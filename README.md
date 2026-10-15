@@ -128,8 +128,9 @@ a verified staging failure so bors can recover instead of waiting indefinitely. 
 always use Namespace. This preserves bors's unique staging-run identity;
 run-attempt fencing protects status publication. Acquired builds and ordinary
 validation failures remain with the existing failure/recovery pipeline. After a
-fleet job fails, its host stops registering capacity for 15 minutes, allowing
-fresh bors retries to choose Namespace. This cooldown survives controller restart.
+fleet infrastructure failure, its host stops registering capacity for 15 minutes, allowing
+fresh bors retries to choose Namespace. Candidate proof failures keep the host
+available. This cooldown survives controller restart.
 
 Guests have private writable overlays and unprivileged networking, with no
 shared host directory or host administrative credentials. Each handles one job

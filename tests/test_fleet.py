@@ -296,6 +296,7 @@ class Isolated(unittest.TestCase):
             conclusion="failure",
             started_at="2026-10-15T00:00:00Z",
             completed_at="2026-10-15T00:01:00Z",
+            steps=[dict(name="Resolve PR head", conclusion="failure")],
         )
         with (
             patch.object(host.github, "request", return_value=dict(jobs=[job])),
@@ -304,6 +305,31 @@ class Isolated(unittest.TestCase):
             host.collect_ci_results(store.host_config())
         self.assertEqual(store.read(store.state_dir() / "ci-backoff.json")["until"], 1900)
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
+
+    def test_candidate_failure_does_not_withdraw_healthy_ci_capacity(self):
+        self.assertFalse(
+            host.ci_infrastructure_failure(
+                dict(
+                    conclusion="failure",
+                    steps=[
+                        dict(
+                            name="Build exact candidate under bwrap with workflow-pinned audits, offline",
+                            conclusion="failure",
+                        )
+                    ],
+                )
+            )
+        )
+
+    def test_cloud_init_prerequisite_failure_prevents_success_marker(self):
+        directory = self.root / "seed"
+        marker = self.root / "should-not-exist"
+        with patch.object(vm, "run", side_effect=lambda args, **_: Path(args[1]).touch()):
+            vm.cloud_seed(directory, ["false", "touch " + str(marker)], name="test")
+        user = json.loads((directory / "user-data").read_text().split("\n", 1)[1])
+        for command in user["runcmd"]:
+            subprocess.run(command, check=False)
+        self.assertFalse(marker.exists())
 
     def test_resource_probe_verifies_kernel_not_just_systemd_exit(self):
         fake = subprocess.CompletedProcess([], 0, stdout='{"cpu.weight":"100"}', stderr="")

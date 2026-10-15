@@ -6,7 +6,7 @@ registration, or production routing changes were used.
 
 ## Local behavior
 
-- 25 controller tests cover inactive installation, preserved identity/permissions,
+- 27 controller tests cover inactive installation, preserved identity/permissions,
   explicit funding, admission scaling, memory pressure, drain/update behavior,
   SSH argument injection, incremental events, budget corrections/corruption,
   provenance deduplication, Bors landing evidence, incomplete reporting, pinned
@@ -35,10 +35,11 @@ The guest smoke test uses the same AppArmor permission profile as the CI
 workflow, then tests bubblewrap as an unprivileged guest user with explicit user
 and network namespaces. Network access and writes to the read-only filesystem
 were denied. The runner binary and pinned gh 2.102.0 executed, along with git, jq,
-sudo/dpkg and the AppArmor tools. No GitHub runner was registered.
+sudo/dpkg and the AppArmor tools. A failed cloud-init prerequisite prevents subsequent success markers; the
+regression test executes that failure path. No GitHub runner was registered.
 
 Prepared base SHA-256:
-`a12da1a931e5a3c25d7bbddc5c0fc6f7c944bc3616c249531892e37d7f9ca46e`.
+`9a62c95749f36af3c1445c3475fef3e4ae5da2ea2c87ca93877c4b273a6f6fe0`.
 
 ## Companion changes
 
@@ -49,10 +50,10 @@ publication outbox, and SIGTERM handling using fake model receipts.
 
 [TauCeti #16862](https://github.com/TauCetiProject/TauCeti/pull/16862) adds the
 existing picker's dedicated-pool preference, bounded same-run Namespace recovery,
-and attempt-fenced reporting. Local validation passed fleet tests (11), existing
+and attempt-fenced reporting. Local validation passed fleet tests (14), existing
 picker tests (22), batch finalizer tests (20), staging/train identity tests (11),
 and actionlint on changed workflows. The cancellation tests cover force-cancel and same-run retry, terminal failure on
-failed handoff, lost rerun responses, runner-acquisition races, unknown labels,
+failed handoff, lost rerun responses, runner-acquisition races, unknown labels, delayed dependency completion, transient read failures,
 incomplete API observations, and second attempts always using Namespace.
 
 ## Checks remaining for production

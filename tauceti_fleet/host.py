@@ -308,13 +308,39 @@ def worker_statuses():
     return values
 
 
+def ci_infrastructure_failure(job):
+    if job.get("conclusion") in ("cancelled", "timed_out", "startup_failure"):
+        return True
+    prefixes = (
+        "Set up job",
+        "Raise vm.",
+        "Resolve PR head",
+        "Checkout ",
+        "Install ",
+        "Restore ",
+        "Fetch ",
+        "Decide ",
+        "Configure the Lake artifact cache",
+        "Save verified Lake archive",
+        "Prepare trusted read-only Lean watchdog",
+        "Build the trusted environment-lint driver",
+    )
+    return any(
+        step.get("conclusion") == "failure" and step.get("name", "").startswith(prefixes)
+        for step in job.get("steps", [])
+    )
+
+
 def collect_ci_results(config):
     path = state_dir() / "pending-ci.json"
     remaining = []
     for value in read(path, []):
+        if time.time() - value.get("started_at", time.time()) > 7 * 86400:
+            event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
+            continue
         try:
             data = github.request(
-                f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?per_page=100",
+                f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
                 token_file=config.get("github_token_file"),
             )
             job = next((j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]), None)
@@ -325,12 +351,12 @@ def collect_ci_results(config):
 
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            if job["conclusion"] != "success":
+            if ci_infrastructure_failure(job):
                 atomic(
                     state_dir() / "ci-backoff.json",
                     dict(
                         until=time.time() + 900,
-                        reason="Fleet job did not succeed; cooling down before accepting another CI job",
+                        reason="Fleet infrastructure failed; cooling down before accepting another CI job",
                         job_id=job["id"],
                     ),
                 )
@@ -415,6 +441,7 @@ def daemon():
                             pending = read(state_dir() / "pending-ci.json", [])
                             pending.append(value)
                             atomic(state_dir() / "pending-ci.json", pending)
+                            collect_ci_results(config)
                         vm.retire(config, value)
                         value = {}
                         if client:

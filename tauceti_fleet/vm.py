@@ -17,7 +17,7 @@ from .store import FleetError, atomic, data_dir, event, host_config, locked, rea
 NIXPKGS = "github:NixOS/nixpkgs/b6018f87da91d19d0ab4cf979885689b469cdd41"
 UBUNTU_URL = "https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img"
 UBUNTU_SHA256 = "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2"
-IMAGE_REVISION = 2
+IMAGE_REVISION = 3
 GH_VERSION = "2.102.0"
 GH_SHA256 = "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386"
 
@@ -86,7 +86,9 @@ def cloud_seed(directory, commands, *, name):
         users=[dict(name="runner", shell="/bin/bash", lock_passwd=True, sudo=["ALL=(ALL) NOPASSWD:ALL"])],
         ssh_pwauth=False,
         disable_root=True,
-        runcmd=[["bash", "-euc", command] for command in commands],
+        # cloud-init continues between separate runcmd entries on failure.
+        # One fail-fast script makes every prerequisite gate the final marker.
+        runcmd=[["bash", "-euc", "\n".join(commands)]],
     )
     (directory / "user-data").write_text("#cloud-config\n" + json.dumps(user))
     os.chmod(directory / "user-data", 0o600)
