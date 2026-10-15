@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tauceti-fleet"
+version = "0.1.0"
+description = "User-level deployment and reporting for TauCeti worker and CI fleets"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tauceti-fleet = "tauceti_fleet.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tauceti_fleet"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"release.json" = "tauceti_fleet/release.json"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
