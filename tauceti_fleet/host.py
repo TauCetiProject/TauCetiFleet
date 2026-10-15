@@ -325,6 +325,15 @@ def collect_ci_results(config):
 
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
+            if job["conclusion"] != "success":
+                atomic(
+                    state_dir() / "ci-backoff.json",
+                    dict(
+                        until=time.time() + 900,
+                        reason="Fleet job did not succeed; cooling down before accepting another CI job",
+                        job_id=job["id"],
+                    ),
+                )
             event(
                 "ci_result",
                 identity="ci-job:" + str(job["id"]),
@@ -441,6 +450,8 @@ def daemon():
                         except (ValueError, AttributeError):
                             pass
                 busy = bool(value.get("busy"))
+                circuit = read(state_dir() / "ci-backoff.json", {})
+                cooling = circuit.get("until", 0) > time.time()
                 if (config["ci_enabled"] or value) and time.time() - last_github >= 30:
                     last_github = time.time()
                     inventory = github.runners(config)
@@ -451,6 +462,7 @@ def daemon():
                         and not busy
                         and (
                             not config["ci_enabled"]
+                            or cooling
                             or (time.time() - value["started_at"] > 180 and own.get("status") != "online")
                         )
                         and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60)
@@ -458,7 +470,7 @@ def daemon():
                         vm.retire(config, value)
                         value = {}
                         next_vm = time.time() + 60
-                if config["ci_enabled"] and not value and time.time() >= next_vm:
+                if config["ci_enabled"] and not cooling and not value and time.time() >= next_vm:
                     value = vm.start(config)
                     next_vm = time.time() + 60
                 if config["workers_enabled"]:
@@ -488,6 +500,7 @@ def daemon():
                         ci_enabled=config["ci_enabled"],
                         workers_enabled=config["workers_enabled"],
                         ci_busy=busy,
+                        ci_cooldown=circuit if cooling else None,
                         active_worker_limit=target,
                         scaling_reason=reason,
                         resources=caps,

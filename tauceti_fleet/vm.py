@@ -17,6 +17,9 @@ from .store import FleetError, atomic, data_dir, event, host_config, locked, rea
 NIXPKGS = "github:NixOS/nixpkgs/b6018f87da91d19d0ab4cf979885689b469cdd41"
 UBUNTU_URL = "https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img"
 UBUNTU_SHA256 = "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2"
+IMAGE_REVISION = 2
+GH_VERSION = "2.102.0"
+GH_SHA256 = "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386"
 
 
 def download(url, target, sha256):
@@ -154,7 +157,8 @@ def prepare_image(config=None):
             manifest = read(root / "prepared.json")
             if digest(root / "prepared.qcow2") != manifest["sha256"]:
                 raise FleetError("Prepared VM image was modified; remove it and run prepare to rebuild")
-            return manifest
+            if manifest.get("image_revision") == IMAGE_REVISION and time.time() - manifest["prepared_at"] < 14 * 86400:
+                return manifest
         download(UBUNTU_URL, root / "ubuntu.qcow2", UBUNTU_SHA256)
         release = github.request("repos/actions/runner/releases/latest")
         asset = next(
@@ -172,6 +176,17 @@ def prepare_image(config=None):
         run([executable("qemu-img"), "create", "-f", "qcow2", "-F", "qcow2", "-b", root / "ubuntu.qcow2", disk, "20G"])
         commands = [
             "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl git sudo python3 jq libicu74 libssl3t64 zlib1g libkrb5-3 liblttng-ust1t64",
+            "curl --fail --location https://github.com/cli/cli/releases/download/v"
+            + GH_VERSION
+            + "/gh_"
+            + GH_VERSION
+            + "_linux_amd64.tar.gz -o /tmp/gh.tar.gz; echo "
+            + shlex.quote(GH_SHA256 + "  /tmp/gh.tar.gz")
+            + " | sha256sum -c -; tar xzf /tmp/gh.tar.gz -C /tmp; install /tmp/gh_"
+            + GH_VERSION
+            + "_linux_amd64/bin/gh /usr/local/bin/gh; rm -rf /tmp/gh.tar.gz /tmp/gh_"
+            + GH_VERSION
+            + "_linux_amd64; gh --version",
             "mkdir -p /opt/actions-runner; cd /opt/actions-runner; curl --fail --location "
             + shlex.quote(asset["browser_download_url"])
             + " -o runner.tar.gz; echo "
@@ -195,14 +210,20 @@ def prepare_image(config=None):
         if "FLEET_IMAGE_READY" not in console:
             raise FleetError(f"Guest did not shut down cleanly; inspect {staging / 'console.log'}")
         # Flatten: future guests do not depend on a mutable backing chain.
-        run([executable("qemu-img"), "convert", "-O", "qcow2", disk, root / "prepared.qcow2"], timeout=120)
-        os.chmod(root / "prepared.qcow2", 0o400)
+        replacement = root / "prepared.next.qcow2"
+        replacement.unlink(missing_ok=True)
+        run([executable("qemu-img"), "convert", "-O", "qcow2", disk, replacement], timeout=120)
+        os.chmod(replacement, 0o400)
+        os.replace(replacement, root / "prepared.qcow2")
         manifest = dict(
             version=1,
+            image_revision=IMAGE_REVISION,
             sha256=digest(root / "prepared.qcow2"),
             ubuntu_sha256=UBUNTU_SHA256,
             runner_version=release["tag_name"],
             runner_sha256=checksum,
+            gh_version=GH_VERSION,
+            gh_sha256=GH_SHA256,
             prepared_at=time.time(),
         )
         atomic(root / "prepared.json", manifest)
@@ -375,6 +396,7 @@ else:
 print('FLEET_SANDBOX_OK')
 """
             commands += [
+                "su -s /bin/bash runner -c 'gh --version; git --version; jq --version; sudo -n dpkg --version >/dev/null; sudo -n apparmor_parser --version'",
                 "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap",
                 "if [ \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)\" = 1 ]; then printf '%s\\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '  include if exists <local/bwrap>' '}' > /etc/apparmor.d/bwrap; apparmor_parser -r /etc/apparmor.d/bwrap; fi",
                 "PARENT_NET=$(stat -Lc %i /proc/self/ns/net); export PARENT_NET; runuser -u runner -- env -i PARENT_NET=$PARENT_NET /usr/bin/bwrap --unshare-all --unshare-user --tmpfs / --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev /usr/bin/python3 -c "
@@ -412,6 +434,7 @@ print('FLEET_SANDBOX_OK')
         guest_execution=True,
         sandbox_enforced=True,
         clean_replacement=True,
+        build_tools=True,
         production_registered=False,
     )
     atomic(state_dir() / "smoke.json", result)

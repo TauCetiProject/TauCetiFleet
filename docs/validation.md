@@ -6,7 +6,7 @@ registration, or production routing changes were used.
 
 ## Local behavior
 
-- 24 controller tests cover inactive installation, preserved identity/permissions,
+- 25 controller tests cover inactive installation, preserved identity/permissions,
   explicit funding, admission scaling, memory pressure, drain/update behavior,
   SSH argument injection, incremental events, budget corrections/corruption,
   provenance deduplication, Bors landing evidence, incomplete reporting, pinned
@@ -34,10 +34,11 @@ the first overlay was absent from the second, and the base digest was unchanged.
 The guest smoke test uses the same AppArmor permission profile as the CI
 workflow, then tests bubblewrap as an unprivileged guest user with explicit user
 and network namespaces. Network access and writes to the read-only filesystem
-were denied. The runner binary executed. No GitHub runner was registered.
+were denied. The runner binary and pinned gh 2.102.0 executed, along with git, jq,
+sudo/dpkg and the AppArmor tools. No GitHub runner was registered.
 
 Prepared base SHA-256:
-`d65f535660656602f74bef352f2bcf35e99a4d2df76fd1b02f9eacfca2507beb`.
+`a12da1a931e5a3c25d7bbddc5c0fc6f7c944bc3616c249531892e37d7f9ca46e`.
 
 ## Companion changes
 
@@ -48,11 +49,11 @@ publication outbox, and SIGTERM handling using fake model receipts.
 
 [TauCeti #16862](https://github.com/TauCetiProject/TauCeti/pull/16862) adds the
 existing picker's dedicated-pool preference, bounded same-run Namespace recovery,
-and attempt-fenced reporting. Local validation passed fleet tests (7), existing
-picker tests (21), batch finalizer tests (20), staging/train identity tests (11),
-and actionlint on changed workflows. The cancellation tests cover never-acquired
-jobs remaining pending, runner-acquisition races, incomplete API observations,
-and second attempts always using Namespace.
+and attempt-fenced reporting. Local validation passed fleet tests (11), existing
+picker tests (22), batch finalizer tests (20), staging/train identity tests (11),
+and actionlint on changed workflows. The cancellation tests cover force-cancel and same-run retry, terminal failure on
+failed handoff, lost rerun responses, runner-acquisition races, unknown labels,
+incomplete API observations, and second attempts always using Namespace.
 
 ## Checks remaining for production
 

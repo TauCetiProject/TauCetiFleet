@@ -31,7 +31,7 @@ tools through an existing Nix installation when necessary. Without Nix, provide
 automatically invokes host sudo or installs a privileged container daemon.
 
 The first preparation downloads a checksum-verified Ubuntu image and Actions
-runner, boots a 2-vCPU/2-GiB guest to prepare the base image, and tests two fresh
+runner plus pinned GitHub CLI, boots a 2-vCPU/2-GiB guest to prepare the base image, and tests two fresh
 overlays. Smoke tests verify guest execution, the offline filesystem sandbox,
 and disk replacement without registering with GitHub or calling a model.
 
@@ -111,7 +111,8 @@ extends the existing runner picker. Worker integration is in
    this policy before registration.
 2. Supply the host profile's `runner_group_id` and a credential with organization
    self-hosted-runner write permission. Worker GitHub permissions alone may not
-   provide this. Only an encoded, single-job JIT configuration reaches a guest.
+   provide this. Only an encoded, single-job JIT configuration reaches a guest. Use a fine-grained or App token
+   scoped to Self-hosted runners; do not use a broadly scoped admin token for CI reads.
 3. Keep production routing disabled while enabling a prepared host's CI role and
    manually dispatching `fleet-smoke.yml` on main. This registers a disposable
    runner but starts no paid agent. Verify runner acquisition and completion.
@@ -121,17 +122,23 @@ extends the existing runner picker. Worker integration is in
 Initial bors attempts prefer online, idle fleet runners. Incomplete inventories,
 API errors, disabled routing, and busy/offline hosts select the existing
 Namespace configuration. GitHub makes the actual assignment within the trusted
-group. An unacquired fleet job is canceled after two minutes, then rerun under
-the **same workflow run ID** once cancellation is confirmed. Second attempts
+group. An unacquired fleet job is bounded to two minutes, then force-canceled to bypass always-running finalizers and rerun under
+the **same workflow run ID** once cancellation is confirmed. Failed handoff posts
+a verified staging failure so bors can recover instead of waiting indefinitely. Second attempts
 always use Namespace. This preserves bors's unique staging-run identity;
 run-attempt fencing protects status publication. Acquired builds and ordinary
-validation failures remain with the existing failure/recovery pipeline.
+validation failures remain with the existing failure/recovery pipeline. After a
+fleet job fails, its host stops registering capacity for 15 minutes, allowing
+fresh bors retries to choose Namespace. This cooldown survives controller restart.
 
 Guests have private writable overlays and unprivileged networking, with no
 shared host directory or host administrative credentials. Each handles one job
 and shuts down. Host-side cache publications are not introduced; the existing
 trusted publication workflow remains separate. Worker-built artifacts never
-seed CI's trusted caches.
+seed CI's trusted caches. QEMU user networking provides outbound connectivity;
+it also exposes the host loopback through its virtual gateway, so host-local
+services must authenticate callers. The workflow filesystem/network sandbox
+remains the boundary for candidate code inside a guest.
 
 ## Grants
 

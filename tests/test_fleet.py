@@ -287,6 +287,24 @@ class Isolated(unittest.TestCase):
             self.assertEqual(vm.start(store.host_config()), value)
             jit.assert_not_called()
 
+    def test_failed_ci_job_sets_persistent_cooldown(self):
+        store.atomic(store.state_dir() / "pending-ci.json", [dict(run_id=42, runner_id=12)])
+        job = dict(
+            id=7,
+            runner_id=12,
+            status="completed",
+            conclusion="failure",
+            started_at="2026-10-15T00:00:00Z",
+            completed_at="2026-10-15T00:01:00Z",
+        )
+        with (
+            patch.object(host.github, "request", return_value=dict(jobs=[job])),
+            patch.object(host.time, "time", return_value=1000),
+        ):
+            host.collect_ci_results(store.host_config())
+        self.assertEqual(store.read(store.state_dir() / "ci-backoff.json")["until"], 1900)
+        self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
+
     def test_resource_probe_verifies_kernel_not_just_systemd_exit(self):
         fake = subprocess.CompletedProcess([], 0, stdout='{"cpu.weight":"100"}', stderr="")
         with patch.object(capabilities, "run", return_value=fake):

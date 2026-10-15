@@ -259,11 +259,24 @@ def doctor(config=None, *, probe=True):
         roles=("ci",),
     )
     manifest = read(image, {})
+    from .vm import IMAGE_REVISION
+
+    add(
+        "ci-image-tools",
+        "ok" if manifest.get("image_revision") == IMAGE_REVISION else "blocked",
+        "Current CI tool image"
+        if manifest.get("image_revision") == IMAGE_REVISION
+        else "Prepared image needs updated CI dependencies",
+        "Drain and run prepare to rebuild the image",
+        roles=("ci",),
+    )
     smoke = read(state_dir() / "smoke.json", {})
     tested = bool(
         manifest.get("sha256")
         and smoke.get("image_sha256") == manifest["sha256"]
-        and all(smoke.get(k) is True for k in ("guest_execution", "sandbox_enforced", "clean_replacement"))
+        and all(
+            smoke.get(k) is True for k in ("guest_execution", "sandbox_enforced", "clean_replacement", "build_tools")
+        )
     )
     add(
         "ci-isolation-smoke",
