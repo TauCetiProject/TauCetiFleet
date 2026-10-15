@@ -98,13 +98,18 @@ def configure(payload):
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
     # Inactive installation never adopts or starts the existing worker fleet.
-    install_service()
+    service_error = None
+    try:
+        install_service()
+    except FleetError as exc:
+        service_error = str(exc)
     return dict(
         machine_id=value["machine_id"],
         profile=value["profile"],
         ci_allowed=value["ci_allowed"],
         ci_enabled=value["ci_enabled"],
         workers_enabled=value["workers_enabled"],
+        service_error=service_error,
     )
 
 

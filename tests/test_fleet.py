@@ -65,6 +65,13 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "JSON object"):
             host.configure(dict(credentials=[]))
 
+    def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
+        with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
+            result = host.configure(dict(ci_allowed=False))
+        self.assertIn("user manager", result["service_error"])
+        self.assertFalse(result["workers_enabled"])
+        self.assertFalse(result["ci_enabled"])
+
     def test_memory_high_blocks_admissions_using_slice_usage(self):
         result = subprocess.CompletedProcess([], 0, stdout="MemoryCurrent=101\nMemoryHigh=100\n")
         with patch.object(host, "run", return_value=result):

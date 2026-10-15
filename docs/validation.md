@@ -6,7 +6,7 @@ registration, or production routing changes were used.
 
 ## Local behavior
 
-- 23 controller tests cover inactive installation, preserved identity/permissions,
+- 24 controller tests cover inactive installation, preserved identity/permissions,
   explicit funding, admission scaling, memory pressure, drain/update behavior,
   SSH argument injection, incremental events, budget corrections/corruption,
   provenance deduplication, Bors landing evidence, incomplete reporting, pinned
