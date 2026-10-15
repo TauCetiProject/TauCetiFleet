@@ -398,7 +398,7 @@ else:
 print('FLEET_SANDBOX_OK')
 """
             commands += [
-                "su -s /bin/bash runner -c 'gh --version; git --version; jq --version; sudo -n dpkg --version >/dev/null; sudo -n apparmor_parser --version'",
+                "su -s /bin/bash runner -c 'set -e; gh --version; git --version; jq --version; sudo -n dpkg --version >/dev/null; sudo -n apparmor_parser --version'",
                 "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap",
                 "if [ \"$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)\" = 1 ]; then printf '%s\\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '  include if exists <local/bwrap>' '}' > /etc/apparmor.d/bwrap; apparmor_parser -r /etc/apparmor.d/bwrap; fi",
                 "PARENT_NET=$(stat -Lc %i /proc/self/ns/net); export PARENT_NET; runuser -u runner -- env -i PARENT_NET=$PARENT_NET /usr/bin/bwrap --unshare-all --unshare-user --tmpfs / --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev /usr/bin/python3 -c "
