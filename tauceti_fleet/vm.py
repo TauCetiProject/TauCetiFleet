@@ -307,11 +307,12 @@ def _start(config):
                 "systemd-run",
                 "--user",
                 "--quiet",
-                "--collect",
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
                 "KillMode=control-group",
+                "-p",
+                "RemainAfterExit=yes",
                 *qemu_args(config, directory, disk, seed),
             ],
             timeout=30,
@@ -343,6 +344,7 @@ def retire(config, value):
 
 def _retire(config, value):
     run(["systemctl", "--user", "stop", value["unit"]], check=False)
+    run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
     try:
         github.request(
             f"orgs/TauCetiProject/actions/runners/{value['runner_id']}",
@@ -356,7 +358,9 @@ def _retire(config, value):
         shutil.rmtree(directory, ignore_errors=True)
     if read(state_dir() / "vm.json", {}).get("instance") == value.get("instance"):
         (state_dir() / "vm.json").unlink(missing_ok=True)
-    event("ci_vm_retired", runner_id=value["runner_id"])
+    retired_at = time.time()
+    atomic(state_dir() / "ci-last-retired.json", dict(at=retired_at, runner_id=value["runner_id"]))
+    event("ci_vm_retired", at=retired_at, runner_id=value["runner_id"])
 
 
 def smoke(config=None):
