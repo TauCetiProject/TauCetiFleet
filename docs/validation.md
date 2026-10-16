@@ -118,7 +118,7 @@ extra production watcher is introduced, and the capacity/guest isolation is
 unchanged. This corrects the cooldown after an eligible cancellation; it cannot
 move a picker decision made while the previous guest was still busy.
 
-Local validation: 41 unit tests, Ruff, compileall and wheel/sdist build pass.
+Local validation: 42 unit tests, Ruff, compileall and wheel/sdist build pass.
 A local disposable user-service probe confirmed the retained successful exit is
 reported `(False, 'healthy')`; it registered no runner and was removed. Production
 acceptance remains pending required review, merged deployment identity, and the

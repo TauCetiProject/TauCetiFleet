@@ -48,9 +48,10 @@ def classify(job, *, run=None, statuses=None, host_health=None):
     if job.get("conclusion") != "cancelled":
         if job.get("conclusion") == "success":
             return result(False, "successful_job")
-        failed = [s.get("name") for s in steps if s.get("conclusion") == "failure"]
-        if job.get("conclusion") == "failure" and BUILD in failed and all(name in (BUILD, REPORT) for name in failed):
-            return result(False, "candidate_build_failure")
+        # Preserve the existing treatment of source/policy guard failures.
+        # Tightened evidence requirements apply to the cancellation exemption.
+        if job.get("conclusion") == "failure":
+            return result(False, "candidate_result")
         return result(True, "job_failure_inconclusive")
 
     unknown = result(True, "cancellation_evidence_inconclusive")

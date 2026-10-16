@@ -98,6 +98,16 @@ class Classification(unittest.TestCase):
         job["steps"][2]["conclusion"] = "failure"
         self.assertFalse(ci.classify(job)["cooldown"])
 
+    def test_source_guard_failures_preserve_existing_capacity_policy(self):
+        for name in (
+            "Preflight exact-candidate import headers",
+            "Scope guard — allow TauCeti sources and validated pins",
+            "Import-boundary guard (TauCeti/ and TauCeti.lean ⊬ roadmap/review)",
+        ):
+            with self.subTest(name=name):
+                job = dict(conclusion="failure", steps=[step(name, "failure")])
+                self.assertFalse(ci.classify(job)["cooldown"])
+
     def test_missing_or_conflicting_metadata_keeps_cooldown(self):
         job, run, statuses = evidence()
         self.assertTrue(ci.classify(job)["cooldown"])
