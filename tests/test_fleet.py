@@ -1,8 +1,10 @@
 import io
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -286,6 +288,36 @@ class Isolated(unittest.TestCase):
         ):
             self.assertEqual(vm.start(store.host_config()), value)
             jit.assert_not_called()
+
+    def test_generated_hooks_run_with_actions_shell_and_emit_json_lines(self):
+        store.atomic(store.data_dir() / "images/prepared.json", dict(sha256="a" * 64))
+        with (
+            patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)),
+            patch.object(vm, "executable", side_effect=lambda name: name),
+            patch.object(vm.github, "jit_config", return_value=(12, "test-jit")),
+            patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso") as seed,
+        ):
+            vm.start(store.host_config())
+        commands = seed.call_args.args[1]
+        for command, kind in zip(commands[1:3], ("ci_started", "ci_completed"), strict=True):
+            words = shlex.split(command)
+            script, path = words[2], words[4].removesuffix(";")
+            self.assertTrue(path.endswith(".sh"), path)
+            self.assertIn(path, commands[3])
+            output = self.root / (kind + ".jsonl")
+            hook = self.root / Path(path).name
+            hook.write_text(
+                script.replace("/dev/virtio-ports/org.tauceti.events", str(output)).replace(
+                    "/usr/bin/python3", shlex.quote(sys.executable)
+                )
+            )
+            subprocess.run(["bash", "-e", str(hook)], env={**os.environ, "GITHUB_RUN_ID": "42"}, check=True)
+            raw = output.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            self.assertEqual(len(raw.splitlines()), 1)
+            notice = json.loads(raw)
+            self.assertEqual(notice["kind"], kind)
+            self.assertEqual(notice["run_id"], "42")
 
     def test_failed_ci_job_sets_persistent_cooldown(self):
         store.atomic(store.state_dir() / "pending-ci.json", [dict(run_id=42, runner_id=12)])

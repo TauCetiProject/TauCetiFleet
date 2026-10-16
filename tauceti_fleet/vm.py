@@ -271,18 +271,19 @@ def _start(config):
                 str(config["ci_disk_gib"]) + "G",
             ]
         )
-        hook = "#!/usr/bin/python3\nimport json,os\nwith open('/dev/virtio-ports/org.tauceti.events','w') as f: f.write(json.dumps(dict(kind=KIND,run_id=os.environ.get('GITHUB_RUN_ID'),at=__import__('time').time()))+'\\n')\n"
+        # Actions runs .sh hooks with bash, regardless of their shebang.
+        hook = "#!/bin/sh\nexec /usr/bin/python3 - <<'PY'\nimport json,os,time\nwith open('/dev/virtio-ports/org.tauceti.events','w') as f: print(json.dumps(dict(kind=KIND,run_id=os.environ.get('GITHUB_RUN_ID'),at=time.time())),file=f)\nPY\n"
         commands = [
             "printf %s "
             + shlex.quote(jit)
             + " > /opt/actions-runner/.jit; chmod 600 /opt/actions-runner/.jit; chown runner:runner /opt/actions-runner/.jit",
             "printf %s "
             + shlex.quote(hook.replace("KIND", "'ci_started'"))
-            + " > /opt/hook-start; chmod 755 /opt/hook-start",
+            + " > /opt/hook-start.sh; chmod 755 /opt/hook-start.sh",
             "printf %s "
             + shlex.quote(hook.replace("KIND", "'ci_completed'"))
-            + " > /opt/hook-complete; chmod 755 /opt/hook-complete",
-            "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
+            + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
+            "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
             "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
         ]
         seed = cloud_seed(directory, commands, name=name)
