@@ -74,3 +74,55 @@ the trusted `fleet-smoke.yml` while `FLEET_CI_ENABLED` remains off. Real GitHub
 registration, acquisition, job completion, guest retirement, and a controlled
 unacquired-job fallback must be checked at that point. Static tests and local
 guests do not establish that live routing has passed.
+
+## Verified cancellation classification (#17125)
+
+Fleet exempts a cancellation from its 900-second circuit only when **all** of
+these host/GitHub facts agree:
+
+- The disposable QEMU service exited successfully. New units retain their
+  systemd result with `RemainAfterExit=yes` until retirement; a failed/missing
+  read, older pending record, or previously collected unit is unknown.
+- GitHub binds the registered runner's completed `sandboxed-build` to attempt 1
+  of the Bors bot's `repository_dispatch` of main's `pr-build.yml`. Run name,
+  base SHA, candidate SHA and batch are checked together. Reruns stay conservative.
+- Setup and trusted-tooling checkout succeeded, the sandboxed build was cancelled,
+  and `Complete job` succeeded. No setup/host/timeout or unknown failed step is
+  excused. Candidate source compilation failure remains a candidate result.
+- The latest Bors-bot `bors` commit status on that candidate is `Canceled`, links
+  to the exact batch, and was created during the sandboxed build before it ended.
+  This status represents coordinator withdrawal/supersession, not runner failure.
+  A cancelled conclusion or absence of failed steps alone grants no exemption.
+- The trusted report step intentionally exits 1 when its build was cancelled.
+  That specific failure is allowed only with both successful `scope` and
+  `bump-guard` GitHub status writes, tied to this run and reporting interval.
+  Missing, stale or failed writes retain cooldown.
+
+Metadata comes from bounded GitHub API reads using the existing host read
+credential. No logs, guest hook claims, candidate artifacts or new credentials
+establish health. Unknown/changed workflow shapes retain cooldown. Classification
+is advisory for host capacity only; it never grants candidate approval or cache
+publication. A healthy result does not clear another job's cooldown.
+
+`ci_result` events include runner/run/job identity, a fixed classification reason,
+and bounded evidence (candidate SHA, batch, status ID/time, attempt, host service
+health). Cooldown expiry is anchored to job completion plus 900 seconds; replayed
+collection cannot renew it, shorten a newer fault's cooldown, or duplicate its
+result event. Historical result events are not reclassified on deployment.
+
+`ci_vm_retired` and `ci_runner_online` record the previous runner ID and elapsed
+retirement-to-first-observed-online time. Online observation uses the existing
+30-second inventory refresh; this is an upper bound at that observation, not an
+exact listener timestamp. Failed API reads/controller delays can widen it. No
+extra production watcher is introduced, and the capacity/guest isolation is
+unchanged. This corrects the cooldown after an eligible cancellation; it cannot
+move a picker decision made while the previous guest was still busy.
+
+Local validation: 41 unit tests, Ruff, compileall and wheel/sdist build pass.
+A local disposable user-service probe confirmed the retained successful exit is
+reported `(False, 'healthy')`; it registered no runner and was removed. Production
+acceptance remains pending required review, merged deployment identity, and the
+next naturally occurring eligible cancellation/replacement. Do not manufacture
+one or launch a hardware benchmark. Existing root-owned staging watch supplies
+production observations; genuine fault cooldown is verified live only if a fault
+occurs naturally.

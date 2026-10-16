@@ -8,11 +8,23 @@ import sys
 import time
 from pathlib import Path
 
-from . import github, vm
+from . import ci, github, vm
 from .capabilities import GIB, doctor, resources
 from .process import executable, run
 from .report import snapshot
-from .store import FleetError, atomic, config_dir, data_dir, event, host_config, locked, read, state_dir, update_host
+from .store import (
+    FleetError,
+    atomic,
+    config_dir,
+    data_dir,
+    database,
+    event,
+    host_config,
+    locked,
+    read,
+    state_dir,
+    update_host,
+)
 
 
 def command():
@@ -309,26 +321,41 @@ def worker_statuses():
 
 
 def ci_infrastructure_failure(job):
-    if job.get("conclusion") in ("cancelled", "timed_out", "startup_failure"):
-        return True
-    prefixes = (
-        "Set up job",
-        "Raise vm.",
-        "Resolve PR head",
-        "Checkout ",
-        "Install ",
-        "Restore ",
-        "Fetch ",
-        "Decide ",
-        "Configure the Lake artifact cache",
-        "Save verified Lake archive",
-        "Prepare trusted read-only Lean watchdog",
-        "Build the trusted environment-lint driver",
+    return ci.classify(job)["cooldown"]
+
+
+def ci_service_state(unit):
+    result = run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            unit,
+            "-p",
+            "LoadState",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+        ],
+        check=False,
     )
-    return any(
-        step.get("conclusion") == "failure" and step.get("name", "").startswith(prefixes)
-        for step in job.get("steps", [])
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if fields.get("LoadState") == "not-found":
+        return False, "unknown"
+    if result.returncode or not all(fields.get(k) for k in ("ActiveState", "SubState", "Result", "ExecMainStatus")):
+        return None, "unknown"
+    running = fields["SubState"] in ("running", "start", "start-pre", "start-post")
+    if fields["Result"] != "success" or fields["ExecMainStatus"] != "0":
+        return running, "fault"
+    healthy_exit = (
+        fields.get("LoadState") == "loaded" and fields["ActiveState"] == "active" and fields["SubState"] == "exited"
     )
+    return running, "healthy" if healthy_exit else "unknown"
 
 
 def collect_ci_results(config):
@@ -343,30 +370,42 @@ def collect_ci_results(config):
                 f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
                 token_file=config.get("github_token_file"),
             )
-            job = next((j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]), None)
+            jobs = [j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]]
+            job = jobs[0] if len(jobs) == 1 else None
             if not job or job["status"] != "completed":
                 remaining.append(value)
                 continue
             from .report import timestamp
 
+            identity = "ci-job:" + str(job["id"])
+            with database() as db:
+                if db.execute("SELECT 1 FROM events WHERE id=?", (identity,)).fetchone():
+                    continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            if ci_infrastructure_failure(job):
-                atomic(
-                    state_dir() / "ci-backoff.json",
-                    dict(
-                        until=time.time() + 900,
-                        reason="Fleet infrastructure failed; cooling down before accepting another CI job",
-                        job_id=job["id"],
-                    ),
-                )
+            decision = ci.classify(job, host_health=value.get("host_health"))
+            if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
+                try:
+                    run_data, statuses = ci.cancellation_metadata(job, config, github.request)
+                    decision = ci.classify(job, run=run_data, statuses=statuses, host_health=value.get("host_health"))
+                except (FleetError, ValueError, KeyError, TypeError, OSError):
+                    decision = dict(cooldown=True, reason="cancellation_evidence_unavailable", evidence={})
+            circuit_path = state_dir() / "ci-backoff.json"
+            if decision["cooldown"]:
+                # Anchor to the actual failure, so replay/crash recovery never
+                # renews the same cooldown or shortens a newer fault's cooldown.
+                circuit = read(circuit_path, {})
+                if completed + 900 > circuit.get("until", 0):
+                    atomic(circuit_path, dict(until=completed + 900, job_id=job["id"], reason=decision["reason"]))
             event(
                 "ci_result",
-                identity="ci-job:" + str(job["id"]),
+                identity=identity,
                 at=completed,
                 run_id=value["run_id"],
                 job_id=job["id"],
                 conclusion=job["conclusion"],
+                runner_id=value["runner_id"],
+                classification=decision,
                 run_seconds=max(0, completed - started),
                 wait_seconds=max(0, started - created) if created else None,
             )
@@ -434,10 +473,13 @@ def daemon():
                 previous = current
                 value = read(state_dir() / "vm.json", {})
                 if value:
-                    active = run(["systemctl", "--user", "is-active", value["unit"]], check=False).returncode == 0
-                    if not active and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60):
+                    active, service_health = ci_service_state(value["unit"])
+                    if active is False and not (
+                        value.get("phase") == "starting" and time.time() - value["started_at"] < 60
+                    ):
                         # Preserve immutable run identity for deferred result collection.
                         if value.get("run_id"):
+                            value["host_health"] = service_health
                             pending = read(state_dir() / "pending-ci.json", [])
                             pending.append(value)
                             atomic(state_dir() / "pending-ci.json", pending)
@@ -483,6 +525,19 @@ def daemon():
                     last_github = time.time()
                     inventory = github.runners(config)
                     own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
+                    if value and own.get("status") == "online" and not value.get("online_observed_at"):
+                        value["online_observed_at"] = time.time()
+                        atomic(state_dir() / "vm.json", value)
+                        retired = read(state_dir() / "ci-last-retired.json", {})
+                        event(
+                            "ci_runner_online",
+                            runner_id=value["runner_id"],
+                            previous_runner_id=retired.get("runner_id"),
+                            retirement_to_online_seconds=max(0, value["online_observed_at"] - retired["at"])
+                            if retired
+                            else None,
+                            observation_interval_seconds=30,
+                        )
                     busy = busy or own.get("busy", False)
                     if (
                         value

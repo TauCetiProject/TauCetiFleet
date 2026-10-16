@@ -335,7 +335,7 @@ class Isolated(unittest.TestCase):
             patch.object(host.time, "time", return_value=1000),
         ):
             host.collect_ci_results(store.host_config())
-        self.assertEqual(store.read(store.state_dir() / "ci-backoff.json")["until"], 1900)
+        self.assertEqual(store.read(store.state_dir() / "ci-backoff.json")["until"], report.timestamp(job["completed_at"]) + 900)
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
 
     def test_candidate_failure_does_not_withdraw_healthy_ci_capacity(self):
