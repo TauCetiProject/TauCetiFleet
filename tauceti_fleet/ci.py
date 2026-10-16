@@ -63,7 +63,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
         run.get("name", ""),
     )
     if not match:
-        return unknown
+        return result(True, "cancellation_run_name_mismatch")
     batch, candidate, base = match.groups()
     if (
         run.get("id") != job.get("run_id")
@@ -79,22 +79,22 @@ def classify(job, *, run=None, statuses=None, host_health=None):
         or run.get("triggering_actor", {}).get("id") != BORS_ID
         or job.get("name") != "sandboxed-build"
     ):
-        return unknown
+        return result(True, "cancellation_run_identity_mismatch")
     # Duplicate names or partial/unknown step outcomes cannot establish health.
     by_name = {s.get("name"): s for s in steps}
     if len(by_name) != len(steps) or any(
         s.get("status") != "completed" or s.get("conclusion") not in ("success", "skipped", "cancelled", "failure")
         for s in steps
     ):
-        return unknown
+        return result(True, "cancellation_steps_incomplete")
     for name in ("Set up job", "Checkout workflow-pinned trusted build tooling", "Complete job"):
         if by_name.get(name, {}).get("conclusion") != "success":
-            return unknown
+            return result(True, "cancellation_runner_completion_missing")
     build = by_name.get(BUILD, {})
     if build.get("conclusion") != "cancelled":
-        return unknown
+        return result(True, "cancellation_not_build_interrupt")
     if any(s.get("conclusion") == "cancelled" and s.get("name") != BUILD for s in steps):
-        return unknown
+        return result(True, "cancellation_additional_step_cancelled")
     # Read newest-first status history from GitHub, not candidate logs/artifacts.
     bors = next((s for s in statuses if s.get("context") == "bors" and s.get("creator", {}).get("id") == BORS_ID), {})
     if (
@@ -102,7 +102,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
         or bors.get("description") != "Canceled"
         or bors.get("target_url") != "https://bors.taucetiproject.org/batches/" + batch
     ):
-        return unknown
+        return result(True, "cancellation_status_mismatch")
     try:
         requested = timestamp(bors.get("created_at"))
         if not (
@@ -111,7 +111,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
             <= timestamp(build.get("completed_at"))
             <= timestamp(job.get("completed_at"))
         ):
-            return unknown
+            return result(True, "cancellation_status_time_mismatch")
         for step in steps:
             if step.get("conclusion") != "failure":
                 continue
@@ -119,7 +119,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
             # build. Require BOTH successful API status writes to exclude its
             # network/publication fault path; no other failed step is exempt.
             if step.get("name") != REPORT or timestamp(step.get("started_at")) < requested:
-                return unknown
+                return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
             for context in ("scope", "bump-guard"):
                 status = next(
                     (
@@ -138,9 +138,9 @@ def classify(job, *, run=None, statuses=None, host_health=None):
                         <= timestamp(step.get("completed_at"))
                     )
                 ):
-                    return unknown
+                    return result(True, "cancellation_report_evidence_missing")
     except (ValueError, TypeError, OverflowError):
-        return unknown
+        return result(True, "cancellation_timestamps_invalid")
     return result(
         False,
         "verified_bors_cancellation",
