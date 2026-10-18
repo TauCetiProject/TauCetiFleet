@@ -145,7 +145,10 @@ def advance(value, observation):
     for name, active in conditions.items():
         if active:
             since.setdefault(name, now)
-            delay = 0 if name == "merge_queue" or observation["worker_oom_kill"] > value["baseline_oom_kill"] else 300
+            urgent = name == "merge_queue" or (
+                name == "memory" and observation["worker_oom_kill"] > value["baseline_oom_kill"]
+            )
+            delay = 0 if urgent else 300
             if now - since[name] >= delay:
                 reached.append(name)
         else:

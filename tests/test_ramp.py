@@ -96,7 +96,7 @@ class RampTests(unittest.TestCase):
         self.assertEqual(set(value["limiting_factors"]), {"cpu", "memory"})
 
     def test_oom_is_an_immediate_memory_limit(self):
-        value, change = ramp.advance(self.state(), self.observation(worker_oom_kill=1))
+        value, change = ramp.advance(self.state(), self.observation(worker_oom_kill=1, cpu_idle=0.1))
         self.assertEqual(change, 0)
         self.assertEqual(value["limiting_factors"], ["memory"])
 
