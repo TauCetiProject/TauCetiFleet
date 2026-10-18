@@ -1,15 +1,22 @@
 """Resource experiments must ramp slowly, survive restarts and distinguish evidence gaps."""
 
 import copy
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from tauceti_fleet import host, ramp, store
+from tauceti_fleet.cli import print_ramp
 
 
 class RampTests(unittest.TestCase):
+    def test_human_status_does_not_require_spending_report_fields(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            print_ramp(dict(phase="running", maximum=1, next_increase_at=2800))
+        self.assertIn("worker ceiling: 1", output.getvalue())
+
     def state(self):
         return dict(
             phase="running",

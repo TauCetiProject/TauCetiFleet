@@ -111,6 +111,7 @@ def print_report(value, entries):
             print(f"Last collection: {max(0, time.time() - report['observed_at']):.0f}s ago")
         for error in report["coverage_errors"]:
             print("Coverage: " + error)
+    print("\n" + value["spending_basis"])
 
 
 def print_ramp(value):
@@ -137,7 +138,6 @@ def print_ramp(value):
             f"Budget: ${Decimal(sample['available']):.2f} available, ${sample['pending']} pending; ${sample['grant_rate']}/hour replenishment"
         )
         print("Worker states: " + json.dumps(sample["worker_states"]))
-    print("\n" + value["spending_basis"])
 
 
 def main(argv=None):
