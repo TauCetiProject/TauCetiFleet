@@ -238,7 +238,7 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
-        + "\nRestart=on-failure\nRestartSec=10\n"
+        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
