@@ -205,7 +205,15 @@ def worker_config(config):
             fields[key] = config[key]
     lines = ["version = 1"]
     ids = []
-    for n in range(config["max_workers"]):
+    # Keep existing definitions when reducing admissions: removing a definition
+    # makes the manager terminate its worker, including an admitted paid session.
+    import tomllib
+
+    prior = config_dir() / "workers.toml"
+    preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
+    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    count = max(1, config["max_workers"], old_count)
+    for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
@@ -556,10 +564,14 @@ def daemon():
                     value = vm.start(config)
                     next_vm = time.time() + 60
                 if config["workers_enabled"]:
-                    if not ids:
+                    if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
                 reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+                maximum = config["max_workers"]
+                ramp = read(state_dir() / "ramp.json", {})
+                if ramp.get("phase") == "running" and time.time() - ramp.get("heartbeat_at", 0) > 120:
+                    maximum = 0
                 target, reason = scaler.step(
                     now=time.time(),
                     enabled=config["workers_enabled"] and not worker_pool_pressure(),
@@ -567,7 +579,7 @@ def daemon():
                     available=caps["memory_available"],
                     reserve=reserve,
                     idle=idle,
-                    maximum=config["max_workers"],
+                    maximum=maximum,
                 )
                 atomic(
                     state_dir() / "admission.json",
@@ -664,6 +676,14 @@ def rpc(payload):
         return prepare()
     if action == "enable":
         return enable(ci=bool(payload.get("ci")), workers=bool(payload.get("workers")))
+    if action == "workers":
+        from .ramp import set_maximum
+
+        return set_maximum(payload["maximum"])
+    if action == "ramp":
+        from .ramp import control
+
+        return control(payload)
     if action == "drain":
         return drain()
     if action == "budget":
@@ -680,6 +700,7 @@ def rpc(payload):
             ci_allowed=config["ci_allowed"],
             ci_enabled=config["ci_enabled"],
             workers_enabled=config["workers_enabled"],
+            max_workers=config["max_workers"],
             status=read(state_dir() / "status.json", {}),
         )
     raise FleetError("Unknown host operation")
