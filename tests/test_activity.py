@@ -77,7 +77,8 @@ class ActivityTests(unittest.TestCase):
             pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
             costs=dict(
                 spending={
-                    w: dict(spent_usd="37.035", covered_seconds=10800, usd_per_hour="12.345") for w in activity.WINDOWS
+                    w: dict(spent_usd="37.035", covered_seconds=10800, worker_seconds=21600, usd_per_hour="12.345")
+                    for w in activity.WINDOWS
                 }
             ),
             running=0,
@@ -96,13 +97,15 @@ class ActivityTests(unittest.TestCase):
         lines = output.getvalue().splitlines()
         heading = next(line for line in lines if line.startswith("Finished rounds"))
         ends = [heading.index(h) + len(h) for h in ("3h", "24h", "7d", "Recorded total")]
-        row = next(line for line in lines if line.startswith("API spend ($/hour)"))
+        row = next(line for line in lines if line.startswith("API spend ($/elapsed hour)"))
         self.assertEqual([m.end() for m in re.finditer(r"\$\d+\.\d+", row)], ends)
         self.assertEqual(row.count("$12.34"), 4)
         section = next(i for i, line in enumerate(lines) if line.startswith("Spending (completed sessions)"))
         self.assertEqual(lines[section - 1], "")
         self.assertIn("All time", lines[section])
-        self.assertTrue(any(line.startswith("Hours recorded") for line in lines))
+        hours = next(line for line in lines if line.startswith("Worker-hours recorded"))
+        self.assertEqual(hours.count("6.00"), 4)
+        self.assertNotIn("closed/merged PRs lack landing evidence", output.getvalue())
 
     def test_snapshot_rpc_cannot_request_github_refresh(self):
         with patch.object(host, "snapshot", return_value={}) as snapshot:

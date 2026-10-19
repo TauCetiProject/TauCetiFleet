@@ -248,9 +248,17 @@ Average spending also has 3h, 24h, 7d and All time columns in $/hour, using
 completed/reconciled session costs and the recorded hours in each window.
 Active-session reservations remain separate estimates. New machines use elapsed
 recorded time; fleet totals pool spending over the longest covered wall-clock
-duration rather than averaging machine rates or adding machine-hours. `Hours
-recorded` shows the denominator. These values come from the same prepared worker
-summary, with no extra collector or API requests.
+duration rather than averaging machine rates or adding machine-hours.
+`Worker-hours recorded` sums recorded round durations across workers, clipped to
+each window; capacity/budget/quota waiting does not inflate it. Spending remains
+$/elapsed hour. These values come from the same prepared worker summary, with
+no extra collector or GitHub requests.
+
+Bors squash-merges are counted using exact-head promotion receipts imported into
+the shared state server's cache by its existing cron, at most once per five
+minutes for the whole fleet. This reads Bors's stored journal without GitHub API
+calls or changes to merge-queue state. Ordinary closed PRs do not produce a
+missing-landing warning.
 
 `tauceti` prepares accounting, LOC observations, review counts and local CI
 history in background. Fleet only collects the small prepared summaries.
