@@ -112,6 +112,60 @@ class ActivityTests(unittest.TestCase):
             host.rpc(dict(action="snapshot"))
         snapshot.assert_called_once_with(refresh=False)
 
+    def test_partial_loc_rates_render_from_cached_snapshots_without_io(self):
+        summary = dict(
+            prepared_at=100,
+            history_since=1,
+            rounds={w: {} for w in activity.WINDOWS},
+            pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
+            costs=dict(
+                windows={
+                    "total": dict(
+                        estimated_usd="100",
+                        landed_loc_added=200,
+                        open_loc_added=0,
+                        landed_prs=2,
+                        open_prs=1,
+                        measured_pr_weight=2,
+                        known_loc_prs=2,
+                        missing_loc_prs=1,
+                        usd_per_loc=None,
+                    ),
+                    "7d": dict(
+                        estimated_usd="30",
+                        landed_loc_added=0,
+                        open_loc_added=0,
+                        landed_prs=0,
+                        open_prs=1,
+                        measured_pr_weight=0,
+                        known_loc_prs=0,
+                        missing_loc_prs=1,
+                        usd_per_loc=None,
+                    ),
+                }
+            ),
+            running=0,
+            open_prs=1,
+            unknown_prs=0,
+            unknown_landings=0,
+        )
+        Path(self.tmp.name, "summary.json").write_text(json.dumps(dict(groups={"m": summary}, errors=[])))
+        with (
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            activity.display(activity.cached("m"))
+        lines = output.getvalue().splitlines()
+        heading = next(line for line in lines if line.startswith("Costs / initiated PR output"))
+        rate = next(line for line in lines if line.startswith("Estimated $ / weighted LOC"))
+        expected = [heading.index(h) + len(h) for h in ("All time", "7 days")]
+        self.assertEqual([m.end() for m in re.finditer(r"~\$(?:\d+\.\d+|∞)", rate)], expected)
+        self.assertIn("~$0.4000", rate)
+        self.assertIn("~$∞", rate)
+        self.assertIn("~250", output.getvalue())
+
     def test_cached_snapshot_prs_keep_verified_landings_without_api(self):
         p = dict(
             scope="m",

@@ -242,7 +242,10 @@ and fixes for others, are amortized over initiated PR output: landed Lean lines
 added plus half of currently open Lean lines added. The seven-day output cohort
 contains only PRs initiated in that window. Completed costs and active-session
 estimates are shown separately, and ratios pool cost/output before division.
-Incomplete LOC produces an unavailable estimate instead of a partial ratio.
+Missing LOC is estimated from measured PRs in that window, preserving half credit
+for open PRs. Such estimates show `~` and measurement coverage. Unknown PR states
+and LOC with no measured sample contribute zero; positive spending over zero LOC
+shows `$∞`, so missing PR data never hides the rate.
 
 Average spending also has 3h, 24h, 7d and All time columns in $/hour, using
 completed/reconciled session costs and the recorded hours in each window.
