@@ -89,16 +89,30 @@ class Isolated(unittest.TestCase):
         ):
             self.assertFalse(host.worker_pool_pressure())
 
-    def test_scaler_yields_then_recovers_gradually(self):
+    def test_ci_start_preserves_allowance_and_growth_schedule(self):
         scaler = host.Scaler()
         args = dict(enabled=True, available=20, reserve=10, idle=0.8, maximum=8)
         self.assertEqual(scaler.step(now=100, ci_busy=False, **args)[0], 1)
         self.assertEqual(scaler.step(now=110, ci_busy=False, **args)[0], 1)
         self.assertEqual(scaler.step(now=170, ci_busy=False, **args)[0], 2)
-        self.assertEqual(scaler.step(now=175, ci_busy=True, **args)[0], 1)
-        self.assertEqual(scaler.step(now=240, ci_busy=True, **args)[0], 2)
+        self.assertEqual(scaler.step(now=175, ci_busy=True, **args)[0], 2)
+        self.assertEqual(scaler.step(now=230, ci_busy=True, **args)[0], 3)
+        self.assertEqual(scaler.step(now=235, ci_busy=False, **args)[0], 3)
+        self.assertEqual(scaler.step(now=240, ci_busy=True, **args)[0], 3)
         args["available"] = 1
-        self.assertEqual(scaler.step(now=180, ci_busy=False, **args)[0], 0)
+        self.assertEqual(scaler.step(now=245, ci_busy=True, **args)[0], 0)
+
+    def test_ci_requires_more_cpu_headroom_for_increases(self):
+        scaler = host.Scaler()
+        args = dict(enabled=True, available=20, reserve=10, idle=0.3, maximum=8)
+        self.assertEqual(scaler.step(now=100, ci_busy=False, **args)[0], 1)
+        self.assertEqual(scaler.step(now=170, ci_busy=True, **args)[0], 1)
+        args["idle"] = 0.4
+        self.assertEqual(scaler.step(now=175, ci_busy=True, **args)[0], 2)
+        args["maximum"] = 1
+        self.assertEqual(scaler.step(now=180, ci_busy=True, **args)[0], 1)
+        args["enabled"] = False
+        self.assertEqual(scaler.step(now=185, ci_busy=True, **args)[0], 0)
 
     def test_drain_changes_admission_not_desired_worker_configuration(self):
         store.host_config()
