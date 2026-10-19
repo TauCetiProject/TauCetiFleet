@@ -82,10 +82,10 @@ def memory_pressure(memory, caps):
     reasons = []
     if caps["memory_available"] < max(4 * GIB, int(caps["memory_total"] * 0.1)):
         reasons.append("host memory headroom low")
-    if memory["working_set"] >= memory["high"]:
-        reasons.append("worker working set near limit")
-    if memory["stall_some"] >= 5 or memory["stall_full"] >= 1:
-        reasons.append("worker memory reclamation stalls")
+    if memory["working_set"] >= memory["maximum"] * 0.95:
+        reasons.append("worker working set near hard memory limit")
+    # Reclaim PSI includes throttling against MemoryHigh and is not evidence of
+    # host exhaustion. Let the kernel reclaim cache without pausing API work.
     return reasons
 
 

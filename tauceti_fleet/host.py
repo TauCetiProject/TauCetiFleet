@@ -184,7 +184,7 @@ def write_slices(config, caps):
         )
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
-            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.8))}\nMemoryMax={int(maximum)}\nTasksMax=16384\n"
+            f"[Slice]\nCPUWeight={weight}\nIOWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\nTasksMax=16384\n"
         )
     run(["systemctl", "--user", "daemon-reload"])
     return worker
@@ -437,55 +437,34 @@ def collect_ci_results(config):
 class Scaler:
     def __init__(self):
         self.target = 0
-        self.last_added = 0
-        self.recovery_reason = "controller start"
         self.decision = {}
 
-    def _result(self, state, reason, required_idle, next_increase_at=None):
+    def _result(self, state, reason):
         self.decision = dict(
             state=state,
             reason=reason,
-            recovery_reason=self.recovery_reason,
-            cpu_idle_required=required_idle,
-            next_increase_at=next_increase_at,
-            next_worker_limit=self.target + 1 if next_increase_at is not None else None,
+            policy="opportunistic",
+            cpu_idle_required=0,
+            next_increase_at=None,
+            next_worker_limit=None,
         )
         return self.target, reason
 
     def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None):
-        required_idle = 0.35 if ci_busy else 0.25
         if not enabled or available < reserve:
             self.target = 0
             reason = pause_reason or (
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
-            self.recovery_reason = reason
-            return self._result("paused", reason, required_idle)
-        if idle >= required_idle and now - self.last_added >= 60:
-            self.target = min(maximum, self.target + 1)
-            self.last_added = now
-        self.target = min(self.target, maximum)
-        if self.target == maximum:
-            self.recovery_reason = None
-            return self._result(
-                "at_ceiling" if maximum else "paused",
-                "configured worker ceiling reached"
-                if maximum
-                else (pause_reason or "configured worker ceiling is zero"),
-                required_idle,
-            )
-        if idle < required_idle:
-            return self._result(
-                "waiting_cpu",
-                f"CPU idle {idle:.1%}; need at least {required_idle:.0%} to increase allowance",
-                required_idle,
-            )
-        context = f"rebuilding allowance after {self.recovery_reason}; " if self.recovery_reason else ""
+            return self._result("paused", reason)
+        # CPU/IO scheduling gives CI first claim on contested resources. Idle CPU
+        # and reclaim waits must not cap mostly network-bound inference sessions.
+        self.target = maximum
         return self._result(
-            "waiting_interval",
-            context + "waiting between increases (one worker per minute)",
-            required_idle,
-            self.last_added + 60,
+            "at_ceiling" if maximum else "paused",
+            "all configured workers allowed; CI has CPU/IO priority"
+            if maximum
+            else (pause_reason or "configured worker ceiling is zero"),
         )
 
 

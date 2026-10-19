@@ -31,11 +31,19 @@ class MemoryTests(unittest.TestCase):
         memory = self.measured(shmem=30 * GIB)
         self.assertEqual(memory["cold_clean"], 2 * GIB)
 
-    def test_high_stalls_pause_even_with_a_small_working_set(self):
+    def test_reclaim_stalls_do_not_pause_network_bound_work(self):
         memory = self.measured()
-        memory["stall_full"] = 1.5
+        memory.update(stall_full=60, stall_some=90)
         reasons = memory_pressure(memory, dict(memory_available=80 * GIB, memory_total=125 * GIB))
-        self.assertEqual(reasons, ["worker memory reclamation stalls"])
+        self.assertEqual(reasons, [])
+
+    def test_actual_working_set_near_hard_limit_still_pauses(self):
+        memory = self.measured()
+        memory["working_set"] = 45 * GIB
+        self.assertEqual(
+            memory_pressure(memory, dict(memory_available=80 * GIB, memory_total=125 * GIB)),
+            ["worker working set near hard memory limit"],
+        )
 
     def test_host_headroom_is_an_independent_limit(self):
         memory = self.measured()

@@ -74,92 +74,61 @@ class Isolated(unittest.TestCase):
         self.assertFalse(result["workers_enabled"])
         self.assertFalse(result["ci_enabled"])
 
-    def test_memory_high_blocks_admissions_using_slice_usage(self):
+    def test_hard_memory_limit_blocks_admissions_using_working_set(self):
         caps = dict(memory_available=40 * 1024**3, memory_total=128 * 1024**3)
-        memory = dict(working_set=101, high=100, stall_some=0, stall_full=0)
+        memory = dict(working_set=96, high=80, maximum=100, stall_some=0, stall_full=0)
         with (
             patch.object(host, "worker_memory", return_value=memory),
             patch.object(host, "resources", return_value=caps),
         ):
             self.assertTrue(host.worker_pool_pressure())
-        memory["working_set"] = 99
-        with (
-            patch.object(host, "worker_memory", return_value=memory),
-            patch.object(host, "resources", return_value=caps),
-        ):
+            memory["working_set"] = 90
             self.assertFalse(host.worker_pool_pressure())
 
-    def test_ci_start_preserves_allowance_and_growth_schedule(self):
+    def test_all_slots_available_even_when_ci_is_busy_and_cpu_full(self):
         scaler = host.Scaler()
-        args = dict(enabled=True, available=20, reserve=10, idle=0.8, maximum=8)
-        self.assertEqual(scaler.step(now=100, ci_busy=False, **args)[0], 1)
-        self.assertEqual(scaler.step(now=110, ci_busy=False, **args)[0], 1)
-        self.assertEqual(scaler.step(now=170, ci_busy=False, **args)[0], 2)
-        self.assertEqual(scaler.step(now=175, ci_busy=True, **args)[0], 2)
-        self.assertEqual(scaler.step(now=230, ci_busy=True, **args)[0], 3)
-        self.assertEqual(scaler.step(now=235, ci_busy=False, **args)[0], 3)
-        self.assertEqual(scaler.step(now=240, ci_busy=True, **args)[0], 3)
-        args["available"] = 1
-        self.assertEqual(scaler.step(now=245, ci_busy=True, **args)[0], 0)
-
-    def test_ci_requires_more_cpu_headroom_for_increases(self):
-        scaler = host.Scaler()
-        args = dict(enabled=True, available=20, reserve=10, idle=0.3, maximum=8)
-        self.assertEqual(scaler.step(now=100, ci_busy=False, **args)[0], 1)
-        self.assertEqual(scaler.step(now=170, ci_busy=True, **args)[0], 1)
-        args["idle"] = 0.4
-        self.assertEqual(scaler.step(now=175, ci_busy=True, **args)[0], 2)
-        args["maximum"] = 1
-        self.assertEqual(scaler.step(now=180, ci_busy=True, **args)[0], 1)
-        args["enabled"] = False
-        self.assertEqual(scaler.step(now=185, ci_busy=True, **args)[0], 0)
-
-    def test_admission_explains_startup_interval_and_conditional_next_increase(self):
-        scaler = host.Scaler()
-        args = dict(enabled=True, ci_busy=False, available=20, reserve=10, idle=0.8, maximum=4)
-        self.assertEqual(scaler.step(now=100, **args)[0], 1)
-        self.assertEqual(scaler.decision["state"], "waiting_interval")
-        self.assertIn("controller start", scaler.decision["reason"])
-        self.assertEqual(scaler.decision["next_increase_at"], 160)
-        self.assertEqual(scaler.decision["next_worker_limit"], 2)
-        args["ci_busy"] = True
-        scaler.step(now=155, **args)
-        self.assertEqual(scaler.decision["next_increase_at"], 160)
-        self.assertEqual(scaler.decision["cpu_idle_required"], 0.35)
-        self.assertEqual(scaler.step(now=160, **args)[0], 2)
-        self.assertEqual(scaler.decision["next_increase_at"], 220)
-
-    def test_admission_does_not_predict_an_increase_when_cpu_blocks_it(self):
-        scaler = host.Scaler()
-        args = dict(enabled=True, ci_busy=True, available=20, reserve=10, idle=0.8, maximum=4)
-        scaler.step(now=100, **args)
-        args["idle"] = 0.2
-        self.assertEqual(scaler.step(now=170, **args)[0], 1)
-        self.assertEqual(scaler.decision["state"], "waiting_cpu")
-        self.assertIn("20.0%", scaler.decision["reason"])
-        self.assertIn("35%", scaler.decision["reason"])
+        args = dict(enabled=True, available=20, reserve=10, idle=0, maximum=12)
+        self.assertEqual(scaler.step(now=100, ci_busy=False, **args)[0], 12)
+        self.assertEqual(scaler.step(now=101, ci_busy=True, **args)[0], 12)
+        self.assertEqual(scaler.decision["policy"], "opportunistic")
+        self.assertEqual(scaler.decision["cpu_idle_required"], 0)
         self.assertIsNone(scaler.decision["next_increase_at"])
-        self.assertIsNone(scaler.decision["next_worker_limit"])
+        args["maximum"] = 6
+        self.assertEqual(scaler.step(now=102, ci_busy=True, **args)[0], 6)
 
-    def test_admission_distinguishes_pressure_recovery_ceiling_and_zero(self):
+    def test_slices_keep_ci_and_os_reservations_and_prioritize_ci(self):
+        gib = 1024**3
+        with (
+            patch.object(host, "units", return_value=self.root),
+            patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+        ):
+            worker = host.write_slices(
+                dict(ci_allowed=True, ci_memory_gib=64),
+                dict(memory_total=128 * gib, memory_available=128 * gib),
+            )
+        self.assertLessEqual(worker + 66 * gib + int(128 * gib * 0.1), 128 * gib)
+        workers = (self.root / "tauceti-fleet-workers.slice").read_text()
+        ci = (self.root / "tauceti-fleet-ci.slice").read_text()
+        self.assertIn("CPUWeight=10\nIOWeight=10\n", workers)
+        self.assertIn("CPUWeight=1000\nIOWeight=1000\n", ci)
+        self.assertIn(f"MemoryMax={int(worker)}\n", workers)
+        self.assertIn(f"MemoryHigh={int(worker * 0.95)}\n", workers)
+
+    def test_low_memory_or_disable_blocks_new_work_and_recovers_immediately(self):
         scaler = host.Scaler()
-        args = dict(enabled=True, ci_busy=True, available=20, reserve=10, idle=0.8, maximum=2)
-        scaler.step(now=100, **args)
-        self.assertEqual(scaler.step(now=160, **args)[0], 2)
-        self.assertEqual(scaler.decision["state"], "at_ceiling")
-        self.assertIsNone(scaler.decision["next_increase_at"])
-        reason = "worker memory reclamation stalls"
-        self.assertEqual(scaler.step(now=165, **{**args, "enabled": False, "pause_reason": reason})[0], 0)
+        args = dict(enabled=True, available=20, reserve=10, idle=0, maximum=12, ci_busy=True)
+        self.assertEqual(scaler.step(now=100, **args)[0], 12)
+        self.assertEqual(scaler.step(now=101, **{**args, "available": 1})[0], 0)
         self.assertEqual(scaler.decision["state"], "paused")
+        self.assertIn("host memory", scaler.decision["reason"])
+        self.assertEqual(scaler.step(now=102, **args)[0], 12)
+        reason = "worker working set near hard memory limit"
+        self.assertEqual(scaler.step(now=103, **{**args, "enabled": False, "pause_reason": reason})[0], 0)
         self.assertEqual(scaler.decision["reason"], reason)
-        self.assertIsNone(scaler.decision["next_increase_at"])
-        scaler.step(now=170, **args)
-        self.assertIn(reason, scaler.decision["reason"])
-        self.assertEqual(scaler.decision["next_increase_at"], 220)
-        scaler.step(now=175, **{**args, "maximum": 0})
-        self.assertEqual(scaler.decision["state"], "paused")
+        self.assertEqual(scaler.step(now=104, **args)[0], 12)
+        self.assertEqual(scaler.step(now=105, **{**args, "maximum": 0})[0], 0)
         self.assertIn("ceiling is zero", scaler.decision["reason"])
-        scaler.step(now=180, **{**args, "maximum": 0, "pause_reason": "worker admission lease expired"})
+        scaler.step(now=106, **{**args, "maximum": 0, "pause_reason": "worker admission lease expired"})
         self.assertEqual(scaler.decision["reason"], "worker admission lease expired")
 
     def test_drain_changes_admission_not_desired_worker_configuration(self):

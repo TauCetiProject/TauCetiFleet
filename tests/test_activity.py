@@ -45,7 +45,7 @@ class ActivityTests(unittest.TestCase):
             activity.display(value)
         lines = output.getvalue().splitlines()
         header = next(line for line in lines if line.startswith("Finished rounds"))
-        expected_ends = [header.index(h) + len(h) for h in ("3h", "24h", "7d", "Recorded total")]
+        expected_ends = [header.index(h) + len(h) for h in ("3h", "24h", "7d", "All time")]
         data_rows = [line for line in lines if re.search(r"\d+\s+\d+\s+\d+\s+\d+$", line)]
         for line in data_rows:
             self.assertEqual([m.end() for m in re.finditer(r"\d+", line)], expected_ends, line)
@@ -96,15 +96,20 @@ class ActivityTests(unittest.TestCase):
             activity.display(activity.cached("m"))
         lines = output.getvalue().splitlines()
         heading = next(line for line in lines if line.startswith("Finished rounds"))
-        ends = [heading.index(h) + len(h) for h in ("3h", "24h", "7d", "Recorded total")]
+        ends = [heading.index(h) + len(h) for h in ("3h", "24h", "7d", "All time")]
         row = next(line for line in lines if line.startswith("API spend ($/elapsed hour)"))
         self.assertEqual([m.end() for m in re.finditer(r"\$\d+\.\d+", row)], ends)
         self.assertEqual(row.count("$12.34"), 4)
+        per_worker = next(line for line in lines if line.startswith("API spend ($/worker-hour)"))
+        self.assertEqual(per_worker.count("$6.17"), 4)
         section = next(i for i, line in enumerate(lines) if line.startswith("Spending (completed sessions)"))
         self.assertEqual(lines[section - 1], "")
         self.assertIn("All time", lines[section])
         hours = next(line for line in lines if line.startswith("Worker-hours recorded"))
         self.assertEqual(hours.count("6.00"), 4)
+        self.assertLess(lines.index(hours), lines.index(per_worker))
+        self.assertLess(lines.index(per_worker), lines.index(row))
+        self.assertIn("Currently: 0 workers working;", output.getvalue())
         self.assertNotIn("closed/merged PRs lack landing evidence", output.getvalue())
 
     def test_snapshot_rpc_cannot_request_github_refresh(self):
@@ -160,7 +165,7 @@ class ActivityTests(unittest.TestCase):
         lines = output.getvalue().splitlines()
         heading = next(line for line in lines if line.startswith("Costs / initiated PR output"))
         rate = next(line for line in lines if line.startswith("Estimated $ / weighted LOC"))
-        expected = [heading.index(h) + len(h) for h in ("All time", "7 days")]
+        expected = [heading.index(h) + len(h) for h in ("7 days", "All time")]
         self.assertEqual([m.end() for m in re.finditer(r"~\$(?:\d+\.\d+|∞)", rate)], expected)
         self.assertIn("~$0.4000", rate)
         self.assertIn("~$∞", rate)

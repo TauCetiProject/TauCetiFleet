@@ -115,6 +115,7 @@ def advance(value, observation):
                         dict(
                             working_set=observation["worker_memory"],
                             high=observation["worker_memory_high"],
+                            maximum=observation.get("worker_memory_maximum", observation["worker_memory_high"]),
                             stall_some=0,
                             stall_full=0,
                         ),

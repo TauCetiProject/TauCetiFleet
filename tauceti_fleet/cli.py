@@ -189,12 +189,9 @@ def main(argv=None):
                         print(
                             f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard"
                         )
-                        stalls_high = memory["stall_some"] >= 5 or memory["stall_full"] >= 1
+                        print("Worker memory reclamation waits (1-minute averages; informational)")
                         print(
-                            f"Memory pressure from waiting for RAM: {'high' if stalls_high else 'low'} (1-minute averages)"
-                        )
-                        print(
-                            f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}% (pause new work at 5% / 1%)"
+                            f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}%"
                         )
                     print()
                     reason = str(status.get("scaling_reason", status.get("error", "unknown")))
@@ -207,7 +204,9 @@ def main(argv=None):
                     permission = f"up to {allowance} workers allowed" if allowance else "paused"
                     print(f"Starting new work: {permission}; {reason}")
                     decision = status.get("worker_admission", {})
-                    if decision:
+                    if decision and decision.get("policy") == "opportunistic":
+                        print(f"CPU idle: {status['cpu_idle_fraction']:.1%}; workers yield CPU and IO to CI")
+                    elif decision:
                         print(
                             f"CPU idle: {status['cpu_idle_fraction']:.1%}; required for an increase: {decision['cpu_idle_required']:.0%}"
                         )

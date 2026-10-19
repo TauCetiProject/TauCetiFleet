@@ -129,30 +129,24 @@ worker definitions are retained when lowering the ceiling.
 worker states and resource measurements. "Starting new work" shows how many workers
 may start new rounds and why; existing paid sessions finish even if that allowance
 falls. Budget checks still apply before paid work starts.
-The explanation identifies the current constraint: rebuilding the allowance after
-controller start or a pause, waiting for CPU headroom, memory pressure, an expired
-admission lease, disabled workers, or the configured ceiling. When only the interval
-between increases remains, status shows the next allowance, a countdown and UTC
-time; that increase remains conditional on CPU and memory checks. JSON status
-includes the same decision under `worker_admission`.
+All configured workers may start work immediately when memory is safe. CPU idle
+and memory-reclaim stalls do not reduce admissions: mostly network-bound API
+sessions can keep running while CI builds. CI has CPUWeight/IOWeight 1000 and
+workers 10, so CI receives priority when those resources are contested. This is
+scheduling priority, not a measured guarantee of any particular CI runtime.
 
-Starting a CI job preserves the current worker allowance. Increases remain limited
-to one worker per minute and require at least 35% idle CPU while CI is busy (25%
-otherwise), alongside the memory checks below.
+Worker RAM includes cached file data. Estimated working memory subtracts cold
+clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
+are informational. Worker MemoryHigh is 95% of the hard limit; MemoryMax still
+reserves CI's full configured memory plus 2 GiB overhead and at least 10% of host
+RAM (minimum 4 GiB) for the OS. Workers cannot borrow that reservation.
 
-Worker RAM is the total memory counted toward the worker group's limits, including
-cached file data. Estimated working memory subtracts likely reclaimable file cache
-from that total; it is not an additional allocation. Memory reporting also includes
-one-minute averages of time spent waiting for RAM, both with at least one task
-waiting and with all active worker-group tasks waiting simultaneously. The display
-marks these stalls as high when either admission threshold is reached. Cold clean cache is estimated as inactive
-file cache minus dirty/writeback data; the estimate is diagnostic, not a promise
-that every subtracted page is immediately reclaimable. Limits still include cache.
-
-New worker admissions pause on low host headroom, working set reaching the soft
-threshold, or partial/full memory stalls of at least 5%/1%. Missing memory evidence
-fails closed. External automation can renew a short admission lease; an expired
-lease pauses new work. A manual `workers --max` command clears the lease.
+New work pauses when host available memory falls below the OS reserve or worker
+working memory reaches 95% of its hard limit. Missing memory evidence fails closed.
+Existing paid sessions finish. When safe memory returns, the entire configured
+allowance is restored immediately. External admission leases and manual pauses
+retain their existing semantics. JSON status includes the decision under
+`worker_admission`.
 
 Ad hoc scheduling, capacity experiments and their reports belong to external
 operator scripts. The dated script under `experiments/` records the October 2026
@@ -237,7 +231,7 @@ aliases never multiply costs or output. Offline hosts retain their last small
 status snapshot with an explicit age and unavailable-host error; new machines
 without a snapshot contribute no invented financial totals.
 
-Costs have All time and 7 days columns. All conversation costs, including reviews
+Costs have 7 days and All time columns. All conversation costs, including reviews
 and fixes for others, are amortized over initiated PR output: landed Lean lines
 added plus half of currently open Lean lines added. The seven-day output cohort
 contains only PRs initiated in that window. Completed costs and active-session
@@ -247,15 +241,16 @@ for open PRs. Such estimates show `~` and measurement coverage. Unknown PR state
 and LOC with no measured sample contribute zero; positive spending over zero LOC
 shows `$∞`, so missing PR data never hides the rate.
 
-Average spending also has 3h, 24h, 7d and All time columns in $/hour, using
-completed/reconciled session costs and the recorded hours in each window.
+Spending has 3h, 24h, 7d and All time columns: worker-hours recorded, API dollars
+per worker-hour and API dollars per elapsed hour, using completed/reconciled costs.
 Active-session reservations remain separate estimates. New machines use elapsed
 recorded time; fleet totals pool spending over the longest covered wall-clock
 duration rather than averaging machine rates or adding machine-hours.
 `Worker-hours recorded` sums recorded round durations across workers, clipped to
-each window; capacity/budget/quota waiting does not inflate it. Spending remains
-$/elapsed hour. These values come from the same prepared worker summary, with
-no extra collector or GitHub requests.
+each window; capacity/budget/quota waiting does not inflate it. The worker-hour
+rate pools spending over summed worker time; the elapsed-hour rate pools spending
+over the longest covered wall-clock duration. These values come from the same
+prepared worker summary, with no extra collector or GitHub requests.
 
 Bors squash-merges are counted using exact-head promotion receipts imported into
 the shared state server's cache by its existing cron, at most once per five
