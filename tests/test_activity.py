@@ -76,10 +76,11 @@ class ActivityTests(unittest.TestCase):
             rounds={w: {} for w in activity.WINDOWS},
             pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
             costs=dict(
+                accounting_version=2,
                 spending={
                     w: dict(spent_usd="37.035", covered_seconds=10800, worker_seconds=21600, usd_per_hour="12.345")
                     for w in activity.WINDOWS
-                }
+                },
             ),
             running=0,
             open_prs=0,
@@ -102,7 +103,7 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(row.count("$12.34"), 4)
         per_worker = next(line for line in lines if line.startswith("API spend ($/worker-hour)"))
         self.assertEqual(per_worker.count("$6.17"), 4)
-        section = next(i for i, line in enumerate(lines) if line.startswith("Spending (completed sessions)"))
+        section = next(i for i, line in enumerate(lines) if line.startswith("Spending (recorded usage)"))
         self.assertEqual(lines[section - 1], "")
         self.assertIn("All time", lines[section])
         hours = next(line for line in lines if line.startswith("Worker-hours recorded"))

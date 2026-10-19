@@ -237,16 +237,19 @@ without a snapshot contribute no invented financial totals.
 Costs have 7 days and All time columns. All conversation costs, including reviews
 and fixes for others, are amortized over initiated PR output: landed Lean lines
 added plus half of currently open Lean lines added. The seven-day output cohort
-contains only PRs initiated in that window. Completed costs and active-session
-estimates are shown separately, and ratios pool cost/output before division.
+contains only PRs initiated in that window. Completed costs and recorded running usage
+are shown separately, and ratios pool cost/output before division.
 Missing LOC is estimated from measured PRs in that window, preserving half credit
 for open PRs. Such estimates show `~` and measurement coverage. Unknown PR states
 and LOC with no measured sample contribute zero; positive spending over zero LOC
 shows `$∞`, so missing PR data never hides the rate.
 
 Spending has 3h, 24h, 7d and All time columns: worker-hours recorded, API dollars
-per worker-hour and API dollars per elapsed hour, using completed/reconciled costs.
-Active-session reservations remain separate estimates. New machines use elapsed
+per worker-hour and API dollars per elapsed hour, using accrued usage from running, completed and interrupted conversations.
+Native final totals correct token-price estimates at the original usage timestamps;
+legacy costs without timestamps are spread over the conversation duration.
+Budget reservations are excluded from both rates and cost/LOC. A compact quality
+note identifies incomplete usage. New machines use elapsed
 recorded time; fleet totals pool spending over the longest covered wall-clock
 duration rather than averaging machine rates or adding machine-hours.
 `Worker-hours recorded` sums recorded round durations across workers, clipped to
@@ -254,6 +257,12 @@ each window; capacity/budget/quota waiting does not inflate it. The worker-hour
 rate pools spending over summed worker time; the elapsed-hour rate pools spending
 over the longest covered wall-clock duration. These values come from the same
 prepared worker summary, with no extra collector or GitHub requests.
+
+Native host coding rounds can share immutable extracted Mathlib snapshots with
+private copy-on-write builds. The native activity collector prepares the sharing
+summary as well; Fleet only renders it. See the worker
+[shared Mathlib documentation](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/shared-mathlib.md)
+for `auto|off|required` modes, capability diagnostics, bounded canaries and rollback.
 
 Bors squash-merges are counted using exact-head promotion receipts imported into
 the shared state server's cache by its existing cron, at most once per five
