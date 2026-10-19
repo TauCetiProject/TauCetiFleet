@@ -105,9 +105,14 @@ stays active. Zero pauses new work; admitted paid sessions finish. Existing live
 worker definitions are retained when lowering the ceiling.
 
 `tauceti-fleet status HOST` reports the configured ceiling, current admissions,
-worker states and resource measurements. Memory reporting distinguishes total
-charged memory, anonymous memory, file cache, a conservative working-set estimate,
-and 60-second memory stall percentages. Cold clean cache is estimated as inactive
+worker states and resource measurements. "Starting new work" shows how many workers
+may start new rounds and why; existing paid sessions finish even if that allowance
+falls. Budget checks still apply before paid work starts.
+
+Worker RAM is the total memory counted toward the worker group's limits, including
+cached file data. Estimated working memory subtracts likely reclaimable file cache
+from that total; it is not an additional allocation. Memory reporting also includes
+60-second memory stall percentages. Cold clean cache is estimated as inactive
 file cache minus dirty/writeback data; the estimate is diagnostic, not a promise
 that every subtracted page is immediately reclaimable. Limits still include cache.
 
