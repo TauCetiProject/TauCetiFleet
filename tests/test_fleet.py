@@ -114,6 +114,54 @@ class Isolated(unittest.TestCase):
         args["enabled"] = False
         self.assertEqual(scaler.step(now=185, ci_busy=True, **args)[0], 0)
 
+    def test_admission_explains_startup_interval_and_conditional_next_increase(self):
+        scaler = host.Scaler()
+        args = dict(enabled=True, ci_busy=False, available=20, reserve=10, idle=0.8, maximum=4)
+        self.assertEqual(scaler.step(now=100, **args)[0], 1)
+        self.assertEqual(scaler.decision["state"], "waiting_interval")
+        self.assertIn("controller start", scaler.decision["reason"])
+        self.assertEqual(scaler.decision["next_increase_at"], 160)
+        self.assertEqual(scaler.decision["next_worker_limit"], 2)
+        args["ci_busy"] = True
+        scaler.step(now=155, **args)
+        self.assertEqual(scaler.decision["next_increase_at"], 160)
+        self.assertEqual(scaler.decision["cpu_idle_required"], 0.35)
+        self.assertEqual(scaler.step(now=160, **args)[0], 2)
+        self.assertEqual(scaler.decision["next_increase_at"], 220)
+
+    def test_admission_does_not_predict_an_increase_when_cpu_blocks_it(self):
+        scaler = host.Scaler()
+        args = dict(enabled=True, ci_busy=True, available=20, reserve=10, idle=0.8, maximum=4)
+        scaler.step(now=100, **args)
+        args["idle"] = 0.2
+        self.assertEqual(scaler.step(now=170, **args)[0], 1)
+        self.assertEqual(scaler.decision["state"], "waiting_cpu")
+        self.assertIn("20.0%", scaler.decision["reason"])
+        self.assertIn("35%", scaler.decision["reason"])
+        self.assertIsNone(scaler.decision["next_increase_at"])
+        self.assertIsNone(scaler.decision["next_worker_limit"])
+
+    def test_admission_distinguishes_pressure_recovery_ceiling_and_zero(self):
+        scaler = host.Scaler()
+        args = dict(enabled=True, ci_busy=True, available=20, reserve=10, idle=0.8, maximum=2)
+        scaler.step(now=100, **args)
+        self.assertEqual(scaler.step(now=160, **args)[0], 2)
+        self.assertEqual(scaler.decision["state"], "at_ceiling")
+        self.assertIsNone(scaler.decision["next_increase_at"])
+        reason = "worker memory reclamation stalls"
+        self.assertEqual(scaler.step(now=165, **{**args, "enabled": False, "pause_reason": reason})[0], 0)
+        self.assertEqual(scaler.decision["state"], "paused")
+        self.assertEqual(scaler.decision["reason"], reason)
+        self.assertIsNone(scaler.decision["next_increase_at"])
+        scaler.step(now=170, **args)
+        self.assertIn(reason, scaler.decision["reason"])
+        self.assertEqual(scaler.decision["next_increase_at"], 220)
+        scaler.step(now=175, **{**args, "maximum": 0})
+        self.assertEqual(scaler.decision["state"], "paused")
+        self.assertIn("ceiling is zero", scaler.decision["reason"])
+        scaler.step(now=180, **{**args, "maximum": 0, "pause_reason": "worker admission lease expired"})
+        self.assertEqual(scaler.decision["reason"], "worker admission lease expired")
+
     def test_drain_changes_admission_not_desired_worker_configuration(self):
         store.host_config()
         store.update_host(ci_enabled=True, workers_enabled=True)

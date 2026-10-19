@@ -438,20 +438,54 @@ class Scaler:
     def __init__(self):
         self.target = 0
         self.last_added = 0
+        self.recovery_reason = "controller start"
+        self.decision = {}
 
-    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum):
+    def _result(self, state, reason, required_idle, next_increase_at=None):
+        self.decision = dict(
+            state=state,
+            reason=reason,
+            recovery_reason=self.recovery_reason,
+            cpu_idle_required=required_idle,
+            next_increase_at=next_increase_at,
+            next_worker_limit=self.target + 1 if next_increase_at is not None else None,
+        )
+        return self.target, reason
+
+    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None):
+        required_idle = 0.35 if ci_busy else 0.25
         if not enabled or available < reserve:
             self.target = 0
-            return 0, "host draining or memory headroom reserved"
-        if idle >= (0.35 if ci_busy else 0.25) and now - self.last_added >= 60:
+            reason = pause_reason or (
+                "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
+            )
+            self.recovery_reason = reason
+            return self._result("paused", reason, required_idle)
+        if idle >= required_idle and now - self.last_added >= 60:
             self.target = min(maximum, self.target + 1)
             self.last_added = now
         self.target = min(self.target, maximum)
-        return (
-            self.target,
-            "CI active; workers admitted only against measured spare capacity"
-            if ci_busy
-            else "workers use available capacity",
+        if self.target == maximum:
+            self.recovery_reason = None
+            return self._result(
+                "at_ceiling" if maximum else "paused",
+                "configured worker ceiling reached"
+                if maximum
+                else (pause_reason or "configured worker ceiling is zero"),
+                required_idle,
+            )
+        if idle < required_idle:
+            return self._result(
+                "waiting_cpu",
+                f"CPU idle {idle:.1%}; need at least {required_idle:.0%} to increase allowance",
+                required_idle,
+            )
+        context = f"rebuilding allowance after {self.recovery_reason}; " if self.recovery_reason else ""
+        return self._result(
+            "waiting_interval",
+            context + "waiting between increases (one worker per minute)",
+            required_idle,
+            self.last_added + 60,
         )
 
 
@@ -577,10 +611,14 @@ def daemon():
                 reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
-                if lease is not None and time.time() >= lease.get("expires_at", 0):
+                lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
+                if lease_expired:
                     maximum = 0
                 memory = worker_memory() if config["workers_enabled"] else None
                 pressure = memory_pressure(memory, caps) if memory else []
+                pause_reason = (
+                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
+                )
                 target, reason = scaler.step(
                     now=time.time(),
                     enabled=config["workers_enabled"] and not pressure,
@@ -589,11 +627,8 @@ def daemon():
                     reserve=reserve,
                     idle=idle,
                     maximum=maximum,
+                    pause_reason=pause_reason,
                 )
-                if pressure:
-                    reason = "; ".join(pressure)
-                elif lease is not None and maximum == 0:
-                    reason = "worker admission lease expired"
                 atomic(
                     state_dir() / "admission.json",
                     dict(version=1, expires_at=time.time() + 15, workers=ids[:target], reason=reason),
@@ -610,6 +645,7 @@ def daemon():
                         ci_cooldown=circuit if cooling else None,
                         active_worker_limit=target,
                         scaling_reason=reason,
+                        worker_admission=scaler.decision,
                         worker_memory=memory,
                         memory_pressure=pressure,
                         resources=caps,

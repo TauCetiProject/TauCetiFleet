@@ -2,8 +2,10 @@
 
 import argparse
 import json
+import math
 import sys
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from . import host, remote
@@ -253,6 +255,21 @@ def main(argv=None):
                     allowance = status.get("active_worker_limit", 0)
                     permission = f"up to {allowance} workers allowed" if allowance else "paused"
                     print(f"Starting new work: {permission}; {reason}")
+                    decision = status.get("worker_admission", {})
+                    if decision:
+                        print(
+                            f"CPU idle: {status['cpu_idle_fraction']:.1%}; required for an increase: {decision['cpu_idle_required']:.0%}"
+                        )
+                        next_increase = decision.get("next_increase_at")
+                        if next_increase is not None:
+                            remaining = math.ceil(next_increase - time.time())
+                            if remaining > 0:
+                                when = datetime.fromtimestamp(next_increase, UTC).strftime("%H:%M:%S UTC")
+                                print(
+                                    f"Next increase: {decision['next_worker_limit']} workers in {remaining}s ({when}), if CPU and memory checks pass"
+                                )
+                            else:
+                                print("Next increase: eligible now, awaiting a fresh controller check")
                     for worker in status.get("workers", []):
                         print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
                 else:
