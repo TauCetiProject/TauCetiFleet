@@ -100,6 +100,25 @@ drained. Fleet worker state is separate from the account's existing manager.
 
 ## Worker controls and memory observations
 
+`status` also reads the worker installation's prepared activity summary: finished
+rounds by type, authored/landed PRs over 3h/24h/7d and recorded totals, and current
+open PRs. Preparation happens in `tauceti`, not during status. The summary shows
+its age, recorded coverage and unknown PR states/landing evidence. Full worker
+history and PR inventories are not transferred by status.
+
+After upgrading `tauceti`, prepare existing structured history once:
+
+```sh
+tauceti activity refresh --config ~/.config/tauceti-fleet/workers.toml --backfill
+```
+
+The worker manager maintains the cache in background. `tauceti activity
+install-timer` is optional for installations without a running manager. Shared
+server reporting reads stored facts only; missing/stale data never triggers
+GitHub fallback or reconciliation. The fleet `report` command also uses prepared
+PR evidence and no longer refreshes GitHub/Bors archives on request. Its legacy
+spending and CI sections may still scan local ledgers; status does not.
+
 `tauceti-fleet workers HOST --max N` sets the worker admission ceiling while CI
 stays active. Zero pauses new work; admitted paid sessions finish. Existing live
 worker definitions are retained when lowering the ceiling.

@@ -10,7 +10,7 @@ from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from . import github
+from . import activity, github
 from .store import FleetError, database, export_events, host_config, state_dir
 
 WINDOWS = {"3h": 3 * 3600, "6h": 6 * 3600, "24h": 24 * 3600, "7d": 7 * 86400}
@@ -162,6 +162,29 @@ def snapshot(config=None, *, refresh=False):
     errors = refresh_prs(config, events) if refresh and events else []
     with database() as db:
         prs = [json.loads(row[0]) for row in db.execute("SELECT data FROM prs")]
+    # Prepared facts replace on-demand GitHub refreshes, including Bors landings.
+    try:
+        prepared = activity.inventory(config["machine_id"])
+        known = {(p["repository"], p["pr"]): p for p in prs}
+        for p in prepared:
+            if p.get("state") is not None:
+                key = (p["repo"], p["number"])
+                value = dict(
+                    repository=p["repo"],
+                    pr=p["number"],
+                    state="open" if p["state"] == "OPEN" else "closed",
+                    head_sha=p["head"],
+                    landed_at=p["landed"],
+                    observed_at=p["observed"],
+                    landing_source=p["source"],
+                    created_at=p["created"],
+                    lean_loc=known.get(key, {}).get("lean_loc"),
+                )
+                if value["observed_at"] is None or value["observed_at"] >= known.get(key, {}).get("observed_at", 0):
+                    known[key] = value
+        prs = list(known.values())
+    except (FleetError, KeyError, TypeError):
+        errors.append("Prepared PR activity unavailable")
     if any(p["state"] == "closed" and not p.get("landed_at") for p in prs):
         try:
             path = refresh_bors() if refresh else state_dir() / "tauceti-ci.sqlite"
@@ -223,6 +246,9 @@ def summarize(snapshots, *, now=None, windows=None):
             key = (e["repository"], e["pr"])
             owners.setdefault(key, e["machine_id"])
             origin_times.setdefault(key, e["at"])
+    for key in origin_times:
+        if prs.get(key, {}).get("created_at") is not None:
+            origin_times[key] = prs[key]["created_at"]
     reports = []
     for machine in [*sorted(machines), "fleet"]:
         covered = list(machines.values()) if machine == "fleet" else [machines[machine]]
@@ -288,6 +314,9 @@ def summarize(snapshots, *, now=None, windows=None):
         reports.append(
             dict(
                 machine_id=machine,
+                activity=activity.combine(list(machines.values()), prs, owners, origin_times, now)
+                if machine == "fleet"
+                else machines[machine].get("activity", {}),
                 open_prs=open_prs,
                 pr_metadata_unknown=sum(
                     key not in prs and (machine == "fleet" or owner == machine) for key, owner in owners.items()

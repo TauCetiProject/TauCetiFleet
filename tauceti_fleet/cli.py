@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from . import host, remote
+from . import activity, host, remote
 from .report import WINDOWS, summarize
 from .store import FleetError, atomic, config_dir, read
 
@@ -66,6 +66,7 @@ def print_report(value, entries):
     for report in value["reports"]:
         machine = report["machine_id"]
         print(f"\n{names.get(machine, machine)} — {report['open_prs']} open originating PRs")
+        activity.display(report.get("activity", {}))
         if report["pr_metadata_unknown"]:
             print(f"PR metadata unavailable for {report['pr_metadata_unknown']} originating PR(s)")
         current = report.get("current", {})
@@ -272,6 +273,7 @@ def main(argv=None):
                                 print("Next increase: eligible now, awaiting a fresh controller check")
                     for worker in status.get("workers", []):
                         print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
+                    activity.display(value.get("activity", {}))
                 else:
                     print(json.dumps(value, indent=2))
         return 1 if any("error" in value for value in results.values()) else 0
