@@ -95,6 +95,39 @@ class ActivityTests(unittest.TestCase):
             value = report.snapshot(dict(machine_id="m", created_at=1))
         self.assertEqual(value["prs"][0]["landed_at"], 20)
 
+    def test_report_uses_prepared_inventory_after_old_data_is_dropped(self):
+        prepared = dict(
+            scope="m",
+            repo="o/r",
+            number=2,
+            worker="w",
+            created=50,
+            state="OPEN",
+            landed=None,
+            observed=90,
+            head="h",
+            source=None,
+        )
+        events = [dict(id=str(n), kind="pr_created", repository="o/r", pr=n, at=at) for n, at in ((1, 10), (2, 55))]
+        with report.database() as db:
+            db.execute(
+                "INSERT INTO prs VALUES ('o/r',1,?)", (json.dumps(dict(repository="o/r", pr=1, state="closed")),)
+            )
+        with (
+            patch.object(report, "export_events", return_value=events),
+            patch.object(report, "settled_costs", return_value=[]),
+            patch("tauceti_fleet.process.executable", return_value=None),
+            patch.object(activity, "inventory", return_value=[prepared]),
+            patch.object(activity, "cached", return_value=dict(available=True)),
+            patch.object(report, "refresh_prs", side_effect=AssertionError("API refresh")),
+            patch.object(report, "bors_landings", side_effect=AssertionError("Old closed PR restored")),
+        ):
+            snapshot = report.snapshot(dict(machine_id="m", created_at=1))
+        self.assertEqual([p["pr"] for p in snapshot["prs"]], [2])
+        self.assertEqual([(e["pr"], e["at"]) for e in snapshot["events"] if e["kind"] == "pr_created"], [(2, 50)])
+        summary = report.summarize([snapshot], now=100)
+        self.assertEqual(summary["reports"][-1]["windows"]["3h"]["prs_originated"], 1)
+
     def test_combined_pr_counts_deduplicate_across_hosts(self):
         summary = dict(
             prepared_at=100,

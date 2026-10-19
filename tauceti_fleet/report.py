@@ -166,6 +166,21 @@ def snapshot(config=None, *, refresh=False):
     try:
         prepared = activity.inventory(config["machine_id"])
         known = {(p["repository"], p["pr"]): p for p in prs}
+        if activity.cached(config["machine_id"]).get("available"):
+            # The prepared inventory owns the reporting period. Legacy creation
+            # journals and metadata caches must not restore discarded PR activity.
+            tracked = {(p["repo"], p["number"]) for p in prepared}
+            known = {key: value for key, value in known.items() if key in tracked}
+            events = [e for e in events if e["kind"] != "pr_created"] + [
+                dict(
+                    id=f"activity-pr:{p['repo']}:{p['number']}",
+                    kind="pr_created",
+                    repository=p["repo"],
+                    pr=p["number"],
+                    at=p["created"],
+                )
+                for p in prepared
+            ]
         for p in prepared:
             if p.get("state") is not None:
                 key = (p["repo"], p["number"])
