@@ -108,6 +108,12 @@ worker definitions are retained when lowering the ceiling.
 worker states and resource measurements. "Starting new work" shows how many workers
 may start new rounds and why; existing paid sessions finish even if that allowance
 falls. Budget checks still apply before paid work starts.
+The explanation identifies the current constraint: rebuilding the allowance after
+controller start or a pause, waiting for CPU headroom, memory pressure, an expired
+admission lease, disabled workers, or the configured ceiling. When only the interval
+between increases remains, status shows the next allowance, a countdown and UTC
+time; that increase remains conditional on CPU and memory checks. JSON status
+includes the same decision under `worker_admission`.
 
 Starting a CI job preserves the current worker allowance. Increases remain limited
 to one worker per minute and require at least 35% idle CPU while CI is busy (25%
