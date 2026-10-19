@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import ci, github, vm
+from . import activity, ci, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -734,8 +734,9 @@ def rpc(payload):
     if action == "budget":
         return budget(payload)
     if action == "snapshot":
-        result = snapshot(refresh=True)
+        result = snapshot(refresh=False)
         result["status"] = read(state_dir() / "status.json", {})
+        result["activity"] = activity.cached(host_config()["machine_id"])
         return result
     if action == "status":
         config = host_config()
@@ -747,5 +748,6 @@ def rpc(payload):
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
             status=read(state_dir() / "status.json", {}),
+            activity=activity.cached(config["machine_id"]),
         )
     raise FleetError("Unknown host operation")
