@@ -55,7 +55,9 @@ class ActivityTests(unittest.TestCase):
         self.assertNotIn("unrecorded", output.getvalue())
         self.assertNotIn("Older resource logs", output.getvalue())
         self.assertNotIn("totals cover", output.getvalue())
-        self.assertIn("Outcome rows are subsets", output.getvalue())
+        self.assertNotIn("Outcome rows are subsets", output.getvalue())
+        pr_start = next(i for i, line in enumerate(lines) if line.startswith("PRs authored"))
+        self.assertEqual(lines[pr_start - 1], "")
 
     def test_status_reads_only_prepared_activity_without_process_or_sql(self):
         Path(self.tmp.name, "summary.json").write_text(json.dumps(dict(groups={"m": dict(prepared_at=1)}, errors=[])))

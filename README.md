@@ -156,6 +156,11 @@ lease pauses new work. A manual `workers --max` command clears the lease.
 Ad hoc scheduling, capacity experiments and their reports belong to external
 operator scripts. The dated script under `experiments/` records the October 2026
 capacity investigation and is excluded from installed releases.
+When the experiment reaches a CPU, memory-stall, budget, or configured-ceiling
+limit, it stops increasing capacity and releases its admission lease. The current
+worker ceiling remains under the ordinary controller and budget checks. Queue
+overload, an OOM kill, disabled workers, or lost observations can explicitly
+pause new work. Stopping the experiment itself preserves the current ceiling.
 
 ## GitHub CI setup
 

@@ -157,7 +157,15 @@ def advance(value, observation):
             maximum_at_stop=value["maximum"],
             last_sample=observation,
         )
-        return value, 0
+        # Resource thresholds stop the experiment's increases. The ordinary
+        # controller still governs memory/CPU admissions and the budget ledger
+        # governs spending. Only urgent protective stops pause all new work.
+        pause = (
+            "merge_queue" in reached
+            or "workers_disabled" in reached
+            or observation["worker_oom_kill"] > value["baseline_oom_kill"]
+        )
+        return value, 0 if pause else value["maximum"]
     # Do not increase during even a transient limit, or until the existing
     # configured workers have actually launched. Non-resource failures are explicit.
     ready = (
@@ -174,7 +182,7 @@ def advance(value, observation):
                 limiting_factors=["experiment_ceiling"],
                 maximum_at_stop=value["maximum"],
             )
-            return value, 0
+            return value, value["maximum"]
         value["maximum"] += 1
         value["stage_admitted_peak"] = 0
         value["next_increase_at"] = now + value["interval_seconds"]
@@ -216,16 +224,16 @@ def daemon():
                 value.setdefault("observation_failure_since", now)
                 value["condition_since"] = {}
                 value.update(hold_reason="observations unavailable", observation_error=error)
-                set_maximum(0, experiment=True)
                 # Missing evidence cannot establish any resource bottleneck.
                 if now - value["observation_failure_since"] >= 300:
                     value.update(phase="stopped", stopped_at=now, limiting_factors=["observation_unavailable"])
+                set_maximum(0, experiment=value["phase"] == "running")
             else:
                 if value.pop("observation_failure_since", None) is not None:
                     value["next_increase_at"] = now + value["interval_seconds"]
                 value.pop("observation_error", None)
                 value, maximum = advance(value, observation)
-                set_maximum(value["maximum"] if maximum is None else maximum, experiment=True)
+                set_maximum(value["maximum"] if maximum is None else maximum, experiment=value["phase"] == "running")
                 sample_path = experiment_dir() / "samples.jsonl"
                 fd = os.open(sample_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
                 with os.fdopen(fd, "a") as stream:
@@ -240,8 +248,9 @@ def daemon():
             if stopping:
                 break
             time.sleep(1)
-    # The generic admission lease also expires if this process is killed.
-    set_maximum(0, experiment=True)
+    # Stopping the experiment ends its increases and releases its lease. Leave
+    # the current ceiling under ordinary controller admission/resource checks.
+    set_maximum(host_config()["max_workers"])
 
 
 def print_status(value):
@@ -288,7 +297,7 @@ if __name__ == "__main__":
             value = read(experiment_dir() / "state.json", {})
             value.update(phase="stopped", stopped_at=time.time(), limiting_factors=["operator"])
             atomic(experiment_dir() / "state.json", value)
-            set_maximum(0, experiment=True)
+            set_maximum(host_config()["max_workers"])
         print_status(public(value))
     else:
         print_status(public(read(experiment_dir() / "state.json", {})))
