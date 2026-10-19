@@ -78,7 +78,7 @@ def display(value):
     for key, label in (("authored", "PRs authored"), ("landed", "Authored PRs landed")):
         print(f"{label:25}" + "".join(f"{s['pr_windows'][w][key]:7}" for w in WINDOWS))
     print(
-        f"Currently: {s['running']} rounds running; {s['open_prs']} authored PRs open; {s['unknown_prs']} PR states unknown; {s['unknown_landings']} closed/merged PRs lack landing evidence"
+        f"Currently: {s['running'] if s['running'] is not None else 'unknown'} rounds running; {s['open_prs']} known open authored PRs; {s['unknown_prs']} PR states unknown; {s['unknown_landings']} closed/merged PRs lack landing evidence"
     )
     if s.get("interrupted_unfinished"):
         print(f"Interrupted without finish receipts: {s['interrupted_unfinished']} (outside finished counts)")
@@ -124,7 +124,9 @@ def combine(snapshots, prs, owners, origin_times, now):
             history_since=min((s["history_since"] for s in known if s.get("history_since")), default=None),
             rounds=rounds,
             pr_windows=windows,
-            running=sum(s["running"] for s in known),
+            running=sum(s["running"] for s in known)
+            if all(s["running"] is not None for s in known) and len(known) == len(snapshots)
+            else None,
             interrupted_unfinished=sum(s.get("interrupted_unfinished", 0) for s in known),
             open_prs=sum(key in owners and p["state"] == "open" and not p.get("landed_at") for key, p in prs.items()),
             unknown_prs=sum(key not in prs for key in owners),
