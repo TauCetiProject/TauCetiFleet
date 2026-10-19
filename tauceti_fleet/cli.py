@@ -1,7 +1,6 @@
 """Operator CLI and host-side JSON protocol."""
 
 import argparse
-import datetime as dt
 import json
 import sys
 import time
@@ -43,16 +42,7 @@ def parser():
     workers.add_argument("host")
     workers.add_argument("--max", dest="maximum", type=int, required=True)
     workers.add_argument("--json", action="store_true")
-    ramp = sub.add_parser("ramp", help="start, inspect or stop a persistent worker capacity experiment")
-    ramp.add_argument("host")
-    mode = ramp.add_mutually_exclusive_group()
-    mode.add_argument("--start", action="store_true")
-    mode.add_argument("--stop", action="store_true")
-    ramp.add_argument("--interval-minutes", type=int, default=30)
-    ramp.add_argument("--queue-limit", type=int, default=40)
-    ramp.add_argument("--ceiling", type=int, default=64)
-    ramp.add_argument("--json", action="store_true")
-    for name in ("_host", "host-daemon", "run-workers", "ramp-daemon"):
+    for name in ("_host", "host-daemon", "run-workers"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
 
@@ -114,32 +104,6 @@ def print_report(value, entries):
     print("\n" + value["spending_basis"])
 
 
-def print_ramp(value):
-    print(f"Ramp: {value.get('phase', 'unknown')}; worker ceiling: {value.get('maximum', 0)}")
-    if value.get("phase") == "running" and value.get("next_increase_at"):
-        print("Next increase: " + dt.datetime.fromtimestamp(value["next_increase_at"], dt.UTC).isoformat())
-    if value.get("hold_reason"):
-        print("Holding: " + value["hold_reason"])
-    if value.get("limiting_factors"):
-        print(
-            f"Stopped at ceiling {value.get('maximum_at_stop', value.get('maximum', 0))}: "
-            + ", ".join(value["limiting_factors"])
-        )
-    sample = value.get("last_sample", {})
-    if sample:
-        gib = 1024**3
-        print(
-            f"Queue: {sample['queue_prs']}/{value['queue_limit']} PRs; CPU idle: {sample['cpu_idle']:.0%}; CI busy: {sample['ci_busy']}"
-        )
-        print(
-            f"Worker memory: {sample['worker_memory'] / gib:.1f}/{sample['worker_memory_high'] / gib:.1f} GiB; host available: {sample['memory_available'] / gib:.1f} GiB"
-        )
-        print(
-            f"Budget: ${Decimal(sample['available']):.2f} available, ${sample['pending']} pending; ${sample['grant_rate']}/hour replenishment"
-        )
-        print("Worker states: " + json.dumps(sample["worker_states"]))
-
-
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
@@ -158,11 +122,6 @@ def main(argv=None):
             return 0
         if args.command == "run-workers":
             host.run_workers()
-            return 0
-        if args.command == "ramp-daemon":
-            from .ramp import daemon
-
-            daemon()
             return 0
         if args.command == "add":
             value = remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
@@ -194,14 +153,6 @@ def main(argv=None):
                 payload.update(ci=args.ci, workers=args.workers)
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
-            if args.command == "ramp":
-                payload.update(
-                    start=args.start,
-                    stop=args.stop,
-                    interval_minutes=args.interval_minutes,
-                    queue_limit=args.queue_limit,
-                    ceiling=args.ceiling,
-                )
             if args.command == "update":
                 status = remote.call(entry["target"], dict(action="status"))
                 if status["ci_enabled"] or status["workers_enabled"]:
@@ -269,8 +220,23 @@ def main(argv=None):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
-                elif args.command == "ramp" and "phase" in value:
-                    print_ramp(value)
+                elif args.command == "status" and "status" in value:
+                    status = value["status"]
+                    print(
+                        f"Workers: {status.get('active_worker_limit', 0)} admitted / {value.get('max_workers', 0)} maximum; CI busy: {status.get('ci_busy', 'unknown')}"
+                    )
+                    memory = status.get("worker_memory")
+                    if memory:
+                        gib = 1024**3
+                        print(
+                            f"Worker memory: {memory['charged'] / gib:.1f} GiB charged; {memory['working_set'] / gib:.1f} GiB estimated working set; {memory['file'] / gib:.1f} GiB file cache"
+                        )
+                        print(
+                            f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard; memory stalls: {memory['stall_some']:.2f}% partial / {memory['stall_full']:.2f}% full (60s)"
+                        )
+                    print("Admissions: " + str(status.get("scaling_reason", status.get("error", "unknown"))))
+                    for worker in status.get("workers", []):
+                        print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
                 else:
                     print(json.dumps(value, indent=2))
         return 1 if any("error" in value for value in results.values()) else 0

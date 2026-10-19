@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import ci, github, vm
-from .capabilities import GIB, doctor, resources
+from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -306,15 +306,27 @@ def cpu_sample():
 
 
 def worker_pool_pressure():
-    result = run(
-        ["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryCurrent", "-p", "MemoryHigh"],
-        check=False,
-    )
-    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    try:
-        return int(fields["MemoryCurrent"]) >= int(fields["MemoryHigh"])
-    except (ValueError, KeyError):
-        return False
+    return bool(memory_pressure(worker_memory(), resources()))
+
+
+def set_worker_maximum(maximum, *, lease_seconds=None):
+    """Set admissions; optional short leases allow external automation to fail closed."""
+    if type(maximum) is not int or not 0 <= maximum <= 4096:
+        raise FleetError("Worker maximum must be an integer from 0 to 4096")
+    lease = state_dir() / "worker-admission-lease.json"
+    if lease_seconds is None:
+        lease.unlink(missing_ok=True)
+    else:
+        if type(lease_seconds) is not int or not 30 <= lease_seconds <= 3600:
+            raise FleetError("Admission lease must be 30 to 3600 seconds")
+        atomic(lease, dict(expires_at=time.time() + lease_seconds))
+    update_host(max_workers=maximum)
+    if maximum == 0:
+        atomic(
+            state_dir() / "admission.json",
+            dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
+        )
+    return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
 def worker_statuses():
@@ -569,18 +581,24 @@ def daemon():
                         start_workers()
                 reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
                 maximum = config["max_workers"]
-                ramp = read(state_dir() / "ramp.json", {})
-                if ramp.get("phase") == "running" and time.time() - ramp.get("heartbeat_at", 0) > 120:
+                lease = read(state_dir() / "worker-admission-lease.json")
+                if lease is not None and time.time() >= lease.get("expires_at", 0):
                     maximum = 0
+                memory = worker_memory() if config["workers_enabled"] else None
+                pressure = memory_pressure(memory, caps) if memory else []
                 target, reason = scaler.step(
                     now=time.time(),
-                    enabled=config["workers_enabled"] and not worker_pool_pressure(),
+                    enabled=config["workers_enabled"] and not pressure,
                     ci_busy=busy,
                     available=caps["memory_available"],
                     reserve=reserve,
                     idle=idle,
                     maximum=maximum,
                 )
+                if pressure:
+                    reason = "; ".join(pressure)
+                elif lease is not None and maximum == 0:
+                    reason = "worker admission lease expired"
                 atomic(
                     state_dir() / "admission.json",
                     dict(version=1, expires_at=time.time() + 15, workers=ids[:target], reason=reason),
@@ -597,6 +615,8 @@ def daemon():
                         ci_cooldown=circuit if cooling else None,
                         active_worker_limit=target,
                         scaling_reason=reason,
+                        worker_memory=memory,
+                        memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,
                         workers=worker_statuses(),
@@ -677,13 +697,7 @@ def rpc(payload):
     if action == "enable":
         return enable(ci=bool(payload.get("ci")), workers=bool(payload.get("workers")))
     if action == "workers":
-        from .ramp import set_maximum
-
-        return set_maximum(payload["maximum"])
-    if action == "ramp":
-        from .ramp import control
-
-        return control(payload)
+        return set_worker_maximum(payload["maximum"])
     if action == "drain":
         return drain()
     if action == "budget":
