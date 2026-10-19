@@ -116,7 +116,9 @@ otherwise), alongside the memory checks below.
 Worker RAM is the total memory counted toward the worker group's limits, including
 cached file data. Estimated working memory subtracts likely reclaimable file cache
 from that total; it is not an additional allocation. Memory reporting also includes
-60-second memory stall percentages. Cold clean cache is estimated as inactive
+one-minute averages of time spent waiting for RAM, both with at least one task
+waiting and with all active worker-group tasks waiting simultaneously. The display
+marks these stalls as high when either admission threshold is reached. Cold clean cache is estimated as inactive
 file cache minus dirty/writeback data; the estimate is diagnostic, not a promise
 that every subtracted page is immediately reclaimable. Limits still include cache.
 

@@ -235,7 +235,14 @@ def main(argv=None):
                             f"Estimated working memory: {memory['working_set'] / gib:.1f} GiB after subtracting likely reclaimable file cache"
                         )
                         print(
-                            f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard; memory stalls: {memory['stall_some']:.2f}% partial / {memory['stall_full']:.2f}% full (60s)"
+                            f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard"
+                        )
+                        stalls_high = memory["stall_some"] >= 5 or memory["stall_full"] >= 1
+                        print(
+                            f"Memory pressure from waiting for RAM: {'high' if stalls_high else 'low'} (1-minute averages)"
+                        )
+                        print(
+                            f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}% (pause new work at 5% / 1%)"
                         )
                     reason = str(status.get("scaling_reason", status.get("error", "unknown")))
                     # Explain older hosts' generic policy messages as well.
