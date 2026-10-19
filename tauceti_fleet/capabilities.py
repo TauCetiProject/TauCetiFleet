@@ -14,7 +14,7 @@ from .store import FleetError, data_dir, host_config, read, state_dir
 GIB = 1024**3
 
 
-def memory_accounting(current, high, maximum, stats, pressure, events):
+def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
     """Conservative working-set estimate; cold dirty cache is not immediately free."""
     cold_clean = max(
         0,
@@ -30,7 +30,8 @@ def memory_accounting(current, high, maximum, stats, pressure, events):
         file=stats["file"],
         kernel=stats["kernel"],
         cold_clean=cold_clean,
-        working_set=max(0, current - cold_clean),
+        working_set=max(0, current - cold_clean) + swap,
+        swap=swap,
         dirty=stats["file_dirty"],
         writeback=stats["file_writeback"],
         stall_some=pressure["some"],
@@ -52,6 +53,8 @@ def worker_memory():
             "MemoryHigh",
             "-p",
             "MemoryMax",
+            "-p",
+            "MemorySwapMax",
             "-p",
             "ControlGroup",
         ]
@@ -75,17 +78,18 @@ def worker_memory():
         counters("memory.stat"),
         pressure,
         counters("memory.events"),
+        int((cg / "memory.swap.current").read_text()),
     )
 
 
-def memory_pressure(memory, caps):
+def memory_pressure(memory, caps, *, recovering=False):
     reasons = []
     if caps["memory_available"] < max(4 * GIB, int(caps["memory_total"] * 0.1)):
         reasons.append("host memory headroom low")
-    if memory["working_set"] >= memory["high"]:
-        reasons.append("worker working set near limit")
-    if memory["stall_some"] >= 5 or memory["stall_full"] >= 1:
-        reasons.append("worker memory reclamation stalls")
+    if memory["working_set"] >= memory["maximum"] * (0.85 if recovering else 0.90):
+        reasons.append("worker working set near hard memory limit")
+    # Reclaim PSI includes throttling against MemoryHigh and is not evidence of
+    # host exhaustion. Let the kernel reclaim cache without pausing API work.
     return reasons
 
 
@@ -127,7 +131,7 @@ def resources():
 def resource_probe():
     code = """import json,pathlib
 p=pathlib.Path('/sys/fs/cgroup')/pathlib.Path('/proc/self/cgroup').read_text().strip().split(':',2)[2].lstrip('/')
-print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.high','memory.max','pids.max')}))
+print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.high','memory.max','memory.swap.max','pids.max')}))
 """
     result = run(
         [
@@ -144,6 +148,8 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
             "-p",
             "MemoryMax=128M",
             "-p",
+            "MemorySwapMax=16M",
+            "-p",
             "TasksMax=32",
             sys.executable,
             "-c",
@@ -159,6 +165,7 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
         "cpu.weight": "1000",
         "memory.high": str(64 * 1024**2),
         "memory.max": str(128 * 1024**2),
+        "memory.swap.max": str(16 * 1024**2),
         "pids.max": "32",
     }
     if values != expected:
