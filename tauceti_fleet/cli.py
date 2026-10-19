@@ -229,12 +229,23 @@ def main(argv=None):
                     if memory:
                         gib = 1024**3
                         print(
-                            f"Worker memory: {memory['charged'] / gib:.1f} GiB charged; {memory['working_set'] / gib:.1f} GiB estimated working set; {memory['file'] / gib:.1f} GiB file cache"
+                            f"Worker RAM: {memory['charged'] / gib:.1f} GiB counted toward limits (includes {memory['file'] / gib:.1f} GiB cached file data)"
+                        )
+                        print(
+                            f"Estimated working memory: {memory['working_set'] / gib:.1f} GiB after subtracting likely reclaimable file cache"
                         )
                         print(
                             f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard; memory stalls: {memory['stall_some']:.2f}% partial / {memory['stall_full']:.2f}% full (60s)"
                         )
-                    print("Admissions: " + str(status.get("scaling_reason", status.get("error", "unknown"))))
+                    reason = str(status.get("scaling_reason", status.get("error", "unknown")))
+                    # Explain older hosts' generic policy messages as well.
+                    reason = {
+                        "workers use available capacity": "CI idle; increases require spare CPU and memory",
+                        "CI active; workers admitted only against measured spare capacity": "CI running; increases require spare CPU and memory",
+                    }.get(reason, reason)
+                    allowance = status.get("active_worker_limit", 0)
+                    permission = f"up to {allowance} workers allowed" if allowance else "paused"
+                    print(f"Starting new work: {permission}; {reason}")
                     for worker in status.get("workers", []):
                         print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
                 else:
