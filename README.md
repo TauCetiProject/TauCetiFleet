@@ -103,10 +103,11 @@ drained. Fleet worker state is separate from the account's existing manager.
 `status` also reads the worker installation's prepared activity summary: finished
 rounds by type, authored/landed PRs over 3h/24h/7d and recorded totals, and current
 open PRs. Preparation happens in `tauceti`, not during status. The summary shows
-its age, recorded coverage and unknown PR states/landing evidence. Full worker
+its age, the activity start time and current PR state/landing evidence. Full worker
 history and PR inventories are not transferred by status.
 
-After upgrading `tauceti`, prepare existing structured history once:
+Activity starts with native round tracking. To import PR creation receipts from
+that point onward:
 
 ```sh
 tauceti activity refresh --config ~/.config/tauceti-fleet/workers.toml --backfill

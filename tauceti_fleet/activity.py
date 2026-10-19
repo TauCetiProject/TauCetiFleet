@@ -68,9 +68,8 @@ def display(value):
     print(f"Activity: prepared {age}s ago" + (" (stale)" if age > 180 else ""))
     since = s.get("history_since")
     print(
-        "Recorded history: "
+        "Activity since: "
         + (dt.datetime.fromtimestamp(since, dt.UTC).isoformat(timespec="seconds") if since else "none")
-        + "; totals cover recorded activity only"
     )
     observed_kinds = {kind for rows in s["rounds"].values() for kind in rows}
     kinds = list(dict.fromkeys(s.get("round_types", ROUND_TYPES)))
@@ -83,14 +82,8 @@ def display(value):
             else s["rounds"][w].get(kind, {}).get("finished", 0)
             for w in WINDOWS
         ]
-        label = "type unrecorded" if kind == "unknown" else kind
-        rows.append(("  " + label, counts))
+        rows.append(("  " + kind, counts))
     rows.append(("    failed/timed out", [sum(r["failed"] for r in s["rounds"][w].values()) for w in WINDOWS]))
-    unknown_outcomes = any(r.get("unknown") for rs in s["rounds"].values() for r in rs.values())
-    if unknown_outcomes:
-        rows.append(
-            ("    outcome unrecorded", [sum(r.get("unknown", 0) for r in s["rounds"][w].values()) for w in WINDOWS])
-        )
     for key, label in (("authored", "PRs authored"), ("landed", "Authored PRs landed")):
         rows.append((label, [s["pr_windows"][w][key] for w in WINDOWS]))
     headers = ("3h", "24h", "7d", "Recorded total")
@@ -106,8 +99,6 @@ def display(value):
             + "  ".join(f"{count:>{width}}" for count, width in zip(counts, widths, strict=True))
         )
     print("Outcome rows are subsets of finished rounds.")
-    if "unknown" in observed_kinds or unknown_outcomes:
-        print("Older resource logs did not record round types or outcomes; these receipts cannot supply them.")
     print(
         f"Currently: {s['running'] if s['running'] is not None else 'unknown'} rounds running; {s['open_prs']} known open authored PRs; {s['unknown_prs']} PR states unknown; {s['unknown_landings']} closed/merged PRs lack landing evidence"
     )
