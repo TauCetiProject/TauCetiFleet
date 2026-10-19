@@ -9,6 +9,22 @@ from pathlib import Path
 from .store import FleetError, read
 
 WINDOWS = ("3h", "24h", "7d", "total")
+# Compatibility for summaries prepared before the worker published its taxonomy.
+# New summaries carry round_types, keeping future worker kinds out of fleet policy.
+ROUND_TYPES = (
+    "rebase",
+    "review",
+    "fix-ci",
+    "fix",
+    "bump",
+    "progress",
+    "roadmap",
+    "lint-repair",
+    "overlap-scan",
+    "overlap-fix",
+    "security-audit",
+    "no-work",
+)
 
 
 def activity_root():
@@ -56,8 +72,10 @@ def display(value):
         + (dt.datetime.fromtimestamp(since, dt.UTC).isoformat(timespec="seconds") if since else "none")
         + "; totals cover recorded activity only"
     )
-    print("Finished rounds             3h     24h      7d   Recorded total")
-    kinds = sorted({kind for rows in s["rounds"].values() for kind in rows})
+    observed_kinds = {kind for rows in s["rounds"].values() for kind in rows}
+    kinds = list(dict.fromkeys(s.get("round_types", ROUND_TYPES)))
+    kinds += sorted(observed_kinds - set(kinds))
+    rows = []
     for kind in ["ALL", *kinds]:
         counts = [
             sum(r["finished"] for r in s["rounds"][w].values())
@@ -65,18 +83,31 @@ def display(value):
             else s["rounds"][w].get(kind, {}).get("finished", 0)
             for w in WINDOWS
         ]
-        print(f"  {kind:23}" + "".join(f"{n:7}" for n in counts))
-    print(
-        "  failed/timed out         "
-        + "".join(f"{sum(r['failed'] for r in s['rounds'][w].values()):7}" for w in WINDOWS)
-    )
-    if any(r.get("unknown") for rows in s["rounds"].values() for r in rows.values()):
-        print(
-            "  outcome unknown         "
-            + "".join(f"{sum(r.get('unknown', 0) for r in s['rounds'][w].values()):7}" for w in WINDOWS)
+        label = "type unrecorded" if kind == "unknown" else kind
+        rows.append(("  " + label, counts))
+    rows.append(("    failed/timed out", [sum(r["failed"] for r in s["rounds"][w].values()) for w in WINDOWS]))
+    unknown_outcomes = any(r.get("unknown") for rs in s["rounds"].values() for r in rs.values())
+    if unknown_outcomes:
+        rows.append(
+            ("    outcome unrecorded", [sum(r.get("unknown", 0) for r in s["rounds"][w].values()) for w in WINDOWS])
         )
     for key, label in (("authored", "PRs authored"), ("landed", "Authored PRs landed")):
-        print(f"{label:25}" + "".join(f"{s['pr_windows'][w][key]:7}" for w in WINDOWS))
+        rows.append((label, [s["pr_windows"][w][key] for w in WINDOWS]))
+    headers = ("3h", "24h", "7d", "Recorded total")
+    label_width = max(len("Finished rounds"), *(len(label) for label, _ in rows))
+    widths = [max(len(header), *(len(str(counts[i])) for _, counts in rows)) for i, header in enumerate(headers)]
+    print(
+        f"{'Finished rounds':<{label_width}}  "
+        + "  ".join(f"{header:>{width}}" for header, width in zip(headers, widths, strict=True))
+    )
+    for label, counts in rows:
+        print(
+            f"{label:<{label_width}}  "
+            + "  ".join(f"{count:>{width}}" for count, width in zip(counts, widths, strict=True))
+        )
+    print("Outcome rows are subsets of finished rounds.")
+    if "unknown" in observed_kinds or unknown_outcomes:
+        print("Older resource logs did not record round types or outcomes; these receipts cannot supply them.")
     print(
         f"Currently: {s['running'] if s['running'] is not None else 'unknown'} rounds running; {s['open_prs']} known open authored PRs; {s['unknown_prs']} PR states unknown; {s['unknown_landings']} closed/merged PRs lack landing evidence"
     )
@@ -123,6 +154,7 @@ def combine(snapshots, prs, owners, origin_times, now):
             prepared_at=min(s["prepared_at"] for s in known),
             history_since=min((s["history_since"] for s in known if s.get("history_since")), default=None),
             rounds=rounds,
+            round_types=list(dict.fromkeys(kind for s in known for kind in s.get("round_types", ROUND_TYPES))),
             pr_windows=windows,
             running=sum(s["running"] for s in known)
             if all(s["running"] is not None for s in known) and len(known) == len(snapshots)
