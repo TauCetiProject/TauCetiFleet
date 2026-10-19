@@ -69,6 +69,41 @@ class ActivityTests(unittest.TestCase):
             self.assertEqual(activity.cached("m")["summary"]["prepared_at"], 1)
             self.assertTrue(host.rpc(dict(action="status"))["activity"]["available"] is False)
 
+    def test_spending_rates_render_from_prepared_json_without_io_or_misalignment(self):
+        summary = dict(
+            prepared_at=100,
+            history_since=1,
+            rounds={w: {} for w in activity.WINDOWS},
+            pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
+            costs=dict(
+                spending={
+                    w: dict(spent_usd="37.035", covered_seconds=10800, usd_per_hour="12.345") for w in activity.WINDOWS
+                }
+            ),
+            running=0,
+            open_prs=0,
+            unknown_prs=0,
+            unknown_landings=0,
+        )
+        Path(self.tmp.name, "summary.json").write_text(json.dumps(dict(groups={"m": summary}, errors=[])))
+        with (
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            activity.display(activity.cached("m"))
+        lines = output.getvalue().splitlines()
+        heading = next(line for line in lines if line.startswith("Finished rounds"))
+        ends = [heading.index(h) + len(h) for h in ("3h", "24h", "7d", "Recorded total")]
+        row = next(line for line in lines if line.startswith("API spend ($/hour)"))
+        self.assertEqual([m.end() for m in re.finditer(r"\$\d+\.\d+", row)], ends)
+        self.assertEqual(row.count("$12.34"), 4)
+        section = next(i for i, line in enumerate(lines) if line.startswith("Spending (completed sessions)"))
+        self.assertEqual(lines[section - 1], "")
+        self.assertIn("All time", lines[section])
+        self.assertTrue(any(line.startswith("Hours recorded") for line in lines))
+
     def test_snapshot_rpc_cannot_request_github_refresh(self):
         with patch.object(host, "snapshot", return_value={}) as snapshot:
             host.rpc(dict(action="snapshot"))
