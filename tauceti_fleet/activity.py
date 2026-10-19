@@ -1,11 +1,10 @@
 """Read prepared worker activity. No subprocess, database, or network access."""
 
-import datetime as dt
 import hashlib
 import os
-import time
 from pathlib import Path
 
+from . import activity_summary
 from .store import FleetError, read
 
 WINDOWS = ("3h", "24h", "7d", "total")
@@ -59,61 +58,12 @@ def inventory(machine):
     return [p for p in value.get("prs", []) if p["scope"] == machine]
 
 
+def combine_status(values):
+    return activity_summary.combine(values)
+
+
 def display(value):
-    if not value.get("available"):
-        print("Activity: " + value.get("reason", "unavailable"))
-        return
-    s = value["summary"]
-    age = max(0, int(time.time() - s["prepared_at"]))
-    print(f"Activity: prepared {age}s ago" + (" (stale)" if age > 180 else ""))
-    since = s.get("history_since")
-    print(
-        "Activity since: "
-        + (dt.datetime.fromtimestamp(since, dt.UTC).isoformat(timespec="seconds") if since else "none")
-    )
-    print()
-    observed_kinds = {kind for rows in s["rounds"].values() for kind in rows}
-    kinds = list(dict.fromkeys(s.get("round_types", ROUND_TYPES)))
-    kinds += sorted(observed_kinds - set(kinds))
-    rows = []
-    for kind in ["ALL", *kinds]:
-        counts = [
-            sum(r["finished"] for r in s["rounds"][w].values())
-            if kind == "ALL"
-            else s["rounds"][w].get(kind, {}).get("finished", 0)
-            for w in WINDOWS
-        ]
-        rows.append(("  " + kind, counts))
-    rows.append(("    failed/timed out", [sum(r["failed"] for r in s["rounds"][w].values()) for w in WINDOWS]))
-    for key, label in (("authored", "PRs authored"), ("landed", "Authored PRs landed")):
-        rows.append((label, [s["pr_windows"][w][key] for w in WINDOWS]))
-    headers = ("3h", "24h", "7d", "Recorded total")
-    label_width = max(len("Finished rounds"), *(len(label) for label, _ in rows))
-    widths = [max(len(header), *(len(str(counts[i])) for _, counts in rows)) for i, header in enumerate(headers)]
-    print(
-        f"{'Finished rounds':<{label_width}}  "
-        + "  ".join(f"{header:>{width}}" for header, width in zip(headers, widths, strict=True))
-    )
-    for label, counts in rows:
-        if label == "PRs authored":
-            print()
-        print(
-            f"{label:<{label_width}}  "
-            + "  ".join(f"{count:>{width}}" for count, width in zip(counts, widths, strict=True))
-        )
-    print()
-    print(
-        f"Currently: {s['running'] if s['running'] is not None else 'unknown'} rounds running; {s['open_prs']} known open authored PRs; {s['unknown_prs']} PR states unknown; {s['unknown_landings']} closed/merged PRs lack landing evidence"
-    )
-    if s.get("interrupted_unfinished"):
-        print(f"Interrupted without finish receipts: {s['interrupted_unfinished']} (outside finished counts)")
-    observed = s.get("pr_observed_at")
-    print(
-        "PR evidence: "
-        + (f"oldest observation {max(0, int(time.time() - observed))}s ago" if observed else "not yet available")
-    )
-    for error in value.get("errors", []):
-        print("Activity coverage: " + error)
+    activity_summary.display(value, ROUND_TYPES)
 
 
 def combine(snapshots, prs, owners, origin_times, now):

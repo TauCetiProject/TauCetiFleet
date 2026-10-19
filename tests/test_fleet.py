@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, host, remote, report, store, vm
+from tauceti_fleet import activity, capabilities, host, remote, report, store, vm
 from tauceti_fleet.cli import main
 
 
@@ -198,7 +198,7 @@ class Isolated(unittest.TestCase):
             self.assertEqual(Path(os.environ["GH_CONFIG_DIR"]), store.state_dir() / "gh")
             self.assertNotIn("fake-selected-token", str(launch.call_args))
 
-    def test_report_with_unreachable_uncached_host_has_unknown_fleet_total(self):
+    def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
         output = io.StringIO()
         with (
@@ -206,10 +206,56 @@ class Isolated(unittest.TestCase):
             patch.object(remote, "call", side_effect=store.FleetError("offline")),
             patch("sys.stdout", output),
         ):
-            self.assertEqual(main(["report", "--json"]), 1)
+            self.assertEqual(main(["status", "--json"]), 1)
         result = json.loads(output.getvalue())
-        self.assertIsNone(result["reports"][-1]["windows"]["24h"]["settled_api_usd"])
-        self.assertIn("missing", result["unavailable_hosts"])
+        self.assertEqual(result["missing"]["error"], "offline")
+        self.assertNotIn("activity", result["missing"])
+
+    def test_status_keeps_a_small_cache_for_unreachable_hosts(self):
+        entry = dict(machine_id="a", target="host", profile="test")
+        value = dict(machine_id="a", status=dict(active_worker_limit=2), activity=dict(available=False))
+        with (
+            patch.object(remote, "inventory", return_value={"host": entry}),
+            patch.object(remote, "call", return_value=value),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(main(["status", "--json"]), 0)
+        output = io.StringIO()
+        with (
+            patch.object(remote, "inventory", return_value={"host": entry}),
+            patch.object(remote, "call", side_effect=store.FleetError("offline")),
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "--json"]), 1)
+        cached = json.loads(output.getvalue())["host"]
+        self.assertTrue(cached["offline"])
+        self.assertEqual(cached["status"]["active_worker_limit"], 2)
+
+    def test_status_aggregates_prepared_summaries_and_deduplicates_host_aliases(self):
+        entries = {
+            name: dict(machine_id=identity, target=name)
+            for name, identity in (("a", "one"), ("alias-a", "one"), ("b", "two"))
+        }
+
+        def prepared(target, payload, **kwargs):
+            self.assertEqual(payload, dict(action="status"))
+            self.assertEqual(kwargs["timeout"], 3)
+            return dict(
+                machine_id=entries[target]["machine_id"],
+                activity=dict(available=True, summary=dict(source_id=entries[target]["machine_id"])),
+            )
+
+        output = io.StringIO()
+        with (
+            patch.object(remote, "inventory", return_value=entries),
+            patch.object(remote, "call", side_effect=prepared),
+            patch.object(activity, "combine_status", return_value=dict(available=False)) as combine,
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "--json"]), 0)
+        summaries = combine.call_args.args[0]
+        self.assertEqual([v["summary"]["source_id"] for v in summaries], ["one", "two"])
+        self.assertIn("_fleet", json.loads(output.getvalue()))
 
     def test_ssh_target_cannot_inject_shell_options_or_commands(self):
         for target in ["-oProxyCommand=bad", "host;bad", "host$(bad)", "user@host/path", "host\ncommand"]:
