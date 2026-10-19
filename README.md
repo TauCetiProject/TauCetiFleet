@@ -98,48 +98,27 @@ fleet. Runtime decisions and reasons appear in status output. Host settings are
 in `~/.config/tauceti-fleet/host.json`; role/resource changes should be made while
 drained. Fleet worker state is separate from the account's existing manager.
 
-## Worker ceilings and capacity experiments
+## Worker controls and memory observations
 
-`tauceti-fleet workers HOST --max N` changes the worker admission ceiling while
-CI stays active. Zero pauses new worker work. Existing worker definitions are
-retained when reducing the ceiling so admitted paid sessions can finish.
+`tauceti-fleet workers HOST --max N` sets the worker admission ceiling while CI
+stays active. Zero pauses new work; admitted paid sessions finish. Existing live
+worker definitions are retained when lowering the ceiling.
 
-For a supervised experiment, begin with admissions paused, enable the workers,
-and start the ramp:
+`tauceti-fleet status HOST` reports the configured ceiling, current admissions,
+worker states and resource measurements. Memory reporting distinguishes total
+charged memory, anonymous memory, file cache, a conservative working-set estimate,
+and 60-second memory stall percentages. Cold clean cache is estimated as inactive
+file cache minus dirty/writeback data; the estimate is diagnostic, not a promise
+that every subtracted page is immediately reclaimable. Limits still include cache.
 
-```sh
-tauceti-fleet workers tauchonki --max 0
-tauceti-fleet enable tauchonki --workers
-tauceti-fleet ramp tauchonki --start --interval-minutes 30 --queue-limit 40
-tauceti-fleet ramp tauchonki
-tauceti-fleet ramp tauchonki --stop
-```
+New worker admissions pause on low host headroom, working set reaching the soft
+threshold, or partial/full memory stalls of at least 5%/1%. Missing memory evidence
+fails closed. External automation can renew a short admission lease; an expired
+lease pauses new work. A manual `workers --max` command clears the lease.
 
-The persistent user service starts at one admitted worker and raises the ceiling
-by one per interval. Restarts never cause catch-up bursts. It samples every
-minute and holds increases during resource pressure or unhealthy worker states.
-It pauses new worker admissions and records the limiting factors when:
-
-- Merge-ready bors PRs, counting waiting and running batches, exceed the queue limit.
-- CPU idle remains below 25% (35% while CI is active) for five minutes.
-- Worker memory reaches its cgroup high limit, or available memory falls below
-  OS headroom, for five minutes; a worker OOM kill stops the ramp immediately.
-- After the initial half hour, budget waits persist for five minutes, or the
-  rolling half-hour settled spending rate exceeds replenishment for five minutes.
-
-The default experiment ceiling is 64 workers (`--ceiling` overrides it). Reaching
-it records an experiment bound, without claiming a resource limit was found.
-Simultaneous limits are reported together. Queue growth is an observed global
-condition and does not itself establish that these workers caused it. CPU and
-memory limits measure reserved headroom, rather than physical exhaustion.
-
-Missing/stale observations pause admissions immediately and stop the experiment
-as inconclusive after five minutes. The host controller also pauses admissions
-if the ramp supervisor's heartbeat expires. CI remains enabled throughout.
-Status includes the start time, next increase, current ceiling, hold reason,
-last measurements, and final outcome. Detailed samples and a compact report
-are private files in `~/.local/state/tauceti-fleet/ramp-samples.jsonl` and
-`ramp-report.json`. The experiment does not change grants or replenishment.
+Ad hoc scheduling, capacity experiments and their reports belong to external
+operator scripts. The dated script under `experiments/` records the October 2026
+capacity investigation and is excluded from installed releases.
 
 ## GitHub CI setup
 

@@ -75,11 +75,18 @@ class Isolated(unittest.TestCase):
         self.assertFalse(result["ci_enabled"])
 
     def test_memory_high_blocks_admissions_using_slice_usage(self):
-        result = subprocess.CompletedProcess([], 0, stdout="MemoryCurrent=101\nMemoryHigh=100\n")
-        with patch.object(host, "run", return_value=result):
+        caps = dict(memory_available=40 * 1024**3, memory_total=128 * 1024**3)
+        memory = dict(working_set=101, high=100, stall_some=0, stall_full=0)
+        with (
+            patch.object(host, "worker_memory", return_value=memory),
+            patch.object(host, "resources", return_value=caps),
+        ):
             self.assertTrue(host.worker_pool_pressure())
-        result.stdout = "MemoryCurrent=99\nMemoryHigh=100\n"
-        with patch.object(host, "run", return_value=result):
+        memory["working_set"] = 99
+        with (
+            patch.object(host, "worker_memory", return_value=memory),
+            patch.object(host, "resources", return_value=caps),
+        ):
             self.assertFalse(host.worker_pool_pressure())
 
     def test_scaler_yields_then_recovers_gradually(self):
@@ -335,7 +342,9 @@ class Isolated(unittest.TestCase):
             patch.object(host.time, "time", return_value=1000),
         ):
             host.collect_ci_results(store.host_config())
-        self.assertEqual(store.read(store.state_dir() / "ci-backoff.json")["until"], report.timestamp(job["completed_at"]) + 900)
+        self.assertEqual(
+            store.read(store.state_dir() / "ci-backoff.json")["until"], report.timestamp(job["completed_at"]) + 900
+        )
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
 
     def test_candidate_failure_does_not_withdraw_healthy_ci_capacity(self):

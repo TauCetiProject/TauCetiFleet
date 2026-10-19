@@ -14,6 +14,81 @@ from .store import FleetError, data_dir, host_config, read, state_dir
 GIB = 1024**3
 
 
+def memory_accounting(current, high, maximum, stats, pressure, events):
+    """Conservative working-set estimate; cold dirty cache is not immediately free."""
+    cold_clean = max(
+        0,
+        min(stats["inactive_file"], stats["file"] - stats.get("shmem", 0))
+        - stats["file_dirty"]
+        - stats["file_writeback"],
+    )
+    return dict(
+        charged=current,
+        high=high,
+        maximum=maximum,
+        anon=stats["anon"],
+        file=stats["file"],
+        kernel=stats["kernel"],
+        cold_clean=cold_clean,
+        working_set=max(0, current - cold_clean),
+        dirty=stats["file_dirty"],
+        writeback=stats["file_writeback"],
+        stall_some=pressure["some"],
+        stall_full=pressure["full"],
+        oom_kill=events["oom_kill"],
+    )
+
+
+def worker_memory():
+    result = run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            "tauceti-fleet-workers.slice",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "MemoryHigh",
+            "-p",
+            "MemoryMax",
+            "-p",
+            "ControlGroup",
+        ]
+    )
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if not fields.get("ControlGroup"):
+        raise FleetError("Worker memory cgroup is unavailable")
+    cg = Path("/sys/fs/cgroup") / fields["ControlGroup"].lstrip("/")
+
+    def counters(name):
+        return {k: int(v) for k, v in (line.split() for line in (cg / name).read_text().splitlines())}
+
+    pressure = {}
+    for line in (cg / "memory.pressure").read_text().splitlines():
+        name, *values = line.split()
+        pressure[name] = float(dict(x.split("=", 1) for x in values)["avg60"])
+    return memory_accounting(
+        int(fields["MemoryCurrent"]),
+        int(fields["MemoryHigh"]),
+        int(fields["MemoryMax"]),
+        counters("memory.stat"),
+        pressure,
+        counters("memory.events"),
+    )
+
+
+def memory_pressure(memory, caps):
+    reasons = []
+    if caps["memory_available"] < max(4 * GIB, int(caps["memory_total"] * 0.1)):
+        reasons.append("host memory headroom low")
+    if memory["working_set"] >= memory["high"]:
+        reasons.append("worker working set near limit")
+    if memory["stall_some"] >= 5 or memory["stall_full"] >= 1:
+        reasons.append("worker memory reclamation stalls")
+    return reasons
+
+
 def resources():
     memory = {}
     try:

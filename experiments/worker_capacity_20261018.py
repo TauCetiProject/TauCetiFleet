@@ -1,5 +1,6 @@
-"""Persistent, measured worker admission experiment; never terminates paid work."""
+"""One-off 2026-10-18 capacity experiment; deliberately excluded from the fleet package."""
 
+import datetime as dt
 import http.client
 import json
 import os
@@ -10,23 +11,20 @@ from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
-from .capabilities import GIB
-from .process import run
-from .store import FleetError, atomic, event, host_config, locked, read, state_dir, update_host
+from tauceti_fleet.capabilities import memory_pressure
+from tauceti_fleet.store import FleetError, atomic, event, host_config, locked, read, state_dir
+
+EXPERIMENT_DIR = Path.home() / ".local/state/tauceti-fleet-experiments/worker-capacity-20261018"
+
+
+def experiment_dir():
+    return Path(os.environ.get("TAUCETI_CAPACITY_EXPERIMENT_DIR", EXPERIMENT_DIR))
 
 
 def set_maximum(maximum, *, experiment=False):
-    if type(maximum) is not int or not 0 <= maximum <= 4096:
-        raise FleetError("Worker maximum must be an integer from 0 to 4096")
-    if not experiment and read(state_dir() / "ramp.json", {}).get("phase") == "running":
-        raise FleetError("Stop the active ramp before manually changing its worker ceiling")
-    update_host(max_workers=maximum)
-    if maximum == 0:
-        atomic(
-            state_dir() / "admission.json",
-            dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
-        )
-    return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
+    from tauceti_fleet.host import set_worker_maximum
+
+    return set_worker_maximum(maximum, lease_seconds=120 if experiment else None)
 
 
 def queue_depth():
@@ -50,7 +48,7 @@ def queue_depth():
 
 
 def sample():
-    from . import host
+    from tauceti_fleet import host
 
     now = time.time()
     status = read(state_dir() / "status.json", {})
@@ -58,23 +56,7 @@ def sample():
         raise FleetError("Host controller observations are unavailable or stale")
     config = host_config()
     resources = status["resources"]
-    result = run(
-        [
-            "systemctl",
-            "--user",
-            "show",
-            "tauceti-fleet-workers.slice",
-            "-p",
-            "MemoryCurrent",
-            "-p",
-            "MemoryHigh",
-            "-p",
-            "ControlGroup",
-        ]
-    )
-    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    cg = Path("/sys/fs/cgroup") / fields["ControlGroup"].lstrip("/")
-    memory_events = dict(line.split() for line in (cg / "memory.events").read_text().splitlines())
+    memory = status["worker_memory"]
     workers = host.worker_statuses()
     budget = host.budget({})
     if budget.get("ledger_repair_required") or budget.get("unresolved"):
@@ -89,9 +71,10 @@ def sample():
         cpus=resources["cpus"],
         memory_available=resources["memory_available"],
         memory_total=resources["memory_total"],
-        worker_memory=int(fields["MemoryCurrent"]),
-        worker_memory_high=int(fields["MemoryHigh"]),
-        worker_oom_kill=int(memory_events.get("oom_kill", 0)),
+        worker_memory=memory["charged"],
+        memory=memory,
+        worker_memory_high=memory["high"],
+        worker_oom_kill=memory["oom_kill"],
         worker_states=dict(Counter(w.get("state", "unknown") for w in workers if w.get("alive"))),
         workers_alive=sum(bool(w.get("alive")) for w in workers),
         queue_prs=queue_depth(),
@@ -118,7 +101,6 @@ def advance(value, observation):
     history[:] = [s for s in history if s["at"] >= now - 1860]
     elapsed = now - value["started_at"]
     value["stage_admitted_peak"] = max(value.get("stage_admitted_peak", 0), observation["admitted"])
-    reserve = max(4 * GIB, int(observation["memory_total"] * 0.1))
     oldest = history[0]
     span = now - oldest["at"]
     rate = max(Decimal(0), Decimal(observation["spent"]) - Decimal(oldest["spent"])) * 3600 / Decimal(str(max(1, span)))
@@ -126,8 +108,20 @@ def advance(value, observation):
     conditions = dict(
         merge_queue=observation["queue_prs"] > value["queue_limit"],
         memory=(
-            observation["memory_available"] < reserve
-            or observation["worker_memory"] >= observation["worker_memory_high"]
+            bool(
+                memory_pressure(
+                    observation.get(
+                        "memory",
+                        dict(
+                            working_set=observation["worker_memory"],
+                            high=observation["worker_memory_high"],
+                            stall_some=0,
+                            stall_full=0,
+                        ),
+                    ),
+                    observation,
+                )
+            )
             or observation["worker_oom_kill"] > value["baseline_oom_kill"]
         ),
         cpu=observation["cpu_idle"] < (0.35 if observation["ci_busy"] else 0.25),
@@ -188,73 +182,12 @@ def advance(value, observation):
     return value, None
 
 
-def control(payload):
-    from .host import unit_argument, units
-
-    path = state_dir() / "ramp.json"
-    with locked(state_dir() / "ramp.lock"):
-        value = read(path, {})
-        if payload.get("stop"):
-            if value:
-                value.update(phase="stopped", stopped_at=time.time(), limiting_factors=["operator"])
-                atomic(path, value)
-            set_maximum(0, experiment=True)
-            return public(value)
-        if not payload.get("start"):
-            return public(value) if value else dict(phase="not_started")
-        if value.get("phase") == "running":
-            raise FleetError("A ramp is already running; inspect or stop it first")
-        interval = payload.get("interval_minutes", 30)
-        limit, ceiling = payload.get("queue_limit", 40), payload.get("ceiling", 64)
-        if any(type(v) is not int or v <= 0 for v in (interval, limit, ceiling)) or ceiling > 4096:
-            raise FleetError("Interval, queue limit and ceiling must be positive integers; ceiling at most 4096")
-        if not host_config()["workers_enabled"]:
-            raise FleetError("Enable workers with an admission maximum of zero before starting the ramp")
-        baseline = sample()
-        if baseline["queue_prs"] > limit:
-            raise FleetError("Merge queue is already over the experiment threshold; workers remain paused")
-        now = time.time()
-        value = dict(
-            version=1,
-            phase="running",
-            started_at=now,
-            heartbeat_at=now,
-            maximum=1,
-            interval_seconds=interval * 60,
-            next_increase_at=now + interval * 60,
-            queue_limit=limit,
-            ceiling=ceiling,
-            baseline_oom_kill=baseline["worker_oom_kill"],
-            baseline=baseline,
-            history=[],
-            condition_since={},
-        )
-        atomic(path, value)
-        # The first admission is made by the supervisor only after it is running.
-        target = units() / "tauceti-fleet-ramp.service"
-        target.write_text(
-            "[Unit]\nDescription=TauCeti worker capacity ramp\nAfter=tauceti-fleet.service\n"
-            "[Service]\nType=simple\nExecStart="
-            + unit_argument(Path.home() / ".local/bin/tauceti-fleet")
-            + " ramp-daemon\nRestart=on-failure\nRestartSec=15\n"
-            "[Install]\nWantedBy=default.target\n"
-        )
-        run(["systemctl", "--user", "daemon-reload"])
-        try:
-            run(["systemctl", "--user", "enable", "--now", target.name])
-        except FleetError:
-            value.update(phase="stopped", limiting_factors=["supervisor_start_failed"])
-            atomic(path, value)
-            raise
-        return public(value)
-
-
 def public(value):
     return {k: v for k, v in value.items() if k != "history"}
 
 
 def daemon():
-    path = state_dir() / "ramp.json"
+    path = experiment_dir() / "state.json"
     stopping = False
 
     def stop(*_):
@@ -268,9 +201,14 @@ def daemon():
             observation, error = sample(), None
         except (FleetError, OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as exc:
             observation, error = None, type(exc).__name__ + ": " + str(exc)
-        with locked(state_dir() / "ramp.lock"):
+        with locked(experiment_dir() / "state.lock"):
             value = read(path, {})
             if value.get("phase") != "running":
+                return
+            if value.get("lease_established") and not (state_dir() / "worker-admission-lease.json").exists():
+                value.update(phase="stopped", stopped_at=time.time(), limiting_factors=["manual_worker_control"])
+                atomic(path, value)
+                atomic(experiment_dir() / "report.json", public(value))
                 return
             now = time.time()
             value["heartbeat_at"] = now
@@ -288,12 +226,13 @@ def daemon():
                 value.pop("observation_error", None)
                 value, maximum = advance(value, observation)
                 set_maximum(value["maximum"] if maximum is None else maximum, experiment=True)
-                sample_path = state_dir() / "ramp-samples.jsonl"
+                sample_path = experiment_dir() / "samples.jsonl"
                 fd = os.open(sample_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
                 with os.fdopen(fd, "a") as stream:
                     stream.write(json.dumps(observation) + "\n")
+            value["lease_established"] = True
             atomic(path, value)
-            atomic(state_dir() / "ramp-report.json", public(value))
+            atomic(experiment_dir() / "report.json", public(value))
             if value.get("phase") != "running":
                 event("worker_ramp_stopped", result=public(value))
                 return
@@ -301,5 +240,55 @@ def daemon():
             if stopping:
                 break
             time.sleep(1)
-    # No unattended increases or paid admissions without a live supervisor.
+    # The generic admission lease also expires if this process is killed.
     set_maximum(0, experiment=True)
+
+
+def print_status(value):
+    print(f"Experiment: {value.get('phase', 'unknown')}; worker ceiling: {value.get('maximum', 0)}")
+    if value.get("phase") == "running" and value.get("next_increase_at"):
+        print("Next increase: " + dt.datetime.fromtimestamp(value["next_increase_at"], dt.UTC).isoformat())
+    if value.get("hold_reason"):
+        print("Holding: " + value["hold_reason"])
+    if value.get("limiting_factors"):
+        print(
+            f"Stopped at ceiling {value.get('maximum_at_stop', value.get('maximum', 0))}: "
+            + ", ".join(value["limiting_factors"])
+        )
+    sample = value.get("last_sample", {})
+    if sample:
+        gib = 1024**3
+        print(
+            f"Queue: {sample['queue_prs']}/{value['queue_limit']} PRs; CPU idle: {sample['cpu_idle']:.0%}; CI busy: {sample['ci_busy']}"
+        )
+        memory = sample.get("memory")
+        if memory:
+            print(
+                f"Worker memory: {memory['charged'] / gib:.1f} GiB charged; {memory['working_set'] / gib:.1f} GiB estimated working set; {memory['file'] / gib:.1f} GiB file cache"
+            )
+            print(f"Memory stalls: {memory['stall_some']:.2f}% partial / {memory['stall_full']:.2f}% full (60s)")
+        else:
+            print(f"Historical charged worker memory: {sample['worker_memory'] / gib:.1f} GiB")
+        print(
+            f"Budget: ${Decimal(sample['available']):.2f} available, ${sample['pending']} pending; ${sample['grant_rate']}/hour replenishment"
+        )
+        print("Worker states: " + json.dumps(sample["worker_states"]))
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="One-off worker capacity experiment started 2026-10-18")
+    parser.add_argument("action", choices=["run", "status", "stop"], default="status", nargs="?")
+    args = parser.parse_args()
+    if args.action == "run":
+        daemon()
+    elif args.action == "stop":
+        with locked(experiment_dir() / "state.lock"):
+            value = read(experiment_dir() / "state.json", {})
+            value.update(phase="stopped", stopped_at=time.time(), limiting_factors=["operator"])
+            atomic(experiment_dir() / "state.json", value)
+            set_maximum(0, experiment=True)
+        print_status(public(value))
+    else:
+        print_status(public(read(experiment_dir() / "state.json", {})))

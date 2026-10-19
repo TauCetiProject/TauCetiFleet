@@ -1,22 +1,16 @@
 """Resource experiments must ramp slowly, survive restarts and distinguish evidence gaps."""
 
 import copy
-import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host, ramp, store
-from tauceti_fleet.cli import print_ramp
+from experiments import worker_capacity_20261018 as ramp
+from tauceti_fleet import host, store
 
 
-class RampTests(unittest.TestCase):
-    def test_human_status_does_not_require_spending_report_fields(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output:
-            print_ramp(dict(phase="running", maximum=1, next_increase_at=2800))
-        self.assertIn("worker ceiling: 1", output.getvalue())
-
+class CapacityExperimentTests(unittest.TestCase):
     def state(self):
         return dict(
             phase="running",
@@ -134,7 +128,10 @@ class RampTests(unittest.TestCase):
         ):
             config = store.update_host(max_workers=3, workers_enabled=True)
             ids = host.worker_config(config)
+            host.set_worker_maximum(3, lease_seconds=120)
+            self.assertTrue((store.state_dir() / "worker-admission-lease.json").exists())
             ramp.set_maximum(1)
+            self.assertFalse((store.state_dir() / "worker-admission-lease.json").exists())
             self.assertEqual(host.worker_config(store.host_config()), ids)
             ramp.set_maximum(0)
             self.assertEqual(host.worker_config(store.host_config()), ids)
