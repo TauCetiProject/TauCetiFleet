@@ -79,14 +79,14 @@ class CapacityExperimentTests(unittest.TestCase):
         value, _ = ramp.advance(value, self.observation(1300, cpu_idle=0.1))
         for at in range(1360, 1601, 60):
             value, change = ramp.advance(value, self.observation(at, cpu_idle=0.1))
-        self.assertEqual(change, 0)
+        self.assertEqual(change, 1)
         self.assertEqual(value["limiting_factors"], ["cpu"])
 
     def test_memory_and_simultaneous_limits_remain_distinct(self):
         value = self.state()
         for at in range(1000, 1301, 60):
             value, change = ramp.advance(value, self.observation(at, cpu_idle=0.1, memory_available=1024))
-        self.assertEqual(change, 0)
+        self.assertEqual(change, 1)
         self.assertEqual(set(value["limiting_factors"]), {"cpu", "memory"})
 
     def test_oom_is_an_immediate_memory_limit(self):
@@ -102,8 +102,48 @@ class CapacityExperimentTests(unittest.TestCase):
         value, _ = ramp.advance(value, self.observation(2800, waiting_budget=1))
         for at in range(2860, 3101, 60):
             value, change = ramp.advance(value, self.observation(at, waiting_budget=1))
-        self.assertEqual(change, 0)
+        self.assertEqual(change, 1)
         self.assertEqual(value["limiting_factors"], ["budget"])
+
+    def test_resource_stop_hands_control_back_without_an_expiring_lease(self):
+        import os
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "TAUCETI_FLEET_CONFIG": str(Path(directory) / "config"),
+                    "TAUCETI_FLEET_STATE": str(Path(directory) / "state"),
+                    "TAUCETI_CAPACITY_EXPERIMENT_DIR": str(Path(directory) / "experiment"),
+                },
+            ),
+        ):
+            value = self.state()
+            value["condition_since"] = {"memory": 1000}
+            value["last_sample"] = {"at": 1240}
+            store.update_host(max_workers=1, workers_enabled=True)
+            host.set_worker_maximum(1, lease_seconds=120)
+            value["lease_established"] = True
+            store.atomic(ramp.experiment_dir() / "state.json", value)
+            with (
+                patch.object(ramp, "sample", return_value=self.observation(1300, memory_available=1024)),
+                patch.object(ramp.signal, "signal"),
+            ):
+                ramp.daemon()
+            self.assertEqual(store.host_config()["max_workers"], 1)
+            self.assertFalse((store.state_dir() / "worker-admission-lease.json").exists())
+            result = store.read(ramp.experiment_dir() / "state.json")
+            self.assertEqual(result["limiting_factors"], ["memory"])
+            self.assertEqual(result["phase"], "stopped")
+
+    def test_experiment_ceiling_stops_increases_without_stopping_workers(self):
+        value = self.state()
+        value["ceiling"] = 1
+        value, change = ramp.advance(value, self.observation(2800))
+        self.assertEqual(value["phase"], "stopped")
+        self.assertEqual(value["limiting_factors"], ["experiment_ceiling"])
+        self.assertEqual(change, 1)
 
     def test_unlaunched_workers_do_not_cause_runaway_increases(self):
         value = self.state()

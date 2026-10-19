@@ -66,9 +66,11 @@ def print_report(value, entries):
     for report in value["reports"]:
         machine = report["machine_id"]
         print(f"\n{names.get(machine, machine)} — {report['open_prs']} open originating PRs")
+        print()
         activity.display(report.get("activity", {}))
         if report["pr_metadata_unknown"]:
             print(f"PR metadata unavailable for {report['pr_metadata_unknown']} originating PR(s)")
+        print()
         current = report.get("current", {})
         budget = current.get("budget")
         if budget:
@@ -89,6 +91,7 @@ def print_report(value, entries):
             print(
                 f"CI busy: {status.get('ci_busy', 'unknown')}; worker limit: {status.get('active_worker_limit', 'unknown')}; CPU idle: {status.get('cpu_idle_fraction', 0):.0%}"
             )
+        print()
         print("Window   Opened  Landed  Assisted       Lean + / - / net    Settled API USD   CI attempts")
         for window, row in report["windows"].items():
             loc = row["lean_loc"]
@@ -100,6 +103,7 @@ def print_report(value, entries):
                 print(f"       LOC unavailable for {row['loc_unknown_prs']} landed PR(s)")
             if not row["attribution_covers_window"]:
                 print("       Machine attribution covers only the period since installation")
+        print()
         if report.get("observed_at"):
             print(f"Last collection: {max(0, time.time() - report['observed_at']):.0f}s ago")
         for error in report["coverage_errors"]:
@@ -219,7 +223,9 @@ def main(argv=None):
         elif args.json:
             print(json.dumps(results, indent=2))
         else:
-            for name, value in results.items():
+            for index, (name, value) in enumerate(results.items()):
+                if index:
+                    print()
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
@@ -230,6 +236,7 @@ def main(argv=None):
                     )
                     memory = status.get("worker_memory")
                     if memory:
+                        print()
                         gib = 1024**3
                         print(
                             f"Worker RAM: {memory['charged'] / gib:.1f} GiB counted toward limits (includes {memory['file'] / gib:.1f} GiB cached file data)"
@@ -247,6 +254,7 @@ def main(argv=None):
                         print(
                             f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}% (pause new work at 5% / 1%)"
                         )
+                    print()
                     reason = str(status.get("scaling_reason", status.get("error", "unknown")))
                     # Explain older hosts' generic policy messages as well.
                     reason = {
@@ -271,8 +279,11 @@ def main(argv=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    if status.get("workers"):
+                        print()
                     for worker in status.get("workers", []):
                         print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
+                    print()
                     activity.display(value.get("activity", {}))
                 else:
                     print(json.dumps(value, indent=2))
