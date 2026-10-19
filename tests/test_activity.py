@@ -32,10 +32,7 @@ class ActivityTests(unittest.TestCase):
             summary=dict(
                 prepared_at=100,
                 history_since=1,
-                rounds={
-                    w: {"fix": dict(finished=1, failed=0), "unknown": dict(finished=1, failed=0, unknown=1)}
-                    for w in activity.WINDOWS
-                },
+                rounds={w: {"fix": dict(finished=1, failed=0)} for w in activity.WINDOWS},
                 pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
                 running=0,
                 open_prs=0,
@@ -55,8 +52,9 @@ class ActivityTests(unittest.TestCase):
         for kind in ("roadmap", "review", "fix-ci", "progress", "security-audit", "no-work"):
             line = next(line for line in data_rows if line.strip().startswith(kind + " "))
             self.assertEqual(re.findall(r"\d+", line), ["0"] * 4)
-        self.assertTrue(any("type unrecorded" in line for line in data_rows))
-        self.assertIn("Older resource logs did not record round types or outcomes", output.getvalue())
+        self.assertNotIn("unrecorded", output.getvalue())
+        self.assertNotIn("Older resource logs", output.getvalue())
+        self.assertNotIn("totals cover", output.getvalue())
         self.assertIn("Outcome rows are subsets", output.getvalue())
 
     def test_status_reads_only_prepared_activity_without_process_or_sql(self):
