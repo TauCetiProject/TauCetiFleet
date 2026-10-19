@@ -109,6 +109,10 @@ worker states and resource measurements. "Starting new work" shows how many work
 may start new rounds and why; existing paid sessions finish even if that allowance
 falls. Budget checks still apply before paid work starts.
 
+Starting a CI job preserves the current worker allowance. Increases remain limited
+to one worker per minute and require at least 35% idle CPU while CI is busy (25%
+otherwise), alongside the memory checks below.
+
 Worker RAM is the total memory counted toward the worker group's limits, including
 cached file data. Estimated working memory subtracts likely reclaimable file cache
 from that total; it is not an additional allocation. Memory reporting also includes

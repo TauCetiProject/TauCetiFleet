@@ -438,16 +438,11 @@ class Scaler:
     def __init__(self):
         self.target = 0
         self.last_added = 0
-        self.was_ci_busy = False
 
     def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum):
         if not enabled or available < reserve:
             self.target = 0
             return 0, "host draining or memory headroom reserved"
-        if ci_busy and not self.was_ci_busy:
-            self.target = min(self.target, 1)
-            self.last_added = now
-        self.was_ci_busy = ci_busy
         if idle >= (0.35 if ci_busy else 0.25) and now - self.last_added >= 60:
             self.target = min(maximum, self.target + 1)
             self.last_added = now
