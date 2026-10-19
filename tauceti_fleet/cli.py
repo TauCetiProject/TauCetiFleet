@@ -6,10 +6,8 @@ import math
 import sys
 import time
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from . import activity, host, remote
-from .report import WINDOWS, summarize
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -20,7 +18,7 @@ def parser():
     add.add_argument("target", help="SSH alias, user@host, or local")
     add.add_argument("--profile", default="ai-for-science")
     add.add_argument("--no-ci", action="store_true")
-    for name in ("doctor", "status", "report", "prepare", "update", "drain"):
+    for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
         cmd.add_argument("host", nargs="?")
         cmd.add_argument("--json", action="store_true")
@@ -28,8 +26,6 @@ def parser():
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
             )
-        if name == "report":
-            cmd.add_argument("--since", choices=list(WINDOWS))
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
     budget.add_argument("--grant")
@@ -59,56 +55,6 @@ def print_doctor(value):
                 print("          Next step: " + check["remedy"])
             if check["administrator_request"]:
                 print("          Ask administrator: " + check["administrator_request"])
-
-
-def print_report(value, entries):
-    names = {v["machine_id"]: k for k, v in entries.items()}
-    for report in value["reports"]:
-        machine = report["machine_id"]
-        print(f"\n{names.get(machine, machine)} — {report['open_prs']} open originating PRs")
-        print()
-        activity.display(report.get("activity", {}))
-        if report["pr_metadata_unknown"]:
-            print(f"PR metadata unavailable for {report['pr_metadata_unknown']} originating PR(s)")
-        print()
-        current = report.get("current", {})
-        budget = current.get("budget")
-        if budget:
-            print(
-                f"Budget: ${Decimal(budget['balance']):.2f} balance; ${Decimal(budget['pending']):.2f} pending estimates; ${Decimal(budget['grant_rate']):.2f}/hour replenishment"
-            )
-        if "pending_estimates_usd" in current:
-            print(
-                "Fleet pending estimates: "
-                + (
-                    "$" + current["pending_estimates_usd"]
-                    if current["pending_estimates_usd"] is not None
-                    else "unknown"
-                )
-            )
-        status = current.get("status", {})
-        if status:
-            print(
-                f"CI busy: {status.get('ci_busy', 'unknown')}; worker limit: {status.get('active_worker_limit', 'unknown')}; CPU idle: {status.get('cpu_idle_fraction', 0):.0%}"
-            )
-        print()
-        print("Window   Opened  Landed  Assisted       Lean + / - / net    Settled API USD   CI attempts")
-        for window, row in report["windows"].items():
-            loc = row["lean_loc"]
-            expenditure = f"{Decimal(row['settled_api_usd']):.2f}" if row["settled_api_usd"] is not None else "unknown"
-            print(
-                f"{window:6} {row['prs_originated']:7} {row['prs_landed']:7} {row['prs_assisted']:9}  {loc['added']:7} / {loc['deleted']:7} / {loc['net']:7}  {expenditure:>15}  {row['ci_attempts']:11}"
-            )
-            if row["loc_unknown_prs"]:
-                print(f"       LOC unavailable for {row['loc_unknown_prs']} landed PR(s)")
-            if not row["attribution_covers_window"]:
-                print("       Machine attribution covers only the period since installation")
-        print()
-        if report.get("observed_at"):
-            print(f"Last collection: {max(0, time.time() - report['observed_at']):.0f}s ago")
-        for error in report["coverage_errors"]:
-            print("Coverage: " + error)
-    print("\n" + value["spending_basis"])
 
 
 def main(argv=None):
@@ -148,9 +94,9 @@ def main(argv=None):
         selected = {args.host: remote.resolve(args.host)} if args.host else entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
-        results, snapshots = {}, []
+        results = {}
         for name, entry in selected.items():
-            action = "snapshot" if args.command == "report" else args.command
+            action = args.command
             payload = dict(action=action)
             if args.command == "doctor":
                 payload["smoke"] = args.smoke
@@ -184,43 +130,34 @@ def main(argv=None):
                     entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"]
                 )
                 continue
-            cache = config_dir() / "cache" / (entry["machine_id"] + ".json")
+            cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:
                 value = remote.call(
                     entry["target"],
                     payload,
-                    timeout=1800 if action == "prepare" else 300 if action == "snapshot" else 90,
+                    timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
                 )
                 results[name] = value
-                if args.command == "report":
-                    atomic(cache, value)
-                    snapshots.append(value)
+                if args.command == "status":
+                    atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:
-                if args.command == "report" and cache.exists():
-                    value = read(cache)
-                    value["spending_complete"] = False
-                    value["coverage_errors"].append("Host offline; showing cached observations: " + str(exc))
-                    snapshots.append(value)
+                if args.command == "status" and cache.exists():
+                    saved = read(cache)
+                    results[name] = dict(
+                        saved["value"], error=str(exc), offline=True, collected_at=saved["collected_at"]
+                    )
                 else:
                     results[name] = dict(error=str(exc))
-        if args.command == "report":
-            windows = {args.since: WINDOWS[args.since]} if args.since else None
-            value = summarize(snapshots, windows=windows)
-            value["unavailable_hosts"] = {k: v for k, v in results.items() if "error" in v}
-            if value["unavailable_hosts"]:
-                fleet = value["reports"][-1]
-                fleet["current"]["pending_estimates_usd"] = None
-                for row in fleet["windows"].values():
-                    row["settled_api_usd"] = None
-                    row["attribution_covers_window"] = False
-                fleet["coverage_errors"].append("Fleet totals omit hosts without cached observations")
-            if args.json:
-                print(json.dumps(value, indent=2))
-            else:
-                print_report(value, entries)
-                for name, error in value["unavailable_hosts"].items():
-                    print(name + ": " + error["error"] + "; no cached coverage")
-        elif args.json:
+        fleet = None
+        if args.command == "status" and not args.host:
+            distinct = {}
+            for name, value in results.items():
+                distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
+            if len(distinct) > 1:
+                fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
+        if args.json:
+            if fleet is not None:
+                results["_fleet"] = dict(activity=fleet)
             print(json.dumps(results, indent=2))
         else:
             for index, (name, value) in enumerate(results.items()):
@@ -231,6 +168,11 @@ def main(argv=None):
                     print_doctor(value)
                 elif args.command == "status" and "status" in value:
                     status = value["status"]
+                    if value.get("offline"):
+                        print(
+                            f"Host unreachable; cached status from {max(0, int(time.time() - value['collected_at']))}s ago"
+                        )
+                        print()
                     print(
                         f"Workers: {status.get('active_worker_limit', 0)} admitted / {value.get('max_workers', 0)} maximum; CI busy: {status.get('ci_busy', 'unknown')}"
                     )
@@ -287,6 +229,9 @@ def main(argv=None):
                     activity.display(value.get("activity", {}))
                 else:
                     print(json.dumps(value, indent=2))
+            if fleet is not None:
+                print("\nFleet totals:")
+                activity.display(fleet)
         return 1 if any("error" in value for value in results.values()) else 0
     except (FleetError, OSError, ValueError) as exc:
         print("tauceti-fleet: " + str(exc), file=sys.stderr)

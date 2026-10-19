@@ -116,9 +116,10 @@ tauceti activity refresh --config ~/.config/tauceti-fleet/workers.toml --backfil
 The worker manager maintains the cache in background. `tauceti activity
 install-timer` is optional for installations without a running manager. Shared
 server reporting reads stored facts only; missing/stale data never triggers
-GitHub fallback or reconciliation. The fleet `report` command also uses prepared
-PR evidence and no longer refreshes GitHub/Bors archives on request. Its legacy
-spending and CI sections may still scan local ledgers; status does not.
+GitHub fallback or reconciliation. `status` includes cached cost estimates,
+weighted authored LOC, review/assist counts, budget balances and local CI history.
+It never scans ledgers, opens reporting databases or invokes the budget command.
+The shared presentation/aggregation module is vendored from the pinned worker.
 
 `tauceti-fleet workers HOST --max N` sets the worker admission ceiling while CI
 stays active. Zero pauses new work; admitted paid sessions finish. Existing live
@@ -222,33 +223,31 @@ session costs reserve funds before launch; receipts settle actual costs. Credits
 accumulate while idle. Grants govern admissions, not a hard billing cap, and
 active sessions may settle into a deficit.
 
-## Reports
+## Status and cost estimates
 
 ```sh
-tauceti-fleet report
-tauceti-fleet report server1
-tauceti-fleet report --since 24h --json
+tauceti-fleet status
+tauceti-fleet status server1
+tauceti-fleet status --json
 ```
 
-Default rolling UTC windows: 3h, 6h, 24h, 7d. Reports include originated PRs
-landed, other PRs assisted, landed Lean additions/deletions/net LOC, settled API
-spending, pending estimates, CI attempts/outcomes/runtime, and current resources
-and worker limits. Open originating PRs are a current workload count.
+`status` is the single machine/fleet reporting command. Without a host argument,
+it includes fleet totals when multiple distinct machines are enrolled. Host
+aliases never multiply costs or output. Offline hosts retain their last small
+status snapshot with an explicit age and unavailable-host error; new machines
+without a snapshot contribute no invented financial totals.
 
-Machine IDs and mutation receipts establish attribution even when hosts share a
-GitHub login. One origin receives primary credit; assistance is separate and
-fleet totals deduplicate PRs. Running CI alone earns no authorship credit.
-GitHub merge evidence and the existing TauCetiCI database establish landings;
-closed bors PRs are not assumed merged. LOC uses the observed final PR diff and
-excludes dependency pins and generated files. Missing LOC/evidence is explicit.
+Costs have All time and 7 days columns. All conversation costs, including reviews
+and fixes for others, are amortized over initiated PR output: landed Lean lines
+added plus half of currently open Lean lines added. The seven-day output cohort
+contains only PRs initiated in that window. Completed costs and active-session
+estimates are shown separately, and ratios pool cost/output before division.
+Incomplete LOC produces an unavailable estimate instead of a partial ratio.
 
-Spending is recognized at settlement; reconciliation restates that receipt.
-Pending/unresolved estimates are separate. Subscription equivalents and hosting
-invoices are not invented or added to API expenditure. Offline hosts use cached
-observations with refresh timestamps and incomplete coverage. Historical machine
-attribution is unavailable before instrumentation; each affected window says so.
-Unknown PR metadata and incomplete fleet spending remain explicit. Local grant receipts may
-provide earlier expenditure history.
+`tauceti` prepares accounting, LOC observations, review counts and local CI
+history in background. Fleet only collects the small prepared summaries.
+Neither status nor LOC preparation issues new GitHub API requests. The `budget`
+command remains the explicit interface for grants and replenishment changes.
 
 ## Development
 
