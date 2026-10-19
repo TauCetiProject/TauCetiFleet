@@ -82,7 +82,7 @@ class Isolated(unittest.TestCase):
             patch.object(host, "resources", return_value=caps),
         ):
             self.assertTrue(host.worker_pool_pressure())
-            memory["working_set"] = 90
+            memory["working_set"] = 89
             self.assertFalse(host.worker_pool_pressure())
 
     def test_all_slots_available_even_when_ci_is_busy_and_cpu_full(self):
@@ -106,11 +106,12 @@ class Isolated(unittest.TestCase):
                 dict(ci_allowed=True, ci_memory_gib=64),
                 dict(memory_total=128 * gib, memory_available=128 * gib),
             )
-        self.assertLessEqual(worker + 66 * gib + int(128 * gib * 0.1), 128 * gib)
+        self.assertLessEqual(worker + gib + 66 * gib + int(128 * gib * 0.1), 128 * gib)
         workers = (self.root / "tauceti-fleet-workers.slice").read_text()
         ci = (self.root / "tauceti-fleet-ci.slice").read_text()
-        self.assertIn("CPUWeight=10\nIOWeight=10\n", workers)
-        self.assertIn("CPUWeight=1000\nIOWeight=1000\n", ci)
+        self.assertIn("CPUWeight=10\n", workers)
+        self.assertIn("CPUWeight=1000\n", ci)
+        self.assertIn(f"MemorySwapMax={gib}\n", workers)
         self.assertIn(f"MemoryMax={int(worker)}\n", workers)
         self.assertIn(f"MemoryHigh={int(worker * 0.95)}\n", workers)
 

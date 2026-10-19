@@ -131,20 +131,23 @@ may start new rounds and why; existing paid sessions finish even if that allowan
 falls. Budget checks still apply before paid work starts.
 All configured workers may start work immediately when memory is safe. CPU idle
 and memory-reclaim stalls do not reduce admissions: mostly network-bound API
-sessions can keep running while CI builds. CI has CPUWeight/IOWeight 1000 and
-workers 10, so CI receives priority when those resources are contested. This is
-scheduling priority, not a measured guarantee of any particular CI runtime.
+sessions can keep running while CI builds. CI has CPUWeight 1000 and workers 10. This prioritizes CPU contention; I/O and
+memory-bandwidth isolation are not provided. CI throughput must be measured
+under representative load; scheduling weights alone do not guarantee a runtime.
 
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
 are informational. Worker MemoryHigh is 95% of the hard limit; MemoryMax still
 reserves CI's full configured memory plus 2 GiB overhead and at least 10% of host
-RAM (minimum 4 GiB) for the OS. Workers cannot borrow that reservation.
+RAM (minimum 4 GiB) for the OS. A 1 GiB swap cap is included within the worker
+reservation, deducted from its resident RAM limit; swapped bytes also count in
+the estimated working set. This bounds zram use outside resident accounting.
 
 New work pauses when host available memory falls below the OS reserve or worker
-working memory reaches 95% of its hard limit. Missing memory evidence fails closed.
-Existing paid sessions finish. When safe memory returns, the entire configured
-allowance is restored immediately. External admission leases and manual pauses
+working memory reaches 90% of its hard RAM limit. After a memory pause it must
+fall below 85% before resuming, preventing repeated start/pause cycles. Missing
+memory evidence fails closed. Existing paid sessions finish. When safe memory
+returns, the entire configured allowance is restored immediately. External admission leases and manual pauses
 retain their existing semantics. JSON status includes the decision under
 `worker_admission`.
 

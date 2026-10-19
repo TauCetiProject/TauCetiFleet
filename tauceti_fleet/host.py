@@ -175,16 +175,22 @@ def write_slices(config, caps):
             return 0
 
     outstanding_ci = max(0, ci - current("ci"))
-    worker = min(
-        caps["memory_total"] - ci - reserve, caps["memory_available"] - outstanding_ci - reserve + current("workers")
-    )
+    worker = (
+        min(
+            caps["memory_total"] - ci - reserve,
+            caps["memory_available"] - outstanding_ci - reserve + current("workers"),
+        )
+        - GIB
+    )  # Keep a bounded 1 GiB swap allowance inside the worker reservation.
     if worker < GIB:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
-            f"[Slice]\nCPUWeight={weight}\nIOWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\nTasksMax=16384\n"
+            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
+            + (f"MemorySwapMax={GIB}\n" if name == "workers" else "")
+            + "TasksMax=16384\n"
         )
     run(["systemctl", "--user", "daemon-reload"])
     return worker
@@ -457,12 +463,12 @@ class Scaler:
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
             return self._result("paused", reason)
-        # CPU/IO scheduling gives CI first claim on contested resources. Idle CPU
+        # CPU scheduling gives CI first claim on contested resources. Idle CPU
         # and reclaim waits must not cap mostly network-bound inference sessions.
         self.target = maximum
         return self._result(
             "at_ceiling" if maximum else "paused",
-            "all configured workers allowed; CI has CPU/IO priority"
+            "all configured workers allowed; CI has CPU priority"
             if maximum
             else (pause_reason or "configured worker ceiling is zero"),
         )
@@ -489,6 +495,7 @@ def daemon():
         next_vm = 0
         ids = []
         last_results = 0
+        memory_paused = False
         while not stopping:
             config = host_config()
             try:
@@ -594,7 +601,8 @@ def daemon():
                 if lease_expired:
                     maximum = 0
                 memory = worker_memory() if config["workers_enabled"] else None
-                pressure = memory_pressure(memory, caps) if memory else []
+                pressure = memory_pressure(memory, caps, recovering=memory_paused) if memory else []
+                memory_paused = bool(pressure)
                 pause_reason = (
                     "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
                 )

@@ -49,3 +49,21 @@ class MemoryTests(unittest.TestCase):
         memory = self.measured()
         reasons = memory_pressure(memory, dict(memory_available=5 * GIB, memory_total=125 * GIB))
         self.assertEqual(reasons, ["host memory headroom low"])
+
+    def test_real_memory_pressure_has_hysteresis_without_stall_gating(self):
+        memory = self.measured()
+        caps = dict(memory_available=80 * GIB, memory_total=125 * GIB)
+        memory["working_set"] = 41 * GIB  # Between resume and pause thresholds.
+        self.assertEqual(memory_pressure(memory, caps), [])
+        self.assertEqual(memory_pressure(memory, caps, recovering=True), ["worker working set near hard memory limit"])
+        memory["working_set"] = 39 * GIB
+        self.assertEqual(memory_pressure(memory, caps, recovering=True), [])
+
+    def test_swapped_memory_is_counted_in_working_set(self):
+        original = self.measured()
+        stats = dict(
+            anon=2 * GIB, file=33 * GIB, kernel=2 * GIB, inactive_file=27 * GIB, file_dirty=GIB, file_writeback=0
+        )
+        swapped = memory_accounting(37 * GIB, 44 * GIB, 47 * GIB, stats, dict(some=0, full=0), dict(oom_kill=0), GIB)
+        self.assertEqual(swapped["working_set"], original["working_set"] + GIB)
+        self.assertEqual(swapped["swap"], GIB)

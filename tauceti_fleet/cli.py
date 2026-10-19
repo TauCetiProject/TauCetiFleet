@@ -186,6 +186,8 @@ def main(argv=None):
                         print(
                             f"Estimated working memory: {memory['working_set'] / gib:.1f} GiB after subtracting likely reclaimable file cache"
                         )
+                        if memory.get("swap"):
+                            print(f"  Includes {memory['swap'] / gib:.1f} GiB swapped out")
                         print(
                             f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard"
                         )
@@ -205,7 +207,7 @@ def main(argv=None):
                     print(f"Starting new work: {permission}; {reason}")
                     decision = status.get("worker_admission", {})
                     if decision and decision.get("policy") == "opportunistic":
-                        print(f"CPU idle: {status['cpu_idle_fraction']:.1%}; workers yield CPU and IO to CI")
+                        print(f"CPU idle: {status['cpu_idle_fraction']:.1%}; workers yield CPU to CI")
                     elif decision:
                         print(
                             f"CPU idle: {status['cpu_idle_fraction']:.1%}; required for an increase: {decision['cpu_idle_required']:.0%}"
