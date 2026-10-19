@@ -244,6 +244,14 @@ contains only PRs initiated in that window. Completed costs and active-session
 estimates are shown separately, and ratios pool cost/output before division.
 Incomplete LOC produces an unavailable estimate instead of a partial ratio.
 
+Average spending also has 3h, 24h, 7d and All time columns in $/hour, using
+completed/reconciled session costs and the recorded hours in each window.
+Active-session reservations remain separate estimates. New machines use elapsed
+recorded time; fleet totals pool spending over the longest covered wall-clock
+duration rather than averaging machine rates or adding machine-hours. `Hours
+recorded` shows the denominator. These values come from the same prepared worker
+summary, with no extra collector or API requests.
+
 `tauceti` prepares accounting, LOC observations, review counts and local CI
 history in background. Fleet only collects the small prepared summaries.
 Neither status nor LOC preparation issues new GitHub API requests. The `budget`
