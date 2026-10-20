@@ -59,6 +59,42 @@ class ActivityTests(unittest.TestCase):
         pr_start = next(i for i, line in enumerate(lines) if line.startswith("PRs authored"))
         self.assertEqual(lines[pr_start - 1], "")
 
+    def test_storage_and_expansion_status_uses_only_prepared_data(self):
+        summary = dict(
+            prepared_at=100,
+            history_since=1,
+            rounds={w: {} for w in activity.WINDOWS},
+            pr_windows={w: {} for w in activity.WINDOWS},
+            running=0,
+            open_prs=0,
+            unknown_prs=0,
+            unknown_landings=0,
+            storage_cleanup=dict(
+                at=100,
+                managed_bytes=64 * 2**30,
+                protected_bytes=32 * 2**30,
+                free_bytes=200 * 2**30,
+                reclaimed_bytes=8 * 2**30,
+                pressure=True,
+            ),
+            expanded_cache=dict(workers=2, hits=1200, expanded=10, seconds=4),
+        )
+        value = dict(available=True, summary=summary)
+        with (
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            patch("pathlib.Path.rglob", side_effect=AssertionError("storage scan in status")),
+            patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            activity.display(value)
+            combined = activity.combine_status([value, value])
+        self.assertIn("Managed caches: 64.0 GiB", output.getvalue())
+        self.assertIn("32.0 GiB held by live workers", output.getvalue())
+        self.assertIn("1200 reused; 10 expanded", output.getvalue())
+        self.assertEqual(combined["summary"]["storage_cleanup"]["managed_bytes"], 128 * 2**30)
+        self.assertEqual(combined["summary"]["expanded_cache"]["hits"], 2400)
+
     def test_status_reads_only_prepared_activity_without_process_or_sql(self):
         Path(self.tmp.name, "summary.json").write_text(json.dumps(dict(groups={"m": dict(prepared_at=1)}, errors=[])))
         with (
