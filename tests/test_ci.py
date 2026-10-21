@@ -1,4 +1,4 @@
-"""Cancellation decisions use GitHub metadata, never guest-controlled logs."""
+"""Capacity decisions use GitHub metadata, never guest-controlled logs."""
 
 import copy
 import json
@@ -67,9 +67,79 @@ def evidence():
     return job, run, statuses
 
 
+def quota_evidence():
+    job, _, _ = evidence()
+    job.update(
+        conclusion="failure",
+        steps=[
+            step("Set up job"),
+            step("Checkout workflow-pinned trusted build tooling", number=2),
+            step("Resolve PR head", "failure", 3),
+            step(ci.QUOTA, "failure", 4),
+            step("Complete job", number=5),
+        ],
+    )
+    return job
+
+
 class Classification(unittest.TestCase):
     def classify(self, job, run, statuses):
         return ci.classify(job, run=run, statuses=statuses, host_health="healthy")
+
+    def test_explicit_quota_failure_keeps_healthy_capacity(self):
+        job = quota_evidence()
+        decision = ci.classify(job, host_health="healthy")
+        self.assertEqual(decision["reason"], "github_api_quota_unavailable")
+        self.assertFalse(decision["cooldown"])
+        self.assertEqual(decision["evidence"]["failed_api_steps"], ["Resolve PR head"])
+        self.assertLess(len(json.dumps(decision)), 400)
+
+    def test_quota_proof_does_not_override_actual_host_fault(self):
+        for conclusion in ("timed_out", "startup_failure"):
+            job = quota_evidence()
+            job["conclusion"] = conclusion
+            self.assertTrue(ci.classify(job, host_health="healthy")["cooldown"])
+            job = quota_evidence()
+            job["steps"][2]["conclusion"] = conclusion
+            self.assertTrue(ci.classify(job, host_health="healthy")["cooldown"])
+        for name in ("Install bubblewrap", "Fetch Mathlib", "Checkout current base", "Restore cache"):
+            job = quota_evidence()
+            job["steps"].insert(-1, step(name, "failure", 6))
+            self.assertTrue(ci.classify(job, host_health="healthy")["cooldown"])
+        self.assertEqual(ci.classify(quota_evidence(), host_health="fault")["reason"], "host_service_fault")
+
+    def test_missing_or_ambiguous_quota_proof_keeps_infrastructure_cooldown(self):
+        mutations = [
+            lambda j: j.update(name="another-job"),
+            lambda j: j.update(status="in_progress"),
+            lambda j: j.update(conclusion="cancelled"),
+            lambda j: j["steps"].pop(3),
+            lambda j: j["steps"][3].update(conclusion="success"),
+            lambda j: j["steps"][3].update(conclusion="skipped"),
+            lambda j: j["steps"][3].update(status="in_progress"),
+            lambda j: j["steps"].pop(4),
+            lambda j: j["steps"][1].update(conclusion="skipped"),
+            lambda j: j["steps"].append(step(ci.QUOTA, "failure", 6)),
+            lambda j: j["steps"].append(step("Unknown trusted failure", "failure", 6)),
+            lambda j: j["steps"].append(step("Resolve PR head extra", "failure", 6)),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                job = quota_evidence()
+                mutate(job)
+                self.assertTrue(ci.classify(job, host_health="healthy")["cooldown"])
+        for health in (None, "unknown", "", False):
+            self.assertTrue(ci.classify(quota_evidence(), host_health=health)["cooldown"])
+
+    def test_quota_marker_does_not_expand_existing_infrastructure_failure_policy(self):
+        for name in ci.QUOTA_STEPS:
+            job = quota_evidence()
+            job["steps"][2]["name"] = name
+            self.assertEqual(ci.classify(job, host_health="healthy")["reason"], "github_api_quota_unavailable")
+        # An old workflow without the marker retains its existing classification.
+        job = quota_evidence()
+        job["steps"].pop(3)
+        self.assertEqual(ci.classify(job, host_health="healthy")["reason"], "infrastructure_step_failed")
 
     def test_verified_cancellation_is_healthy_with_bounded_evidence(self):
         decision = self.classify(*evidence())
@@ -231,6 +301,20 @@ class Collection(unittest.TestCase):
         with patch.object(host.github, "request", side_effect=request):
             host.collect_ci_results(self.config)
         return job
+
+    def test_quota_collection_uses_only_existing_job_read_and_preserves_other_cooldown(self):
+        job = quota_evidence()
+        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="healthy")])
+        store.atomic(self.backoff, dict(until=9999999999, job_id=99))
+        with patch.object(host.github, "request", return_value=dict(jobs=[job])) as request:
+            host.collect_ci_results(self.config)
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("/jobs?", request.call_args.args[0])
+        self.assertEqual(store.read(self.pending), [])
+        self.assertEqual(store.read(self.backoff)["job_id"], 99)
+        events = store.export_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["classification"]["reason"], "github_api_quota_unavailable")
 
     def test_healthy_collection_and_duplicate_replay(self):
         self.collect()
