@@ -7,7 +7,7 @@ from pathlib import Path
 from . import activity_summary
 from .store import FleetError, read
 
-WINDOWS = ("3h", "24h", "7d", "total")
+WINDOWS = activity_summary.WINDOWS
 # Compatibility for summaries prepared before the worker published its taxonomy.
 # New summaries carry round_types, keeping future worker kinds out of fleet policy.
 ROUND_TYPES = (
@@ -73,16 +73,20 @@ def combine(snapshots, prs, owners, origin_times, now):
     errors = [e for snap in snapshots for e in snap.get("activity", {}).get("errors", [])]
     if len(known) != len(snapshots):
         errors.append("Fleet activity omits hosts without prepared summaries")
-    rounds = {w: {} for w in WINDOWS}
+    report_windows = tuple(w for w in WINDOWS if all(w in s["rounds"] for s in known))
+    rounds = {w: {} for w in report_windows}
     for s in known:
         for w, kinds in s["rounds"].items():
+            if w not in report_windows:
+                continue
             for kind, counts in kinds.items():
                 row = rounds[w].setdefault(kind, dict(finished=0, failed=0, unknown=0))
                 for key in row:
                     row[key] += counts.get(key, 0)
     # PR counts use the existing deduplicated repository/number identities.
     windows = {}
-    for w, seconds in (("3h", 10800), ("24h", 86400), ("7d", 604800), ("total", None)):
+    for w in report_windows:
+        seconds = activity_summary.WINDOW_SECONDS[w]
         since = float("-inf") if seconds is None else now - seconds
         windows[w] = dict(
             authored=sum(since <= at <= now for at in origin_times.values()),
