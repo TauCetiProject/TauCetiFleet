@@ -14,6 +14,9 @@ BUILD = "Build exact candidate under bwrap with workflow-pinned audits, offline"
 REPORT = "Report build and bump-guard statuses to the PR head commit"
 BORS_ID = 337246530
 ACTIONS_ID = 41898282
+# The main-defined workflow can write statuses with its built-in token or the
+# separately scoped Bors CI-status App. Never accept arbitrary App/bot writers.
+STATUS_WRITERS = frozenset((ACTIONS_ID, BORS_ID))
 QUOTA = "GitHub API quota unavailable"
 # Exact names from main's trusted workflow: never exempt arbitrary setup failures
 # just because an unrelated API request also exhausted its quota.
@@ -169,7 +172,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
                     (
                         s
                         for s in statuses
-                        if s.get("context") == context and s.get("creator", {}).get("id") == ACTIONS_ID
+                        if s.get("context") == context and s.get("creator", {}).get("id") in STATUS_WRITERS
                     ),
                     {},
                 )

@@ -95,7 +95,9 @@ these host/GitHub facts agree:
   A cancelled conclusion or absence of failed steps alone grants no exemption.
 - The trusted report step intentionally exits 1 when its build was cancelled.
   That specific failure is allowed only with both successful `scope` and
-  `bump-guard` GitHub status writes, tied to this run and reporting interval.
+  `bump-guard` GitHub status writes by the fixed GitHub Actions bot or Bors CI
+  status App identity, tied to this run and reporting interval. Other bots or
+  Apps cannot supply this evidence.
   Missing, stale or failed writes retain cooldown.
 
 Metadata comes from bounded GitHub API reads using the existing host read

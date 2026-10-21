@@ -236,6 +236,39 @@ class Classification(unittest.TestCase):
             self.assertTrue(self.classify(job, run, statuses)["cooldown"])
             statuses[-1] = original
 
+    def test_report_evidence_accepts_only_known_status_writers(self):
+        for writers, expected in (
+            ((ci.ACTIONS_ID, ci.ACTIONS_ID), False),
+            ((ci.BORS_ID, ci.BORS_ID), False),
+            ((ci.ACTIONS_ID, ci.BORS_ID), False),
+            ((1, ci.BORS_ID), True),
+            ((ci.BORS_ID, 1), True),
+        ):
+            with self.subTest(writers=writers):
+                job, run, statuses = evidence()
+                job["steps"].insert(3, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
+                for context, writer in zip(("scope", "bump-guard"), writers, strict=True):
+                    statuses.append(
+                        dict(
+                            context=context,
+                            creator=dict(id=writer),
+                            state="success",
+                            target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/42",
+                            created_at="2026-10-16T00:00:53Z",
+                        )
+                    )
+                self.assertEqual(self.classify(job, run, statuses)["cooldown"], expected)
+                if not expected:
+                    # Trusted authorship alone never replaces exact run/time proof.
+                    for changed in (
+                        dict(target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/43"),
+                        dict(created_at="2026-10-16T00:00:20Z"),
+                        dict(state="failure"),
+                    ):
+                        invalid = copy.deepcopy(statuses)
+                        invalid[-1].update(changed)
+                        self.assertTrue(self.classify(job, run, invalid)["cooldown"])
+
     def test_missing_host_health_is_unknown_even_with_valid_github_proof(self):
         job, run, statuses = evidence()
         for health in (None, "unknown", "", False):
