@@ -192,7 +192,11 @@ run-attempt fencing protects status publication. Acquired builds and ordinary
 validation failures remain with the existing failure/recovery pipeline. After a
 fleet infrastructure failure, its host stops registering capacity for 15 minutes, allowing
 fresh bors retries to choose Namespace. Candidate proof failures keep the host
-available. This cooldown survives controller restart.
+available. An explicitly identified GitHub API quota failure also keeps a
+healthy host available: moving the same request to Namespace cannot repair a
+shared API quota. This exemption requires the trusted workflow's dedicated quota
+step and a clean host service exit; unrelated setup failures still cool down.
+The cooldown survives controller restart.
 
 Guests have private writable overlays and unprivileged networking, with no
 shared host directory or host administrative credentials. Each handles one job

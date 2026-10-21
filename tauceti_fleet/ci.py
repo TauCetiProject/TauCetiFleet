@@ -2,6 +2,8 @@
 
 The runner group restricts execution to the main-defined workflow. Guest messages
 supply a lookup hint, never authority for cancellation or runner health.
+Quota classification uses a dedicated trusted-workflow step, not log text or
+candidate artifacts, and requires the host service to have exited cleanly.
 """
 
 import re
@@ -12,6 +14,17 @@ BUILD = "Build exact candidate under bwrap with workflow-pinned audits, offline"
 REPORT = "Report build and bump-guard statuses to the PR head commit"
 BORS_ID = 337246530
 ACTIONS_ID = 41898282
+QUOTA = "GitHub API quota unavailable"
+# Exact names from main's trusted workflow: never exempt arbitrary setup failures
+# just because an unrelated API request also exhausted its quota.
+QUOTA_STEPS = (
+    "Resolve PR head",
+    "Scope guard — allow TauCeti sources and validated pins",
+    "Diff size guard — additions, deletions, and changed files each ≤ 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)",
+    "New-file length guard — newly added .lean files must be ≤ 1000 lines",
+    "Decide the environment-lint scope",
+    REPORT,
+)
 INFRA_PREFIXES = (
     "Set up job",
     "Set up runner",
@@ -41,9 +54,39 @@ def classify(job, *, run=None, statuses=None, host_health=None):
     if job.get("conclusion") in ("timed_out", "startup_failure"):
         return result(True, "job_" + job["conclusion"])
     for step in steps:
-        if step.get("conclusion") in ("timed_out", "startup_failure") or (
-            step.get("conclusion") == "failure" and step.get("name", "").startswith(INFRA_PREFIXES)
-        ):
+        if step.get("conclusion") in ("timed_out", "startup_failure"):
+            return result(True, "infrastructure_step_failed", step_number=step.get("number"))
+    # The helper records a quota response in private runner-temp state outside
+    # the candidate sandbox. A fixed main-defined finalizer fails ONLY when that
+    # record exists. Its conclusion is available in the already-fetched jobs
+    # metadata: no log download or additional quota-consuming read is needed.
+    by_name = {s.get("name"): s for s in steps}
+    failed = [s for s in steps if s.get("conclusion") == "failure"]
+    if (
+        host_health == "healthy"
+        and job.get("name") == "sandboxed-build"
+        and job.get("status") == "completed"
+        and job.get("conclusion") == "failure"
+        and len(by_name) == len(steps)
+        and all(
+            s.get("status") == "completed" and s.get("conclusion") in ("success", "skipped", "failure") for s in steps
+        )
+        and all(
+            by_name.get(name, {}).get("conclusion") == "success"
+            for name in ("Set up job", "Checkout workflow-pinned trusted build tooling", "Complete job")
+        )
+        and by_name.get(QUOTA, {}).get("conclusion") == "failure"
+        and all(s.get("name") in (*QUOTA_STEPS, QUOTA) for s in failed)
+    ):
+        return result(
+            False,
+            "github_api_quota_unavailable",
+            marker_step_number=by_name[QUOTA].get("number"),
+            failed_api_steps=[s.get("name") for s in failed if s.get("name") != QUOTA],
+            host_service="healthy",
+        )
+    for step in steps:
+        if step.get("conclusion") == "failure" and step.get("name", "").startswith(INFRA_PREFIXES):
             return result(True, "infrastructure_step_failed", step_number=step.get("number"))
     if job.get("conclusion") != "cancelled":
         if job.get("conclusion") == "success":

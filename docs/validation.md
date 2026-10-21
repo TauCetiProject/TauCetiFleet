@@ -126,3 +126,35 @@ next naturally occurring eligible cancellation/replacement. Do not manufacture
 one or launch a hardware benchmark. Existing root-owned staging watch supplies
 production observations; genuine fault cooldown is verified live only if a fault
 occurs naturally.
+
+
+## Explicit external GitHub quota failure
+
+The main-defined workflow's API helper identifies quota exhaustion from GitHub's
+HTTP response and writes the workflow's private environment command file. Its
+final `GitHub API quota unavailable` step fails only when that trusted marker is
+set. Candidate code has no access to that command file inside its sandbox.
+Fleet reads the step conclusion from the jobs response it already collects;
+there is no extra API request, log download, guest claim or candidate artifact.
+
+A completed failed `sandboxed-build` keeps its host available only when:
+
+- The host service receipt records a clean exit, and `Set up job`, trusted-tooling
+  checkout, and `Complete job` all succeeded.
+- Exactly one quota marker failed; all step names are unique and every step has
+  a complete, recognized outcome.
+- Every failed step is either that marker or an exact known API-bearing workflow
+  step. Other setup failures, unknown failures, cancellation, startup failure and
+  timeout remain outside this exemption. A quota error cannot conceal an
+  independent host failure.
+
+`ci_result.classification.reason` is `github_api_quota_unavailable` and records
+only the marker's step number, failed API step names, and healthy host receipt.
+An exempt job does not shorten or erase another job's existing cooldown.
+Workflows predating the marker retain their prior classification. This changes
+host availability only; it neither approves source changes nor retries a build.
+
+Local validation: all 79 Fleet unit tests pass, including failure precedence,
+missing/ambiguous evidence and a collector test proving no additional API read.
+Deployment requires both the trusted workflow marker and this Fleet classifier;
+either can merge first without changing source-validation outcomes.
