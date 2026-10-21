@@ -45,13 +45,13 @@ class ActivityTests(unittest.TestCase):
             activity.display(value)
         lines = output.getvalue().splitlines()
         header = next(line for line in lines if line.startswith("Finished rounds"))
-        expected_ends = [header.index(h) + len(h) for h in ("3h", "24h", "7d", "All time")]
+        expected_ends = [header.index(h) + len(h) for h in ("1h", "3h", "24h", "7d", "All time")]
         data_rows = [line for line in lines if re.search(r"\d+\s+\d+\s+\d+\s+\d+$", line)]
         for line in data_rows:
             self.assertEqual([m.end() for m in re.finditer(r"\d+", line)], expected_ends, line)
         for kind in ("roadmap", "review", "fix-ci", "progress", "security-audit", "no-work"):
             line = next(line for line in data_rows if line.strip().startswith(kind + " "))
-            self.assertEqual(re.findall(r"\d+", line), ["0"] * 4)
+            self.assertEqual(re.findall(r"\d+", line), ["0"] * 5)
         self.assertNotIn("unrecorded", output.getvalue())
         self.assertNotIn("Older resource logs", output.getvalue())
         self.assertNotIn("totals cover", output.getvalue())
@@ -133,17 +133,17 @@ class ActivityTests(unittest.TestCase):
             activity.display(activity.cached("m"))
         lines = output.getvalue().splitlines()
         heading = next(line for line in lines if line.startswith("Finished rounds"))
-        ends = [heading.index(h) + len(h) for h in ("3h", "24h", "7d", "All time")]
+        ends = [heading.index(h) + len(h) for h in ("1h", "3h", "24h", "7d", "All time")]
         row = next(line for line in lines if line.startswith("API spend ($/elapsed hour)"))
         self.assertEqual([m.end() for m in re.finditer(r"\$\d+\.\d+", row)], ends)
-        self.assertEqual(row.count("$12.34"), 4)
+        self.assertEqual(row.count("$12.34"), 5)
         per_worker = next(line for line in lines if line.startswith("API spend ($/worker-hour)"))
-        self.assertEqual(per_worker.count("$6.17"), 4)
+        self.assertEqual(per_worker.count("$6.17"), 5)
         section = next(i for i, line in enumerate(lines) if line.startswith("Spending (recorded usage)"))
         self.assertEqual(lines[section - 1], "")
         self.assertIn("All time", lines[section])
         hours = next(line for line in lines if line.startswith("Worker-hours recorded"))
-        self.assertEqual(hours.count("6.00"), 4)
+        self.assertEqual(hours.count("6.00"), 5)
         self.assertLess(lines.index(hours), lines.index(per_worker))
         self.assertLess(lines.index(per_worker), lines.index(row))
         self.assertIn("Currently: 0 workers working;", output.getvalue())

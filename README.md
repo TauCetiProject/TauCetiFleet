@@ -120,6 +120,9 @@ GitHub fallback or reconciliation. `status` includes cached cost estimates,
 weighted authored LOC, review/assist counts, budget balances and local CI history.
 It never scans ledgers, opens reporting databases or invokes the budget command.
 The shared presentation/aggregation module is vendored from the pinned worker.
+Activity tables use 1h, 3h, 24h, 7d and All time columns; cost/output uses 24h,
+7 days and All time. The cost total follows its additive components; settled and
+recovered estimate subsets remain available in JSON.
 
 `tauceti-fleet workers HOST --max N` sets the worker admission ceiling while CI
 stays active. Zero pauses new work; admitted paid sessions finish. Existing live
