@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import broker, github, host, remote, store, vm
+from tauceti_fleet import broker, cli, github, host, remote, store, vm
 
 
 class Enrollment(unittest.TestCase):
@@ -36,19 +36,107 @@ class Enrollment(unittest.TestCase):
                 raise store.FleetError("response lost")
             return dict(machine_id=config["machine_id"], runner_group_id=3)
 
-        with patch.object(broker, "request", side_effect=redeem), patch.object(broker.getpass, "getpass", return_value="one-time"), patch.object(remote, "add", return_value={}) as add:
+        with patch.object(broker, "request", side_effect=redeem), patch.object(broker.getpass, "getpass", return_value="i" * 64), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
             with self.assertRaisesRegex(store.FleetError, "response lost"):
                 broker.enroll()
             broker.enroll()
             self.assertEqual(observed[0], observed[1])
-            add.assert_called_once_with("local", profile_name="ci-enrolled")
-        with patch.object(remote, "run", side_effect=AssertionError("No gh login should be needed")):
-            profile = remote.profile("ci-enrolled")
-        self.assertEqual(set(profile["credentials"]), {"ci_broker_token_file"})
-        self.assertNotIn("github_account", profile)
-        path = Path(store.read(store.config_dir() / "profiles.json")["ci-enrolled"]["ci_broker_token_file"])
+        self.assertFalse((store.config_dir() / "profiles.json").exists())
+        path = Path(store.host_config()["ci_broker_token_file"])
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.read_text().strip(), observed[0])
+        self.assertEqual(store.host_config()["ci_broker_token_file"], str(path))
+
+    def test_ci_enrollment_preserves_an_existing_worker_profile_and_identity(self):
+        prior = store.update_host(profile="science", github_account="worker-science", max_open_prs=128)
+        with patch.object(broker, "request", return_value=dict(machine_id=prior["machine_id"], runner_group_id=3)), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+            result = broker.enroll(code="i" * 64)
+        config = store.host_config()
+        for key in ("profile", "github_account", "max_open_prs"):
+            self.assertEqual(config[key], prior[key])
+        self.assertTrue(result["installed"]["ci_enrolled"])
+
+    def test_remote_enrollment_creates_identity_and_credential_on_the_selected_server(self):
+        operator_id = store.host_config()["machine_id"]
+        server = self.root / "server"
+        server_env = {"TAUCETI_FLEET_" + name.upper(): str(server / name) for name in ("config", "state", "data")}
+        invitation = self.root / "invite"
+        invitation.write_text("i" * 64)
+        redemptions = []
+
+        def redeem(config, path, **kwargs):
+            redemptions.append(kwargs["data"])
+            return dict(machine_id=config["machine_id"], runner_group_id=3)
+
+        def server_call(target, payload, **kwargs):
+            self.assertEqual(target, "chris")
+            with patch.dict(os.environ, server_env), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+                return host.rpc(payload)
+
+        with patch.object(remote, "deploy") as deploy, patch.object(remote, "call", side_effect=server_call), patch.object(broker, "request", side_effect=redeem):
+            result = remote.enroll("chris", url=broker.DEFAULT_URL, token_file=invitation)
+        deploy.assert_called_once_with("chris")
+        server_id = result["installed"]["machine_id"]
+        self.assertNotEqual(server_id, operator_id)
+        self.assertEqual(redemptions[0]["machine_id"], server_id)
+        self.assertEqual(remote.resolve("chris")["machine_id"], server_id)
+        self.assertTrue(remote.resolve("chris")["ci_enrolled"])
+        self.assertEqual(remote.resolve(server_id)["target"], "chris")
+        self.assertFalse((store.config_dir() / "enrollment.json").exists())
+        self.assertFalse((store.config_dir() / "profiles.json").exists())
+        self.assertFalse((store.config_dir() / "secrets").exists())
+        self.assertNotIn("host_token", json.dumps(result))
+        with patch.dict(os.environ, server_env):
+            config = store.host_config()
+            self.assertEqual(Path(config["ci_broker_token_file"]).read_text().strip(), redemptions[0]["host_token"])
+
+    def test_enrolled_ssh_host_updates_preserve_server_credentials_without_local_profile(self):
+        status = dict(machine_id="a" * 32, profile="science", ci_enrolled=True,
+                      ci_enabled=False, workers_enabled=False, ci_allowed=True, status={})
+        remote.remember("chris", status, profile_name="science")
+        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}, status, status, {}]) as call, patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cli.main(["update", "chris", "--json"]), 0)
+        self.assertEqual(call.call_args_list[3].args, ("chris", {"action": "configure"}))
+        self.assertEqual(call.call_args_list[3].kwargs["expected_machine_id"], status["machine_id"])
+        self.assertEqual(remote.resolve("chris")["profile"], "science")
+
+    def test_legacy_host_identity_is_verified_by_the_caller_before_mutation_or_reenrollment(self):
+        entry = dict(machine_id="a" * 32, profile="science", target="chris", aliases=["chris"])
+        store.atomic(store.config_dir() / "inventory.json", {"chris": entry})
+        # Old _host code ignores expected_machine_id; its status still identifies it.
+        legacy = subprocess.CompletedProcess([], 0, stdout=json.dumps(dict(ok=True, result=dict(machine_id="b" * 32))))
+        with patch.object(remote, "ssh", return_value=legacy) as ssh, patch.object(remote, "deploy", side_effect=AssertionError("Must reject before deploying")), patch.object(broker, "invitation", side_effect=AssertionError("Must reject before reading code")):
+            for action in ("enable", "configure", "prepare_update", "drain"):
+                with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                    remote.call("chris", dict(action=action), expected_machine_id=entry["machine_id"])
+            with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                remote.enroll("chris", url=broker.DEFAULT_URL)
+        self.assertTrue(all(json.loads(call.kwargs["input"])["action"] == "status" for call in ssh.call_args_list))
+        self.assertEqual(remote.resolve("chris")["machine_id"], entry["machine_id"])
+
+    def test_legacy_enrollment_profiles_cannot_export_a_machine_bound_credential(self):
+        store.atomic(store.config_dir() / "profiles.json", {"ci-enrolled": dict(ci_broker_url=broker.DEFAULT_URL,
+                     ci_broker_token_file="/private/server-credential")})
+        with self.assertRaisesRegex(store.FleetError, "Machine-bound"):
+            remote.profile("ci-enrolled")
+
+    def test_enrollment_requires_an_explicit_machine(self):
+        with patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.parser().parse_args(["enroll"])
+        self.assertEqual(cli.parser().parse_args(["enroll", "local"]).target, "local")
+        with patch.object(remote, "deploy", side_effect=AssertionError("Reject before deployment")):
+            with self.assertRaises(store.FleetError):
+                remote.enroll("-oProxyCommand=bad", url=broker.DEFAULT_URL)
+
+    def test_remembered_machine_identity_is_checked_before_configuration_or_activation(self):
+        original = store.host_config()
+        with patch.object(host, "configure", side_effect=AssertionError("Reject before mutation")), patch.object(host, "enable", side_effect=AssertionError("Reject before activation")):
+            for action in ("configure", "enable"):
+                with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                    remote.call("local", dict(action=action, ci=True), expected_machine_id="wrong-machine")
+        status = remote.call("local", dict(action="status"), expected_machine_id=original["machine_id"])
+        self.assertEqual(status["machine_id"], original["machine_id"])
 
     def test_active_hosts_cannot_enroll(self):
         store.update_host(ci_enabled=True)

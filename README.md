@@ -10,7 +10,8 @@ workers, change existing worker definitions, or copy budget grants.
 ## Install and inspect
 
 For a volunteer contributing CI without AI workers, use [host enrollment](services/ci-broker/README.md):
-an operator supplies a one-time code, and the volunteer runs `tauceti-fleet enroll`.
+an operator supplies a one-time code, and the volunteer runs `tauceti-fleet enroll local`
+on the server, or `tauceti-fleet enroll SSH_HOST` from a machine with SSH access.
 The host needs no GitHub login, model credentials, or budget. It receives only a
 revocable credential for its own disposable runner; the GitHub App key stays on
 the enrollment service. Enrollment installs inactive services; `prepare` and

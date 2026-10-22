@@ -388,7 +388,7 @@ def doctor(config=None, *, probe=True):
                 "github-runner-policy",
                 "blocked",
                 str(exc),
-                "Enroll this host with tauceti-fleet enroll, or configure runner_group_id and a CI registration credential",
+                "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
     credential_names = ["anthropic_api_key_file", "github_token_file"]

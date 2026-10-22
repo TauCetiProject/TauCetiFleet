@@ -18,9 +18,11 @@ def parser():
     add.add_argument("target", help="SSH alias, user@host, or local")
     add.add_argument("--profile", default="ai-for-science")
     add.add_argument("--no-ci", action="store_true")
-    enroll = sub.add_parser("enroll", help="enroll this host for CI using a one-time code, without GitHub or AI credentials")
+    enroll = sub.add_parser("enroll", help="enroll one explicit machine for CI using a one-time code")
+    enroll.add_argument("target", help="SSH alias, user@host, or local; the credential stays on this machine")
     enroll.add_argument("--broker", default=broker.DEFAULT_URL)
     enroll.add_argument("--token-file", help="read the one-time enrollment code from a file instead of prompting")
+    enroll.add_argument("--replace-machine", action="store_true", help="explicitly enroll a replacement machine at a remembered SSH alias")
     for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
         cmd.add_argument("host", nargs="?")
@@ -84,7 +86,7 @@ def main(argv=None):
             host.run_workers()
             return 0
         if args.command in ("add", "enroll"):
-            value = broker.enroll(args.broker, token_file=args.token_file) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
+            value = remote.enroll(args.target, url=args.broker, token_file=args.token_file, replace_machine=args.replace_machine) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
             print("Installed " + value["host"] + "; existing workload activation and budget settings were preserved.")
             print_doctor(value["doctor"])
             print(
@@ -117,7 +119,7 @@ def main(argv=None):
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "update":
-                status = remote.call(entry["target"], dict(action="status"))
+                status = remote.call(entry["target"], dict(action="status"), expected_machine_id=entry["machine_id"])
                 if status["ci_enabled"] or status["workers_enabled"]:
                     raise FleetError("Drain this host before updating its installed software")
                 waiting = {
@@ -135,9 +137,11 @@ def main(argv=None):
                     raise FleetError(
                         "Host is draining active work; wait for its round/CI build to finish before update"
                     )
-                remote.call(entry["target"], dict(action="prepare_update"))
+                remote.call(entry["target"], dict(action="prepare_update"), expected_machine_id=entry["machine_id"])
                 results[name] = remote.add(
-                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"]
+                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
+                    preserve_profile=status.get("ci_enrolled", False) or status["profile"] == "ci-enrolled" or entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
+                    expected_machine_id=entry["machine_id"],
                 )
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
@@ -146,6 +150,7 @@ def main(argv=None):
                     entry["target"],
                     payload,
                     timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
                 if args.command == "status":

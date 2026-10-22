@@ -28,21 +28,31 @@ def ssh(target, remote_command, *, input=None, timeout=60):
     )
 
 
-def call(target, payload, *, timeout=90):
+def call(target, payload, *, timeout=90, expected_machine_id=None):
+    if expected_machine_id is not None:
+        payload = dict(payload, expected_machine_id=expected_machine_id)
+        if payload.get("action") != "status":
+            # Older hosts ignore the new RPC field. Read their stable identity
+            # before sending a mutation or replacing their installed release.
+            call(target, dict(action="status"), timeout=min(timeout, 90), expected_machine_id=expected_machine_id)
     if target == "local":
         from .host import rpc
 
-        return rpc(payload)
-    result = ssh(target, '"$HOME/.local/bin/tauceti-fleet" _host', input=json.dumps(payload), timeout=timeout)
-    try:
-        reply = json.loads(result.stdout)
-    except ValueError:
-        raise FleetError(
-            "Remote host did not return a fleet response; check its installation and SSH login shell"
-        ) from None
-    if not reply.get("ok"):
-        raise FleetError(reply.get("error", "Remote operation failed"))
-    return reply["result"]
+        value = rpc(payload)
+    else:
+        result = ssh(target, '"$HOME/.local/bin/tauceti-fleet" _host', input=json.dumps(payload), timeout=timeout)
+        try:
+            reply = json.loads(result.stdout)
+        except ValueError:
+            raise FleetError(
+                "Remote host did not return a fleet response; check its installation and SSH login shell"
+            ) from None
+        if not reply.get("ok"):
+            raise FleetError(reply.get("error", "Remote operation failed"))
+        value = reply["result"]
+    if expected_machine_id is not None and payload.get("action") == "status" and value.get("machine_id") != expected_machine_id:
+        raise FleetError("Host identity differs from inventory; verify the SSH target before acting")
+    return value
 
 
 BOOTSTRAP = r"""import hashlib,io,json,os,pathlib,shlex,sys,tempfile,zipfile
@@ -121,10 +131,12 @@ def profile(name):
                     value[key] = source[key]
     else:
         raise FleetError(f"Profile {name!r} does not exist; define it in {config_dir() / 'profiles.json'}")
-    allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url", "ci_broker_url"}
+    if value.get("ci_broker_url") or value.get("ci_broker_token_file"):
+        raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
+    allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
     result = {k: v for k, v in value.items() if k in allowed}
     credentials = {}
-    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
         if value.get(name):
             path = Path(value[name]).expanduser()
             if path.exists():
@@ -150,10 +162,11 @@ def resolve(name):
     for entry in entries.values():
         if name in (entry["target"], entry["machine_id"]) or name in entry.get("aliases", []):
             return entry
-    raise FleetError(f"Unknown fleet host {name!r}; use add first")
+    raise FleetError(f"Unknown fleet host {name!r}; use add or enroll first")
 
 
-def add(target, *, profile_name="ai-for-science", no_ci=False):
+def deploy(target):
+    """Install this release on the explicitly selected machine."""
     if target != "local":
         result = ssh(target, "python3 -c " + shlex.quote(BOOTSTRAP), input=archive(), timeout=120)
         if not json.loads(result.stdout).get("installed"):
@@ -162,16 +175,56 @@ def add(target, *, profile_name="ai-for-science", no_ci=False):
         import sys
 
         run([sys.executable, "-c", BOOTSTRAP], input=archive(), timeout=120)
-    payload = dict(action="configure", profile=profile_name, ci_allowed=not no_ci, **profile(profile_name))
-    status = call(target, payload)
+
+
+def remember(target, status, *, profile_name):
     name = target.split("@")[-1]
     path = config_dir() / "inventory.json"
     with locked(path.with_suffix(".lock")):
         entries = inventory()
         matching = next((k for k, v in entries.items() if v["machine_id"] == status["machine_id"]), name)
         prior = entries.get(matching, {})
+        if prior.get("machine_id") != status["machine_id"]:
+            prior = {}
         aliases = sorted(set(prior.get("aliases", []) + [target, name]))
-        entries[matching] = dict(target=target, machine_id=status["machine_id"], aliases=aliases, profile=profile_name)
+        entries[matching] = dict(target=target, machine_id=status["machine_id"], aliases=aliases,
+                                 profile=profile_name, ci_enrolled=bool(status.get("ci_enrolled")))
         atomic(path, entries)
-    readiness = call(target, dict(action="doctor"))
+    return matching
+
+
+def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=False, expected_machine_id=None):
+    if expected_machine_id:
+        call(target, dict(action="status"), expected_machine_id=expected_machine_id)
+    deploy(target)
+    # Enrolled hosts generate their credential on the server. Updating the
+    # release must not require (or copy) that credential onto the SSH client.
+    payload = dict(action="configure") if preserve_profile else dict(
+        action="configure", profile=profile_name, ci_allowed=not no_ci, **profile(profile_name)
+    )
+    status = call(target, payload, expected_machine_id=expected_machine_id)
+    matching = remember(target, status, profile_name=status["profile"])
+    readiness = call(target, dict(action="doctor"), expected_machine_id=status["machine_id"])
     return dict(host=matching, installed=status, doctor=readiness)
+
+
+def enroll(target, *, url, token_file=None, replace_machine=False):
+    from . import broker
+
+    if target != "local":
+        validate_target(target)
+    url = broker.validate_url(url)
+    entries = inventory()
+    known = next((entry for name, entry in entries.items() if target in
+                  (name, entry["target"], entry["machine_id"], *entry.get("aliases", []))), None)
+    expected = known["machine_id"] if known and not replace_machine else None
+    if expected:
+        call(target, dict(action="status"), expected_machine_id=expected)
+    invitation = broker.invitation(token_file, target=target)
+    deploy(target)
+    # Only the invitation crosses SSH stdin. The long-lived credential is
+    # created and retained by the selected machine, and never returned here.
+    value = call(target, dict(action="enroll", broker=url, invitation=invitation), timeout=180,
+                 expected_machine_id=expected)
+    value["host"] = remember(target, value["installed"], profile_name=value["installed"]["profile"])
+    return value

@@ -46,7 +46,7 @@ On the volunteer's Linux x86-64 server:
 
 ```sh
 uv tool install git+https://github.com/TauCetiProject/TauCetiFleet.git
-tauceti-fleet enroll
+tauceti-fleet enroll local
 # Paste the one-time enrollment code at the hidden prompt.
 tauceti-fleet prepare local
 tauceti-fleet doctor local
@@ -55,6 +55,20 @@ tauceti-fleet status local
 ```
 
 For unattended enrollment, `--token-file PATH` reads the one-time code from a file.
+Enrollment always requires an explicit machine. From your laptop, you can instead
+run `tauceti-fleet enroll chris`, where `chris` is an existing SSH hostname or alias.
+Fleet installs its release over SSH and redeems the code on that server. Its
+machine identity and permanent credential are generated there; the credential
+stays there. The laptop remembers the server's identity and SSH alias so subsequent
+`prepare chris`, `doctor chris`, `enable chris --ci`, and `status chris` operate on
+the same server. `--token-file` is read on the machine running the command.
+Subsequent commands check the remembered machine identity before acting, so
+repointing an SSH alias does not silently activate a different server.
+For an intentional replacement, revoke the old machine's broker credential first
+and use `enroll HOST --replace-machine` with a fresh invitation. This explicitly
+replaces the alias's inventory entry. Machine-bound CI credentials cannot be
+copied through `add --profile`.
+
 The host still needs Python 3.11+, uv, git, systemd user services with cgroup v2
 resource controls, KVM access, sufficient disk/RAM/CPU, and the QEMU/cloud-init
 tools (or Nix to fetch them). `doctor` reports these requirements. Workers-only
@@ -63,6 +77,8 @@ readiness failures do not block CI. Enable lingering for logout/boot persistence
 Enrollment generates and persists the host's credential before redeeming the
 invitation, so retrying a lost response does not create a second identity. It
 does not enable CI, enable workers, grant a budget, or authenticate any AI agent.
+It preserves an existing worker profile and identity. Software updates retain
+the enrolled server's credentials without copying the operator machine's profile.
 `prepare` currently installs the worker package alongside the CI image, but does
 not run workers. Existing hosts must drain before enrollment or reconfiguration.
 
