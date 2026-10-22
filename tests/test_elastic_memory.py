@@ -44,6 +44,13 @@ class ElasticMemory(unittest.TestCase):
             self.assertEqual((cg / 'memory.max').read_text(), str(46 * GIB))
             self.assertTrue(opened.call_args.args[1] & os.O_NONBLOCK)
 
+    def test_missing_host_measurement_retains_the_live_limit(self):
+        memory = dict(high=40 * GIB)
+        with patch.object(host.os, 'open', side_effect=AssertionError('must not change live limits')):
+            host.refresh_worker_memory(self.config, dict(memory_total=0, memory_available=0), memory)
+        self.assertEqual(memory['high'], 40 * GIB)
+        self.assertIn('measurement unavailable', memory['allocation_error'])
+
 
 if __name__ == '__main__':
     unittest.main()

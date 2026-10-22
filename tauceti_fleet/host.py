@@ -190,6 +190,9 @@ def worker_memory_limits(config, caps, pinned=0):
 
 def refresh_worker_memory(config, caps, memory):
     """Adjust the running slice without restarting work or blocking on reclaim."""
+    if not caps["memory_total"]:
+        memory["allocation_error"] = "Host memory measurement unavailable; retaining the last worker limit"
+        return
     cg = Path(memory["cgroup"])
     high, _ = worker_memory_limits(config, caps, memory["pinned"])
     maximum = memory["maximum"]
@@ -222,9 +225,7 @@ def write_slices(config, caps):
             return 0
 
     current_workers = current("workers")
-    # Avoid reclaiming below existing paid work during enable; the controller's
-    # first refresh replaces this conservative charge with actual pinned RAM.
-    high, worker = worker_memory_limits(config, caps, current_workers)
+    _, worker = worker_memory_limits(config, caps)
     live_workers = any(w.get("alive") for w in worker_statuses())
     if live_workers:
         previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
@@ -241,7 +242,7 @@ def write_slices(config, caps):
     worker = max(16 * 1024**2, worker)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
-            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum if name == 'ci' else high)}\nMemoryMax={int(maximum)}\n"
+            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
             + (f"MemorySwapMax={GIB}\n" if name == "workers" else "")
             + "TasksMax=16384\n"
         )
