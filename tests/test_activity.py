@@ -105,6 +105,34 @@ class ActivityTests(unittest.TestCase):
             self.assertEqual(activity.cached("m")["summary"]["prepared_at"], 1)
             self.assertTrue(host.rpc(dict(action="status"))["activity"]["available"] is False)
 
+    def test_cached_missing_finish_details_reach_combined_status_without_io(self):
+        summary = dict(
+            prepared_at=100,
+            history_since=1,
+            rounds={w: {} for w in activity.WINDOWS},
+            pr_windows={w: {} for w in activity.WINDOWS},
+            running=0,
+            open_prs=0,
+            unknown_prs=0,
+            unknown_landings=0,
+            interrupted_unfinished=5,
+            interrupted_unfinished_details=dict(
+                started_1h=1, started_24h=2, latest=dict(started=90, worker="worker-one", round_id="affected")
+            ),
+        )
+        Path(self.tmp.name, "summary.json").write_text(json.dumps(dict(groups={"m": summary}, errors=[])))
+        with (
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            value = activity.cached("m")
+            activity.display(activity.combine_status([value, value]))
+        self.assertIn("2 in 1h; 4 in 24h; 10 all time", output.getvalue())
+        self.assertIn("worker-one, round affected", output.getvalue())
+        self.assertIn("Check worker logs", output.getvalue())
+
     def test_combined_status_warns_only_for_stale_unresolved_pr_evidence(self):
         now = 1_000_000
         summary = dict(
