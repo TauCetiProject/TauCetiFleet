@@ -99,7 +99,12 @@ class Capacity(unittest.TestCase):
         self.assertEqual(result["ci_max_jobs"], 2)
         self.assertFalse(result["workers_enabled"])
         self.assertTrue(result["ci_enabled"])
-        self.assertEqual([c.args[0]["ci_slot"] for c in start.call_args_list], [0, 1])
+        self.assertEqual([c.args[0]["ci_slot"] for c in start.call_args_list], [0])
+        # The enabled controller admits slot one independently; later startup
+        # failures do not turn an already-enabled machine into a partial failure.
+        with patch.object(vm, "start", return_value={}) as remaining:
+            host.CISlot(1).step(store.host_config(), inventory=[], refresh=False, cooling=False)
+        self.assertEqual(remaining.call_args.args[0]["ci_slot"], 1)
         self.assertTrue(all(c.args[0]["ci_vcpus"] == 16 and c.args[0]["ci_memory_gib"] == 32 for c in start.call_args_list))
         self.assertEqual(store.host_config()["ci_kinds"], ["pr", "staging"])
 
@@ -126,3 +131,23 @@ class Capacity(unittest.TestCase):
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")):
             host.write_slices(config, dict(memory_total=128 * gib, memory_available=120 * gib))
         self.assertIn(f"MemoryMax={68 * gib}", (self.root / "tauceti-fleet-ci.slice").read_text())
+
+    def test_ci_only_enable_cannot_shrink_the_slice_of_draining_paid_workers(self):
+        gib = 1024**3
+        config = capacity.settings(store.host_config(), ci="both", maximum=2, vcpus=16, memory_gib=32)
+        def current(args, **kwargs):
+            charged = 68 * gib if "tauceti-fleet-ci.slice" in args else int(.8 * gib)
+            return subprocess.CompletedProcess([], 0, stdout=str(charged))
+        with patch.object(host, "units", return_value=self.root), patch.object(host, "run", side_effect=current), patch.object(host, "worker_statuses", return_value=[dict(alive=True, state="working")]):
+            with self.assertRaisesRegex(store.FleetError, "draining workers"):
+                host.write_slices(config, dict(memory_total=128 * gib, memory_available=13 * gib))
+        self.assertFalse((self.root / "tauceti-fleet-workers.slice").exists())
+
+    def test_disabled_slot_cancels_an_unlaunched_intent_without_creating_a_runner(self):
+        config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL, ci_max_jobs=1)
+        path = vm.slot_file({"ci_slot": 1}, "ci-registration.json")
+        store.atomic(path, dict(instance="a" * 16))
+        with patch.object(broker, "request", return_value=dict(retired=True)) as request, patch.object(vm, "start", side_effect=AssertionError("Drain must not mint a runner")):
+            host.CISlot(1).step(config, inventory=[], refresh=True, cooling=False)
+        self.assertFalse(path.exists())
+        self.assertEqual(request.call_args.args[1], "/v1/slots/1/cancel-registration")

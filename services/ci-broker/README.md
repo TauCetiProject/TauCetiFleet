@@ -71,6 +71,12 @@ The service issues class, machine, and instance labels; a PR-only guest never
 receives the legacy staging label. Revocation covers all slots, and reconciliation
 selects one slot without releasing another slot's ambiguous registration.
 
+A drained host clears definite, unused registration intents automatically. An
+ambiguous registration still requires reconciliation before cleanup can finish.
+Slot migration is one-way: drain all hosts before rolling back to a broker that
+only understands the legacy single-runner record, and migrate stored records back
+explicitly. Reverting broker code alone does not restore the old record format.
+
 ## Operator controls
 
 ```sh
@@ -88,7 +94,7 @@ or an upstream outage. It does not remotely terminate a VM or erase credentials
 already delivered to a host. Re-enrolling a revoked machine requires operator recovery;
 fresh invitations cannot silently undo revocation.
 
-Each host may have one registered runner. The service fixes its group, labels,
+Each host may have one registered runner per authorized slot. The service fixes its group, labels,
 and name prefix, rechecks trusted main-workflow restrictions before registration,
 and filters runner inventory/deletion and job results to that host. It proxies
 only specific read-only TauCeti CI metadata endpoints, not arbitrary GitHub APIs.

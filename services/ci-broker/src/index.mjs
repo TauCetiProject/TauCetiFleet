@@ -272,7 +272,7 @@ export class FleetRegistry extends DurableObject {
         let value;
         try {
           value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
-            data:{name:input.name,runner_group_id:3,labels:labels(id,input.name,kinds),work_folder:'_work'}});
+            data:{name:input.name,runner_group_id:3,labels:labels(id,input.name,kinds,host.name),work_folder:'_work'}});
         } catch (e) {
           if (e instanceof UpstreamError && [400,401,403,404,409,422,429].includes(e.status)) {
             // These are definite rejections, so no runner was created. Only
@@ -288,6 +288,25 @@ export class FleetRegistry extends DurableObject {
         return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
       }
       const retire=url.pathname.match(/^\/v1\/runners\/([1-9][0-9]*)$/);
+      const cancel=url.pathname.match(/^\/v1\/slots\/(0|[1-9][0-9]*)\/cancel-registration$/);
+      if (cancel && req.method==='POST') {
+        const index=Number(cancel[1]), input=await req.json();
+        if (index>=16 || !new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
+          return json({error:'invalid registration identity'},400);
+        const slot=slots(host)[String(index)];
+        if (slot?.pending) return json({error:'registration uncertain; reconcile this slot before draining'},409);
+        if (slot?.runner_id) {
+          if (slot.runner_name!==input.name) return json({error:'another registration occupies this slot'},409);
+          try {
+            const runner=await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners'});
+            if (runner.busy) return json({error:'registration is busy; retain local ownership'},409);
+            await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners',method:'DELETE'});
+          } catch (e) { if (!(e instanceof UpstreamError) || e.status!==404) throw e; }
+          delete slot.runner_id; delete slot.jit;
+        }
+        await save();
+        return json({retired:true});
+      }
       if (retire && req.method==='DELETE') {
         const runnerId=Number(retire[1]);
         const slot=Object.values(slots(host)).find(s=>s.runner_id===runnerId);

@@ -254,6 +254,22 @@ def outstanding():
                for name in ("vm.json", "ci-registration.json"))
 
 
+def cancel_registration(config):
+    """Retire an unlaunched registration without minting another runner."""
+    with locked(slot_file(config, "vm.lock")):
+        path = slot_file(config, "ci-registration.json")
+        intent = read(path)
+        if not intent or slot_file(config, "vm.json").exists():
+            return
+        if not config.get("ci_broker_url"):
+            raise FleetError("Retain the broker enrollment until its pending CI registration is reconciled")
+        from .broker import request
+
+        name = "fleet-" + config["machine_id"][:12] + "-" + intent["instance"]
+        request(config, f"/v1/slots/{config.get('ci_slot', 0)}/cancel-registration", method="POST", data=dict(name=name))
+        path.unlink(missing_ok=True)
+
+
 def _start(config):
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():

@@ -20,8 +20,9 @@ export function slots(host) {
   }
   return host.slots;
 }
-export function labels(id,name,kinds) {
+export function labels(id,name,kinds,hostName) {
   const result=['self-hosted','linux','x64','fleet-'+id,'fleet-instance-'+name.split('-').at(-1)];
   if (kinds.includes('staging')) result.push('tauceti-fleet');
+  if (hostName) result.push('fleet-host-'+hostName.toLowerCase());
   return result.concat(kinds.map(k=>'tauceti-fleet-'+k));
 }

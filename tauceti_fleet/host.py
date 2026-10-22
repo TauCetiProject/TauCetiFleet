@@ -185,14 +185,18 @@ def write_slices(config, caps):
         except ValueError:
             return 0
 
-    outstanding_ci = max(0, ci - current("ci"))
+    current_ci, current_workers = current("ci"), current("workers")
+    outstanding_ci = max(0, ci - current_ci)
     worker = (
         min(
             caps["memory_total"] - ci - reserve,
-            caps["memory_available"] - outstanding_ci - reserve + current("workers"),
+            caps["memory_available"] - outstanding_ci - reserve + current_workers,
         )
         - GIB
     )  # Keep a bounded 1 GiB swap allowance inside the worker reservation.
+    live_workers = any(w.get("alive") for w in worker_statuses())
+    if live_workers and worker < max(GIB, current_workers):
+        raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
     if worker < GIB and config["workers_enabled"]:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
@@ -311,8 +315,10 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         # Persist the policy before launch, so crash recovery never loses the
         # admission ceiling or tries to replace these guests with the old shape.
         update_host(**{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib") if k in config})
-        for slot in range(capacity.jobs(config)):
-            vm.start(dict(config, ci_slot=slot))
+        if not config["ci_enabled"] and not vm.outstanding():
+            # Verify registration once. The controller admits remaining slots
+            # independently, so a later startup error cannot leave a half-enabled role.
+            vm.start(dict(config, ci_slot=0))
     value = update_host(
         ci_enabled=config["ci_enabled"] or bool(ci), workers_enabled=config["workers_enabled"] or workers, draining=False
     )
@@ -541,6 +547,9 @@ class CISlot:
                       ci_enabled=config["ci_enabled"] and self.index < capacity.jobs(config))
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
+        if not config["ci_enabled"] and not value:
+            vm.cancel_registration(config)
+            return {}
         if value:
             active, service_health = ci_service_state(value["unit"])
             if active is False and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60):

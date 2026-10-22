@@ -212,6 +212,7 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   assert.ok(!pr.includes('tauceti-fleet-staging'));
   assert.ok(staging.includes('tauceti-fleet-staging')); assert.ok(!staging.includes('tauceti-fleet-pr'));
   assert.ok(pr.includes('fleet-'+id)); assert.ok(pr.includes('fleet-instance-'+'1'.repeat(16)));
+  assert.ok(pr.includes('fleet-host-test-8'));
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[1],slot:2})).status,403);
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[0],slot:1})).status,409);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['staging']})).status,409);
@@ -242,9 +243,21 @@ test('an ambiguous registration pins only its own slot and legacy records retain
   failRegistration=false;
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'5'.repeat(16),slot:1})).status,200);
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'4'.repeat(16),slot:0})).status,409);
+  assert.equal((await hostRequest(id,token,'/v1/slots/0/cancel-registration','POST',{name:prefix+'4'.repeat(16)})).status,409);
   const legacy={machine_id:'old',runner_id:42,runner_name:'old-runner',jit:'old-jit',issued:[42]};
   assert.deepEqual(slots(legacy),{'0':{runner_id:42,runner_name:'old-runner',jit:'old-jit'}});
   assert.equal(legacy.runner_id,undefined); assert.deepEqual(legacy.issued,[42]);
   const pending={pending:{name:'uncertain',at:1}};
   assert.deepEqual(slots(pending),{'0':{pending:{name:'uncertain',at:1}}});
+});
+test('draining cancels a definitively rejected intent even after its operator ceiling was lowered',async()=>{
+  const id='b'.repeat(32),token='k'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'6'.repeat(16);
+  await enroll(id,token,'cancel-unlaunched',{max_jobs:2,kinds:['staging']});
+  rejectRegistration=422;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1})).status,503);
+  rejectRegistration=0;
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['staging']})).status,200);
+  const before=upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length;
+  assert.equal((await hostRequest(id,token,'/v1/slots/1/cancel-registration','POST',{name})).status,200);
+  assert.equal(upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length,before);
 });
