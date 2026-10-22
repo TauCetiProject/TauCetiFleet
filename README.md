@@ -153,6 +153,9 @@ GitHub fallback or reconciliation. `status` includes cached cost estimates,
 weighted authored LOC, review/assist counts, budget balances and local CI history.
 It never scans ledgers, opens reporting databases or invokes the budget command.
 The shared presentation/aggregation module is vendored from the pinned worker.
+PR freshness stays silent within the normal hourly reconciliation cycle. It
+warns only when an unresolved PR's evidence, or its wait for a first observation,
+exceeds two hours. Closed and verified landed PRs do not produce age warnings.
 Activity tables use 1h, 3h, 24h, 7d and All time columns; cost/output uses 24h,
 7 days and All time. The cost total follows its additive components; settled and
 recovered estimate subsets remain available in JSON.
