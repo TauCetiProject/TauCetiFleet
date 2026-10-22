@@ -153,6 +153,9 @@ GitHub fallback or reconciliation. `status` includes cached cost estimates,
 weighted authored LOC, review/assist counts, budget balances and local CI history.
 It never scans ledgers, opens reporting databases or invokes the budget command.
 The shared presentation/aggregation module is vendored from the pinned worker.
+Missing finish records show counts by round start time over 1h and 24h, the
+retained total, and the latest affected worker and round for checking logs. Exit
+times and causes are unknown; legacy summaries mark recent timing unavailable.
 PR freshness stays silent within the normal hourly reconciliation cycle. It
 warns only when an unresolved PR's evidence, or its wait for a first observation,
 exceeds two hours. Closed and verified landed PRs do not produce age warnings.
