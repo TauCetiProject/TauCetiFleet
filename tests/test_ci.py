@@ -43,6 +43,7 @@ def evidence():
     )
     run = dict(
         id=42,
+        created_at="2026-10-16T00:00:00Z",
         run_attempt=1,
         repository=dict(full_name="TauCetiProject/TauCeti"),
         path=".github/workflows/pr-build.yml",
@@ -199,6 +200,8 @@ class Classification(unittest.TestCase):
             lambda j, r, s: r.update(id=41),
             lambda j, r, s: j.update(run_attempt=2),
             lambda j, r, s: r.update(run_attempt=2),
+            lambda j, r, s: j["steps"].pop(),
+            lambda j, r, s: j["steps"][-1].update(conclusion="cancelled"),
             lambda j, r, s: j["steps"].append(step("New unknown step", "failure", 5)),
             lambda j, r, s: j["steps"][2].update(conclusion="failure"),
         ]
@@ -216,14 +219,27 @@ class Classification(unittest.TestCase):
             "Restore Mathlib's compressed download cache from main",
             ci.BUILD,
             "Hand the merge-group oleans to the isolated publisher",
-            "Complete job",
+            "Summarise CI telemetry (statistics only)",
         ):
             with self.subTest(name=name):
                 job, run, statuses = evidence()
-                job["steps"] = [step(name, "cancelled", start="00:00:01", end="00:00:50")]
+                job["steps"] = [
+                    step(name, "cancelled", start="00:00:01", end="00:00:50"),
+                    step("Complete job", number=2, start="00:00:59", end="00:01:00"),
+                ]
                 decision = self.classify(job, run, statuses)
                 self.assertFalse(decision["cooldown"])
                 self.assertEqual(decision["reason"], "verified_bors_cancellation")
+
+    def test_cancellation_while_queued_is_not_a_machine_fault(self):
+        job, run, statuses = evidence()
+        # Bors cancels after dispatch, while the picker/job is still queued.
+        job["created_at"] = "2026-10-16T00:00:10Z"
+        job["started_at"] = "2026-10-16T00:00:20Z"
+        statuses[0]["created_at"] = "2026-10-16T00:00:05Z"
+        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
+        statuses[0]["created_at"] = "2026-10-15T23:59:59Z"
+        self.assertTrue(self.classify(job, run, statuses)["cooldown"])
 
     def test_cancellation_after_build_success_keeps_healthy_capacity(self):
         job, run, statuses = evidence()

@@ -130,9 +130,12 @@ def classify(job, *, run=None, statuses=None, host_health=None):
         for s in steps
     ):
         return result(True, "cancellation_steps_incomplete")
-    # Bors can cancel during setup, cache restoration, building or finalizers.
-    # A clean host-service exit establishes runner health independently of
-    # which workflow step happened to receive the cancellation.
+    # A clean QEMU exit alone does not prove that the guest runner survived.
+    if by_name.get("Complete job", {}).get("conclusion") != "success":
+        return result(True, "cancellation_runner_completion_missing")
+    # Bors can cancel during setup, cache restoration, building or finalizers;
+    # runner completion and the host receipt establish health independently
+    # of which workflow step happened to receive the cancellation.
     # Read newest-first status history from GitHub, not candidate logs/artifacts.
     bors = next((s for s in statuses if s.get("context") == "bors" and s.get("creator", {}).get("id") == BORS_ID), {})
     if (
@@ -144,7 +147,7 @@ def classify(job, *, run=None, statuses=None, host_health=None):
     try:
         requested = timestamp(bors.get("created_at"))
         if not (
-            timestamp(job.get("started_at")) <= requested <= timestamp(job.get("completed_at"))
+            timestamp(run.get("created_at")) <= requested <= timestamp(job.get("completed_at"))
         ):
             return result(True, "cancellation_status_time_mismatch")
         for step in steps:
@@ -152,8 +155,9 @@ def classify(job, *, run=None, statuses=None, host_health=None):
                 continue
             # This finalizer deliberately exits 1 for cancellation, including
             # before build/guard outputs exist. Its status writes do not prove
-            # host health; the clean host receipt already does. Actual failed
-            # infrastructure steps and host faults were handled above.
+            # host health: runner completion and the host receipt do. A failed
+            # GitHub publication also does not establish a machine fault.
+            # Actual infrastructure failures and host faults were handled above.
             if step.get("name") != REPORT or timestamp(step.get("started_at")) < requested:
                 return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
     except (ValueError, TypeError, OverflowError):

@@ -209,7 +209,7 @@ step and a clean host service exit; unrelated setup failures still cool down.
 A confirmed Bors cancellation keeps a healthy host available in any job phase,
 including setup and cache publication. Host faults and actual infrastructure
 step failures still take precedence. Cancellation classification reuses the
-existing host receipt and bounded GitHub metadata reads.
+existing host receipt, successful runner completion and bounded GitHub metadata reads.
 The cooldown survives controller restart.
 
 Guests have private writable overlays and unprivileged networking, with no

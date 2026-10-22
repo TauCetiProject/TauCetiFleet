@@ -86,19 +86,20 @@ these host/GitHub facts agree:
 - GitHub binds the registered runner's completed `sandboxed-build` to attempt 1
   of the Bors bot's `repository_dispatch` of main's `pr-build.yml`. Run name,
   base SHA, candidate SHA and batch are checked together. Reruns stay conservative.
-- Setup and trusted-tooling checkout succeeded, the sandboxed build was cancelled,
-  and `Complete job` succeeded. No setup/host/timeout or unknown failed step is
-  excused. Candidate source compilation failure remains a candidate result.
+- `Complete job` succeeded, confirming that the guest runner finished normally
+  as well as the QEMU service. No actual infrastructure/host/timeout or unknown
+  failed step is excused. Candidate source compilation failure remains a
+  candidate result.
 - The latest Bors-bot `bors` commit status on that candidate is `Canceled`, links
-  to the exact batch, and was created during the sandboxed build before it ended.
-  This status represents coordinator withdrawal/supersession, not runner failure.
-  A cancelled conclusion or absence of failed steps alone grants no exemption.
-- The trusted report step intentionally exits 1 when its build was cancelled.
-  That specific failure is allowed only with both successful `scope` and
-  `bump-guard` GitHub status writes by the fixed GitHub Actions bot or Bors CI
-  status App identity, tied to this run and reporting interval. Other bots or
-  Apps cannot supply this evidence.
-  Missing, stale or failed writes retain cooldown.
+  to the exact batch, and was created between run creation and job completion.
+  This covers cancellation while queued, during setup, building or finalizers.
+  It represents coordinator withdrawal/supersession, not runner failure. A
+  cancelled conclusion or absence of failed steps alone grants no exemption.
+- The trusted report step intentionally exits 1 when its build was cancelled,
+  including before guard outputs exist. Its failure after the cancellation is
+  allowed without requiring successful guard-status writes. A failed GitHub
+  publication does not establish a machine fault; runner completion and the
+  host-service receipt supply the health evidence.
 
 Metadata comes from bounded GitHub API reads using the existing host read
 credential. No logs, guest hook claims, candidate artifacts or new credentials
