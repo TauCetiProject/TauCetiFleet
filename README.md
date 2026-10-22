@@ -14,7 +14,7 @@ an operator supplies a one-time code, and the volunteer runs `tauceti-fleet enro
 The host needs no GitHub login, model credentials, or budget. It receives only a
 revocable credential for its own disposable runner; the GitHub App key stays on
 the enrollment service. Enrollment installs inactive services; `prepare` and
-`enable local --ci` remain explicit.
+`enable local --ci staging` remain explicit.
 
 Install with `uv tool install git+https://github.com/TauCetiProject/TauCetiFleet.git`
 (or `uv tool install .` from a checkout). From the operator's
@@ -80,7 +80,7 @@ permissions, and `runner_group_id` selects the trusted group described below.
 ## Roles, resource priority, and activation
 
 ```sh
-tauceti-fleet enable big-server --ci
+tauceti-fleet enable big-server --ci staging
 tauceti-fleet enable big-server --workers
 tauceti-fleet drain big-server
 tauceti-fleet update big-server
@@ -93,9 +93,31 @@ machine identity, and historical reporting records.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
 fleet weight 10. The default CI shape is 32 vCPUs / 64 GiB, with 2 GiB additional
-host overhead. Workers receive bounded remaining memory after CI and OS
+host overhead per job. `--max-jobs` sets one shared concurrency limit across
+PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
+explicitly declares which jobs the machine accepts. CPU, memory (including guest
+overhead), and disk reservations cover every configured job. Workers receive bounded remaining memory after CI and OS
 headroom, considering actual available memory on a shared host. CI receives
 priority over this fleet, not an entitlement over other users' allocations.
+
+For the initial two-server configuration:
+
+```sh
+# Chris: two jobs total, regardless of the mix of PR and staging builds.
+tauceti-fleet enable chris --ci both --max-jobs 2 --ci-vcpus 16 --ci-memory-gib 32
+# Tauchonki: one staging job and no PR jobs.
+tauceti-fleet enable tauchonki --ci staging --max-jobs 1 --ci-vcpus 32 --ci-memory-gib 64
+```
+
+Drain every slot before changing these settings. Enrollment also imposes an
+operator-controlled ceiling on classes and shared capacity. A host can request
+less capacity, but cannot exceed its enrollment. Legacy installations retain
+one staging slot. Each guest has its own registration intent, state, event
+socket, and startup retry. Drain, prepare, enrollment, and update inspect all
+slots, including a guest left outside the current configured limit. A fault's
+cooldown remains shared by the machine. Destination selection belongs to the
+existing `pick-runner.yml` dispatcher and its shared selector/recovery scripts;
+Fleet advertises and enforces each machine's capacity.
 
 Workers start one at a time, at most one per minute, up to eight by default.
 Memory pressure stops new admissions; an active CI build limits fresh worker

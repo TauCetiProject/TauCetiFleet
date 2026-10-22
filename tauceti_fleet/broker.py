@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, host_config, read, state_dir
+from .store import FleetError, atomic, config_dir, host_config, read
 
 DEFAULT_URL = "https://fleet.taucetiproject.org"
 
@@ -77,7 +77,9 @@ def enroll(url=DEFAULT_URL, *, token_file=None):
     config = host_config()
     if config["ci_enabled"] or config["workers_enabled"]:
         raise FleetError("Drain this host before enrolling it for CI")
-    if (state_dir() / "vm.json").exists() or (state_dir() / "ci-registration.json").exists():
+    from .vm import outstanding
+
+    if outstanding():
         raise FleetError("Wait for this host's CI guest and runner registration to retire before enrolling it")
     path = config_dir() / "enrollment.json"
     saved = read(path)

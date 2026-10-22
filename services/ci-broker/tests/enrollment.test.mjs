@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {generateKeyPairSync,createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {slots} from '../src/capacity.mjs';
 
 let mf;
 const origin='https://fleet.taucetiproject.org';
@@ -45,7 +46,7 @@ before(async()=>{
         if (failRegistration) return respond({error:'internal error'},500);
         const input=await req.json();
         assert.equal(input.runner_group_id,3);
-        const runner={id:nextId++,name:input.name,status:'online',busy:false};
+        const runner={id:nextId++,name:input.name,status:'online',busy:false,labels:input.labels.map(name=>({name}))};
         runners.set(runner.id,runner);
         return respond({runner,encoded_jit_config:'single-job-'+runner.id});
       }
@@ -67,9 +68,9 @@ const request=(path,options={})=>mf.dispatchFetch(origin+path,options);
 const adminRequest=(path,method='GET',data)=>request(path,{method,headers:{Authorization:'Bearer '+admin},body:data?JSON.stringify(data):undefined});
 const hostRequest=(id,token,path,method='GET',data)=>request(path,{method,
   headers:{Authorization:'Bearer '+token,'X-Fleet-Machine':id},body:data?JSON.stringify(data):undefined});
-async function enroll(id,token,invite) {
+async function enroll(id,token,invite,limits={}) {
   invite=invite.padEnd(64,'_');
-  const grant=await adminRequest('/admin/invites','POST',{name:'test-'+id[0],hash:hash(invite)});
+  const grant=await adminRequest('/admin/invites','POST',{name:'test-'+id[0],hash:hash(invite),...limits});
   assert.equal(grant.status,200);
   const window=await grant.json();
   assert.equal(window.expires_in,7*24*3600);
@@ -103,7 +104,7 @@ test('one-time enrollment binds a durable credential to one machine',async()=>{
   await enroll(id2,token2,'invite-two');
   assert.equal((await hostRequest(id1,token2,'/v1/policy')).status,401);
   assert.equal((await hostRequest(id2,token1,'/v1/policy')).status,401);
-  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),{runner_group_id:3});
+  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),{runner_group_id:3,max_jobs:1,kinds:['staging']});
 });
 test('concurrent registration creates one runner and cannot change its group, labels, or machine',async()=>{
   const name='fleet-'+id1.slice(0,12)+'-'+'a'.repeat(16);
@@ -176,9 +177,9 @@ test('one host cannot issue unlimited authenticated requests or consume another 
   const id='7'.repeat(32),token='g'.repeat(64);
   await enroll(id,token,'rate-limited-host');
   const results=[];
-  for (let i=0;i<13;i++) results.push((await hostRequest(id,token,'/v1/policy')).status);
-  assert.deepEqual(results.slice(0,12),Array(12).fill(200));
-  assert.equal(results[12],429);
+  for (let i=0;i<33;i++) results.push((await hostRequest(id,token,'/v1/policy')).status);
+  assert.deepEqual(results.slice(0,32),Array(32).fill(200));
+  assert.equal(results[32],429);
   assert.equal((await hostRequest('6'.repeat(32),'f'.repeat(64),'/v1/policy')).status,200);
 });
 test('an ambiguous registration does not create additional runners on retry',async()=>{
@@ -190,4 +191,60 @@ test('an ambiguous registration does not create additional runners on retry',asy
   assert.equal((await hostRequest(id3,token3,'/v1/runners','POST',{name})).status,409);
   assert.equal(upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length,before);
   assert.equal((await adminRequest('/admin/hosts/'+id3+'/reconcile','POST',{})).status,409);
+  failRegistration=false;
+});
+test('a machine has one shared slot ceiling across explicitly authorized PR and staging classes',async()=>{
+  const id='8'.repeat(32),token='h'.repeat(64);
+  await enroll(id,token,'shared-two-slots',{max_jobs:2,kinds:['pr','staging']});
+  const prefix='fleet-'+id.slice(0,12)+'-';
+  const inputs=[{slot:0,kinds:['pr'],name:prefix+'1'.repeat(16)},
+    {slot:1,kinds:['staging'],name:prefix+'2'.repeat(16)}];
+  const responses=await Promise.all(inputs.map(input=>hostRequest(id,token,'/v1/runners','POST',input)));
+  const registered=[];
+  for (const response of responses) { assert.equal(response.status,200); registered.push(await response.json()); }
+  const policy=await (await hostRequest(id,token,'/v1/policy')).json();
+  assert.equal(policy.max_jobs,2);
+  const inventory=(await (await hostRequest(id,token,'/v1/runners')).json()).runners;
+  assert.equal(inventory.length,2);
+  const pr=inventory.find(r=>r.id===registered[0].runner_id).labels.map(l=>l.name);
+  const staging=inventory.find(r=>r.id===registered[1].runner_id).labels.map(l=>l.name);
+  assert.ok(pr.includes('tauceti-fleet-pr')); assert.ok(!pr.includes('tauceti-fleet'));
+  assert.ok(!pr.includes('tauceti-fleet-staging'));
+  assert.ok(staging.includes('tauceti-fleet-staging')); assert.ok(!staging.includes('tauceti-fleet-pr'));
+  assert.ok(pr.includes('fleet-'+id)); assert.ok(pr.includes('fleet-instance-'+'1'.repeat(16)));
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[1],slot:2})).status,403);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[0],slot:1})).status,409);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['staging']})).status,409);
+  runners.get(registered[1].runner_id).busy=true;
+  const revoked=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
+  assert.equal(revoked.runner_busy,true);
+  assert.ok(!runners.has(registered[0].runner_id)); assert.ok(runners.has(registered[1].runner_id));
+  runners.get(registered[1].runner_id).busy=false;
+  await adminRequest('/admin/hosts/'+id,'DELETE');
+  assert.ok(!runners.has(registered[1].runner_id));
+});
+test('staging-only enrollment refuses PR labels, extra slots, and invalid operator capacities',async()=>{
+  const id='9'.repeat(32),token='i'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'3'.repeat(16);
+  await enroll(id,token,'staging-only');
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,kinds:['pr']})).status,403);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1})).status,403);
+  for (const input of [{max_jobs:0,kinds:['staging']},{max_jobs:2,kinds:['other']},{max_jobs:2,kinds:[]},
+    {max_jobs:2,kinds:['pr','pr']},{max_jobs:true,kinds:['pr']}])
+    assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',input)).status,400);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:2,kinds:['pr','staging']})).status,200);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1,kinds:['pr']})).status,200);
+});
+test('an ambiguous registration pins only its own slot and legacy records retain ownership during migration',async()=>{
+  const id='a'.repeat(32),token='j'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await enroll(id,token,'independent-slots',{max_jobs:2,kinds:['staging']});
+  failRegistration=true;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'4'.repeat(16),slot:0})).status,503);
+  failRegistration=false;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'5'.repeat(16),slot:1})).status,200);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'4'.repeat(16),slot:0})).status,409);
+  const legacy={machine_id:'old',runner_id:42,runner_name:'old-runner',jit:'old-jit',issued:[42]};
+  assert.deepEqual(slots(legacy),{'0':{runner_id:42,runner_name:'old-runner',jit:'old-jit'}});
+  assert.equal(legacy.runner_id,undefined); assert.deepEqual(legacy.issued,[42]);
+  const pending={pending:{name:'uncertain',at:1}};
+  assert.deepEqual(slots(pending),{'0':{pending:{name:'uncertain',at:1}}});
 });

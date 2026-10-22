@@ -108,12 +108,22 @@ def inspect():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "collect", "inspect", "activate", "invite", "hosts", "revoke", "reconcile"])
+    parser.add_argument("action", choices=["prepare", "collect", "inspect", "activate", "invite", "hosts", "capacity", "revoke", "reconcile"])
     parser.add_argument("--name", help="operator label for a new host invitation")
     parser.add_argument("--machine-id", help="machine identity to revoke")
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
     parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
+    parser.add_argument("--ci", choices=("pr", "staging", "both"), help="allowed CI job classes")
+    parser.add_argument("--max-jobs", type=int, help="one shared PR + staging build limit, 1–16")
+    parser.add_argument("--slot", type=int, default=0, help="slot to reconcile (default: 0)")
     args = parser.parse_args()
+    limits = {}
+    if args.ci:
+        limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
+    if args.max_jobs is not None:
+        if not 1 <= args.max_jobs <= 16:
+            raise SystemExit("Use --max-jobs between 1 and 16")
+        limits["max_jobs"] = args.max_jobs
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
         if (DIRECTORY / "github-app.json").exists():
@@ -174,7 +184,7 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         if not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", token):
             raise SystemExit("Enrollment codes must contain 43–128 URL-safe characters; the supplied file is invalid")
         result = api(ORIGIN + "/admin/invites", token=admin(), data={"name": args.name, "hash": hashlib.sha256(token.encode()).hexdigest(),
-                     "expires_in": args.expires_in_days * 24 * 3600})
+                     "expires_in": args.expires_in_days * 24 * 3600, **limits})
         path = args.token_file.expanduser() if args.token_file else DIRECTORY / "invitations" / (args.name + "-" + secrets.token_hex(4))
         private(path, token + "\n")
         print("Enrollment code saved privately: " + str(path))
@@ -182,18 +192,25 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         print("On the volunteer host: tauceti-fleet enroll (paste that code at the prompt)")
     elif args.action == "hosts":
         print(json.dumps(api(ORIGIN + "/admin/hosts", token=admin()), indent=2))
-    elif args.action in ("revoke", "reconcile"):
+    elif args.action in ("capacity", "revoke", "reconcile"):
         import re
 
         if not re.fullmatch(r"[a-f0-9]{32}", args.machine_id or ""):
             raise SystemExit("Use --machine-id from the hosts command")
-        if args.action == "revoke":
+        if args.action == "capacity":
+            if not args.ci or args.max_jobs is None:
+                raise SystemExit("Specify both --ci pr|staging|both and --max-jobs N")
+            result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/capacity", token=admin(), data=limits)
+            print(json.dumps(result))
+        elif args.action == "revoke":
             result = api(ORIGIN + "/admin/hosts/" + args.machine_id, token=admin(), method="DELETE")
             print("Host credential revoked; existing acquired jobs may finish")
             if result.get("cleanup_pending") or result.get("runner_busy"):
                 print("Run revoke again after the active job finishes or GitHub connectivity recovers to finish runner cleanup")
         else:
-            result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/reconcile", token=admin(), data={})
+            if not 0 <= args.slot < 16:
+                raise SystemExit("Use --slot between 0 and 15")
+            result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/reconcile", token=admin(), data={"slot": args.slot})
             print(json.dumps(result))
 
 

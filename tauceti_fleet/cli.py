@@ -36,7 +36,11 @@ def parser():
     budget.add_argument("--json", action="store_true")
     enable = sub.add_parser("enable", help="explicitly activate a prepared role")
     enable.add_argument("host")
-    enable.add_argument("--ci", action="store_true")
+    enable.add_argument("--ci", choices=("pr", "staging", "both"), help="explicit CI job classes for this machine")
+    enable.add_argument("--max-jobs", type=int, help="shared PR + staging concurrency limit")
+    enable.add_argument("--ci-vcpus", type=int, help="vCPUs per CI job")
+    enable.add_argument("--ci-memory-gib", type=int, help="GiB of guest RAM per CI job")
+    enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change the admission ceiling without interrupting active work")
@@ -92,6 +96,8 @@ def main(argv=None):
         entries = remote.inventory()
         if args.command == "enable" and not (args.ci or args.workers):
             raise FleetError("Select --ci and/or --workers explicitly")
+        if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib)):
+            raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         selected = {args.host: remote.resolve(args.host)} if args.host else entries
@@ -106,7 +112,8 @@ def main(argv=None):
             if args.command == "budget":
                 payload.update(grant=args.grant, grant_rate=args.grant_rate)
             if args.command == "enable":
-                payload.update(ci=args.ci, workers=args.workers)
+                payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
+                               vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib)
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "update":
@@ -179,6 +186,8 @@ def main(argv=None):
                     print(
                         f"Workers: {status.get('active_worker_limit', 0)} admitted / {value.get('max_workers', 0)} maximum; CI busy: {status.get('ci_busy', 'unknown')}"
                     )
+                    if "ci_max_jobs" in value:
+                        print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     memory = status.get("worker_memory")
                     if memory:
                         print()

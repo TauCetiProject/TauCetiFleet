@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
+import {capacity,validCapacity,slots,labels} from './capacity.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'"};
@@ -37,8 +38,8 @@ export class FleetRegistry extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map(); }
   admit(id) {
     const now=Date.now();
-    const bucket=this.buckets.get(id) || {tokens:12,at:now};
-    bucket.tokens=Math.min(12,bucket.tokens+Math.max(0,now-bucket.at)/10000);
+    const bucket=this.buckets.get(id) || {tokens:32,at:now};
+    bucket.tokens=Math.min(32,bucket.tokens+Math.max(0,now-bucket.at)/10000);
     bucket.at=now;
     const allowed=bucket.tokens>=1;
     if (allowed) bucket.tokens--;
@@ -120,32 +121,50 @@ export class FleetRegistry extends DurableObject {
         const key='invite:'+input.hash;
         const prior=await this.ctx.storage.get(key);
         if (prior?.machine_id) return json({error:'cannot extend a redeemed invitation'},409);
+        const limits=capacity({...prior,...input});
+        if (!validCapacity(limits)) return json({error:'invalid CI classes or shared capacity'},400);
         const expires=Date.now()+lifetime*1000;
-        await this.ctx.storage.put(key,{name:input.name,expires});
+        await this.ctx.storage.put(key,{name:input.name,expires,...limits});
         return json({expires_in:lifetime,expires_at:expires});
       }
       if (url.pathname==='/admin/hosts' && req.method==='GET') {
         const hosts=await this.ctx.storage.list({prefix:'host:',limit:1000});
         return json({hosts:Array.from(hosts.values(), h=>({machine_id:h.machine_id,name:h.name,revoked:!!h.revoked,
-          runner_id:h.runner_id || null,registration_pending:!!h.pending,created_at:h.created_at}))});
+          ...capacity(h),slots:Object.entries(slots(h)).map(([slot,s])=>({slot:Number(slot),runner_id:s.runner_id || null,
+            registration_pending:!!s.pending,kinds:s.kinds || ['staging']})),created_at:h.created_at}))});
+      }
+      const policy=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/capacity$/);
+      if (policy && req.method==='POST') {
+        const host=await this.ctx.storage.get('host:'+policy[1]);
+        if (!host) return json({error:'not found'},404);
+        const input=await req.json();
+        if (!validCapacity(input)) return json({error:'invalid CI classes or shared capacity'},400);
+        if (Object.values(slots(host)).some(s=>s.runner_id || s.pending))
+          return json({error:'drain and retire all slots before changing classes or capacity'},409);
+        Object.assign(host,{kinds:input.kinds,max_jobs:input.max_jobs});
+        await this.ctx.storage.put('host:'+host.machine_id,host);
+        return json(capacity(host));
       }
       const revoke=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})$/);
       if (revoke && req.method==='DELETE') {
         const host=await this.ctx.storage.get('host:'+revoke[1]);
         if (!host) return json({error:'not found'},404);
-        host.revoked=true; delete host.jit;
+        host.revoked=true;
+        const registrations=Object.values(slots(host));
+        for (const slot of registrations) delete slot.jit;
         await this.ctx.storage.put('host:'+revoke[1],host);
         let busy=false,cleanupPending=false;
-        if (host.runner_id) {
+        for (const slot of registrations) {
+          if (!slot.runner_id) continue;
           try {
-            const runner=await this.github.request(`orgs/${ORG}/actions/runners/${host.runner_id}`,{kind:'runners'});
-            busy=!!runner.busy;
-            if (!busy) {
-              await this.github.request(`orgs/${ORG}/actions/runners/${host.runner_id}`,{kind:'runners',method:'DELETE'});
-              delete host.runner_id;
+            const runner=await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners'});
+            busy=busy || !!runner.busy;
+            if (!runner.busy) {
+              await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners',method:'DELETE'});
+              delete slot.runner_id;
             }
           } catch (e) {
-            if (e instanceof UpstreamError && e.status===404) delete host.runner_id;
+            if (e instanceof UpstreamError && e.status===404) delete slot.runner_id;
             else cleanupPending=true;
           }
           await this.ctx.storage.put('host:'+revoke[1],host);
@@ -155,13 +174,17 @@ export class FleetRegistry extends DurableObject {
       const reconcile=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/reconcile$/);
       if (reconcile && req.method==='POST') {
         const host=await this.ctx.storage.get('host:'+reconcile[1]);
-        if (!host?.pending) return json({error:'no pending registration'},409);
-        if (Date.now()-host.pending.at<120000) return json({error:'wait two minutes before reconciling a registration'},409);
+        const input=await req.json();
+        const index=input.slot ?? 0;
+        if (!Number.isInteger(index) || index<0 || index>=16) return json({error:'invalid slot'},400);
+        const slot=host && slots(host)[String(index)];
+        if (!slot?.pending) return json({error:'no pending registration'},409);
+        if (Date.now()-slot.pending.at<120000) return json({error:'wait two minutes before reconciling a registration'},409);
         await this.github.policy({fresh:true});
         const matches=[]; let complete=false;
         for (let page=1;page<=20;page++) {
           const data=await this.github.request(`orgs/${ORG}/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
-          matches.push(...data.runners.filter(r=>r.name===host.pending.name));
+          matches.push(...data.runners.filter(r=>r.name===slot.pending.name));
           if (page*100>=data.total_count) { complete=true; break; }
           if (!data.runners.length) break;
         }
@@ -171,7 +194,7 @@ export class FleetRegistry extends DurableObject {
           try { await this.github.request(`orgs/${ORG}/actions/runners/${runner.id}`,{kind:'runners',method:'DELETE'}); }
           catch (e) { if (!(e instanceof UpstreamError) || e.status!==404) throw e; }
         }
-        delete host.pending;
+        delete slot.pending;
         await this.ctx.storage.put('host:'+host.machine_id,host);
         return json({reconciled:true,removed:matches.map(r=>r.id)});
       }
@@ -196,7 +219,7 @@ export class FleetRegistry extends DurableObject {
       if (!invite.machine_id && old) return json({error:'host already enrolled'},409);
       await this.ctx.storage.transaction(async tx=>{
         await tx.put(key,{...invite,machine_id:input.machine_id});
-        await tx.put('host:'+input.machine_id,old || {machine_id:input.machine_id,hash,name:invite.name,created_at:Date.now(),issued:[]});
+        await tx.put('host:'+input.machine_id,old || {machine_id:input.machine_id,hash,name:invite.name,created_at:Date.now(),issued:[],...capacity(invite)});
       });
       return json({machine_id:input.machine_id,runner_group_id:3});
     }
@@ -207,60 +230,74 @@ export class FleetRegistry extends DurableObject {
       if (!host || host.revoked || host.hash!==await digest(token)) return json({error:'unauthorized'},401);
       if (!this.admit(id)) return json({error:'host request limit reached; retry after ten seconds'},429);
       const save=()=>this.ctx.storage.put('host:'+id,host);
-      if (url.pathname==='/v1/policy' && req.method==='GET') return json(await this.github.policy());
+      if (url.pathname==='/v1/policy' && req.method==='GET') return json({...await this.github.policy(),...capacity(host)});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
-        let runner;
-        if (host.runner_id) {
-          try { runner=await this.github.request(`orgs/${ORG}/actions/runners/${host.runner_id}`,{kind:'runners'}); }
+        const runners=[];
+        for (const slot of Object.values(slots(host))) {
+          if (!slot.runner_id) continue;
+          try { runners.push(await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners'})); }
           catch (e) {
             if (!(e instanceof UpstreamError) || e.status!==404) throw e;
-            delete host.runner_id; delete host.jit; await save();
+            delete slot.runner_id; delete slot.jit;
           }
         }
-        return json({runners:runner?[runner]:[]});
+        await save();
+        return json({runners});
       }
       if (url.pathname==='/v1/runners' && req.method==='POST') {
         const input=await req.json();
         if (!new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
           return json({error:'invalid runner name'},400);
-        if (host.pending) return json({error:'registration outcome uncertain; operator reconciliation required'},409);
-        if (host.runner_id) {
-          if (host.runner_name===input.name && host.jit) return json({runner_id:host.runner_id,encoded_jit_config:host.jit});
+        const index=input.slot ?? 0, kinds=input.kinds ?? ['staging'];
+        const allowed=capacity(host);
+        if (!Number.isInteger(index) || index<0 || index>=allowed.max_jobs ||
+            !validCapacity({max_jobs:1,kinds}) || kinds.some(k=>!allowed.kinds.includes(k)))
+          return json({error:'slot or job class exceeds this machine policy'},403);
+        const registrations=slots(host);
+        const slot=registrations[String(index)] ||= {};
+        if (Object.entries(registrations).some(([i,s])=>i!==String(index) &&
+            (s.runner_name===input.name || s.pending?.name===input.name)))
+          return json({error:'runner identity belongs to another slot'},409);
+        if (slot.pending) return json({error:'registration outcome uncertain; operator reconciliation required'},409);
+        if (slot.runner_id) {
+          if (slot.runner_name===input.name && slot.jit && JSON.stringify(slot.kinds || ['staging'])===JSON.stringify(kinds))
+            return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
           return json({error:'host already has registered capacity'},409);
         }
         await this.github.policy({fresh:true});
         // Reserve before the non-idempotent GitHub POST. An ambiguous result fails
         // closed instead of silently creating extra runners on a retry.
-        host.pending={name:input.name,at:Date.now()};
+        slot.pending={name:input.name,at:Date.now()};
         await save();
         let value;
         try {
           value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
-            data:{name:input.name,runner_group_id:3,labels:['self-hosted','linux','x64','tauceti-fleet','fleet-'+id],work_folder:'_work'}});
+            data:{name:input.name,runner_group_id:3,labels:labels(id,input.name,kinds),work_folder:'_work'}});
         } catch (e) {
           if (e instanceof UpstreamError && [400,401,403,404,409,422,429].includes(e.status)) {
             // These are definite rejections, so no runner was created. Only
             // ambiguous transport/server failures keep the reservation pinned.
-            delete host.pending; await save();
+            delete slot.pending; await save();
           }
           throw e;
         }
-        host.runner_id=value.runner.id; host.runner_name=input.name; host.jit=value.encoded_jit_config;
+        slot.runner_id=value.runner.id; slot.runner_name=input.name; slot.jit=value.encoded_jit_config; slot.kinds=kinds;
         host.issued=[...host.issued,value.runner.id].slice(-4096);
-        delete host.pending;
+        delete slot.pending;
         await save();
-        return json({runner_id:host.runner_id,encoded_jit_config:host.jit});
+        return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
       }
       const retire=url.pathname.match(/^\/v1\/runners\/([1-9][0-9]*)$/);
       if (retire && req.method==='DELETE') {
         const runnerId=Number(retire[1]);
-        if (runnerId!==host.runner_id) {
+        const slot=Object.values(slots(host)).find(s=>s.runner_id===runnerId);
+        if (!slot) {
           // Repeating retirement of our own old runner is harmless.
           return host.issued.includes(runnerId)?json({retired:true}):json({error:'not found'},404);
         }
         try { await this.github.request(`orgs/${ORG}/actions/runners/${runnerId}`,{kind:'runners',method:'DELETE'}); }
         catch (e) { if (!(e instanceof UpstreamError) || e.status!==404) throw e; }
-        delete host.runner_id; delete host.jit;
+        delete slot.runner_id; delete slot.jit;
         await save();
         return json({retired:true});
       }

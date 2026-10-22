@@ -26,8 +26,12 @@ their current credentials and configuration.
 From this directory, an operator with the private local admin credential runs:
 
 ```sh
-python3 scripts/setup.py invite --name chris-server
+python3 scripts/setup.py invite --name chris-server --ci both --max-jobs 2
 ```
+
+The invitation authorizes two jobs total, shared across PR and staging builds.
+Omitting the capacity flags retains one staging slot. The host can request a
+subset of these classes and fewer slots, but cannot expand its policy.
 
 The command saves a seven-day enrollment code in a private file under
 `~/.config/tauceti-ci-broker/invitations/`. Transfer that code privately to the
@@ -46,7 +50,7 @@ tauceti-fleet enroll
 # Paste the one-time enrollment code at the hidden prompt.
 tauceti-fleet prepare local
 tauceti-fleet doctor local
-tauceti-fleet enable local --ci
+tauceti-fleet enable local --ci both --max-jobs 2 --ci-vcpus 16 --ci-memory-gib 32
 tauceti-fleet status local
 ```
 
@@ -62,12 +66,19 @@ does not enable CI, enable workers, grant a budget, or authenticate any AI agent
 `prepare` currently installs the worker package alongside the CI image, but does
 not run workers. Existing hosts must drain before enrollment or reconfiguration.
 
+Every slot has a separate GitHub registration and pending-registration record.
+The service issues class, machine, and instance labels; a PR-only guest never
+receives the legacy staging label. Revocation covers all slots, and reconciliation
+selects one slot without releasing another slot's ambiguous registration.
+
 ## Operator controls
 
 ```sh
 python3 scripts/setup.py hosts
 python3 scripts/setup.py revoke --machine-id HEX_ID
-python3 scripts/setup.py reconcile --machine-id HEX_ID
+python3 scripts/setup.py reconcile --machine-id HEX_ID --slot 0
+# After draining and retiring every slot:
+python3 scripts/setup.py capacity --machine-id HEX_ID --ci both --max-jobs 2
 ```
 
 Revocation immediately rejects future host requests and discards the stored JIT
@@ -97,7 +108,7 @@ The service stores ownership for the latest 4096 issued runners per host, which
 bounds record size. A sufficiently old deferred result can therefore age out.
 The service deliberately serializes decisions in one Durable Object; revisit
 sharding if fleet size makes this a throughput bottleneck.
-Authenticated host requests have a burst allowance of 12 and replenish one
+Authenticated host requests have a burst allowance of 32 and replenish one
 request per ten seconds. Readiness policy is cached for at most one minute;
 registration and reconciliation always verify a fresh policy.
 
