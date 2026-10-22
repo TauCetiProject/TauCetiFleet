@@ -41,6 +41,10 @@ before(async()=>{
       else assert.equal(req.headers.get('Authorization'),'Bearer read-grant');
       if (url.pathname==='/orgs/TauCetiProject/actions/runner-groups/3') return respond({id:3,name:'TauCetiFleet',
         restricted_to_workflows:trustedPolicy,selected_workflows:['TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main']});
+      if (url.pathname==='/orgs/TauCetiProject/actions/runner-groups/3/runners') {
+        const all=[...runners.values()],page=Number(url.searchParams.get('page') || 1);
+        return respond({total_count:all.length,runners:all.slice((page-1)*100,page*100)});
+      }
       if (url.pathname.endsWith('/generate-jitconfig')) {
         if (rejectRegistration) return respond({error:'rejected'},rejectRegistration);
         if (failRegistration) return respond({error:'internal error'},500);

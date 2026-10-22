@@ -131,7 +131,7 @@ bounds record size. A sufficiently old deferred result can therefore age out.
 The service deliberately serializes decisions in one Durable Object; revisit
 sharding if fleet size makes this a throughput bottleneck.
 Authenticated host requests have a burst allowance of 32 and replenish one
-request per ten seconds. Readiness policy is cached for at most one minute;
+request per ten seconds per authorized slot. Readiness policy is cached for at most one minute;
 registration and reconciliation always verify a fresh policy.
 
 CI hosts require trusted operators. The build workflow supplies a separate CI

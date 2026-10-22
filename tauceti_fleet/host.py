@@ -196,8 +196,14 @@ def write_slices(config, caps):
         - GIB
     )  # Keep a bounded 1 GiB swap allowance inside the worker reservation.
     live_workers = any(w.get("alive") for w in worker_statuses())
-    if live_workers and worker < max(GIB, current_workers):
-        raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
+    if live_workers:
+        previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
+        try:
+            prior_limit = int(previous.stdout.strip())
+        except ValueError:
+            prior_limit = caps["memory_total"]
+        if previous.returncode or worker < max(GIB, current_workers, prior_limit):
+            raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
     if worker < GIB and config["workers_enabled"]:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
@@ -549,7 +555,9 @@ class CISlot:
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
         if not config["ci_enabled"] and not value:
-            vm.cancel_registration(config)
+            if time.time() >= self.next_vm:
+                self.next_vm = time.time() + 300
+                vm.cancel_registration(config)
             return {}
         if value:
             active, service_health = ci_service_state(value["unit"])
@@ -603,7 +611,7 @@ class CISlot:
             if (value and not value.get("busy")
                     and (not config["ci_enabled"] or cooling
                          or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
-                    and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60)):
+                    and not (time.time() - value["started_at"] < 60)):
                 vm.retire(config, value)
                 value = {}
                 self.close()
@@ -659,7 +667,7 @@ def daemon():
                         value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling)
                     except (FleetError, OSError, ValueError, KeyError) as exc:
                         slot_errors[str(index)] = str(exc)
-                        slot.next_vm = time.time() + 60
+                        slot.next_vm = max(slot.next_vm, time.time() + 60)
                         value = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
                     if value:
                         values.append(value)
@@ -736,7 +744,7 @@ def daemon():
                     dict(machine_id=config["machine_id"], observed_at=time.time(), error=message),
                 )
                 for slot in slots.values():
-                    slot.next_vm = time.time() + 60
+                    slot.next_vm = max(slot.next_vm, time.time() + 60)
             for _ in range(10):
                 if stopping:
                     break

@@ -50,14 +50,14 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
     steps = job.get("steps", [])
     if host_health == "fault":
         return result(True, "host_service_fault")
-    if job.get("conclusion") in ("timed_out", "startup_failure"):
-        return result(True, "job_" + job["conclusion"])
-    for step in steps:
-        if step.get("conclusion") in ("timed_out", "startup_failure"):
-            return result(True, "infrastructure_step_failed", step_number=step.get("number"))
     if kind == "pr":
-        failed_host_steps = [s for s in steps if s.get("conclusion") == "failure" and
-                             s.get("name") in ("Set up job", "Set up runner", "Complete job")]
+        trusted = ("Set up job", "Set up runner", "Complete job", "Raise vm.",
+                   "Checkout workflow-pinned trusted build tooling", "Prepare pinned shared tools",
+                   "Install ", "Prepare trusted read-only Lean watchdog", "Build the trusted environment-lint driver")
+        failed_host_steps = [s for s in steps if s.get("conclusion") in ("failure", "timed_out", "startup_failure")
+                             and s.get("name", "").startswith(trusted)]
+        if job.get("conclusion") == "startup_failure":
+            return result(True, "job_startup_failure")
         if failed_host_steps:
             return result(True, "pr_runner_step_failed", step_number=failed_host_steps[0].get("number"))
         if job.get("conclusion") == "cancelled":
@@ -65,6 +65,11 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
         # Closed/deleted PRs, fork checkouts and candidate failures are normal
         # workflow outcomes. They must not remove staging capacity on a both host.
         return result(False, "pr_workflow_outcome")
+    if job.get("conclusion") in ("timed_out", "startup_failure"):
+        return result(True, "job_" + job["conclusion"])
+    for step in steps:
+        if step.get("conclusion") in ("timed_out", "startup_failure"):
+            return result(True, "infrastructure_step_failed", step_number=step.get("number"))
     # The helper records a quota response in private runner-temp state outside
     # the candidate sandbox. A fixed main-defined finalizer fails ONLY when that
     # record exists. Its conclusion is available in the already-fetched jobs

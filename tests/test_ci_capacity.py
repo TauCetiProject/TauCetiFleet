@@ -143,6 +143,31 @@ class Capacity(unittest.TestCase):
                 host.write_slices(config, dict(memory_total=128 * gib, memory_available=13 * gib))
         self.assertFalse((self.root / "tauceti-fleet-workers.slice").exists())
 
+    def test_live_workers_keep_their_configured_headroom_even_when_usage_is_low(self):
+        gib = 1024**3
+        config = capacity.settings(store.host_config(), ci="both", maximum=2, memory_gib=32)
+        def current(args, **kwargs):
+            value = 60 * gib if "MemoryMax" in args else 2 * gib
+            return subprocess.CompletedProcess([], 0, stdout=str(value))
+        with patch.object(host, "units", return_value=self.root), patch.object(host, "run", side_effect=current), patch.object(host, "worker_statuses", return_value=[dict(alive=True)]):
+            with self.assertRaisesRegex(store.FleetError, "draining workers"):
+                host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
+
+    def test_pending_cleanup_respects_backoff_after_ambiguous_registration(self):
+        slot = host.CISlot(1)
+        config = dict(store.host_config(), ci_max_jobs=2)
+        with patch.object(vm, "cancel_registration", side_effect=store.FleetError("uncertain")) as cleanup:
+            with self.assertRaises(store.FleetError):
+                slot.step(config, inventory=[], refresh=True, cooling=False)
+            slot.step(config, inventory=[], refresh=True, cooling=False)
+            self.assertEqual(cleanup.call_count, 1)
+
+    def test_pr_candidate_timeout_does_not_cool_staging_but_trusted_setup_fault_does(self):
+        job = dict(conclusion="timed_out", steps=[dict(name=ci.BUILD, conclusion="timed_out")])
+        self.assertFalse(ci.classify(job, kind="pr", host_health="healthy")["cooldown"])
+        job["steps"] = [dict(name="Install trusted dependencies", conclusion="failure")]
+        self.assertTrue(ci.classify(job, kind="pr", host_health="healthy")["cooldown"])
+
     def test_disabled_slot_cancels_an_unlaunched_intent_without_creating_a_runner(self):
         config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL, ci_max_jobs=1)
         path = vm.slot_file({"ci_slot": 1}, "ci-registration.json")

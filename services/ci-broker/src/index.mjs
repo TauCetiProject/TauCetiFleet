@@ -36,10 +36,10 @@ export function manifest(origin) {
 
 export class FleetRegistry extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map(); }
-  admit(id) {
+  admit(id, maximum=1) {
     const now=Date.now();
     const bucket=this.buckets.get(id) || {tokens:32,at:now};
-    bucket.tokens=Math.min(32,bucket.tokens+Math.max(0,now-bucket.at)/10000);
+    bucket.tokens=Math.min(32,bucket.tokens+Math.max(0,now-bucket.at)*maximum/10000);
     bucket.at=now;
     const allowed=bucket.tokens>=1;
     if (allowed) bucket.tokens--;
@@ -228,18 +228,17 @@ export class FleetRegistry extends DurableObject {
       const token=(req.headers.get('Authorization') || '').replace(/^Bearer /,'');
       const host=/^[a-f0-9]{32}$/.test(id)?await this.ctx.storage.get('host:'+id):null;
       if (!host || host.revoked || host.hash!==await digest(token)) return json({error:'unauthorized'},401);
-      if (!this.admit(id)) return json({error:'host request limit reached; retry after ten seconds'},429);
+      if (!this.admit(id,capacity(host).max_jobs)) return json({error:'host request limit reached; retry after ten seconds'},429);
       const save=()=>this.ctx.storage.put('host:'+id,host);
       if (url.pathname==='/v1/policy' && req.method==='GET') return json({...await this.github.policy(),...capacity(host)});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
+        const owned=Object.values(slots(host)).filter(s=>s.runner_id);
+        const found=owned.length?await this.github.runners():[];
         const runners=[];
-        for (const slot of Object.values(slots(host))) {
-          if (!slot.runner_id) continue;
-          try { runners.push(await this.github.request(`orgs/${ORG}/actions/runners/${slot.runner_id}`,{kind:'runners'})); }
-          catch (e) {
-            if (!(e instanceof UpstreamError) || e.status!==404) throw e;
-            delete slot.runner_id; delete slot.jit;
-          }
+        for (const slot of owned) {
+          const runner=found.find(r=>r.id===slot.runner_id);
+          if (runner) runners.push(runner);
+          else { delete slot.runner_id; delete slot.jit; }
         }
         await save();
         return json({runners});
