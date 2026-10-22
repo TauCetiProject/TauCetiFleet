@@ -116,7 +116,7 @@ less capacity, but cannot exceed its enrollment. Legacy installations retain
 one staging slot. Each guest has its own registration intent, state, event
 socket, and startup retry. Drain, prepare, enrollment, and update inspect all
 slots, including a guest left outside the current configured limit. A fault's
-cooldown remains shared by the machine. Enabling CI verifies the first guest;
+cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
 the controller starts the remaining slots independently after the role is enabled.
 A draining worker pool must finish before its memory reservation can shrink.
 Destination selection belongs to the

@@ -168,6 +168,19 @@ class Capacity(unittest.TestCase):
         job["steps"] = [dict(name="Install trusted dependencies", conclusion="failure")]
         self.assertTrue(ci.classify(job, kind="pr", host_health="healthy")["cooldown"])
 
+    def test_drained_slot_cleanup_does_not_delay_fresh_guest_admission(self):
+        slot = host.CISlot(1)
+        config = dict(store.host_config(), ci_max_jobs=2)
+        slot.step(config, inventory=[], refresh=True, cooling=False)
+        with patch.object(vm, "start", return_value={}) as start:
+            slot.step(dict(config, ci_enabled=True), inventory=[], refresh=False, cooling=False)
+        start.assert_called_once()
+
+    def test_pr_toolchain_dependent_helpers_cannot_cool_shared_staging_capacity(self):
+        for name in ("Prepare trusted read-only Lean watchdog", "Build the trusted environment-lint driver"):
+            job = dict(conclusion="failure", steps=[dict(name=name, conclusion="failure")])
+            self.assertFalse(ci.classify(job, kind="pr", host_health="healthy")["cooldown"])
+
     def test_disabled_slot_cancels_an_unlaunched_intent_without_creating_a_runner(self):
         config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL, ci_max_jobs=1)
         path = vm.slot_file({"ci_slot": 1}, "ci-registration.json")

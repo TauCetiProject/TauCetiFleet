@@ -542,6 +542,7 @@ class CISlot:
         self.client = None
         self.buffer = b""
         self.next_vm = 0
+        self.next_cleanup = 0
 
     def close(self):
         if self.client:
@@ -555,8 +556,8 @@ class CISlot:
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
         if not config["ci_enabled"] and not value:
-            if time.time() >= self.next_vm:
-                self.next_vm = time.time() + 300
+            if time.time() >= self.next_cleanup:
+                self.next_cleanup = time.time() + 300
                 vm.cancel_registration(config)
             return {}
         if value:

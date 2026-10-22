@@ -53,7 +53,7 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
     if kind == "pr":
         trusted = ("Set up job", "Set up runner", "Complete job", "Raise vm.",
                    "Checkout workflow-pinned trusted build tooling", "Prepare pinned shared tools",
-                   "Install ", "Prepare trusted read-only Lean watchdog", "Build the trusted environment-lint driver")
+                   "Install ")
         failed_host_steps = [s for s in steps if s.get("conclusion") in ("failure", "timed_out", "startup_failure")
                              and s.get("name", "").startswith(trusted)]
         if job.get("conclusion") == "startup_failure":
