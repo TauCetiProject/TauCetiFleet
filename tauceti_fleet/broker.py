@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, host_config, read, state_dir
+from .store import FleetError, atomic, config_dir, host_config, locked, read, state_dir
 
 DEFAULT_URL = "https://fleet.taucetiproject.org"
 
@@ -82,6 +82,11 @@ def invitation(token_file=None, *, target="local"):
 
 def enroll(url=DEFAULT_URL, *, token_file=None, code=None):
     """Redeem on the machine being enrolled; called over the host stdin RPC."""
+    with locked(config_dir() / "enrollment.lock"):
+        return _enroll(url, token_file=token_file, code=code)
+
+
+def _enroll(url, *, token_file, code):
     from . import host
 
     url = validate_url(url)
@@ -105,12 +110,7 @@ def enroll(url=DEFAULT_URL, *, token_file=None, code=None):
                      data=dict(machine_id=config["machine_id"], host_token=saved["host_token"]))
     if result.get("machine_id") != config["machine_id"] or result.get("runner_group_id") != 3:
         raise FleetError("CI broker returned an unexpected host identity or runner group")
-    credential = config_dir() / "secrets" / "ci_broker_token_file"
     # CI enrollment is independent of the host's worker identity/profile.
     status = host.configure(dict(ci_allowed=True, ci_broker_url=url,
                                  credentials={"ci_broker_token_file": saved["host_token"]}, runner_group_id=3))
-    profiles_path = config_dir() / "profiles.json"
-    profiles = read(profiles_path, {})
-    profiles["ci-enrolled"] = dict(ci_broker_url=url, ci_broker_token_file=str(credential), runner_group_id=3)
-    atomic(profiles_path, profiles)
     return dict(installed=status, doctor=host.doctor())

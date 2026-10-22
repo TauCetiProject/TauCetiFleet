@@ -60,6 +60,10 @@ stays there. The laptop remembers the server's identity and SSH alias so subsequ
 the same server. `--token-file` is read on the machine running the command.
 Subsequent commands check the remembered machine identity before acting, so
 repointing an SSH alias does not silently activate a different server.
+For an intentional replacement, revoke the old machine's broker credential first
+and use `enroll HOST --replace-machine` with a fresh invitation. This explicitly
+replaces the alias's inventory entry. Machine-bound CI credentials cannot be
+copied through `add --profile`.
 
 The host still needs Python 3.11+, uv, git, systemd user services with cgroup v2
 resource controls, KVM access, sufficient disk/RAM/CPU, and the QEMU/cloud-init

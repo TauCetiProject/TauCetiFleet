@@ -22,6 +22,7 @@ def parser():
     enroll.add_argument("target", help="SSH alias, user@host, or local; the credential stays on this machine")
     enroll.add_argument("--broker", default=broker.DEFAULT_URL)
     enroll.add_argument("--token-file", help="read the one-time enrollment code from a file instead of prompting")
+    enroll.add_argument("--replace-machine", action="store_true", help="explicitly enroll a replacement machine at a remembered SSH alias")
     for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
         cmd.add_argument("host", nargs="?")
@@ -81,7 +82,7 @@ def main(argv=None):
             host.run_workers()
             return 0
         if args.command in ("add", "enroll"):
-            value = remote.enroll(args.target, url=args.broker, token_file=args.token_file) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
+            value = remote.enroll(args.target, url=args.broker, token_file=args.token_file, replace_machine=args.replace_machine) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
             print("Installed " + value["host"] + "; existing workload activation and budget settings were preserved.")
             print_doctor(value["doctor"])
             print(
@@ -132,7 +133,7 @@ def main(argv=None):
                 remote.call(entry["target"], dict(action="prepare_update"), expected_machine_id=entry["machine_id"])
                 results[name] = remote.add(
                     entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
-                    preserve_profile=entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
+                    preserve_profile=status.get("ci_enrolled", False) or status["profile"] == "ci-enrolled" or entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
                     expected_machine_id=entry["machine_id"],
                 )
                 continue

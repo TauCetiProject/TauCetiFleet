@@ -41,11 +41,8 @@ class Enrollment(unittest.TestCase):
                 broker.enroll()
             broker.enroll()
             self.assertEqual(observed[0], observed[1])
-        with patch.object(remote, "run", side_effect=AssertionError("No gh login should be needed")):
-            profile = remote.profile("ci-enrolled")
-        self.assertEqual(set(profile["credentials"]), {"ci_broker_token_file"})
-        self.assertNotIn("github_account", profile)
-        path = Path(store.read(store.config_dir() / "profiles.json")["ci-enrolled"]["ci_broker_token_file"])
+        self.assertFalse((store.config_dir() / "profiles.json").exists())
+        path = Path(store.host_config()["ci_broker_token_file"])
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.read_text().strip(), observed[0])
         self.assertEqual(store.host_config()["ci_broker_token_file"], str(path))
@@ -71,7 +68,7 @@ class Enrollment(unittest.TestCase):
             redemptions.append(kwargs["data"])
             return dict(machine_id=config["machine_id"], runner_group_id=3)
 
-        def server_call(target, payload):
+        def server_call(target, payload, **kwargs):
             self.assertEqual(target, "chris")
             with patch.dict(os.environ, server_env), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
                 return host.rpc(payload)
@@ -97,11 +94,31 @@ class Enrollment(unittest.TestCase):
         status = dict(machine_id="a" * 32, profile="science", ci_enrolled=True,
                       ci_enabled=False, workers_enabled=False, ci_allowed=True, status={})
         remote.remember("chris", status, profile_name="science")
-        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}, status, {}]) as call, patch("sys.stdout", new=io.StringIO()):
+        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}, status, status, {}]) as call, patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(cli.main(["update", "chris", "--json"]), 0)
-        self.assertEqual(call.call_args_list[2].args, ("chris", {"action": "configure"}))
-        self.assertEqual(call.call_args_list[2].kwargs["expected_machine_id"], status["machine_id"])
+        self.assertEqual(call.call_args_list[3].args, ("chris", {"action": "configure"}))
+        self.assertEqual(call.call_args_list[3].kwargs["expected_machine_id"], status["machine_id"])
         self.assertEqual(remote.resolve("chris")["profile"], "science")
+
+    def test_legacy_host_identity_is_verified_by_the_caller_before_mutation_or_reenrollment(self):
+        entry = dict(machine_id="a" * 32, profile="science", target="chris", aliases=["chris"])
+        store.atomic(store.config_dir() / "inventory.json", {"chris": entry})
+        # Old _host code ignores expected_machine_id; its status still identifies it.
+        legacy = subprocess.CompletedProcess([], 0, stdout=json.dumps(dict(ok=True, result=dict(machine_id="b" * 32))))
+        with patch.object(remote, "ssh", return_value=legacy) as ssh, patch.object(remote, "deploy", side_effect=AssertionError("Must reject before deploying")), patch.object(broker, "invitation", side_effect=AssertionError("Must reject before reading code")):
+            for action in ("enable", "configure", "prepare_update", "drain"):
+                with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                    remote.call("chris", dict(action=action), expected_machine_id=entry["machine_id"])
+            with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                remote.enroll("chris", url=broker.DEFAULT_URL)
+        self.assertTrue(all(json.loads(call.kwargs["input"])["action"] == "status" for call in ssh.call_args_list))
+        self.assertEqual(remote.resolve("chris")["machine_id"], entry["machine_id"])
+
+    def test_legacy_enrollment_profiles_cannot_export_a_machine_bound_credential(self):
+        store.atomic(store.config_dir() / "profiles.json", {"ci-enrolled": dict(ci_broker_url=broker.DEFAULT_URL,
+                     ci_broker_token_file="/private/server-credential")})
+        with self.assertRaisesRegex(store.FleetError, "Machine-bound"):
+            remote.profile("ci-enrolled")
 
     def test_enrollment_requires_an_explicit_machine(self):
         with patch("sys.stderr", new=io.StringIO()):
