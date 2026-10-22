@@ -171,6 +171,41 @@ def prepare(config=None):
     return dict(worker=executable("tauceti"), image=manifest, smoke=vm.smoke(config) if manifest else None)
 
 
+def worker_memory_limits(config, caps, pinned=0):
+    """Borrow presently spare RAM; retain a fixed host/swap emergency bound.
+
+    The hard bound reserves the full CI shape. The soft bound tracks actual
+    headroom without subtracting unused CI RAM again. As CI or other host
+    processes grow, MemAvailable falls and the existing controller lowers high.
+    Only high moves during work: lowering max could kill an active paid round.
+    """
+    reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+    ci = capacity.jobs(config) * (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
+    maximum = max(16 * 1024**2, caps["memory_total"] - ci - reserve - GIB)
+    # MemAvailable already includes reclaimable worker cache. Add only pinned
+    # memory, and don't force pointless reclaim below that plus a small cushion.
+    high = min(int(maximum * 0.95), max(pinned + GIB, pinned + caps["memory_available"] - reserve))
+    return high, maximum
+
+
+def refresh_worker_memory(config, caps, memory):
+    """Adjust the running slice without restarting work or blocking on reclaim."""
+    cg = Path(memory["cgroup"])
+    high, _ = worker_memory_limits(config, caps, memory["pinned"])
+    maximum = memory["maximum"]
+    high = min(high, int(maximum * 0.95))
+    # Ignore sub-256 MiB movement. Opening nonblocking prevents synchronous
+    # reclaim from stalling this controller and expiring worker admission leases.
+    current = int((cg / "memory.high").read_text())
+    if high < current or high - current >= 256 * 1024**2:
+        fd = os.open(cg / "memory.high", os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, str(high).encode())
+        finally:
+            os.close(fd)
+    memory["high"] = int((cg / "memory.high").read_text())
+
+
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     ci = capacity.jobs(config) * (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
@@ -186,15 +221,10 @@ def write_slices(config, caps):
         except ValueError:
             return 0
 
-    current_ci, current_workers = current("ci"), current("workers")
-    outstanding_ci = max(0, ci - current_ci)
-    worker = (
-        min(
-            caps["memory_total"] - ci - reserve,
-            caps["memory_available"] - outstanding_ci - reserve + current_workers,
-        )
-        - GIB
-    )  # Keep a bounded 1 GiB swap allowance inside the worker reservation.
+    current_workers = current("workers")
+    # Avoid reclaiming below existing paid work during enable; the controller's
+    # first refresh replaces this conservative charge with actual pinned RAM.
+    high, worker = worker_memory_limits(config, caps, current_workers)
     live_workers = any(w.get("alive") for w in worker_statuses())
     if live_workers:
         previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
@@ -211,7 +241,7 @@ def write_slices(config, caps):
     worker = max(16 * 1024**2, worker)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
-            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
+            f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum if name == 'ci' else high)}\nMemoryMax={int(maximum)}\n"
             + (f"MemorySwapMax={GIB}\n" if name == "workers" else "")
             + "TasksMax=16384\n"
         )
@@ -683,7 +713,14 @@ def daemon():
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
                 if lease_expired:
                     maximum = 0
-                memory = worker_memory() if config["workers_enabled"] else None
+                memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
+                if memory:
+                    try:
+                        refresh_worker_memory(config, caps, memory)
+                    except (OSError, ValueError) as exc:
+                        # Retain the last applied limit and admissions on a transient
+                        # tuning error; status keeps the operation and failure visible.
+                        memory["allocation_error"] = f"worker memory.high refresh failed: {exc}"
                 pressure = memory_pressure(memory, caps, recovering=memory_paused) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (

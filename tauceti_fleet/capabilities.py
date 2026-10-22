@@ -22,6 +22,7 @@ def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
         - stats["file_dirty"]
         - stats["file_writeback"],
     )
+    clean_file = max(0, stats["file"] - stats.get("shmem", 0) - stats["file_dirty"] - stats["file_writeback"])
     return dict(
         charged=current,
         high=high,
@@ -30,6 +31,7 @@ def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
         file=stats["file"],
         kernel=stats["kernel"],
         cold_clean=cold_clean,
+        pinned=max(0, current - clean_file),
         working_set=max(0, current - cold_clean) + swap,
         swap=swap,
         dirty=stats["file_dirty"],
@@ -71,22 +73,24 @@ def worker_memory():
     for line in (cg / "memory.pressure").read_text().splitlines():
         name, *values = line.split()
         pressure[name] = float(dict(x.split("=", 1) for x in values)["avg60"])
-    return memory_accounting(
+    memory = memory_accounting(
         int(fields["MemoryCurrent"]),
-        int(fields["MemoryHigh"]),
-        int(fields["MemoryMax"]),
+        int((cg / "memory.high").read_text()),
+        int((cg / "memory.max").read_text()),
         counters("memory.stat"),
         pressure,
         counters("memory.events"),
         int((cg / "memory.swap.current").read_text()),
     )
+    memory["cgroup"] = str(cg)
+    return memory
 
 
 def memory_pressure(memory, caps, *, recovering=False):
     reasons = []
     if caps["memory_available"] < max(4 * GIB, int(caps["memory_total"] * 0.1)):
         reasons.append("host memory headroom low")
-    if memory["working_set"] >= memory["maximum"] * (0.85 if recovering else 0.90):
+    if (memory.get("pinned", memory["working_set"]) + memory.get("swap", 0)) >= memory["maximum"] * (0.85 if recovering else 0.90):
         reasons.append("worker working set near hard memory limit")
     # Reclaim PSI includes throttling against MemoryHigh and is not evidence of
     # host exhaustion. Let the kernel reclaim cache without pausing API work.

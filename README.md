@@ -176,7 +176,10 @@ under representative load; scheduling weights alone do not guarantee a runtime.
 
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
-are informational. Worker MemoryHigh is 95% of the hard limit; MemoryMax still
+are informational. The controller refreshes worker MemoryHigh from current host headroom every five seconds,
+without double-counting reclaimable artifact cache or dropping below pinned memory
+plus a 1 GiB cushion (subject to the hard ceiling). Raising it allows workers to
+recover when CI releases RAM. MemoryMax is independent of startup availability and still
 reserves CI's full configured memory plus 2 GiB overhead and at least 10% of host
 RAM (minimum 4 GiB) for the OS. A 1 GiB swap cap is included within the worker
 reservation, deducted from its resident RAM limit; swapped bytes also count in

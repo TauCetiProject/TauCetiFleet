@@ -39,7 +39,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_actual_working_set_near_hard_limit_still_pauses(self):
         memory = self.measured()
-        memory["working_set"] = 45 * GIB
+        memory["pinned"] = 45 * GIB
         self.assertEqual(
             memory_pressure(memory, dict(memory_available=80 * GIB, memory_total=125 * GIB)),
             ["worker working set near hard memory limit"],
@@ -53,10 +53,10 @@ class MemoryTests(unittest.TestCase):
     def test_real_memory_pressure_has_hysteresis_without_stall_gating(self):
         memory = self.measured()
         caps = dict(memory_available=80 * GIB, memory_total=125 * GIB)
-        memory["working_set"] = 41 * GIB  # Between resume and pause thresholds.
+        memory["pinned"] = 41 * GIB  # Between resume and pause thresholds.
         self.assertEqual(memory_pressure(memory, caps), [])
         self.assertEqual(memory_pressure(memory, caps, recovering=True), ["worker working set near hard memory limit"])
-        memory["working_set"] = 39 * GIB
+        memory["pinned"] = 39 * GIB
         self.assertEqual(memory_pressure(memory, caps, recovering=True), [])
 
     def test_swapped_memory_is_counted_in_working_set(self):
@@ -67,3 +67,9 @@ class MemoryTests(unittest.TestCase):
         swapped = memory_accounting(37 * GIB, 44 * GIB, 47 * GIB, stats, dict(some=0, full=0), dict(oom_kill=0), GIB)
         self.assertEqual(swapped["working_set"], original["working_set"] + GIB)
         self.assertEqual(swapped["swap"], GIB)
+
+    def test_active_clean_artifacts_do_not_exhaust_admission_budget(self):
+        memory = self.measured(inactive_file=0)
+        memory["maximum"] = 38 * GIB
+        self.assertEqual(memory["pinned"], 5 * GIB)
+        self.assertEqual(memory_pressure(memory, dict(memory_available=40 * GIB, memory_total=125 * GIB)), [])
