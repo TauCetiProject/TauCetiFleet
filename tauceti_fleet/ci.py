@@ -13,10 +13,6 @@ from .report import timestamp
 BUILD = "Build exact candidate under bwrap with workflow-pinned audits, offline"
 REPORT = "Report build and bump-guard statuses to the PR head commit"
 BORS_ID = 337246530
-ACTIONS_ID = 41898282
-# The main-defined workflow can write statuses with its built-in token or the
-# separately scoped Bors CI-status App. Never accept arbitrary App/bot writers.
-STATUS_WRITERS = frozenset((ACTIONS_ID, BORS_ID))
 QUOTA = "GitHub API quota unavailable"
 # Exact names from main's trusted workflow: never exempt arbitrary setup failures
 # just because an unrelated API request also exhausted its quota.
@@ -134,14 +130,12 @@ def classify(job, *, run=None, statuses=None, host_health=None):
         for s in steps
     ):
         return result(True, "cancellation_steps_incomplete")
-    for name in ("Set up job", "Checkout workflow-pinned trusted build tooling", "Complete job"):
-        if by_name.get(name, {}).get("conclusion") != "success":
-            return result(True, "cancellation_runner_completion_missing")
-    build = by_name.get(BUILD, {})
-    if build.get("conclusion") != "cancelled":
-        return result(True, "cancellation_not_build_interrupt")
-    if any(s.get("conclusion") == "cancelled" and s.get("name") != BUILD for s in steps):
-        return result(True, "cancellation_additional_step_cancelled")
+    # A clean QEMU exit alone does not prove that the guest runner survived.
+    if by_name.get("Complete job", {}).get("conclusion") != "success":
+        return result(True, "cancellation_runner_completion_missing")
+    # Bors can cancel during setup, cache restoration, building or finalizers;
+    # runner completion and the host receipt establish health independently
+    # of which workflow step happened to receive the cancellation.
     # Read newest-first status history from GitHub, not candidate logs/artifacts.
     bors = next((s for s in statuses if s.get("context") == "bors" and s.get("creator", {}).get("id") == BORS_ID), {})
     if (
@@ -153,39 +147,19 @@ def classify(job, *, run=None, statuses=None, host_health=None):
     try:
         requested = timestamp(bors.get("created_at"))
         if not (
-            timestamp(build.get("started_at"))
-            <= requested
-            <= timestamp(build.get("completed_at"))
-            <= timestamp(job.get("completed_at"))
+            timestamp(run.get("created_at")) <= requested <= timestamp(job.get("completed_at"))
         ):
             return result(True, "cancellation_status_time_mismatch")
         for step in steps:
             if step.get("conclusion") != "failure":
                 continue
-            # This trusted reporting step deliberately exits 1 for a cancelled
-            # build. Require BOTH successful API status writes to exclude its
-            # network/publication fault path; no other failed step is exempt.
+            # This finalizer deliberately exits 1 for cancellation, including
+            # before build/guard outputs exist. Its status writes do not prove
+            # host health: runner completion and the host receipt do. A failed
+            # GitHub publication also does not establish a machine fault.
+            # Actual infrastructure failures and host faults were handled above.
             if step.get("name") != REPORT or timestamp(step.get("started_at")) < requested:
                 return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
-            for context in ("scope", "bump-guard"):
-                status = next(
-                    (
-                        s
-                        for s in statuses
-                        if s.get("context") == context and s.get("creator", {}).get("id") in STATUS_WRITERS
-                    ),
-                    {},
-                )
-                if (
-                    status.get("state") != "success"
-                    or status.get("target_url") != f"https://github.com/TauCetiProject/TauCeti/actions/runs/{run['id']}"
-                    or not (
-                        timestamp(step.get("started_at"))
-                        <= timestamp(status.get("created_at"))
-                        <= timestamp(step.get("completed_at"))
-                    )
-                ):
-                    return result(True, "cancellation_report_evidence_missing")
     except (ValueError, TypeError, OverflowError):
         return result(True, "cancellation_timestamps_invalid")
     return result(
