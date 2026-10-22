@@ -125,6 +125,7 @@ def configure(payload):
         profile=value["profile"],
         ci_allowed=value["ci_allowed"],
         ci_enabled=value["ci_enabled"],
+        ci_enrolled=bool(value.get("ci_broker_url")),
         workers_enabled=value["workers_enabled"],
         service_error=service_error,
     )
@@ -709,6 +710,9 @@ def budget(payload):
 def rpc(payload):
     if not isinstance(payload, dict):
         raise FleetError("Host request must be a JSON object")
+    expected = payload.get("expected_machine_id")
+    if expected is not None and expected != host_config()["machine_id"]:
+        raise FleetError("Host identity differs from inventory; verify the SSH target before re-enrolling")
     action = payload.get("action")
     if action == "configure":
         return configure(payload)
@@ -754,6 +758,7 @@ def rpc(payload):
             profile=config["profile"],
             ci_allowed=config["ci_allowed"],
             ci_enabled=config["ci_enabled"],
+            ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
             status=read(state_dir() / "status.json", {}),

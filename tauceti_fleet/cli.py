@@ -111,7 +111,7 @@ def main(argv=None):
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "update":
-                status = remote.call(entry["target"], dict(action="status"))
+                status = remote.call(entry["target"], dict(action="status"), expected_machine_id=entry["machine_id"])
                 if status["ci_enabled"] or status["workers_enabled"]:
                     raise FleetError("Drain this host before updating its installed software")
                 waiting = {
@@ -129,10 +129,11 @@ def main(argv=None):
                     raise FleetError(
                         "Host is draining active work; wait for its round/CI build to finish before update"
                     )
-                remote.call(entry["target"], dict(action="prepare_update"))
+                remote.call(entry["target"], dict(action="prepare_update"), expected_machine_id=entry["machine_id"])
                 results[name] = remote.add(
                     entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
-                    preserve_profile=entry["profile"] == "ci-enrolled",
+                    preserve_profile=entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
+                    expected_machine_id=entry["machine_id"],
                 )
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
@@ -141,6 +142,7 @@ def main(argv=None):
                     entry["target"],
                     payload,
                     timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
                 if args.command == "status":

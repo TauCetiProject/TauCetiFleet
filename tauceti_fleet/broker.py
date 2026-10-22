@@ -106,7 +106,8 @@ def enroll(url=DEFAULT_URL, *, token_file=None, code=None):
     if result.get("machine_id") != config["machine_id"] or result.get("runner_group_id") != 3:
         raise FleetError("CI broker returned an unexpected host identity or runner group")
     credential = config_dir() / "secrets" / "ci_broker_token_file"
-    status = host.configure(dict(profile="ci-enrolled", ci_allowed=True, ci_broker_url=url,
+    # CI enrollment is independent of the host's worker identity/profile.
+    status = host.configure(dict(ci_allowed=True, ci_broker_url=url,
                                  credentials={"ci_broker_token_file": saved["host_token"]}, runner_group_id=3))
     profiles_path = config_dir() / "profiles.json"
     profiles = read(profiles_path, {})

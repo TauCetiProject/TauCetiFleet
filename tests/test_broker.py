@@ -50,6 +50,15 @@ class Enrollment(unittest.TestCase):
         self.assertEqual(path.read_text().strip(), observed[0])
         self.assertEqual(store.host_config()["ci_broker_token_file"], str(path))
 
+    def test_ci_enrollment_preserves_an_existing_worker_profile_and_identity(self):
+        prior = store.update_host(profile="science", github_account="worker-science", max_open_prs=128)
+        with patch.object(broker, "request", return_value=dict(machine_id=prior["machine_id"], runner_group_id=3)), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+            result = broker.enroll(code="i" * 64)
+        config = store.host_config()
+        for key in ("profile", "github_account", "max_open_prs"):
+            self.assertEqual(config[key], prior[key])
+        self.assertTrue(result["installed"]["ci_enrolled"])
+
     def test_remote_enrollment_creates_identity_and_credential_on_the_selected_server(self):
         operator_id = store.host_config()["machine_id"]
         server = self.root / "server"
@@ -74,6 +83,7 @@ class Enrollment(unittest.TestCase):
         self.assertNotEqual(server_id, operator_id)
         self.assertEqual(redemptions[0]["machine_id"], server_id)
         self.assertEqual(remote.resolve("chris")["machine_id"], server_id)
+        self.assertTrue(remote.resolve("chris")["ci_enrolled"])
         self.assertEqual(remote.resolve(server_id)["target"], "chris")
         self.assertFalse((store.config_dir() / "enrollment.json").exists())
         self.assertFalse((store.config_dir() / "profiles.json").exists())
@@ -84,11 +94,14 @@ class Enrollment(unittest.TestCase):
             self.assertEqual(Path(config["ci_broker_token_file"]).read_text().strip(), redemptions[0]["host_token"])
 
     def test_enrolled_ssh_host_updates_preserve_server_credentials_without_local_profile(self):
-        status = dict(machine_id="a" * 32, profile="ci-enrolled")
-        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}]) as call:
-            remote.add("chris", profile_name="ci-enrolled", preserve_profile=True)
-        self.assertEqual(call.call_args_list[0].args, ("chris", {"action": "configure"}))
-        self.assertEqual(remote.resolve("chris")["profile"], "ci-enrolled")
+        status = dict(machine_id="a" * 32, profile="science", ci_enrolled=True,
+                      ci_enabled=False, workers_enabled=False, ci_allowed=True, status={})
+        remote.remember("chris", status, profile_name="science")
+        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}, status, {}]) as call, patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cli.main(["update", "chris", "--json"]), 0)
+        self.assertEqual(call.call_args_list[2].args, ("chris", {"action": "configure"}))
+        self.assertEqual(call.call_args_list[2].kwargs["expected_machine_id"], status["machine_id"])
+        self.assertEqual(remote.resolve("chris")["profile"], "science")
 
     def test_enrollment_requires_an_explicit_machine(self):
         with patch("sys.stderr", new=io.StringIO()):
@@ -98,6 +111,15 @@ class Enrollment(unittest.TestCase):
         with patch.object(remote, "deploy", side_effect=AssertionError("Reject before deployment")):
             with self.assertRaises(store.FleetError):
                 remote.enroll("-oProxyCommand=bad", url=broker.DEFAULT_URL)
+
+    def test_remembered_machine_identity_is_checked_before_configuration_or_activation(self):
+        original = store.host_config()
+        with patch.object(host, "configure", side_effect=AssertionError("Reject before mutation")), patch.object(host, "enable", side_effect=AssertionError("Reject before activation")):
+            for action in ("configure", "enable"):
+                with self.assertRaisesRegex(store.FleetError, "identity differs"):
+                    remote.call("local", dict(action=action, ci=True), expected_machine_id="wrong-machine")
+        status = remote.call("local", dict(action="status"), expected_machine_id=original["machine_id"])
+        self.assertEqual(status["machine_id"], original["machine_id"])
 
     def test_active_hosts_cannot_enroll(self):
         store.update_host(ci_enabled=True)

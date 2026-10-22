@@ -28,7 +28,9 @@ def ssh(target, remote_command, *, input=None, timeout=60):
     )
 
 
-def call(target, payload, *, timeout=90):
+def call(target, payload, *, timeout=90, expected_machine_id=None):
+    if expected_machine_id is not None:
+        payload = dict(payload, expected_machine_id=expected_machine_id)
     if target == "local":
         from .host import rpc
 
@@ -150,7 +152,7 @@ def resolve(name):
     for entry in entries.values():
         if name in (entry["target"], entry["machine_id"]) or name in entry.get("aliases", []):
             return entry
-    raise FleetError(f"Unknown fleet host {name!r}; use add first")
+    raise FleetError(f"Unknown fleet host {name!r}; use add or enroll first")
 
 
 def deploy(target):
@@ -173,21 +175,22 @@ def remember(target, status, *, profile_name):
         matching = next((k for k, v in entries.items() if v["machine_id"] == status["machine_id"]), name)
         prior = entries.get(matching, {})
         aliases = sorted(set(prior.get("aliases", []) + [target, name]))
-        entries[matching] = dict(target=target, machine_id=status["machine_id"], aliases=aliases, profile=profile_name)
+        entries[matching] = dict(target=target, machine_id=status["machine_id"], aliases=aliases,
+                                 profile=profile_name, ci_enrolled=bool(status.get("ci_enrolled")))
         atomic(path, entries)
     return matching
 
 
-def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=False):
+def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=False, expected_machine_id=None):
     deploy(target)
     # Enrolled hosts generate their credential on the server. Updating the
     # release must not require (or copy) that credential onto the SSH client.
     payload = dict(action="configure") if preserve_profile else dict(
         action="configure", profile=profile_name, ci_allowed=not no_ci, **profile(profile_name)
     )
-    status = call(target, payload)
+    status = call(target, payload, expected_machine_id=expected_machine_id)
     matching = remember(target, status, profile_name=status["profile"])
-    readiness = call(target, dict(action="doctor"))
+    readiness = call(target, dict(action="doctor"), expected_machine_id=status["machine_id"])
     return dict(host=matching, installed=status, doctor=readiness)
 
 
@@ -202,5 +205,5 @@ def enroll(target, *, url, token_file=None):
     # Only the invitation crosses SSH stdin. The long-lived credential is
     # created and retained by the selected machine, and never returned here.
     value = call(target, dict(action="enroll", broker=url, invitation=invitation))
-    value["host"] = remember(target, value["installed"], profile_name="ci-enrolled")
+    value["host"] = remember(target, value["installed"], profile_name=value["installed"]["profile"])
     return value

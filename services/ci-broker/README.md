@@ -58,6 +58,8 @@ machine identity and permanent credential are generated there; the credential
 stays there. The laptop remembers the server's identity and SSH alias so subsequent
 `prepare chris`, `doctor chris`, `enable chris --ci`, and `status chris` operate on
 the same server. `--token-file` is read on the machine running the command.
+Subsequent commands check the remembered machine identity before acting, so
+repointing an SSH alias does not silently activate a different server.
 
 The host still needs Python 3.11+, uv, git, systemd user services with cgroup v2
 resource controls, KVM access, sufficient disk/RAM/CPU, and the QEMU/cloud-init
@@ -67,6 +69,8 @@ readiness failures do not block CI. Enable lingering for logout/boot persistence
 Enrollment generates and persists the host's credential before redeeming the
 invitation, so retrying a lost response does not create a second identity. It
 does not enable CI, enable workers, grant a budget, or authenticate any AI agent.
+It preserves an existing worker profile and identity. Software updates retain
+the enrolled server's credentials without copying the operator machine's profile.
 `prepare` currently installs the worker package alongside the CI image, but does
 not run workers. Existing hosts must drain before enrollment or reconfiguration.
 
