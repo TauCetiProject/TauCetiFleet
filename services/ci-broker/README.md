@@ -60,7 +60,7 @@ run `tauceti-fleet enroll chris`, where `chris` is an existing SSH hostname or a
 Fleet installs its release over SSH and redeems the code on that server. Its
 machine identity and permanent credential are generated there; the credential
 stays there. The laptop remembers the server's identity and SSH alias so subsequent
-`prepare chris`, `doctor chris`, `enable chris --ci`, and `status chris` operate on
+`prepare chris`, `doctor chris`, `enable chris --ci both`, and `status chris` operate on
 the same server. `--token-file` is read on the machine running the command.
 Subsequent commands check the remembered machine identity before acting, so
 repointing an SSH alias does not silently activate a different server.

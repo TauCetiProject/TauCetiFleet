@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, host_config, locked, read, state_dir
+from .store import FleetError, atomic, config_dir, host_config, locked, read
 
 DEFAULT_URL = "https://fleet.taucetiproject.org"
 
