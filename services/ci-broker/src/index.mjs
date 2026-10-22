@@ -34,7 +34,18 @@ export function manifest(origin) {
 }
 
 export class FleetRegistry extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); }
+  constructor(ctx, env) { super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map(); }
+  admit(id) {
+    const now=Date.now();
+    const bucket=this.buckets.get(id) || {tokens:12,at:now};
+    bucket.tokens=Math.min(12,bucket.tokens+Math.max(0,now-bucket.at)/10000);
+    bucket.at=now;
+    const allowed=bucket.tokens>=1;
+    if (allowed) bucket.tokens--;
+    this.buckets.delete(id); this.buckets.set(id,bucket);
+    if (this.buckets.size>2000) this.buckets.delete(this.buckets.keys().next().value);
+    return allowed;
+  }
   fetch(req) {
     // Serialize the whole decision, including GitHub awaits, so concurrent host
     // requests cannot register twice or overwrite an administrator's revocation.
@@ -122,15 +133,31 @@ export class FleetRegistry extends DurableObject {
       if (revoke && req.method==='DELETE') {
         const host=await this.ctx.storage.get('host:'+revoke[1]);
         if (!host) return json({error:'not found'},404);
-        await this.ctx.storage.put('host:'+revoke[1],{...host,revoked:true});
-        return json({revoked:true});
+        host.revoked=true; delete host.jit;
+        await this.ctx.storage.put('host:'+revoke[1],host);
+        let busy=false,cleanupPending=false;
+        if (host.runner_id) {
+          try {
+            const runner=await this.github.request(`orgs/${ORG}/actions/runners/${host.runner_id}`,{kind:'runners'});
+            busy=!!runner.busy;
+            if (!busy) {
+              await this.github.request(`orgs/${ORG}/actions/runners/${host.runner_id}`,{kind:'runners',method:'DELETE'});
+              delete host.runner_id;
+            }
+          } catch (e) {
+            if (e instanceof UpstreamError && e.status===404) delete host.runner_id;
+            else cleanupPending=true;
+          }
+          await this.ctx.storage.put('host:'+revoke[1],host);
+        }
+        return json({revoked:true,runner_busy:busy,cleanup_pending:cleanupPending});
       }
       const reconcile=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/reconcile$/);
       if (reconcile && req.method==='POST') {
         const host=await this.ctx.storage.get('host:'+reconcile[1]);
         if (!host?.pending) return json({error:'no pending registration'},409);
         if (Date.now()-host.pending.at<120000) return json({error:'wait two minutes before reconciling a registration'},409);
-        await this.github.policy();
+        await this.github.policy({fresh:true});
         const matches=[]; let complete=false;
         for (let page=1;page<=20;page++) {
           const data=await this.github.request(`orgs/${ORG}/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
@@ -154,6 +181,8 @@ export class FleetRegistry extends DurableObject {
       if (!/^[a-f0-9]{32}$/.test(input.machine_id || '') || !/^[A-Za-z0-9_-]{43,128}$/.test(input.host_token || ''))
         return json({error:'invalid host identity'},400);
       const token=(req.headers.get('Authorization') || '').replace(/^Bearer /,'');
+      if (!/^Bearer [A-Za-z0-9_-]{43,128}$/.test(req.headers.get('Authorization') || ''))
+        return json({error:'invalid enrollment code'},401);
       const inviteHash=await digest(token);
       const key='invite:'+inviteHash;
       const invite=await this.ctx.storage.get(key);
@@ -176,6 +205,7 @@ export class FleetRegistry extends DurableObject {
       const token=(req.headers.get('Authorization') || '').replace(/^Bearer /,'');
       const host=/^[a-f0-9]{32}$/.test(id)?await this.ctx.storage.get('host:'+id):null;
       if (!host || host.revoked || host.hash!==await digest(token)) return json({error:'unauthorized'},401);
+      if (!this.admit(id)) return json({error:'host request limit reached; retry after ten seconds'},429);
       const save=()=>this.ctx.storage.put('host:'+id,host);
       if (url.pathname==='/v1/policy' && req.method==='GET') return json(await this.github.policy());
       if (url.pathname==='/v1/runners' && req.method==='GET') {
@@ -198,13 +228,23 @@ export class FleetRegistry extends DurableObject {
           if (host.runner_name===input.name && host.jit) return json({runner_id:host.runner_id,encoded_jit_config:host.jit});
           return json({error:'host already has registered capacity'},409);
         }
-        await this.github.policy();
+        await this.github.policy({fresh:true});
         // Reserve before the non-idempotent GitHub POST. An ambiguous result fails
         // closed instead of silently creating extra runners on a retry.
         host.pending={name:input.name,at:Date.now()};
         await save();
-        const value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
-          data:{name:input.name,runner_group_id:3,labels:['self-hosted','linux','x64','tauceti-fleet','fleet-'+id],work_folder:'_work'}});
+        let value;
+        try {
+          value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
+            data:{name:input.name,runner_group_id:3,labels:['self-hosted','linux','x64','tauceti-fleet','fleet-'+id],work_folder:'_work'}});
+        } catch (e) {
+          if (e instanceof UpstreamError && [400,401,403,404,409,422,429].includes(e.status)) {
+            // These are definite rejections, so no runner was created. Only
+            // ambiguous transport/server failures keep the reservation pinned.
+            delete host.pending; await save();
+          }
+          throw e;
+        }
         host.runner_id=value.runner.id; host.runner_name=input.name; host.jit=value.encoded_jit_config;
         host.issued=[...host.issued,value.runner.id].slice(-4096);
         delete host.pending;

@@ -5,7 +5,7 @@ const encoder=new TextEncoder();
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
 const encode=value=>b64(encoder.encode(JSON.stringify(value)));
 export class GitHub {
-  constructor(env) { this.env=env; this.tokens=new Map(); }
+  constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=null; }
   async raw(path, token, method='GET', data) {
     const response=await fetch('https://api.github.com/'+path, {method,
       headers:{Accept:'application/vnd.github+json', Authorization:'Bearer '+token,
@@ -37,13 +37,16 @@ export class GitHub {
   async request(path, {kind='read',method='GET',data}={}) {
     return this.raw(path, await this.token(kind),method,data);
   }
-  async policy() {
+  async policy({fresh=false}={}) {
+    if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
     const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
     const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
         !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new Error('Untrusted runner policy');
-    return {runner_group_id:3};
+    const value={runner_group_id:3};
+    this.cachedPolicy={expires:Date.now()+60000,value};
+    return value;
   }
 }

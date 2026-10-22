@@ -11,7 +11,7 @@ const id1='1'.repeat(32), id2='2'.repeat(32), id3='3'.repeat(32);
 const token1='a'.repeat(64), token2='b'.repeat(64), token3='c'.repeat(64);
 const runners=new Map();
 const upstream=[];
-let nextId=100,failRegistration=false;
+let nextId=100,failRegistration=false,rejectRegistration=0,trustedPolicy=true;
 const hash=value=>createHash('sha256').update(value).digest('hex');
 before(async()=>{
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
@@ -39,8 +39,9 @@ before(async()=>{
       if (url.pathname.startsWith('/orgs/')) assert.equal(req.headers.get('Authorization'),'Bearer runner-grant');
       else assert.equal(req.headers.get('Authorization'),'Bearer read-grant');
       if (url.pathname==='/orgs/TauCetiProject/actions/runner-groups/3') return respond({id:3,name:'TauCetiFleet',
-        restricted_to_workflows:true,selected_workflows:['TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main']});
+        restricted_to_workflows:trustedPolicy,selected_workflows:['TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main']});
       if (url.pathname.endsWith('/generate-jitconfig')) {
+        if (rejectRegistration) return respond({error:'rejected'},rejectRegistration);
         if (failRegistration) return respond({error:'internal error'},500);
         const input=await req.json();
         assert.equal(input.runner_group_id,3);
@@ -67,6 +68,7 @@ const adminRequest=(path,method='GET',data)=>request(path,{method,headers:{Autho
 const hostRequest=(id,token,path,method='GET',data)=>request(path,{method,
   headers:{Authorization:'Bearer '+token,'X-Fleet-Machine':id},body:data?JSON.stringify(data):undefined});
 async function enroll(id,token,invite) {
+  invite=invite.padEnd(64,'_');
   const grant=await adminRequest('/admin/invites','POST',{name:'test-'+id[0],hash:hash(invite)});
   assert.equal(grant.status,200);
   const window=await grant.json();
@@ -86,6 +88,14 @@ test('operators can choose or extend an unredeemed invitation window',async()=>{
   assert.ok(extension.expires_at>first.expires_at);
   for (const expires_in of [0,3599,31*24*3600,1.5,'604800'])
     assert.equal((await adminRequest('/admin/invites','POST',{...input,expires_in})).status,400);
+});
+test('an empty or malformed invitation cannot authorize a host even if its hash was recorded',async()=>{
+  await adminRequest('/admin/invites','POST',{name:'invalid-empty',hash:hash('')});
+  for (const Authorization of ['', 'Bearer ', 'Bearer short', 'Basic '+'a'.repeat(64)]) {
+    const response=await request('/v1/enroll',{method:'POST',headers:{Authorization},
+      body:JSON.stringify({machine_id:'e'.repeat(32),host_token:'a'.repeat(64)})});
+    assert.equal(response.status,401);
+  }
 });
 test('one-time enrollment binds a durable credential to one machine',async()=>{
   assert.equal((await hostRequest(id1,token1,'/v1/policy')).status,401);
@@ -123,6 +133,53 @@ test('retirement is owned and idempotent; revocation blocks all future host requ
   assert.equal((await hostRequest(id1,token1,'/v1/policy')).status,401);
   assert.equal((await hostRequest(id1,token1,'/v1/runners','POST',{name:'fleet-'+id1.slice(0,12)+'-'+'c'.repeat(16)})).status,401);
   assert.equal((await hostRequest(id2,token2,'/v1/policy')).status,200);
+});
+test('definite registration rejections do not pin capacity',async()=>{
+  const id='4'.repeat(32),token='d'.repeat(64);
+  await enroll(id,token,'rejected-registration');
+  const name='fleet-'+id.slice(0,12)+'-'+'d'.repeat(16);
+  rejectRegistration=422;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name})).status,503);
+  rejectRegistration=0;
+  const result=await hostRequest(id,token,'/v1/runners','POST',{name});
+  assert.equal(result.status,200);
+  const runner=await result.json();
+  assert.equal((await hostRequest(id,token,'/v1/runners/'+runner.runner_id,'DELETE')).status,200);
+});
+test('revocation removes idle registrations and lets an acquired job finish before cleanup',async()=>{
+  const id='5'.repeat(32),token='e'.repeat(64);
+  await enroll(id,token,'revocation-cleanup');
+  const result=await (await hostRequest(id,token,'/v1/runners','POST',
+    {name:'fleet-'+id.slice(0,12)+'-'+'e'.repeat(16)})).json();
+  runners.get(result.runner_id).busy=true;
+  const busy=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
+  assert.deepEqual(busy,{revoked:true,runner_busy:true,cleanup_pending:false});
+  assert.ok(runners.has(result.runner_id));
+  assert.equal((await hostRequest(id,token,'/v1/policy')).status,401);
+  runners.get(result.runner_id).busy=false;
+  const idle=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
+  assert.deepEqual(idle,{revoked:true,runner_busy:false,cleanup_pending:false});
+  assert.ok(!runners.has(result.runner_id));
+});
+test('cached readiness policy never replaces a fresh registration policy check',async()=>{
+  const id='6'.repeat(32),token='f'.repeat(64);
+  await enroll(id,token,'fresh-policy');
+  assert.equal((await hostRequest(id,token,'/v1/policy')).status,200);
+  trustedPolicy=false;
+  const name='fleet-'+id.slice(0,12)+'-'+'f'.repeat(16);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name})).status,503);
+  trustedPolicy=true;
+  const result=await (await hostRequest(id,token,'/v1/runners','POST',{name})).json();
+  assert.equal((await hostRequest(id,token,'/v1/runners/'+result.runner_id,'DELETE')).status,200);
+});
+test('one host cannot issue unlimited authenticated requests or consume another host allowance',async()=>{
+  const id='7'.repeat(32),token='g'.repeat(64);
+  await enroll(id,token,'rate-limited-host');
+  const results=[];
+  for (let i=0;i<13;i++) results.push((await hostRequest(id,token,'/v1/policy')).status);
+  assert.deepEqual(results.slice(0,12),Array(12).fill(200));
+  assert.equal(results[12],429);
+  assert.equal((await hostRequest('6'.repeat(32),'f'.repeat(64),'/v1/policy')).status,200);
 });
 test('an ambiguous registration does not create additional runners on retry',async()=>{
   await enroll(id3,token3,'invite-three');

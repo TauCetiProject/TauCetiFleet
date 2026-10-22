@@ -56,6 +56,16 @@ class Enrollment(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "Drain"):
                 broker.enroll()
 
+    def test_draining_guests_and_pending_registrations_must_retire_before_enrollment(self):
+        for filename in ("vm.json", "ci-registration.json"):
+            with self.subTest(filename=filename):
+                path = store.state_dir() / filename
+                store.atomic(path, {"instance": "a" * 16})
+                with patch.object(broker.getpass, "getpass", side_effect=AssertionError("must reject before redemption")):
+                    with self.assertRaisesRegex(store.FleetError, "retire"):
+                        broker.enroll()
+                path.unlink()
+
     def test_broker_urls_and_redirects_cannot_leak_the_host_credential(self):
         for url in ("http://fleet.example", "https://user:password@fleet.example", "https://fleet.example/path", "https://fleet.example?token=value"):
             with self.assertRaises(store.FleetError):
@@ -146,3 +156,28 @@ class Enrollment(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "response lost"):
                 vm.retire(config, value)
         self.assertEqual(store.read(store.state_dir() / "vm.json"), value)
+
+    def test_repeated_retirement_failures_queue_the_result_only_once(self):
+        config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL)
+        value = dict(instance="a" * 16, run_id=42, runner_id=7, unit="guest.service",
+                     directory=str(store.state_dir() / "vms" / ("a" * 16)))
+        store.atomic(store.state_dir() / "vm.json", value)
+        for _ in range(2):
+            value = store.read(store.state_dir() / "vm.json")
+            host.queue_ci_result(value, "healthy")
+            with patch.object(vm, "run"), patch.object(github, "retire_runner", side_effect=store.FleetError("broker unavailable")):
+                with self.assertRaises(store.FleetError):
+                    vm.retire(config, value)
+        self.assertEqual(len(store.read(store.state_dir() / "pending-ci.json")), 1)
+        # Successful result collection must not cause requeueing while retirement
+        # is still unavailable or a revoked credential keeps getting rejected.
+        store.atomic(store.state_dir() / "pending-ci.json", [])
+        self.assertFalse(host.queue_ci_result(store.read(store.state_dir() / "vm.json"), "healthy"))
+        self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
+
+    def test_interrupted_result_queueing_deduplicates_before_setting_the_vm_marker(self):
+        value = dict(instance="b" * 16, run_id=43, runner_id=8)
+        store.atomic(store.state_dir() / "pending-ci.json", [value])
+        self.assertTrue(host.queue_ci_result(value, "healthy"))
+        self.assertEqual(len(store.read(store.state_dir() / "pending-ci.json")), 1)
+        self.assertTrue(store.read(store.state_dir() / "vm.json")["result_queued"])

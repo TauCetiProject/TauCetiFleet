@@ -171,6 +171,8 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         if not 1 <= args.expires_in_days <= 30:
             raise SystemExit("Use --expires-in-days between 1 and 30")
         token = args.token_file.expanduser().read_text().strip() if args.token_file else secrets.token_urlsafe(48)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", token):
+            raise SystemExit("Enrollment codes must contain 43–128 URL-safe characters; the supplied file is invalid")
         result = api(ORIGIN + "/admin/invites", token=admin(), data={"name": args.name, "hash": hashlib.sha256(token.encode()).hexdigest(),
                      "expires_in": args.expires_in_days * 24 * 3600})
         path = args.token_file.expanduser() if args.token_file else DIRECTORY / "invitations" / (args.name + "-" + secrets.token_hex(4))
@@ -186,8 +188,10 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         if not re.fullmatch(r"[a-f0-9]{32}", args.machine_id or ""):
             raise SystemExit("Use --machine-id from the hosts command")
         if args.action == "revoke":
-            api(ORIGIN + "/admin/hosts/" + args.machine_id, token=admin(), method="DELETE")
+            result = api(ORIGIN + "/admin/hosts/" + args.machine_id, token=admin(), method="DELETE")
             print("Host credential revoked; existing acquired jobs may finish")
+            if result.get("cleanup_pending") or result.get("runner_busy"):
+                print("Run revoke again after the active job finishes or GitHub connectivity recovers to finish runner cleanup")
         else:
             result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/reconcile", token=admin(), data={})
             print(json.dumps(result))

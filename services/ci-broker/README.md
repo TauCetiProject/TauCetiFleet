@@ -70,9 +70,11 @@ python3 scripts/setup.py revoke --machine-id HEX_ID
 python3 scripts/setup.py reconcile --machine-id HEX_ID
 ```
 
-Revocation immediately rejects future host requests. Acquired jobs can finish;
-revocation does not remotely terminate a VM or erase a JIT configuration already
-delivered to a host. Re-enrolling a revoked machine requires operator recovery;
+Revocation immediately rejects future host requests and discards the stored JIT
+configuration. It removes an idle GitHub registration when GitHub is reachable;
+acquired jobs can finish. Repeat revocation to finish cleanup after an active job
+or an upstream outage. It does not remotely terminate a VM or erase credentials
+already delivered to a host. Re-enrolling a revoked machine requires operator recovery;
 fresh invitations cannot silently undo revocation.
 
 Each host may have one registered runner. The service fixes its group, labels,
@@ -86,6 +88,7 @@ minutes, the operator can run `reconcile`: it checks the full trusted-group
 inventory and removes only offline runners with that exact reserved name before
 clearing the reservation. Active matches and incomplete inventories require
 inspection instead. GitHub API errors never trigger blind registration retries.
+Definite registration rejections release their reservation immediately.
 The host persists its runner request identity before registration and retains
 local ownership when broker retirement fails, so interrupted registration and
 retirement can recover without requesting extra capacity.
@@ -94,6 +97,15 @@ The service stores ownership for the latest 4096 issued runners per host, which
 bounds record size. A sufficiently old deferred result can therefore age out.
 The service deliberately serializes decisions in one Durable Object; revisit
 sharding if fleet size makes this a throughput bottleneck.
+Authenticated host requests have a burst allowance of 12 and replenish one
+request per ten seconds. Readiness policy is cached for at most one minute;
+registration and reconciliation always verify a fresh policy.
+
+CI hosts require trusted operators. The build workflow supplies a separate CI
+status App private key to its runner, and the host can also falsify build results.
+Keeping Fleet administration credentials on the broker does not remove that
+existing trust in the build server. Invitations should be issued only for hosts
+whose operators are trusted with the CI workflow's credentials and results.
 
 ## App registration and deployment
 

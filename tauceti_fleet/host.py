@@ -389,6 +389,23 @@ def ci_service_state(unit):
     return running, "healthy" if healthy_exit else "unknown"
 
 
+def queue_ci_result(value, service_health):
+    """Persist one result receipt even while runner retirement keeps failing."""
+    if not value.get("run_id") or value.get("result_queued"):
+        return False
+    value["host_health"] = service_health
+    pending = read(state_dir() / "pending-ci.json", [])
+    identity = (value.get("instance"), value["run_id"], value["runner_id"])
+    if not any((p.get("instance"), p.get("run_id"), p.get("runner_id")) == identity for p in pending):
+        pending.append(dict(value))
+        atomic(state_dir() / "pending-ci.json", pending)
+    # Write after the receipt. If interrupted between writes, the identity check
+    # deduplicates the next attempt. Keep this marker after collection as well.
+    value["result_queued"] = True
+    atomic(state_dir() / "vm.json", value)
+    return True
+
+
 def collect_ci_results(config):
     path = state_dir() / "pending-ci.json"
     remaining = []
@@ -518,11 +535,7 @@ def daemon():
                         value.get("phase") == "starting" and time.time() - value["started_at"] < 60
                     ):
                         # Preserve immutable run identity for deferred result collection.
-                        if value.get("run_id"):
-                            value["host_health"] = service_health
-                            pending = read(state_dir() / "pending-ci.json", [])
-                            pending.append(value)
-                            atomic(state_dir() / "pending-ci.json", pending)
+                        if queue_ci_result(value, service_health):
                             collect_ci_results(config)
                         vm.retire(config, value)
                         value = {}
