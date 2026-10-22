@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, ci, github, vm
+from . import activity, capacity, ci, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -67,6 +67,8 @@ def configure(payload):
         "ci_vcpus",
         "ci_memory_gib",
         "ci_disk_gib",
+        "ci_max_jobs",
+        "ci_kinds",
         "github_account",
         "author_model",
         "author_effort",
@@ -84,11 +86,15 @@ def configure(payload):
             raise FleetError(f"{name} must be a positive integer at most 4096")
     if "ci_allowed" in updates and type(updates["ci_allowed"]) is not bool:
         raise FleetError("ci_allowed must be a boolean")
+    if "ci_max_jobs" in updates and (type(updates["ci_max_jobs"]) is not int or not 1 <= updates["ci_max_jobs"] <= 16):
+        raise FleetError("ci_max_jobs must be an integer between 1 and 16")
+    if "ci_kinds" in updates and updates["ci_kinds"] not in capacity.KINDS.values():
+        raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     credentials = payload.get("credentials", {})
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
-    if current["ci_enabled"] or current["workers_enabled"]:
+    if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
@@ -125,6 +131,7 @@ def configure(payload):
         profile=value["profile"],
         ci_allowed=value["ci_allowed"],
         ci_enabled=value["ci_enabled"],
+        ci_enrolled=bool(value.get("ci_broker_url")),
         workers_enabled=value["workers_enabled"],
         service_error=service_error,
     )
@@ -132,7 +139,7 @@ def configure(payload):
 
 def prepare(config=None):
     config = config or host_config()
-    if config["ci_enabled"] or config["workers_enabled"] or read(state_dir() / "vm.json", {}):
+    if config["ci_enabled"] or config["workers_enabled"] or vm.outstanding():
         raise FleetError("Drain this host and wait for its CI guest to exit before preparing runtimes")
     worker_revision = read(data_dir() / "release.json", {}).get("worker_revision")
     pinned = read(data_dir() / "worker-runtime.json", {}).get("revision") == worker_revision
@@ -166,7 +173,7 @@ def prepare(config=None):
 
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    ci = (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
+    ci = capacity.jobs(config) * (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
 
     def current(name):
         result = run(
@@ -179,18 +186,29 @@ def write_slices(config, caps):
         except ValueError:
             return 0
 
-    outstanding_ci = max(0, ci - current("ci"))
+    current_ci, current_workers = current("ci"), current("workers")
+    outstanding_ci = max(0, ci - current_ci)
     worker = (
         min(
             caps["memory_total"] - ci - reserve,
-            caps["memory_available"] - outstanding_ci - reserve + current("workers"),
+            caps["memory_available"] - outstanding_ci - reserve + current_workers,
         )
         - GIB
     )  # Keep a bounded 1 GiB swap allowance inside the worker reservation.
-    if worker < GIB:
+    live_workers = any(w.get("alive") for w in worker_statuses())
+    if live_workers:
+        previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
+        try:
+            prior_limit = int(previous.stdout.strip())
+        except ValueError:
+            prior_limit = caps["memory_total"]
+        if previous.returncode or worker < max(GIB, current_workers, prior_limit):
+            raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
+    if worker < GIB and config["workers_enabled"]:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
+    worker = max(16 * 1024**2, worker)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
@@ -279,28 +297,41 @@ def run_workers():
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
-def enable(*, ci=False, workers=False):
+def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None):
     config = host_config()
     if ci and not config["ci_allowed"]:
         raise FleetError("This host was deployed with --no-ci; reconfigure its role first")
+    if ci:
+        proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib)
+        changed = any(proposed.get(k) != config.get(k) for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
+        if changed and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
+            raise FleetError("Drain this host and wait for every CI slot to retire before changing its CI classes or capacity")
+        config = proposed
     result = doctor(config)
     for role, requested in (("ci", ci), ("workers", workers)):
         if requested and result["readiness"][role] == "blocked":
             reasons = [c["name"] for c in result["checks"] if role in c["roles"] and c["status"] == "blocked"]
             raise FleetError(f"Cannot enable {role}: {', '.join(reasons)}. Run doctor for remedies")
     if ci:
-        github.runner_policy(config)
+        capacity.authorize(config, github.capacity_policy(config))
         if not (data_dir() / "images/prepared.json").exists():
             raise FleetError("CI image missing; run prepare before enable --ci")
-    write_slices(config, resources())
+    write_slices(dict(config, workers_enabled=config["workers_enabled"] or workers), resources())
     worker_config(config)
     if ci:
-        vm.start(config)  # Check actual registration permission before claiming activation succeeded.
+        # Persist the policy before launch, so crash recovery never loses the
+        # admission ceiling or tries to replace these guests with the old shape.
+        update_host(**{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib") if k in config})
+        if not config["ci_enabled"] and not vm.outstanding():
+            # Verify registration once. The controller admits remaining slots
+            # independently, so a later startup error cannot leave a half-enabled role.
+            vm.start(dict(config, ci_slot=0))
     value = update_host(
-        ci_enabled=config["ci_enabled"] or ci, workers_enabled=config["workers_enabled"] or workers, draining=False
+        ci_enabled=config["ci_enabled"] or bool(ci), workers_enabled=config["workers_enabled"] or workers, draining=False
     )
     install_service()
-    return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"])
+    return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
+                ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value))
 
 
 def drain():
@@ -402,7 +433,7 @@ def queue_ci_result(value, service_health):
     # Write after the receipt. If interrupted between writes, the identity check
     # deduplicates the next attempt. Keep this marker after collection as well.
     value["result_queued"] = True
-    atomic(state_dir() / "vm.json", value)
+    atomic(vm.slot_file({"ci_slot": value.get("slot", 0)}, "vm.json"), value)
     return True
 
 
@@ -431,7 +462,14 @@ def collect_ci_results(config):
                     continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            decision = ci.classify(job, host_health=value.get("host_health"))
+            kind = "staging"
+            if "pr" in value.get("ci_kinds", ["staging"]) and value.get("host_health") != "fault":
+                run = github.ci_read(config, f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}")
+                # The immutable receipt supplies the run ID, GitHub supplies its
+                # event/title. Guest events never claim PR versus staging trust.
+                if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
+                    kind = "pr"
+            decision = ci.classify(job, host_health=value.get("host_health"), kind=kind)
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
                     run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))
@@ -496,6 +534,95 @@ class Scaler:
         )
 
 
+class CISlot:
+    """Independent guest lifecycle; all slots share the machine's admission limit."""
+
+    def __init__(self, index):
+        self.index = index
+        self.client = None
+        self.buffer = b""
+        self.next_vm = 0
+        self.next_cleanup = 0
+
+    def close(self):
+        if self.client:
+            self.client.close()
+        self.client = None
+        self.buffer = b""
+
+    def step(self, config, *, inventory, refresh, cooling):
+        config = dict(config, ci_slot=self.index,
+                      ci_enabled=config["ci_enabled"] and self.index < capacity.jobs(config))
+        path = vm.slot_file(config, "vm.json")
+        value = read(path, {})
+        if not config["ci_enabled"] and not value:
+            if time.time() >= self.next_cleanup:
+                self.next_cleanup = time.time() + 300
+                vm.cancel_registration(config)
+            return {}
+        if value:
+            active, service_health = ci_service_state(value["unit"])
+            if active is False and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60):
+                if queue_ci_result(value, service_health):
+                    collect_ci_results(config)
+                vm.retire(config, value)
+                value = {}
+                self.close()
+                self.next_vm = time.time() + 5
+        if value and self.client is None:
+            try:
+                self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.client.connect(str(Path(value["directory"]) / "events.sock"))
+                self.client.setblocking(False)
+            except OSError:
+                self.close()
+        if self.client:
+            try:
+                chunk = self.client.recv(16384)
+                if not chunk:
+                    self.close()
+                else:
+                    self.buffer = (self.buffer + chunk)[-65536:]
+            except BlockingIOError:
+                pass
+            except OSError:
+                self.close()
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                try:
+                    notice = json.loads(line)
+                    if notice.get("kind") == "ci_started" and str(notice.get("run_id", "")).isdigit():
+                        value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
+                        atomic(path, value)
+                except (ValueError, AttributeError):
+                    pass
+        if refresh:
+            own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
+            if value and own.get("status") == "online" and not value.get("online_observed_at"):
+                value["online_observed_at"] = time.time()
+                atomic(path, value)
+                retired = read(vm.slot_file(config, "ci-last-retired.json"), {})
+                event("ci_runner_online", slot=self.index, runner_id=value["runner_id"],
+                      previous_runner_id=retired.get("runner_id"),
+                      retirement_to_online_seconds=max(0, value["online_observed_at"] - retired["at"]) if retired else None,
+                      observation_interval_seconds=30)
+            if value and own.get("busy") and not value.get("busy"):
+                value["busy"] = True
+                atomic(path, value)
+            if (value and not value.get("busy")
+                    and (not config["ci_enabled"] or cooling
+                         or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
+                    and not (time.time() - value["started_at"] < 60)):
+                vm.retire(config, value)
+                value = {}
+                self.close()
+                self.next_vm = time.time() + 60
+        if config["ci_enabled"] and not cooling and not value and time.time() >= self.next_vm:
+            value = vm.start(config)
+            self.next_vm = time.time() + 60
+        return value
+
+
 def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(state_dir() / "daemon.lock"):
@@ -509,12 +636,10 @@ def daemon():
         signal.signal(signal.SIGINT, stop)
         scaler = Scaler()
         previous = cpu_sample()
-        client = None
-        buffer = b""
+        slots = {}
         last_github = 0
         inventory = []
         error = None
-        next_vm = 0
         ids = []
         last_results = 0
         memory_paused = False
@@ -528,86 +653,26 @@ def daemon():
                 current = cpu_sample()
                 idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
                 previous = current
-                value = read(state_dir() / "vm.json", {})
-                if value:
-                    active, service_health = ci_service_state(value["unit"])
-                    if active is False and not (
-                        value.get("phase") == "starting" and time.time() - value["started_at"] < 60
-                    ):
-                        # Preserve immutable run identity for deferred result collection.
-                        if queue_ci_result(value, service_health):
-                            collect_ci_results(config)
-                        vm.retire(config, value)
-                        value = {}
-                        if client:
-                            client.close()
-                            client = None
-                        buffer = b""
-                        next_vm = time.time() + 5
-                if value and client is None:
-                    try:
-                        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                        client.connect(str(Path(value["directory"]) / "events.sock"))
-                        client.setblocking(False)
-                    except OSError:
-                        if client:
-                            client.close()
-                        client = None
-                if client:
-                    try:
-                        chunk = client.recv(16384)
-                        if not chunk:
-                            client.close()
-                            client = None
-                        buffer = (buffer + chunk)[-65536:]
-                    except BlockingIOError:
-                        pass
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        try:
-                            notice = json.loads(line)
-                            if notice.get("kind") == "ci_started" and str(notice.get("run_id", "")).isdigit():
-                                value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
-                                atomic(state_dir() / "vm.json", value)
-                        except (ValueError, AttributeError):
-                            pass
-                busy = bool(value.get("busy"))
+                indexes = sorted(set(range(capacity.jobs(config))) | set(vm.slots_in_use()))
+                refresh = (config["ci_enabled"] or vm.outstanding()) and time.time() - last_github >= 30
+                if refresh:
+                    inventory = github.runners(config)
+                    last_github = time.time()
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
-                if (config["ci_enabled"] or value) and time.time() - last_github >= 30:
-                    last_github = time.time()
-                    inventory = github.runners(config)
-                    own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
-                    if value and own.get("status") == "online" and not value.get("online_observed_at"):
-                        value["online_observed_at"] = time.time()
-                        atomic(state_dir() / "vm.json", value)
-                        retired = read(state_dir() / "ci-last-retired.json", {})
-                        event(
-                            "ci_runner_online",
-                            runner_id=value["runner_id"],
-                            previous_runner_id=retired.get("runner_id"),
-                            retirement_to_online_seconds=max(0, value["online_observed_at"] - retired["at"])
-                            if retired
-                            else None,
-                            observation_interval_seconds=30,
-                        )
-                    busy = busy or own.get("busy", False)
-                    if (
-                        value
-                        and not busy
-                        and (
-                            not config["ci_enabled"]
-                            or cooling
-                            or (time.time() - value["started_at"] > 180 and own.get("status") != "online")
-                        )
-                        and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60)
-                    ):
-                        vm.retire(config, value)
-                        value = {}
-                        next_vm = time.time() + 60
-                if config["ci_enabled"] and not cooling and not value and time.time() >= next_vm:
-                    value = vm.start(config)
-                    next_vm = time.time() + 60
+                values = []
+                slot_errors = {}
+                for index in indexes:
+                    slot = slots.setdefault(index, CISlot(index))
+                    try:
+                        value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling)
+                    except (FleetError, OSError, ValueError, KeyError) as exc:
+                        slot_errors[str(index)] = str(exc)
+                        slot.next_vm = max(slot.next_vm, time.time() + 60)
+                        value = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
+                    if value:
+                        values.append(value)
+                busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
@@ -657,7 +722,12 @@ def daemon():
                         cpu_idle_fraction=idle,
                         workers=worker_statuses(),
                         error=None,
-                        ci_vm=value or None,
+                        ci_vm=next((v for v in values if v.get("slot", 0) == 0), None),
+                        ci_vms=values,
+                        ci_jobs_busy=sum(bool(v.get("busy")) for v in values),
+                        ci_max_jobs=capacity.jobs(config),
+                        ci_kinds=capacity.kinds(config),
+                        ci_errors=slot_errors,
                     ),
                 )
                 error = None
@@ -674,7 +744,8 @@ def daemon():
                     state_dir() / "status.json",
                     dict(machine_id=config["machine_id"], observed_at=time.time(), error=message),
                 )
-                next_vm = time.time() + 60
+                for slot in slots.values():
+                    slot.next_vm = max(slot.next_vm, time.time() + 60)
             for _ in range(10):
                 if stopping:
                     break
@@ -683,8 +754,8 @@ def daemon():
             state_dir() / "admission.json",
             dict(version=1, expires_at=time.time() + 15, workers=[], reason="controller stopped"),
         )
-        if client:
-            client.close()
+        for slot in slots.values():
+            slot.close()
 
 
 def budget(payload):
@@ -709,15 +780,22 @@ def budget(payload):
 def rpc(payload):
     if not isinstance(payload, dict):
         raise FleetError("Host request must be a JSON object")
+    expected = payload.get("expected_machine_id")
+    if expected is not None and expected != host_config()["machine_id"]:
+        raise FleetError("Host identity differs from inventory; verify the SSH target before re-enrolling")
     action = payload.get("action")
     if action == "configure":
         return configure(payload)
+    if action == "enroll":
+        from . import broker
+
+        return broker.enroll(payload["broker"], code=payload["invitation"])
     if action == "prepare_update":
         config = host_config()
         waiting = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}
         if config["workers_enabled"] or config["ci_enabled"]:
             raise FleetError("Drain this host before updating")
-        if read(state_dir() / "vm.json", {}) or any(
+        if vm.outstanding() or any(
             w.get("alive") and w.get("state") not in waiting for w in worker_statuses()
         ):
             raise FleetError("Active work is still draining; wait before updating")
@@ -731,7 +809,9 @@ def rpc(payload):
     if action == "prepare":
         return prepare()
     if action == "enable":
-        return enable(ci=bool(payload.get("ci")), workers=bool(payload.get("workers")))
+        return enable(ci=payload.get("ci"), workers=bool(payload.get("workers")),
+                      maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
+                      memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"))
     if action == "workers":
         return set_worker_maximum(payload["maximum"])
     if action == "drain":
@@ -750,6 +830,9 @@ def rpc(payload):
             profile=config["profile"],
             ci_allowed=config["ci_allowed"],
             ci_enabled=config["ci_enabled"],
+            ci_kinds=capacity.kinds(config),
+            ci_max_jobs=capacity.jobs(config),
+            ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
             status=read(state_dir() / "status.json", {}),

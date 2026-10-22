@@ -18,9 +18,11 @@ def parser():
     add.add_argument("target", help="SSH alias, user@host, or local")
     add.add_argument("--profile", default="ai-for-science")
     add.add_argument("--no-ci", action="store_true")
-    enroll = sub.add_parser("enroll", help="enroll this host for CI using a one-time code, without GitHub or AI credentials")
+    enroll = sub.add_parser("enroll", help="enroll one explicit machine for CI using a one-time code")
+    enroll.add_argument("target", help="SSH alias, user@host, or local; the credential stays on this machine")
     enroll.add_argument("--broker", default=broker.DEFAULT_URL)
     enroll.add_argument("--token-file", help="read the one-time enrollment code from a file instead of prompting")
+    enroll.add_argument("--replace-machine", action="store_true", help="explicitly enroll a replacement machine at a remembered SSH alias")
     for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
         cmd.add_argument("host", nargs="?")
@@ -36,7 +38,11 @@ def parser():
     budget.add_argument("--json", action="store_true")
     enable = sub.add_parser("enable", help="explicitly activate a prepared role")
     enable.add_argument("host")
-    enable.add_argument("--ci", action="store_true")
+    enable.add_argument("--ci", choices=("pr", "staging", "both"), help="explicit CI job classes for this machine")
+    enable.add_argument("--max-jobs", type=int, help="shared PR + staging concurrency limit")
+    enable.add_argument("--ci-vcpus", type=int, help="vCPUs per CI job")
+    enable.add_argument("--ci-memory-gib", type=int, help="GiB of guest RAM per CI job")
+    enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change the admission ceiling without interrupting active work")
@@ -80,7 +86,7 @@ def main(argv=None):
             host.run_workers()
             return 0
         if args.command in ("add", "enroll"):
-            value = broker.enroll(args.broker, token_file=args.token_file) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
+            value = remote.enroll(args.target, url=args.broker, token_file=args.token_file, replace_machine=args.replace_machine) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
             print("Installed " + value["host"] + "; existing workload activation and budget settings were preserved.")
             print_doctor(value["doctor"])
             print(
@@ -92,6 +98,8 @@ def main(argv=None):
         entries = remote.inventory()
         if args.command == "enable" and not (args.ci or args.workers):
             raise FleetError("Select --ci and/or --workers explicitly")
+        if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib)):
+            raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         selected = {args.host: remote.resolve(args.host)} if args.host else entries
@@ -106,11 +114,12 @@ def main(argv=None):
             if args.command == "budget":
                 payload.update(grant=args.grant, grant_rate=args.grant_rate)
             if args.command == "enable":
-                payload.update(ci=args.ci, workers=args.workers)
+                payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
+                               vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib)
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "update":
-                status = remote.call(entry["target"], dict(action="status"))
+                status = remote.call(entry["target"], dict(action="status"), expected_machine_id=entry["machine_id"])
                 if status["ci_enabled"] or status["workers_enabled"]:
                     raise FleetError("Drain this host before updating its installed software")
                 waiting = {
@@ -128,9 +137,11 @@ def main(argv=None):
                     raise FleetError(
                         "Host is draining active work; wait for its round/CI build to finish before update"
                     )
-                remote.call(entry["target"], dict(action="prepare_update"))
+                remote.call(entry["target"], dict(action="prepare_update"), expected_machine_id=entry["machine_id"])
                 results[name] = remote.add(
-                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"]
+                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
+                    preserve_profile=status.get("ci_enrolled", False) or status["profile"] == "ci-enrolled" or entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
+                    expected_machine_id=entry["machine_id"],
                 )
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
@@ -139,6 +150,7 @@ def main(argv=None):
                     entry["target"],
                     payload,
                     timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
                 if args.command == "status":
@@ -179,6 +191,8 @@ def main(argv=None):
                     print(
                         f"Workers: {status.get('active_worker_limit', 0)} admitted / {value.get('max_workers', 0)} maximum; CI busy: {status.get('ci_busy', 'unknown')}"
                     )
+                    if "ci_max_jobs" in value:
+                        print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     memory = status.get("worker_memory")
                     if memory:
                         print()

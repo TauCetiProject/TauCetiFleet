@@ -26,8 +26,12 @@ their current credentials and configuration.
 From this directory, an operator with the private local admin credential runs:
 
 ```sh
-python3 scripts/setup.py invite --name chris-server
+python3 scripts/setup.py invite --name chris-server --ci both --max-jobs 2
 ```
+
+The invitation authorizes two jobs total, shared across PR and staging builds.
+Omitting the capacity flags retains one staging slot. The host can request a
+subset of these classes and fewer slots, but cannot expand its policy.
 
 The command saves a seven-day enrollment code in a private file under
 `~/.config/tauceti-ci-broker/invitations/`. Transfer that code privately to the
@@ -42,15 +46,29 @@ On the volunteer's Linux x86-64 server:
 
 ```sh
 uv tool install git+https://github.com/TauCetiProject/TauCetiFleet.git
-tauceti-fleet enroll
+tauceti-fleet enroll local
 # Paste the one-time enrollment code at the hidden prompt.
 tauceti-fleet prepare local
 tauceti-fleet doctor local
-tauceti-fleet enable local --ci
+tauceti-fleet enable local --ci both --max-jobs 2 --ci-vcpus 16 --ci-memory-gib 32
 tauceti-fleet status local
 ```
 
 For unattended enrollment, `--token-file PATH` reads the one-time code from a file.
+Enrollment always requires an explicit machine. From your laptop, you can instead
+run `tauceti-fleet enroll chris`, where `chris` is an existing SSH hostname or alias.
+Fleet installs its release over SSH and redeems the code on that server. Its
+machine identity and permanent credential are generated there; the credential
+stays there. The laptop remembers the server's identity and SSH alias so subsequent
+`prepare chris`, `doctor chris`, `enable chris --ci both`, and `status chris` operate on
+the same server. `--token-file` is read on the machine running the command.
+Subsequent commands check the remembered machine identity before acting, so
+repointing an SSH alias does not silently activate a different server.
+For an intentional replacement, revoke the old machine's broker credential first
+and use `enroll HOST --replace-machine` with a fresh invitation. This explicitly
+replaces the alias's inventory entry. Machine-bound CI credentials cannot be
+copied through `add --profile`.
+
 The host still needs Python 3.11+, uv, git, systemd user services with cgroup v2
 resource controls, KVM access, sufficient disk/RAM/CPU, and the QEMU/cloud-init
 tools (or Nix to fetch them). `doctor` reports these requirements. Workers-only
@@ -59,15 +77,30 @@ readiness failures do not block CI. Enable lingering for logout/boot persistence
 Enrollment generates and persists the host's credential before redeeming the
 invitation, so retrying a lost response does not create a second identity. It
 does not enable CI, enable workers, grant a budget, or authenticate any AI agent.
+It preserves an existing worker profile and identity. Software updates retain
+the enrolled server's credentials without copying the operator machine's profile.
 `prepare` currently installs the worker package alongside the CI image, but does
 not run workers. Existing hosts must drain before enrollment or reconfiguration.
+
+Every slot has a separate GitHub registration and pending-registration record.
+The service issues class, machine, and instance labels; a PR-only guest never
+receives the legacy staging label. Revocation covers all slots, and reconciliation
+selects one slot without releasing another slot's ambiguous registration.
+
+A drained host clears definite, unused registration intents automatically. An
+ambiguous registration still requires reconciliation before cleanup can finish.
+Slot migration is one-way: drain all hosts before rolling back to a broker that
+only understands the legacy single-runner record, and migrate stored records back
+explicitly. Reverting broker code alone does not restore the old record format.
 
 ## Operator controls
 
 ```sh
 python3 scripts/setup.py hosts
 python3 scripts/setup.py revoke --machine-id HEX_ID
-python3 scripts/setup.py reconcile --machine-id HEX_ID
+python3 scripts/setup.py reconcile --machine-id HEX_ID --slot 0
+# After draining and retiring every slot:
+python3 scripts/setup.py capacity --machine-id HEX_ID --ci both --max-jobs 2
 ```
 
 Revocation immediately rejects future host requests and discards the stored JIT
@@ -77,7 +110,7 @@ or an upstream outage. It does not remotely terminate a VM or erase credentials
 already delivered to a host. Re-enrolling a revoked machine requires operator recovery;
 fresh invitations cannot silently undo revocation.
 
-Each host may have one registered runner. The service fixes its group, labels,
+Each host may have one registered runner per authorized slot. The service fixes its group, labels,
 and name prefix, rechecks trusted main-workflow restrictions before registration,
 and filters runner inventory/deletion and job results to that host. It proxies
 only specific read-only TauCeti CI metadata endpoints, not arbitrary GitHub APIs.
@@ -97,8 +130,8 @@ The service stores ownership for the latest 4096 issued runners per host, which
 bounds record size. A sufficiently old deferred result can therefore age out.
 The service deliberately serializes decisions in one Durable Object; revisit
 sharding if fleet size makes this a throughput bottleneck.
-Authenticated host requests have a burst allowance of 12 and replenish one
-request per ten seconds. Readiness policy is cached for at most one minute;
+Authenticated host requests have a burst allowance of 32 and replenish one
+request per ten seconds per authorized slot. Readiness policy is cached for at most one minute;
 registration and reconciliation always verify a fresh policy.
 
 CI hosts require trusted operators. The build workflow supplies a separate CI

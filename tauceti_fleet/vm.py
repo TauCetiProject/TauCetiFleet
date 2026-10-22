@@ -234,8 +234,40 @@ def prepare_image(config=None):
 
 
 def start(config):
-    with locked(state_dir() / "vm.lock"):
+    with locked(slot_file(config, "vm.lock")):
         return _start(config)
+
+
+def slot_file(config, name):
+    slot = config.get("ci_slot", 0)
+    return (state_dir() if slot == 0 else state_dir() / "ci-slots" / str(slot)) / name
+
+
+def slots_in_use():
+    """Include old slot zero and every draining slot, regardless of configured limit."""
+    return sorted({0} | {int(p.parent.name) for name in ("vm.json", "ci-registration.json")
+                         for p in (state_dir() / "ci-slots").glob("*/" + name) if p.parent.name.isdecimal()})
+
+
+def outstanding():
+    return any(slot_file({"ci_slot": slot}, name).exists() for slot in slots_in_use()
+               for name in ("vm.json", "ci-registration.json"))
+
+
+def cancel_registration(config):
+    """Retire an unlaunched registration without minting another runner."""
+    with locked(slot_file(config, "vm.lock")):
+        path = slot_file(config, "ci-registration.json")
+        intent = read(path)
+        if not intent or slot_file(config, "vm.json").exists():
+            return
+        if not config.get("ci_broker_url"):
+            raise FleetError("Retain the broker enrollment until its pending CI registration is reconciled")
+        from .broker import request
+
+        name = "fleet-" + config["machine_id"][:12] + "-" + intent["instance"]
+        request(config, f"/v1/slots/{config.get('ci_slot', 0)}/cancel-registration", method="POST", data=dict(name=name))
+        path.unlink(missing_ok=True)
 
 
 def _start(config):
@@ -243,13 +275,13 @@ def _start(config):
     if not (root / "prepared.json").exists():
         raise FleetError("Prepared CI image missing; run prepare before enabling CI")
     # Host-local lock is the capacity authority, including across daemon restarts.
-    prior = read(state_dir() / "vm.json", {})
+    prior = read(slot_file(config, "vm.json"), {})
     if prior.get("unit"):
         result = run(["systemctl", "--user", "is-active", prior["unit"]], check=False)
         if result.returncode == 0:
             return prior
         _retire(config, prior)
-    registration = state_dir() / "ci-registration.json"
+    registration = slot_file(config, "ci-registration.json")
     intent = read(registration, {}) if config.get("ci_broker_url") else {}
     instance = intent.get("instance") or secrets.token_hex(8)
     if config.get("ci_broker_url"):
@@ -294,6 +326,8 @@ def _start(config):
         ]
         seed = cloud_seed(directory, commands, name=name)
         value = dict(
+            slot=config.get("ci_slot", 0),
+            ci_kinds=config.get("ci_kinds", ["staging"]),
             instance=instance,
             unit=unit + ".service",
             runner_id=runner_id,
@@ -305,7 +339,7 @@ def _start(config):
         )
         # Record the prospective unit before launch: a controller/process crash
         # can then recover either the existing guest or the unused registration.
-        atomic(state_dir() / "vm.json", value)
+        atomic(slot_file(config, "vm.json"), value)
         # A transient user service survives controller restart; its slice bounds
         # all QEMU threads. No guest-writable path is shared with host secrets.
         run(
@@ -324,7 +358,7 @@ def _start(config):
             timeout=30,
         )
         value["phase"] = "ready"
-        atomic(state_dir() / "vm.json", value)
+        atomic(slot_file(config, "vm.json"), value)
         event("ci_vm_started", runner_id=runner_id)
         registration.unlink(missing_ok=True)
         return value
@@ -336,13 +370,14 @@ def _start(config):
         except FleetError:
             pass
         shutil.rmtree(directory, ignore_errors=True)
-        if read(state_dir() / "vm.json", {}).get("instance") == instance:
-            (state_dir() / "vm.json").unlink(missing_ok=True)
+        if read(slot_file(config, "vm.json"), {}).get("instance") == instance:
+            slot_file(config, "vm.json").unlink(missing_ok=True)
         raise
 
 
 def retire(config, value):
-    with locked(state_dir() / "vm.lock"):
+    config = dict(config, ci_slot=value.get("slot", 0))
+    with locked(slot_file(config, "vm.lock")):
         return _retire(config, value)
 
 
@@ -356,16 +391,16 @@ def _retire(config, value):
             # Preserve local ownership for an idempotent retirement retry. The
             # broker handles GitHub's already-deregistered (404) case itself.
             raise
-    registration = state_dir() / "ci-registration.json"
+    registration = slot_file(config, "ci-registration.json")
     if read(registration, {}).get("instance") == value.get("instance"):
         registration.unlink(missing_ok=True)
     directory = Path(value["directory"])
     if directory.parent == state_dir() / "vms":
         shutil.rmtree(directory, ignore_errors=True)
-    if read(state_dir() / "vm.json", {}).get("instance") == value.get("instance"):
-        (state_dir() / "vm.json").unlink(missing_ok=True)
+    if read(slot_file(config, "vm.json"), {}).get("instance") == value.get("instance"):
+        slot_file(config, "vm.json").unlink(missing_ok=True)
     retired_at = time.time()
-    atomic(state_dir() / "ci-last-retired.json", dict(at=retired_at, runner_id=value["runner_id"]))
+    atomic(slot_file(config, "ci-last-retired.json"), dict(at=retired_at, runner_id=value["runner_id"]))
     event("ci_vm_retired", at=retired_at, runner_id=value["runner_id"])
 
 

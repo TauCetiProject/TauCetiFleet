@@ -92,8 +92,10 @@ def runner_policy(config):
 def jit_config(config, name):
     if config.get("ci_broker_url"):
         from .broker import request as broker_request
+        from .capacity import kinds
 
-        value = broker_request(config, "/v1/runners", method="POST", data=dict(name=name))
+        value = broker_request(config, "/v1/runners", method="POST",
+                               data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
         return value["runner_id"], value["encoded_jit_config"]
     group = runner_policy(config)
     data = request(
@@ -103,11 +105,33 @@ def jit_config(config, name):
         data=dict(
             name=name,
             runner_group_id=group,
-            labels=["self-hosted", "linux", "x64", "tauceti-fleet", "fleet-" + config["machine_id"]],
+            labels=runner_labels(config, name),
             work_folder="_work",
         ),
     )
     return data["runner"]["id"], data["encoded_jit_config"]
+
+
+def runner_labels(config, name):
+    from .capacity import kinds
+
+    labels = ["self-hosted", "linux", "x64", "fleet-" + config["machine_id"],
+              "fleet-instance-" + name.rsplit("-", 1)[-1]]
+    allowed = kinds(config)
+    # Legacy staging workflows match this label. PR-only runners never carry it.
+    if "staging" in allowed:
+        labels.append("tauceti-fleet")
+    return labels + ["tauceti-fleet-" + kind for kind in allowed]
+
+
+def capacity_policy(config):
+    if config.get("ci_broker_url"):
+        from .broker import request as broker_request
+
+        return broker_request(config, "/v1/policy")
+    from .capacity import jobs, kinds
+
+    return dict(runner_group_id=runner_policy(config), max_jobs=jobs(config), kinds=kinds(config))
 
 
 def retire_runner(config, runner_id):

@@ -246,13 +246,16 @@ def doctor(config=None, *, probe=True):
         f"Effective allocation: {caps['cpus']:g} CPUs, {caps['memory_total'] / GIB:.1f} GiB RAM",
         "Effective ancestor cgroup limits must be readable",
     )
-    ci_memory = config["ci_memory_gib"] * GIB
+    from .capacity import jobs, kinds
+
+    count = jobs(config)
+    ci_memory = count * config["ci_memory_gib"] * GIB
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    fits = caps["cpus"] >= config["ci_vcpus"] and caps["memory_total"] >= ci_memory + 2 * GIB + reserve
+    fits = caps["cpus"] >= count * config["ci_vcpus"] and caps["memory_total"] >= ci_memory + count * 2 * GIB + reserve
     add(
         "ci-shape",
         "ok" if fits else "blocked",
-        f"CI requests {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB, plus {reserve / GIB:.1f} GiB OS headroom",
+        f"CI requests {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB, plus 2 GiB per guest and {reserve / GIB:.1f} GiB OS headroom",
         "Configure a smaller CI shape, or redeploy with --no-ci",
         roles=("ci",),
     )
@@ -265,7 +268,7 @@ def doctor(config=None, *, probe=True):
             committed = 0
     except (FleetError, ValueError):
         committed = 0
-    needed = max(0, ci_memory + 2 * GIB - committed) + reserve
+    needed = max(0, ci_memory + count * 2 * GIB - committed) + reserve
     add(
         "available-memory-headroom",
         "ok" if caps["memory_available"] >= needed else "blocked",
@@ -303,8 +306,8 @@ def doctor(config=None, *, probe=True):
     free = shutil.disk_usage(Path.home()).free
     add(
         "storage",
-        "ok" if free >= config["ci_disk_gib"] * GIB else "blocked",
-        f"{free / GIB:.1f} GiB free; CI requires {config['ci_disk_gib']} GiB",
+        "ok" if free >= count * config["ci_disk_gib"] * GIB else "blocked",
+        f"{free / GIB:.1f} GiB free; CI requires {count * config['ci_disk_gib']} GiB for {count} jobs",
         "Free space, lower ci_disk_gib, or choose a larger writable data directory",
         roles=("ci",),
     )
@@ -385,7 +388,7 @@ def doctor(config=None, *, probe=True):
                 "github-runner-policy",
                 "blocked",
                 str(exc),
-                "Enroll this host with tauceti-fleet enroll, or configure runner_group_id and a CI registration credential",
+                "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
     credential_names = ["anthropic_api_key_file", "github_token_file"]
@@ -444,6 +447,7 @@ def doctor(config=None, *, probe=True):
         readiness=readiness,
         checks=checks,
         resources=caps,
-        ci_shape={k: config[k] for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib")},
+        ci_shape=dict({k: config[k] for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib")},
+                      ci_max_jobs=count, ci_kinds=kinds(config)),
         observed_at=__import__("time").time(),
     )

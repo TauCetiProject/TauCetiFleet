@@ -37,6 +37,18 @@ export class GitHub {
   async request(path, {kind='read',method='GET',data}={}) {
     return this.raw(path, await this.token(kind),method,data);
   }
+  async runners() {
+    const found=[];let total;
+    for(let page=1;page<=20;page++) {
+      const value=await this.request(`orgs/TauCetiProject/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
+      if(!Array.isArray(value.runners) || !Number.isInteger(value.total_count) || value.total_count<0 ||
+         total!==undefined && total!==value.total_count)throw new Error('Incomplete runner inventory');
+      total=value.total_count;found.push(...value.runners);
+      if(found.length===total)return found;
+      if(!value.runners.length || found.length>total)break;
+    }
+    throw new Error('Incomplete runner inventory');
+  }
   async policy({fresh=false}={}) {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
