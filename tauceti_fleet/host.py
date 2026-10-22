@@ -712,6 +712,10 @@ def rpc(payload):
     action = payload.get("action")
     if action == "configure":
         return configure(payload)
+    if action == "enroll":
+        from . import broker
+
+        return broker.enroll(payload["broker"], code=payload["invitation"])
     if action == "prepare_update":
         config = host_config()
         waiting = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}

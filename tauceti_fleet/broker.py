@@ -2,6 +2,7 @@
 
 import getpass
 import json
+import re
 import secrets
 import socket
 import time
@@ -70,8 +71,18 @@ def request(config, path, *, method="GET", data=None, token=None):
         raise FleetError("CI broker unavailable; retry after checking connectivity") from None
 
 
-def enroll(url=DEFAULT_URL, *, token_file=None):
-    from . import remote
+def invitation(token_file=None, *, target="local"):
+    value = Path(token_file).expanduser().read_text().strip() if token_file else getpass.getpass(
+        f"One-time enrollment code for {target}: "
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", value):
+        raise FleetError("Invalid one-time enrollment code")
+    return value
+
+
+def enroll(url=DEFAULT_URL, *, token_file=None, code=None):
+    """Redeem on the machine being enrolled; called over the host stdin RPC."""
+    from . import host
 
     url = validate_url(url)
     config = host_config()
@@ -87,27 +98,18 @@ def enroll(url=DEFAULT_URL, *, token_file=None):
         # Persist before redemption, allowing an exact retry after a lost response.
         saved = dict(url=url, host_token=secrets.token_urlsafe(48))
         atomic(path, saved)
-    invitation = Path(token_file).expanduser().read_text().strip() if token_file else getpass.getpass("One-time enrollment code: ").strip()
-    result = request(dict(config, ci_broker_url=url), "/v1/enroll", method="POST", token=invitation,
+    code = invitation(token_file) if code is None else code
+    if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", code):
+        raise FleetError("Invalid one-time enrollment code")
+    result = request(dict(config, ci_broker_url=url), "/v1/enroll", method="POST", token=code,
                      data=dict(machine_id=config["machine_id"], host_token=saved["host_token"]))
     if result.get("machine_id") != config["machine_id"] or result.get("runner_group_id") != 3:
         raise FleetError("CI broker returned an unexpected host identity or runner group")
     credential = config_dir() / "secrets" / "ci_broker_token_file"
-    credential.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    import os
-    import tempfile
-
-    fd, temporary = tempfile.mkstemp(dir=credential.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(saved["host_token"] + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, credential)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    status = host.configure(dict(profile="ci-enrolled", ci_allowed=True, ci_broker_url=url,
+                                 credentials={"ci_broker_token_file": saved["host_token"]}, runner_group_id=3))
     profiles_path = config_dir() / "profiles.json"
     profiles = read(profiles_path, {})
     profiles["ci-enrolled"] = dict(ci_broker_url=url, ci_broker_token_file=str(credential), runner_group_id=3)
     atomic(profiles_path, profiles)
-    return remote.add("local", profile_name="ci-enrolled")
+    return dict(installed=status, doctor=host.doctor())

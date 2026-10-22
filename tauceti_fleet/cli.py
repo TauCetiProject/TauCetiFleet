@@ -18,7 +18,8 @@ def parser():
     add.add_argument("target", help="SSH alias, user@host, or local")
     add.add_argument("--profile", default="ai-for-science")
     add.add_argument("--no-ci", action="store_true")
-    enroll = sub.add_parser("enroll", help="enroll this host for CI using a one-time code, without GitHub or AI credentials")
+    enroll = sub.add_parser("enroll", help="enroll one explicit machine for CI using a one-time code")
+    enroll.add_argument("target", help="SSH alias, user@host, or local; the credential stays on this machine")
     enroll.add_argument("--broker", default=broker.DEFAULT_URL)
     enroll.add_argument("--token-file", help="read the one-time enrollment code from a file instead of prompting")
     for name in ("doctor", "status", "prepare", "update", "drain"):
@@ -80,7 +81,7 @@ def main(argv=None):
             host.run_workers()
             return 0
         if args.command in ("add", "enroll"):
-            value = broker.enroll(args.broker, token_file=args.token_file) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
+            value = remote.enroll(args.target, url=args.broker, token_file=args.token_file) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
             print("Installed " + value["host"] + "; existing workload activation and budget settings were preserved.")
             print_doctor(value["doctor"])
             print(
@@ -130,7 +131,8 @@ def main(argv=None):
                     )
                 remote.call(entry["target"], dict(action="prepare_update"))
                 results[name] = remote.add(
-                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"]
+                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
+                    preserve_profile=entry["profile"] == "ci-enrolled",
                 )
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")

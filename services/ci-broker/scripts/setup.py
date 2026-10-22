@@ -179,7 +179,7 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         private(path, token + "\n")
         print("Enrollment code saved privately: " + str(path))
         print("Valid until: " + datetime.fromtimestamp(result["expires_at"] / 1000, UTC).isoformat())
-        print("On the volunteer host: tauceti-fleet enroll (paste that code at the prompt)")
+        print("On the volunteer host: tauceti-fleet enroll local (paste that code at the prompt)")
     elif args.action == "hosts":
         print(json.dumps(api(ORIGIN + "/admin/hosts", token=admin()), indent=2))
     elif args.action in ("revoke", "reconcile"):

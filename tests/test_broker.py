@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import broker, github, host, remote, store, vm
+from tauceti_fleet import broker, cli, github, host, remote, store, vm
 
 
 class Enrollment(unittest.TestCase):
@@ -36,12 +36,11 @@ class Enrollment(unittest.TestCase):
                 raise store.FleetError("response lost")
             return dict(machine_id=config["machine_id"], runner_group_id=3)
 
-        with patch.object(broker, "request", side_effect=redeem), patch.object(broker.getpass, "getpass", return_value="one-time"), patch.object(remote, "add", return_value={}) as add:
+        with patch.object(broker, "request", side_effect=redeem), patch.object(broker.getpass, "getpass", return_value="i" * 64), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
             with self.assertRaisesRegex(store.FleetError, "response lost"):
                 broker.enroll()
             broker.enroll()
             self.assertEqual(observed[0], observed[1])
-            add.assert_called_once_with("local", profile_name="ci-enrolled")
         with patch.object(remote, "run", side_effect=AssertionError("No gh login should be needed")):
             profile = remote.profile("ci-enrolled")
         self.assertEqual(set(profile["credentials"]), {"ci_broker_token_file"})
@@ -49,6 +48,56 @@ class Enrollment(unittest.TestCase):
         path = Path(store.read(store.config_dir() / "profiles.json")["ci-enrolled"]["ci_broker_token_file"])
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.read_text().strip(), observed[0])
+        self.assertEqual(store.host_config()["ci_broker_token_file"], str(path))
+
+    def test_remote_enrollment_creates_identity_and_credential_on_the_selected_server(self):
+        operator_id = store.host_config()["machine_id"]
+        server = self.root / "server"
+        server_env = {"TAUCETI_FLEET_" + name.upper(): str(server / name) for name in ("config", "state", "data")}
+        invitation = self.root / "invite"
+        invitation.write_text("i" * 64)
+        redemptions = []
+
+        def redeem(config, path, **kwargs):
+            redemptions.append(kwargs["data"])
+            return dict(machine_id=config["machine_id"], runner_group_id=3)
+
+        def server_call(target, payload):
+            self.assertEqual(target, "chris")
+            with patch.dict(os.environ, server_env), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+                return host.rpc(payload)
+
+        with patch.object(remote, "deploy") as deploy, patch.object(remote, "call", side_effect=server_call), patch.object(broker, "request", side_effect=redeem):
+            result = remote.enroll("chris", url=broker.DEFAULT_URL, token_file=invitation)
+        deploy.assert_called_once_with("chris")
+        server_id = result["installed"]["machine_id"]
+        self.assertNotEqual(server_id, operator_id)
+        self.assertEqual(redemptions[0]["machine_id"], server_id)
+        self.assertEqual(remote.resolve("chris")["machine_id"], server_id)
+        self.assertEqual(remote.resolve(server_id)["target"], "chris")
+        self.assertFalse((store.config_dir() / "enrollment.json").exists())
+        self.assertFalse((store.config_dir() / "profiles.json").exists())
+        self.assertFalse((store.config_dir() / "secrets").exists())
+        self.assertNotIn("host_token", json.dumps(result))
+        with patch.dict(os.environ, server_env):
+            config = store.host_config()
+            self.assertEqual(Path(config["ci_broker_token_file"]).read_text().strip(), redemptions[0]["host_token"])
+
+    def test_enrolled_ssh_host_updates_preserve_server_credentials_without_local_profile(self):
+        status = dict(machine_id="a" * 32, profile="ci-enrolled")
+        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}]) as call:
+            remote.add("chris", profile_name="ci-enrolled", preserve_profile=True)
+        self.assertEqual(call.call_args_list[0].args, ("chris", {"action": "configure"}))
+        self.assertEqual(remote.resolve("chris")["profile"], "ci-enrolled")
+
+    def test_enrollment_requires_an_explicit_machine(self):
+        with patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.parser().parse_args(["enroll"])
+        self.assertEqual(cli.parser().parse_args(["enroll", "local"]).target, "local")
+        with patch.object(remote, "deploy", side_effect=AssertionError("Reject before deployment")):
+            with self.assertRaises(store.FleetError):
+                remote.enroll("-oProxyCommand=bad", url=broker.DEFAULT_URL)
 
     def test_active_hosts_cannot_enroll(self):
         store.update_host(ci_enabled=True)

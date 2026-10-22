@@ -42,7 +42,7 @@ On the volunteer's Linux x86-64 server:
 
 ```sh
 uv tool install git+https://github.com/TauCetiProject/TauCetiFleet.git
-tauceti-fleet enroll
+tauceti-fleet enroll local
 # Paste the one-time enrollment code at the hidden prompt.
 tauceti-fleet prepare local
 tauceti-fleet doctor local
@@ -51,6 +51,14 @@ tauceti-fleet status local
 ```
 
 For unattended enrollment, `--token-file PATH` reads the one-time code from a file.
+Enrollment always requires an explicit machine. From your laptop, you can instead
+run `tauceti-fleet enroll chris`, where `chris` is an existing SSH hostname or alias.
+Fleet installs its release over SSH and redeems the code on that server. Its
+machine identity and permanent credential are generated there; the credential
+stays there. The laptop remembers the server's identity and SSH alias so subsequent
+`prepare chris`, `doctor chris`, `enable chris --ci`, and `status chris` operate on
+the same server. `--token-file` is read on the machine running the command.
+
 The host still needs Python 3.11+, uv, git, systemd user services with cgroup v2
 resource controls, KVM access, sufficient disk/RAM/CPU, and the QEMU/cloud-init
 tools (or Nix to fetch them). `doctor` reports these requirements. Workers-only
