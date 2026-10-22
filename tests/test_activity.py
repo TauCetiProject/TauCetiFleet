@@ -105,6 +105,42 @@ class ActivityTests(unittest.TestCase):
             self.assertEqual(activity.cached("m")["summary"]["prepared_at"], 1)
             self.assertTrue(host.rpc(dict(action="status"))["activity"]["available"] is False)
 
+    def test_combined_status_warns_only_for_stale_unresolved_pr_evidence(self):
+        now = 1_000_000
+        summary = dict(
+            prepared_at=now,
+            history_since=1,
+            rounds={w: {} for w in activity.WINDOWS},
+            pr_windows={w: dict(authored=1, landed=0) for w in activity.WINDOWS},
+            running=0,
+            open_prs=1,
+            unknown_prs=0,
+            unknown_landings=0,
+            pr_observed_at=now - 3 * 86400,
+        )
+        for freshness, expected in (
+            (None, None),
+            (dict(observed_at=now - 2700, missing_since=None), None),
+            (dict(observed_at=now - 10800, missing_since=None), "oldest unresolved PR observation 3h 0m"),
+            (dict(observed_at=now - 2700, missing_since=now - 86400), "without an observation; created 24h 0m"),
+        ):
+            with self.subTest(freshness=freshness):
+                row = dict(summary)
+                if freshness is not None:
+                    row["pr_freshness"] = freshness
+                with (
+                    patch("tauceti_fleet.activity_summary.time.time", return_value=now),
+                    patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+                    patch("subprocess.run", side_effect=AssertionError("process in status")),
+                    patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                ):
+                    activity.display(activity.combine_status([dict(available=True, summary=row)]))
+                if expected:
+                    self.assertIn(expected, output.getvalue())
+                else:
+                    self.assertNotIn("PR evidence:", output.getvalue())
+
     def test_spending_rates_render_from_prepared_json_without_io_or_misalignment(self):
         summary = dict(
             prepared_at=100,
