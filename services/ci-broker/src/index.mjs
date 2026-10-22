@@ -101,10 +101,17 @@ export class FleetRegistry extends DurableObject {
     if (url.pathname.startsWith('/admin/') && await authenticates(req,this.env.ADMIN_TOKEN)) {
       if (url.pathname==='/admin/invites' && req.method==='POST') {
         const input=await req.json();
+        const lifetime=input.expires_in ?? 7*24*3600;
         if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(input.name || '') || !/^[a-f0-9]{64}$/.test(input.hash || ''))
           return json({error:'invalid invite'},400);
-        await this.ctx.storage.put('invite:'+input.hash,{name:input.name,expires:Date.now()+3600000});
-        return json({expires_in:3600});
+        if (!Number.isInteger(lifetime) || lifetime<3600 || lifetime>30*24*3600)
+          return json({error:'invitation lifetime must be between one hour and 30 days'},400);
+        const key='invite:'+input.hash;
+        const prior=await this.ctx.storage.get(key);
+        if (prior?.machine_id) return json({error:'cannot extend a redeemed invitation'},409);
+        const expires=Date.now()+lifetime*1000;
+        await this.ctx.storage.put(key,{name:input.name,expires});
+        return json({expires_in:lifetime,expires_at:expires});
       }
       if (url.pathname==='/admin/hosts' && req.method==='GET') {
         const hosts=await this.ctx.storage.list({prefix:'host:',limit:1000});

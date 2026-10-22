@@ -12,6 +12,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 SERVICE = Path(__file__).resolve().parent.parent
@@ -110,6 +111,8 @@ def main():
     parser.add_argument("action", choices=["prepare", "collect", "inspect", "activate", "invite", "hosts", "revoke", "reconcile"])
     parser.add_argument("--name", help="operator label for a new host invitation")
     parser.add_argument("--machine-id", help="machine identity to revoke")
+    parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
+    parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
     args = parser.parse_args()
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
@@ -165,11 +168,15 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
 
         if not args.name or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", args.name):
             raise SystemExit("Use --name with a short host label, e.g. chris-server")
-        token = secrets.token_urlsafe(48)
-        api(ORIGIN + "/admin/invites", token=admin(), data={"name": args.name, "hash": hashlib.sha256(token.encode()).hexdigest()})
-        path = DIRECTORY / "invitations" / (args.name + "-" + secrets.token_hex(4))
+        if not 1 <= args.expires_in_days <= 30:
+            raise SystemExit("Use --expires-in-days between 1 and 30")
+        token = args.token_file.expanduser().read_text().strip() if args.token_file else secrets.token_urlsafe(48)
+        result = api(ORIGIN + "/admin/invites", token=admin(), data={"name": args.name, "hash": hashlib.sha256(token.encode()).hexdigest(),
+                     "expires_in": args.expires_in_days * 24 * 3600})
+        path = args.token_file.expanduser() if args.token_file else DIRECTORY / "invitations" / (args.name + "-" + secrets.token_hex(4))
         private(path, token + "\n")
-        print("One-hour enrollment code saved privately: " + str(path))
+        print("Enrollment code saved privately: " + str(path))
+        print("Valid until: " + datetime.fromtimestamp(result["expires_at"] / 1000, UTC).isoformat())
         print("On the volunteer host: tauceti-fleet enroll (paste that code at the prompt)")
     elif args.action == "hosts":
         print(json.dumps(api(ORIGIN + "/admin/hosts", token=admin()), indent=2))

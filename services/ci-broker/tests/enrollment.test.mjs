@@ -67,12 +67,26 @@ const adminRequest=(path,method='GET',data)=>request(path,{method,headers:{Autho
 const hostRequest=(id,token,path,method='GET',data)=>request(path,{method,
   headers:{Authorization:'Bearer '+token,'X-Fleet-Machine':id},body:data?JSON.stringify(data):undefined});
 async function enroll(id,token,invite) {
-  assert.equal((await adminRequest('/admin/invites','POST',{name:'test-'+id[0],hash:hash(invite)})).status,200);
+  const grant=await adminRequest('/admin/invites','POST',{name:'test-'+id[0],hash:hash(invite)});
+  assert.equal(grant.status,200);
+  const window=await grant.json();
+  assert.equal(window.expires_in,7*24*3600);
+  assert.ok(window.expires_at>Date.now()+6*24*3600*1000);
   const redeem=(machine_id=id,host_token=token)=>request('/v1/enroll',{method:'POST',headers:{Authorization:'Bearer '+invite},body:JSON.stringify({machine_id,host_token})});
   assert.equal((await redeem()).status,200);
   assert.equal((await redeem()).status,200);
   assert.equal((await redeem('f'.repeat(32),'x'.repeat(64))).status,409);
+  assert.equal((await adminRequest('/admin/invites','POST',{name:'reset-used',hash:hash(invite)})).status,409);
 }
+test('operators can choose or extend an unredeemed invitation window',async()=>{
+  const input={name:'delayed-zulip',hash:hash('long-lived-invite'),expires_in:2*24*3600};
+  const first=await (await adminRequest('/admin/invites','POST',input)).json();
+  assert.equal(first.expires_in,2*24*3600);
+  const extension=await (await adminRequest('/admin/invites','POST',{...input,expires_in:14*24*3600})).json();
+  assert.ok(extension.expires_at>first.expires_at);
+  for (const expires_in of [0,3599,31*24*3600,1.5,'604800'])
+    assert.equal((await adminRequest('/admin/invites','POST',{...input,expires_in})).status,400);
+});
 test('one-time enrollment binds a durable credential to one machine',async()=>{
   assert.equal((await hostRequest(id1,token1,'/v1/policy')).status,401);
   await enroll(id1,token1,'invite-one');

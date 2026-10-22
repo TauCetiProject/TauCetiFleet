@@ -29,9 +29,14 @@ From this directory, an operator with the private local admin credential runs:
 python3 scripts/setup.py invite --name chris-server
 ```
 
-The command saves a one-hour enrollment code in a private file under
+The command saves a seven-day enrollment code in a private file under
 `~/.config/tauceti-ci-broker/invitations/`. Transfer that code privately to the
 volunteer. No GitHub PAT or App private key goes to the host.
+
+Use `--expires-in-days N` to choose 1–30 days. To extend an existing unredeemed
+code, add `--token-file PATH`; a redeemed invitation cannot be extended or reset.
+This deadline only controls enrollment. Once enrolled, the host credential
+continues working until the operator revokes it.
 
 On the volunteer's Linux x86-64 server:
 
