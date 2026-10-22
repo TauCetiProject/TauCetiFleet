@@ -249,14 +249,20 @@ def _start(config):
         if result.returncode == 0:
             return prior
         _retire(config, prior)
-    instance = secrets.token_hex(8)
+    registration = state_dir() / "ci-registration.json"
+    intent = read(registration, {}) if config.get("ci_broker_url") else {}
+    instance = intent.get("instance") or secrets.token_hex(8)
+    if config.get("ci_broker_url"):
+        # Keep the request identity across lost replies and controller restarts.
+        # The broker can replay the existing JIT config without registering twice.
+        atomic(registration, dict(instance=instance))
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
-    directory.mkdir(parents=True, mode=0o700)
     disk = directory / "disk.qcow2"
     unit = "tauceti-fleet-vm-" + instance
     try:
+        directory.mkdir(parents=True, mode=0o700)
         run(
             [
                 executable("qemu-img"),
@@ -320,11 +326,13 @@ def _start(config):
         value["phase"] = "ready"
         atomic(state_dir() / "vm.json", value)
         event("ci_vm_started", runner_id=runner_id)
+        registration.unlink(missing_ok=True)
         return value
     except Exception:
         run(["systemctl", "--user", "stop", unit + ".service"], check=False)
         try:
             github.retire_runner(config, runner_id)
+            registration.unlink(missing_ok=True)
         except FleetError:
             pass
         shutil.rmtree(directory, ignore_errors=True)
@@ -344,7 +352,13 @@ def _retire(config, value):
     try:
         github.retire_runner(config, value["runner_id"])
     except FleetError:
-        pass  # Ephemeral runners usually already deregistered themselves.
+        if config.get("ci_broker_url"):
+            # Preserve local ownership for an idempotent retirement retry. The
+            # broker handles GitHub's already-deregistered (404) case itself.
+            raise
+    registration = state_dir() / "ci-registration.json"
+    if read(registration, {}).get("instance") == value.get("instance"):
+        registration.unlink(missing_ok=True)
     directory = Path(value["directory"])
     if directory.parent == state_dir() / "vms":
         shutil.rmtree(directory, ignore_errors=True)

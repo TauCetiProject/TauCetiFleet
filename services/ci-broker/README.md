@@ -81,6 +81,9 @@ minutes, the operator can run `reconcile`: it checks the full trusted-group
 inventory and removes only offline runners with that exact reserved name before
 clearing the reservation. Active matches and incomplete inventories require
 inspection instead. GitHub API errors never trigger blind registration retries.
+The host persists its runner request identity before registration and retains
+local ownership when broker retirement fails, so interrupted registration and
+retirement can recover without requesting extra capacity.
 
 The service stores ownership for the latest 4096 issued runners per host, which
 bounds record size. A sufficiently old deferred result can therefore age out.

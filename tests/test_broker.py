@@ -2,12 +2,13 @@ import io
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import broker, github, host, remote, store
+from tauceti_fleet import broker, github, host, remote, store, vm
 
 
 class Enrollment(unittest.TestCase):
@@ -115,3 +116,33 @@ class Enrollment(unittest.TestCase):
         self.assertFalse(result["workers_enabled"])
         self.assertFalse(result["ci_enabled"])
         self.assertEqual(store.host_config()["ci_broker_url"], broker.DEFAULT_URL)
+
+    def test_interrupted_registration_keeps_its_identity_until_vm_launch(self):
+        config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL)
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        names = []
+
+        def register(config, name):
+            names.append(name)
+            if len(names) == 1:
+                raise store.FleetError("response lost after remote registration")
+            return 7, "single-job-config"
+
+        with patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"):
+            with self.assertRaisesRegex(store.FleetError, "response lost"):
+                vm.start(config)
+            self.assertTrue((store.state_dir() / "ci-registration.json").exists())
+            value = vm.start(config)
+        self.assertEqual(names[0], names[1])
+        self.assertEqual(value["runner_name"], names[0])
+        self.assertFalse((store.state_dir() / "ci-registration.json").exists())
+
+    def test_failed_broker_retirement_preserves_local_ownership_for_retry(self):
+        config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL)
+        value = dict(instance="a" * 16, unit="guest.service", runner_id=7,
+                     directory=str(store.state_dir() / "vms" / ("a" * 16)))
+        store.atomic(store.state_dir() / "vm.json", value)
+        with patch.object(vm, "run"), patch.object(github, "retire_runner", side_effect=store.FleetError("response lost")):
+            with self.assertRaisesRegex(store.FleetError, "response lost"):
+                vm.retire(config, value)
+        self.assertEqual(store.read(store.state_dir() / "vm.json"), value)
