@@ -208,6 +208,8 @@ def main(argv=None):
                         print(
                             f"Worker limits: {memory['high'] / gib:.1f} GiB soft / {memory['maximum'] / gib:.1f} GiB hard"
                         )
+                        if memory.get("allocation_error"):
+                            print(f"Memory allocation error: {memory['allocation_error']}")
                         print("Worker memory reclamation waits (1-minute averages; informational)")
                         print(
                             f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}%"

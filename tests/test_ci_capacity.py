@@ -132,16 +132,17 @@ class Capacity(unittest.TestCase):
             host.write_slices(config, dict(memory_total=128 * gib, memory_available=120 * gib))
         self.assertIn(f"MemoryMax={68 * gib}", (self.root / "tauceti-fleet-ci.slice").read_text())
 
-    def test_ci_only_enable_cannot_shrink_the_slice_of_draining_paid_workers(self):
+    def test_temporary_low_availability_cannot_freeze_a_small_hard_limit(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=2, vcpus=16, memory_gib=32)
         def current(args, **kwargs):
             charged = 68 * gib if "tauceti-fleet-ci.slice" in args else int(.8 * gib)
             return subprocess.CompletedProcess([], 0, stdout=str(charged))
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run", side_effect=current), patch.object(host, "worker_statuses", return_value=[dict(alive=True, state="working")]):
-            with self.assertRaisesRegex(store.FleetError, "draining workers"):
-                host.write_slices(config, dict(memory_total=128 * gib, memory_available=13 * gib))
-        self.assertFalse((self.root / "tauceti-fleet-workers.slice").exists())
+            low = host.write_slices(config, dict(memory_total=128 * gib, memory_available=13 * gib))
+            recovered = host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
+        self.assertEqual(low, recovered)
+        self.assertGreater(low, 40 * gib)
 
     def test_live_workers_keep_their_configured_headroom_even_when_usage_is_low(self):
         gib = 1024**3
