@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tauceti-ci-broker",
+  "account_id": "ec2169bdf033f56b009956d4b64ba8ef",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-11",
+  "routes": [{"pattern": "fleet.taucetiproject.org", "custom_domain": true}],
+  "workers_dev": false,
+  "keep_vars": true,
+  "observability": {"enabled": false},
+  "durable_objects": {"bindings": [{"name": "REGISTRY", "class_name": "FleetRegistry"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["FleetRegistry"]}]
+}

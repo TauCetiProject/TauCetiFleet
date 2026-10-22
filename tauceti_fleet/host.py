@@ -72,8 +72,13 @@ def configure(payload):
         "author_effort",
         "runner_group_id",
         "github_state_url",
+        "ci_broker_url",
     }
     updates = {k: v for k, v in payload.items() if k in allowed}
+    if "ci_broker_url" in updates:
+        from .broker import validate_url
+
+        validate_url(updates["ci_broker_url"])
     for name in ("max_workers", "max_open_prs", "runner_group_id", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"):
         if name in updates and (type(updates[name]) is not int or not 1 <= updates[name] <= 4096):
             raise FleetError(f"{name} must be a positive integer at most 4096")
@@ -87,7 +92,7 @@ def configure(payload):
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
@@ -384,6 +389,23 @@ def ci_service_state(unit):
     return running, "healthy" if healthy_exit else "unknown"
 
 
+def queue_ci_result(value, service_health):
+    """Persist one result receipt even while runner retirement keeps failing."""
+    if not value.get("run_id") or value.get("result_queued"):
+        return False
+    value["host_health"] = service_health
+    pending = read(state_dir() / "pending-ci.json", [])
+    identity = (value.get("instance"), value["run_id"], value["runner_id"])
+    if not any((p.get("instance"), p.get("run_id"), p.get("runner_id")) == identity for p in pending):
+        pending.append(dict(value))
+        atomic(state_dir() / "pending-ci.json", pending)
+    # Write after the receipt. If interrupted between writes, the identity check
+    # deduplicates the next attempt. Keep this marker after collection as well.
+    value["result_queued"] = True
+    atomic(state_dir() / "vm.json", value)
+    return True
+
+
 def collect_ci_results(config):
     path = state_dir() / "pending-ci.json"
     remaining = []
@@ -392,9 +414,9 @@ def collect_ci_results(config):
             event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
             continue
         try:
-            data = github.request(
+            data = github.ci_read(
+                config,
                 f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
-                token_file=config.get("github_token_file"),
             )
             jobs = [j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]]
             job = jobs[0] if len(jobs) == 1 else None
@@ -412,7 +434,7 @@ def collect_ci_results(config):
             decision = ci.classify(job, host_health=value.get("host_health"))
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
-                    run_data, statuses = ci.cancellation_metadata(job, config, github.request)
+                    run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))
                     decision = ci.classify(job, run=run_data, statuses=statuses, host_health=value.get("host_health"))
                 except (FleetError, ValueError, KeyError, TypeError, OSError):
                     decision = dict(cooldown=True, reason="cancellation_evidence_unavailable", evidence={})
@@ -513,11 +535,7 @@ def daemon():
                         value.get("phase") == "starting" and time.time() - value["started_at"] < 60
                     ):
                         # Preserve immutable run identity for deferred result collection.
-                        if value.get("run_id"):
-                            value["host_health"] = service_health
-                            pending = read(state_dir() / "pending-ci.json", [])
-                            pending.append(value)
-                            atomic(state_dir() / "pending-ci.json", pending)
+                        if queue_ci_result(value, service_health):
                             collect_ci_results(config)
                         vm.retire(config, value)
                         value = {}
