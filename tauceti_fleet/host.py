@@ -449,7 +449,14 @@ def collect_ci_results(config):
                     continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            decision = ci.classify(job, host_health=value.get("host_health"))
+            kind = "staging"
+            if "pr" in value.get("ci_kinds", ["staging"]) and value.get("host_health") != "fault":
+                run = github.ci_read(config, f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}")
+                # The immutable receipt supplies the run ID, GitHub supplies its
+                # event/title. Guest events never claim PR versus staging trust.
+                if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
+                    kind = "pr"
+            decision = ci.classify(job, host_health=value.get("host_health"), kind=kind)
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
                     run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))

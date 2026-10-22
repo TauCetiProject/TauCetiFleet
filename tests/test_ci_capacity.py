@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import broker, capacity, github, host, store, vm
+from tauceti_fleet import broker, capacity, ci, github, host, store, vm
 
 
 class Capacity(unittest.TestCase):
@@ -29,9 +29,9 @@ class Capacity(unittest.TestCase):
         for maximum in (0, True, 1.5, 17):
             with self.assertRaises(store.FleetError):
                 capacity.settings(config, ci="both", maximum=maximum)
-        for ci in (True, {}, "unknown"):
+        for kind in (True, {}, "unknown"):
             with self.assertRaises(store.FleetError):
-                capacity.settings(config, ci=ci)
+                capacity.settings(config, ci=kind)
 
     def test_pr_only_runners_cannot_match_legacy_staging_workflows(self):
         config = capacity.settings(store.host_config(), ci="pr")
@@ -40,6 +40,16 @@ class Capacity(unittest.TestCase):
         self.assertNotIn("tauceti-fleet", labels)
         self.assertNotIn("tauceti-fleet-staging", labels)
         self.assertIn("fleet-instance-" + "a" * 16, labels)
+
+    def test_normal_pr_cancellations_and_deleted_forks_do_not_cool_staging_capacity(self):
+        for job in (dict(conclusion="cancelled", steps=[]),
+                    dict(conclusion="failure", steps=[dict(name="Resolve PR head", conclusion="failure")]),
+                    dict(conclusion="failure", steps=[dict(name="Checkout PR", conclusion="failure")])):
+            self.assertFalse(ci.classify(job, kind="pr", host_health="healthy")["cooldown"])
+            self.assertTrue(ci.classify(job, kind="pr", host_health="fault")["cooldown"])
+        self.assertTrue(ci.classify(dict(conclusion="failure", steps=[dict(name="Set up job", conclusion="failure")]),
+                                    kind="pr", host_health="healthy")["cooldown"])
+        self.assertTrue(ci.classify(dict(conclusion="startup_failure"), kind="pr", host_health="healthy")["cooldown"])
 
     def test_guests_and_registration_retries_are_isolated_by_slot(self):
         config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL)

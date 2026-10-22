@@ -311,6 +311,7 @@ def _start(config):
         seed = cloud_seed(directory, commands, name=name)
         value = dict(
             slot=config.get("ci_slot", 0),
+            ci_kinds=config.get("ci_kinds", ["staging"]),
             instance=instance,
             unit=unit + ".service",
             runner_id=runner_id,

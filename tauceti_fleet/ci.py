@@ -41,7 +41,7 @@ INFRA_PREFIXES = (
 )
 
 
-def classify(job, *, run=None, statuses=None, host_health=None):
+def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
     """Return a bounded, non-secret decision; missing/conflicting facts fail closed."""
 
     def result(cooldown, reason, **evidence):
@@ -55,6 +55,16 @@ def classify(job, *, run=None, statuses=None, host_health=None):
     for step in steps:
         if step.get("conclusion") in ("timed_out", "startup_failure"):
             return result(True, "infrastructure_step_failed", step_number=step.get("number"))
+    if kind == "pr":
+        failed_host_steps = [s for s in steps if s.get("conclusion") == "failure" and
+                             s.get("name") in ("Set up job", "Set up runner", "Complete job")]
+        if failed_host_steps:
+            return result(True, "pr_runner_step_failed", step_number=failed_host_steps[0].get("number"))
+        if job.get("conclusion") == "cancelled":
+            return result(host_health != "healthy", "pr_cancelled" if host_health == "healthy" else "pr_cancellation_health_unavailable")
+        # Closed/deleted PRs, fork checkouts and candidate failures are normal
+        # workflow outcomes. They must not remove staging capacity on a both host.
+        return result(False, "pr_workflow_outcome")
     # The helper records a quota response in private runner-temp state outside
     # the candidate sandbox. A fixed main-defined finalizer fails ONLY when that
     # record exists. Its conclusion is available in the already-fetched jobs
