@@ -385,19 +385,27 @@ def doctor(config=None, *, probe=True):
                 "github-runner-policy",
                 "blocked",
                 str(exc),
-                "Configure runner_group_id and a CI registration credential with Self-hosted runners write permission",
+                "Enroll this host with tauceti-fleet enroll, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    for name in ("anthropic_api_key_file", "github_token_file"):
+    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    if config.get("ci_broker_url"):
+        credential_names.append("ci_broker_token_file")
+    for name in credential_names:
         value = config.get(name)
         exists = bool(value and Path(value).is_file() and Path(value).stat().st_size)
         private = exists and Path(value).stat().st_mode & 0o077 == 0
+        roles = ("workers",)
+        if name == "ci_broker_token_file":
+            roles = ("ci",)
+        elif name == "github_token_file" and not config.get("ci_broker_url"):
+            roles = ("workers", "ci")
         add(
             name,
             "ok" if private else "blocked",
             "private credential file present" if private else "credential missing or readable by other users",
             "Configure the selected profile and repeat add; use chmod 600 for credential files",
-            roles=("workers",) if name.startswith("anthropic") else ("workers", "ci"),
+            roles=roles,
         )
     if config.get("github_token_file"):
         try:

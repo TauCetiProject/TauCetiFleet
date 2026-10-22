@@ -9,6 +9,13 @@ workers, change existing worker definitions, or copy budget grants.
 
 ## Install and inspect
 
+For a volunteer contributing CI without AI workers, use [host enrollment](services/ci-broker/README.md):
+an operator supplies a one-time code, and the volunteer runs `tauceti-fleet enroll`.
+The host needs no GitHub login, model credentials, or budget. It receives only a
+revocable credential for its own disposable runner; the GitHub App key stays on
+the enrollment service. Enrollment installs inactive services; `prepare` and
+`enable local --ci` remain explicit.
+
 Install with `uv tool install git+https://github.com/TauCetiProject/TauCetiFleet.git`
 (or `uv tool install .` from a checkout). From the operator's
 machine, use existing SSH aliases, authentication, and known-host verification:

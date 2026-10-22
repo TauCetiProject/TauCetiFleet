@@ -40,6 +40,10 @@ def request(path, *, token_file=None, method="GET", data=None):
 
 
 def runners(config):
+    if config.get("ci_broker_url"):
+        from .broker import request as broker_request
+
+        return broker_request(config, "/v1/runners")["runners"]
     found = []
     for page in range(1, 21):
         data = request(
@@ -56,6 +60,13 @@ def runners(config):
 
 
 def runner_policy(config):
+    if config.get("ci_broker_url"):
+        from .broker import request as broker_request
+
+        group = broker_request(config, "/v1/policy")["runner_group_id"]
+        if group != config.get("runner_group_id"):
+            raise FleetError("CI broker returned a different runner group")
+        return group
     group = config.get("runner_group_id")
     if not isinstance(group, int) or group <= 0:
         raise FleetError(
@@ -79,6 +90,11 @@ def runner_policy(config):
 
 
 def jit_config(config, name):
+    if config.get("ci_broker_url"):
+        from .broker import request as broker_request
+
+        value = broker_request(config, "/v1/runners", method="POST", data=dict(name=name))
+        return value["runner_id"], value["encoded_jit_config"]
     group = runner_policy(config)
     data = request(
         "orgs/TauCetiProject/actions/runners/generate-jitconfig",
@@ -92,3 +108,26 @@ def jit_config(config, name):
         ),
     )
     return data["runner"]["id"], data["encoded_jit_config"]
+
+
+def retire_runner(config, runner_id):
+    if config.get("ci_broker_url"):
+        from .broker import request as broker_request
+
+        return broker_request(config, f"/v1/runners/{int(runner_id)}", method="DELETE")
+    return request(f"orgs/TauCetiProject/actions/runners/{int(runner_id)}", method="DELETE",
+                   token_file=config.get("ci_token_file") or config.get("github_token_file"))
+
+
+def ci_read(config, path):
+    if config.get("ci_broker_url"):
+        import re
+
+        from .broker import request as broker_request
+
+        prefix = "repos/TauCetiProject/TauCeti/"
+        endpoint = path.split("?", 1)[0]
+        if not endpoint.startswith(prefix) or not re.fullmatch(r"actions/runs/[1-9][0-9]*(?:/jobs)?|commits/[a-f0-9]{40}/statuses", endpoint[len(prefix):]):
+            raise FleetError("Unsupported CI metadata endpoint")
+        return broker_request(config, "/v1/github/" + endpoint[len(prefix):])
+    return request(path, token_file=config.get("github_token_file"))

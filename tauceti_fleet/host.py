@@ -72,8 +72,13 @@ def configure(payload):
         "author_effort",
         "runner_group_id",
         "github_state_url",
+        "ci_broker_url",
     }
     updates = {k: v for k, v in payload.items() if k in allowed}
+    if "ci_broker_url" in updates:
+        from .broker import validate_url
+
+        validate_url(updates["ci_broker_url"])
     for name in ("max_workers", "max_open_prs", "runner_group_id", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"):
         if name in updates and (type(updates[name]) is not int or not 1 <= updates[name] <= 4096):
             raise FleetError(f"{name} must be a positive integer at most 4096")
@@ -87,7 +92,7 @@ def configure(payload):
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
@@ -392,9 +397,9 @@ def collect_ci_results(config):
             event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
             continue
         try:
-            data = github.request(
+            data = github.ci_read(
+                config,
                 f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
-                token_file=config.get("github_token_file"),
             )
             jobs = [j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]]
             job = jobs[0] if len(jobs) == 1 else None
@@ -412,7 +417,7 @@ def collect_ci_results(config):
             decision = ci.classify(job, host_health=value.get("host_health"))
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
-                    run_data, statuses = ci.cancellation_metadata(job, config, github.request)
+                    run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))
                     decision = ci.classify(job, run=run_data, statuses=statuses, host_health=value.get("host_health"))
                 except (FleetError, ValueError, KeyError, TypeError, OSError):
                     decision = dict(cooldown=True, reason="cancellation_evidence_unavailable", evidence={})

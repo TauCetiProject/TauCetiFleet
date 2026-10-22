@@ -324,11 +324,7 @@ def _start(config):
     except Exception:
         run(["systemctl", "--user", "stop", unit + ".service"], check=False)
         try:
-            github.request(
-                f"orgs/TauCetiProject/actions/runners/{runner_id}",
-                method="DELETE",
-                token_file=config.get("ci_token_file") or config.get("github_token_file"),
-            )
+            github.retire_runner(config, runner_id)
         except FleetError:
             pass
         shutil.rmtree(directory, ignore_errors=True)
@@ -346,11 +342,7 @@ def _retire(config, value):
     run(["systemctl", "--user", "stop", value["unit"]], check=False)
     run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
     try:
-        github.request(
-            f"orgs/TauCetiProject/actions/runners/{value['runner_id']}",
-            method="DELETE",
-            token_file=config.get("ci_token_file") or config.get("github_token_file"),
-        )
+        github.retire_runner(config, value["runner_id"])
     except FleetError:
         pass  # Ephemeral runners usually already deregistered themselves.
     directory = Path(value["directory"])
