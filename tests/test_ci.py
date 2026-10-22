@@ -199,10 +199,8 @@ class Classification(unittest.TestCase):
             lambda j, r, s: r.update(id=41),
             lambda j, r, s: j.update(run_attempt=2),
             lambda j, r, s: r.update(run_attempt=2),
-            lambda j, r, s: j["steps"].pop(),
             lambda j, r, s: j["steps"].append(step("New unknown step", "failure", 5)),
             lambda j, r, s: j["steps"][2].update(conclusion="failure"),
-            lambda j, r, s: j["steps"].append(step("Checkout late network failure", "cancelled", 5)),
         ]
         for index, mutate in enumerate(mutations):
             with self.subTest(index=index):
@@ -210,64 +208,42 @@ class Classification(unittest.TestCase):
                 mutate(*values)
                 self.assertTrue(self.classify(*values)["cooldown"])
 
-    def test_report_expected_failure_requires_both_successful_status_writes(self):
-        job, run, statuses = evidence()
-        job["steps"].insert(3, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
-        self.assertTrue(self.classify(job, run, statuses)["cooldown"])
-        for context in ("scope", "bump-guard"):
-            statuses.append(
-                dict(
-                    id=124,
-                    context=context,
-                    creator=dict(id=ci.ACTIONS_ID),
-                    state="success",
-                    target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/42",
-                    created_at="2026-10-16T00:00:53Z",
-                )
-            )
-        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
-        for change in (
-            dict(state="failure"),
-            dict(target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/41"),
-            dict(created_at="2026-10-16T00:00:20Z"),
+    def test_verified_cancellation_during_any_job_phase(self):
+        for name in (
+            "Set up job",
+            "Checkout workflow-pinned trusted build tooling",
+            "Install bubblewrap (pinned + checksum) and self-test (fail closed)",
+            "Restore Mathlib's compressed download cache from main",
+            ci.BUILD,
+            "Hand the merge-group oleans to the isolated publisher",
+            "Complete job",
         ):
-            original = dict(statuses[-1])
-            statuses[-1].update(change)
-            self.assertTrue(self.classify(job, run, statuses)["cooldown"])
-            statuses[-1] = original
-
-    def test_report_evidence_accepts_only_known_status_writers(self):
-        for writers, expected in (
-            ((ci.ACTIONS_ID, ci.ACTIONS_ID), False),
-            ((ci.BORS_ID, ci.BORS_ID), False),
-            ((ci.ACTIONS_ID, ci.BORS_ID), False),
-            ((1, ci.BORS_ID), True),
-            ((ci.BORS_ID, 1), True),
-        ):
-            with self.subTest(writers=writers):
+            with self.subTest(name=name):
                 job, run, statuses = evidence()
-                job["steps"].insert(3, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
-                for context, writer in zip(("scope", "bump-guard"), writers, strict=True):
-                    statuses.append(
-                        dict(
-                            context=context,
-                            creator=dict(id=writer),
-                            state="success",
-                            target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/42",
-                            created_at="2026-10-16T00:00:53Z",
-                        )
-                    )
-                self.assertEqual(self.classify(job, run, statuses)["cooldown"], expected)
-                if not expected:
-                    # Trusted authorship alone never replaces exact run/time proof.
-                    for changed in (
-                        dict(target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/43"),
-                        dict(created_at="2026-10-16T00:00:20Z"),
-                        dict(state="failure"),
-                    ):
-                        invalid = copy.deepcopy(statuses)
-                        invalid[-1].update(changed)
-                        self.assertTrue(self.classify(job, run, invalid)["cooldown"])
+                job["steps"] = [step(name, "cancelled", start="00:00:01", end="00:00:50")]
+                decision = self.classify(job, run, statuses)
+                self.assertFalse(decision["cooldown"])
+                self.assertEqual(decision["reason"], "verified_bors_cancellation")
+
+    def test_cancellation_after_build_success_keeps_healthy_capacity(self):
+        job, run, statuses = evidence()
+        job["steps"][2]["conclusion"] = "success"
+        job["steps"].insert(3, step("Publish cache", "cancelled", 5, "00:00:51", "00:00:55"))
+        statuses[0]["created_at"] = "2026-10-16T00:00:52Z"
+        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
+
+    def test_expected_reporting_failure_after_cancellation_needs_no_guard_statuses(self):
+        # Batch1502 was cancelled during bubblewrap setup, before the build.
+        # Reporting then deliberately failed; scope/bump-guard success is not
+        # required to prove that a cancelled setup left the host healthy.
+        job, run, statuses = evidence()
+        job["steps"][2] = step("Install bubblewrap", "cancelled", 3, "00:00:03", "00:00:50")
+        job["steps"].insert(3, step(ci.BUILD, "skipped", 6, "00:00:50", "00:00:50"))
+        job["steps"].insert(4, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
+        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
+        # Failure before the coordinator cancelled is conflicting evidence.
+        job["steps"][4]["started_at"] = "2026-10-16T00:00:20Z"
+        self.assertTrue(self.classify(job, run, statuses)["cooldown"])
 
     def test_missing_host_health_is_unknown_even_with_valid_github_proof(self):
         job, run, statuses = evidence()
@@ -317,8 +293,9 @@ class Collection(unittest.TestCase):
         self.backoff = Path(self.temp.name) / "ci-backoff.json"
         self.config = store.host_config()
 
-    def collect(self, *, fault=False, api_fault=False, host_health="healthy"):
+    def collect(self, *, fault=False, api_fault=False, host_health="healthy", phase=ci.BUILD):
         job, run, statuses = evidence()
+        job["steps"][2]["name"] = phase
         if fault:
             job["conclusion"] = "timed_out"
         value = dict(run_id=42, runner_id=12, host_health=host_health)
@@ -331,8 +308,9 @@ class Collection(unittest.TestCase):
                 raise store.FleetError("network unavailable")
             return statuses if "/statuses?" in path else run
 
-        with patch.object(host.github, "request", side_effect=request):
+        with patch.object(host.github, "request", side_effect=request) as request_mock:
             host.collect_ci_results(self.config)
+        self.request_count = request_mock.call_count
         return job
 
     def test_quota_collection_uses_only_existing_job_read_and_preserves_other_cooldown(self):
@@ -356,6 +334,14 @@ class Collection(unittest.TestCase):
         self.assertEqual(len(store.export_events()), 1)
         self.collect()
         self.assertEqual(len(store.export_events()), 1)
+
+    def test_setup_cancellation_collection_keeps_capacity_without_extra_reads(self):
+        self.collect(phase="Install bubblewrap")
+        self.assertEqual(self.request_count, 4)  # Jobs/run/statuses, then the duplicate receipt's jobs lookup.
+        self.assertFalse(self.backoff.exists())
+        events = store.export_events()
+        self.assertEqual(events[0]["classification"]["reason"], "verified_bors_cancellation")
+        self.assertEqual(store.read(self.pending), [])
 
     def test_fault_replay_never_extends_or_shortens_other_cooldown(self):
         job = self.collect(fault=True)
