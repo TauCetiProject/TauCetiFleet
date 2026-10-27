@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_watchdog, github, vm
+from . import activity, capacity, ci, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -574,27 +574,12 @@ class CISlot:
         self.buffer = b""
         self.next_vm = 0
         self.next_cleanup = 0
-        self.next_watchdog = 0
 
     def close(self):
         if self.client:
             self.client.close()
         self.client = None
         self.buffer = b""
-
-    def retirement_reason(self, config, value):
-        now = time.time()
-        if now - value.get("started_at", now) >= ci_watchdog.VM_MAX_SECONDS:
-            return "guest_lifetime_exceeded"
-        if value.get("busy") and value.get("run_id") and now >= self.next_watchdog:
-            self.next_watchdog = now + ci_watchdog.OBSERVATION_INTERVAL_SECONDS
-            response = github.ci_read(
-                config,
-                f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
-            )
-            if ci_watchdog.completed_job(value, response, now):
-                return "github_job_completed"
-        return None
 
     def step(self, config, *, inventory, refresh, cooling):
         config = dict(config, ci_slot=self.index,
@@ -608,19 +593,28 @@ class CISlot:
             return {}
         if value:
             active, service_health = ci_service_state(value["unit"])
-            reason = self.retirement_reason(config, value) if active is not False else None
-            if reason:
-                # Stop before any reporting writes or API calls: even a full
-                # disk or unavailable GitHub must not keep this guest alive.
-                run(["systemctl", "--user", "stop", value["unit"]])
-                value["watchdog_reason"] = reason
-                event("ci_watchdog_retirement", slot=self.index, instance=value["instance"],
-                      runner_id=value["runner_id"], run_id=value.get("run_id"), reason=reason)
-                active = False
-                service_health = "fault" if reason == "guest_lifetime_exceeded" else "unknown"
+            if active is not False and refresh:
+                own = next((r for r in inventory if r["id"] == value.get("runner_id")), None)
+                # JIT runners serve exactly one job. Once their registration
+                # disappears, a surviving guest cannot accept or report work.
+                # Require fresh complete inventories across a ten-minute grace;
+                # an offline registered runner may still be running a build.
+                if own is None and time.time() - value["started_at"] > 180:
+                    if "runner_missing_since" not in value:
+                        value["runner_missing_since"] = time.time()
+                        atomic(path, value)
+                    elif time.time() - value["runner_missing_since"] >= 600:
+                        run(["systemctl", "--user", "stop", value["unit"]])
+                        event("ci_orphan_retired", slot=self.index, runner_id=value["runner_id"],
+                              instance=value["instance"], reason="runner_registration_disappeared")
+                        active = False
+                elif "runner_missing_since" in value:
+                    del value["runner_missing_since"]
+                    atomic(path, value)
             if active is False and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60):
-                if queue_ci_result(value, service_health):
-                    collect_ci_results(config)
+                # The daemon collects queued results on its existing schedule;
+                # reporting must not delay retiring this guest.
+                queue_ci_result(value, service_health)
                 vm.retire(config, value)
                 value = {}
                 self.close()
@@ -695,7 +689,6 @@ def daemon():
         slots = {}
         last_github = 0
         inventory = []
-        inventory_error = None
         error = None
         ids = []
         last_results = 0
@@ -713,19 +706,12 @@ def daemon():
                 indexes = sorted(set(range(capacity.jobs(config))) | set(vm.slots_in_use()))
                 refresh = (config["ci_enabled"] or vm.outstanding()) and time.time() - last_github >= 30
                 if refresh:
+                    inventory = github.runners(config)
                     last_github = time.time()
-                    try:
-                        inventory = github.runners(config)
-                        inventory_error = None
-                    except FleetError as exc:
-                        # Local guest deadlines must run even when runner
-                        # inventory is unavailable. Never act on stale inventory.
-                        inventory_error = str(exc)
-                        refresh = False
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
                 values = []
-                slot_errors = {"inventory": inventory_error} if inventory_error else {}
+                slot_errors = {}
                 for index in indexes:
                     slot = slots.setdefault(index, CISlot(index))
                     try:

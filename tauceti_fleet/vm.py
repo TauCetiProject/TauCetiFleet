@@ -10,7 +10,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import ci_watchdog, github
+from . import github
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, event, host_config, locked, read, state_dir
 
@@ -353,8 +353,6 @@ def _start(config):
                 "KillMode=control-group",
                 "-p",
                 "RemainAfterExit=yes",
-                "-p",
-                f"RuntimeMaxSec={ci_watchdog.VM_MAX_SECONDS}",
                 *qemu_args(config, directory, disk, seed),
             ],
             timeout=30,

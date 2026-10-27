@@ -45,16 +45,21 @@ def runners(config):
 
         return broker_request(config, "/v1/runners")["runners"]
     found = []
+    total = None
     for page in range(1, 21):
         data = request(
             f"orgs/TauCetiProject/actions/runners?per_page=100&page={page}",
             token_file=config.get("ci_token_file") or config.get("github_token_file"),
         )
         batch = data["runners"]
+        if (not isinstance(batch, list) or type(data.get("total_count")) is not int
+                or data["total_count"] < 0 or total is not None and total != data["total_count"]):
+            break
+        total = data["total_count"]
         found.extend(batch)
-        if len(found) >= data["total_count"]:
+        if len(found) == total and len({r["id"] for r in found}) == total:
             return found
-        if not batch:
+        if not batch or len(found) >= total:
             break
     raise FleetError("GitHub runner inventory was incomplete; CI capacity remains unavailable")
 
