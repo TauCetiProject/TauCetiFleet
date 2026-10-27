@@ -207,6 +207,20 @@ pause new work. Stopping the experiment itself preserves the current ceiling.
 
 ## GitHub CI setup
 
+CI guests are automatically retired when GitHub confirms that the job assigned
+to their runner finished at least two minutes ago. The controller checks at
+most once per minute per busy slot and matches the host-owned runner ID; guest
+completion messages alone cannot stop a build. Missing or conflicting metadata
+leaves a live build running until the lifetime limit.
+
+Every guest has a seven-hour lifetime limit, including startup and teardown.
+Both the controller and systemd enforce it, so GitHub outages, controller
+restarts, or a lost completion hook cannot strand a slot indefinitely. The
+controller preserves the result identity, retires the old runner and creates a
+fresh guest when CI remains enabled. Watchdog retirements record their reason
+in the local event history; observation errors appear in `status --json` under
+`status.ci_errors`.
+
 The [companion TauCeti PR](https://github.com/TauCetiProject/TauCeti/pull/16862)
 extends the existing runner picker. Worker integration is in
 [TauCetiWorker #270](https://github.com/TauCetiProject/TauCetiWorker/pull/270). With

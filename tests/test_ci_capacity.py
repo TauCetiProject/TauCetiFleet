@@ -113,7 +113,7 @@ class Capacity(unittest.TestCase):
         values = []
         for slot in (0, 1):
             value = dict(slot=slot, unit=f"vm-{slot}", directory=str(self.root / str(slot)), runner_id=100 + slot,
-                         started_at=0, phase="ready", busy=False)
+                         started_at=host.time.time() - 300, phase="ready", busy=False)
             store.atomic(vm.slot_file({"ci_slot": slot}, "vm.json"), value)
             values.append(value)
         inventory = [dict(id=100, status="online", busy=False), dict(id=101, status="online", busy=True)]
