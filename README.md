@@ -207,6 +207,21 @@ pause new work. Stopping the experiment itself preserves the current ceiling.
 
 ## GitHub CI setup
 
+The controller reconciles each guest with the existing GitHub runner inventory.
+JIT runners serve one job and disappear after completion. If a guest remains
+alive after its registration disappears, fresh complete inventories must confirm
+the absence across ten minutes before the controller retires it and provisions
+a replacement. The result identity is retained for normal result collection.
+Registered runners, including offline runners, are preserved: neither VM age
+nor a guest completion message authorizes stopping a build. Failed or incomplete
+inventory reads do not authorize cleanup. Job timeouts remain the workflow's
+responsibility. Orphan retirements appear as `ci_orphan_retired` in local events.
+An offline runner that remains registered waits for GitHub's ephemeral-runner
+cleanup; the controller does not infer job completion from lost connectivity.
+For broker-enrolled hosts, deploy the accompanying broker change before updating
+hosts: inventory observations must retain ownership until explicit retirement,
+so a runner omitted once can appear again on the next observation.
+
 The [companion TauCeti PR](https://github.com/TauCetiProject/TauCeti/pull/16862)
 extends the existing runner picker. Worker integration is in
 [TauCetiWorker #270](https://github.com/TauCetiProject/TauCetiWorker/pull/270). With

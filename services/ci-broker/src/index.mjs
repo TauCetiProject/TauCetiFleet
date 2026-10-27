@@ -238,7 +238,8 @@ export class FleetRegistry extends DurableObject {
         for (const slot of owned) {
           const runner=found.find(r=>r.id===slot.runner_id);
           if (runner) runners.push(runner);
-          else { delete slot.runner_id; delete slot.jit; }
+          // Observations never release ownership. A later complete inventory
+          // may show this runner again; only explicit retirement clears it.
         }
         await save();
         return json({runners});

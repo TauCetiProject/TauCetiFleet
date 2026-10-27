@@ -593,9 +593,28 @@ class CISlot:
             return {}
         if value:
             active, service_health = ci_service_state(value["unit"])
+            if active is not False and refresh:
+                own = next((r for r in inventory if r["id"] == value.get("runner_id")), None)
+                # JIT runners serve exactly one job. Once their registration
+                # disappears, a surviving guest cannot accept or report work.
+                # Require fresh complete inventories across a ten-minute grace;
+                # an offline registered runner may still be running a build.
+                if own is None and time.time() - value["started_at"] > 180:
+                    if "runner_missing_since" not in value:
+                        value["runner_missing_since"] = time.time()
+                        atomic(path, value)
+                    elif time.time() - value["runner_missing_since"] >= 600:
+                        run(["systemctl", "--user", "stop", value["unit"]])
+                        event("ci_orphan_retired", slot=self.index, runner_id=value["runner_id"],
+                              instance=value["instance"], reason="runner_registration_disappeared")
+                        active = False
+                elif "runner_missing_since" in value:
+                    del value["runner_missing_since"]
+                    atomic(path, value)
             if active is False and not (value.get("phase") == "starting" and time.time() - value["started_at"] < 60):
-                if queue_ci_result(value, service_health):
-                    collect_ci_results(config)
+                # The daemon collects queued results on its existing schedule;
+                # reporting must not delay retiring this guest.
+                queue_ci_result(value, service_health)
                 vm.retire(config, value)
                 value = {}
                 self.close()

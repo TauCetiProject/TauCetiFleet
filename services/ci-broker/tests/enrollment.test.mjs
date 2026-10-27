@@ -130,6 +130,15 @@ test('metadata reads are fixed to TauCeti and jobs are filtered to the host',asy
   assert.equal((await hostRequest(id1,token1,'/v1/github/repos/other/repo')).status,404);
   assert.equal((await hostRequest(id1,token1,'/v1/github/orgs/TauCetiProject/actions/runners','POST',{})).status,404);
 });
+test('runner absence does not erase ownership or hide a reappearing runner',async()=>{
+  const runner=runners.get(100);
+  runners.delete(100);
+  assert.deepEqual((await (await hostRequest(id1,token1,'/v1/runners')).json()).runners,[]);
+  assert.equal((await hostRequest(id1,token1,'/v1/runners','POST',
+    {name:'fleet-'+id1.slice(0,12)+'-'+'d'.repeat(16)})).status,409);
+  runners.set(100,runner);
+  assert.deepEqual((await (await hostRequest(id1,token1,'/v1/runners')).json()).runners.map(r=>r.id),[100]);
+});
 test('retirement is owned and idempotent; revocation blocks all future host requests',async()=>{
   assert.equal((await hostRequest(id1,token1,'/v1/runners/100','DELETE')).status,200);
   assert.equal((await hostRequest(id1,token1,'/v1/runners/100','DELETE')).status,200);
