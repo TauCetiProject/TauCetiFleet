@@ -1,0 +1,23 @@
+name: CI broker health
+on:
+  schedule:
+    - cron: '7,17,27,37,47,57 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Check broker availability and stuck registrations
+        run: |
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          with urllib.request.urlopen('https://fleet.taucetiproject.org/healthz', timeout=60) as response:
+              health = json.load(response)
+          print(json.dumps(health, sort_keys=True))
+          if health.get('app_configured') is not True or health.get('stuck_registrations') != 0:
+              raise SystemExit('CI broker unhealthy; inspect registration recovery in the operator hosts command')
+          PY
