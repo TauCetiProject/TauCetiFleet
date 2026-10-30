@@ -7,7 +7,7 @@
   "routes": [{"pattern": "fleet.taucetiproject.org", "custom_domain": true}],
   "workers_dev": false,
   "keep_vars": true,
-  "observability": {"enabled": false},
+  "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false}},
   "durable_objects": {"bindings": [{"name": "REGISTRY", "class_name": "FleetRegistry"}]},
   "migrations": [{"tag": "v1", "new_sqlite_classes": ["FleetRegistry"]}]
 }

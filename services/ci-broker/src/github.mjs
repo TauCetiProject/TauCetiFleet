@@ -1,5 +1,11 @@
 export class UpstreamError extends Error {
-  constructor(status) { super('GitHub request failed'); this.status=status; }
+  constructor(status,requestId=null) { super('GitHub request failed'); this.status=status; this.requestId=requestId; }
+}
+export class InventoryError extends Error {
+  constructor() { super('Incomplete runner inventory'); }
+}
+export class PolicyError extends Error {
+  constructor() { super('Untrusted runner policy'); }
 }
 const encoder=new TextEncoder();
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
@@ -11,7 +17,7 @@ export class GitHub {
       headers:{Accept:'application/vnd.github+json', Authorization:'Bearer '+token,
         'User-Agent':'TauCetiFleet/broker', 'X-GitHub-Api-Version':'2022-11-28', 'Content-Type':'application/json'},
       body:data===undefined?undefined:JSON.stringify(data), signal:AbortSignal.timeout(20000)});
-    if (!response.ok) throw new UpstreamError(response.status);
+    if (!response.ok) throw new UpstreamError(response.status,response.headers.get('x-github-request-id'));
     if (response.status===204) return null;
     const text=await response.text();
     if (text.length>4*1024*1024) throw new Error('GitHub response exceeds limit');
@@ -38,16 +44,21 @@ export class GitHub {
     return this.raw(path, await this.token(kind),method,data);
   }
   async runners() {
-    const found=[];let total;
+    const found=[],ids=new Set();let total;
     for(let page=1;page<=20;page++) {
       const value=await this.request(`orgs/TauCetiProject/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
       if(!Array.isArray(value.runners) || !Number.isInteger(value.total_count) || value.total_count<0 ||
-         total!==undefined && total!==value.total_count)throw new Error('Incomplete runner inventory');
+         total!==undefined && total!==value.total_count)throw new InventoryError();
+      for (const runner of value.runners) {
+        if (!Number.isSafeInteger(runner.id) || typeof runner.name!=='string' || ids.has(runner.id))
+          throw new InventoryError();
+        ids.add(runner.id);
+      }
       total=value.total_count;found.push(...value.runners);
       if(found.length===total)return found;
       if(!value.runners.length || found.length>total)break;
     }
-    throw new Error('Incomplete runner inventory');
+    throw new InventoryError();
   }
   async policy({fresh=false}={}) {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
@@ -56,7 +67,7 @@ export class GitHub {
     const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
-        !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new Error('Untrusted runner policy');
+        !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();
     const value={runner_group_id:3};
     this.cachedPolicy={expires:Date.now()+60000,value};
     return value;

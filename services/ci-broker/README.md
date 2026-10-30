@@ -116,12 +116,33 @@ and filters runner inventory/deletion and job results to that host. It proxies
 only specific read-only TauCeti CI metadata endpoints, not arbitrary GitHub APIs.
 One-time JIT configurations reach guests; host credentials do not.
 
-An ambiguous GitHub registration reserves capacity and fails closed. After two
-minutes, the operator can run `reconcile`: it checks the full trusted-group
-inventory and removes only offline runners with that exact reserved name before
-clearing the reservation. Active matches and incomplete inventories require
-inspection instead. GitHub API errors never trigger blind registration retries.
-Definite registration rejections release their reservation immediately.
+An ambiguous GitHub registration reserves capacity and schedules a durable
+recovery alarm before making the GitHub request. After two minutes, recovery
+checks the complete trusted-group inventory, rechecks and removes only offline
+runners with that exact reserved name, and clears the reservation. The host's
+existing retries then resume registration without an upgrade or operator action.
+Active matches, incomplete inventories, policy errors and upstream outages keep
+their reservation and retry with backoff up to fifteen minutes. Recovery runs
+without incoming host requests and continues beyond the platform's six automatic
+alarm retries. The operator's `reconcile` command uses the same recovery checks.
+GitHub API errors never trigger blind registration retries. Definite registration
+rejections release their reservation immediately.
+
+The `hosts` command includes pending timestamps, a sanitized original failure,
+recovery attempts, the latest recovery error and the last successful recovery.
+Logs retain only structured recovery events, GitHub HTTP status and request IDs;
+they exclude tokens, callback URLs, exception messages and upstream bodies.
+Invocation logs stay disabled to avoid recording enrollment URLs.
+
+`/healthz` returns HTTP 503 if the App is unconfigured or a registration remains
+pending for ten minutes. It exposes only aggregate counts and adopts existing
+reservations that predate automatic recovery. The `CI broker health` GitHub
+Actions workflow checks this endpoint every ten minutes, including availability
+and response shape. Normal Actions failure notifications apply; operators should
+subscribe to workflow failures in their GitHub notification settings. Scheduled
+runs can be delayed by GitHub. This check detects broker availability and stuck
+registrations; it does not assert that every volunteer host is online or that a
+CI job has completed successfully.
 The host persists its runner request identity before registration and retains
 local ownership when broker retirement fails, so interrupted registration and
 retirement can recover without requesting extra capacity.

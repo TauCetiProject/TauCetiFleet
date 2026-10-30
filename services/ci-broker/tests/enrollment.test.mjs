@@ -17,8 +17,15 @@ const hash=value=>createHash('sha256').update(value).digest('hex');
 before(async()=>{
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
   mf=new Miniflare(convertV4MiniflareOptions({modules:true,
-    script:await readFile(new URL('../dist/index.js',import.meta.url),'utf8'),compatibilityDate:'2026-10-11',
-    durableObjects:{REGISTRY:{className:'FleetRegistry',useSQLite:true}},
+    // Test-only RPC methods exercise persisted recovery and the actual alarm
+    // handler without waiting two minutes or adding production debug routes.
+    script:(await readFile(new URL('../dist/index.js',import.meta.url),'utf8'))+`
+      export class TestFleetRegistry extends FleetRegistry {
+        async seed(host) { return this.serialize(()=>this.ctx.storage.put('host:'+host.machine_id,host)); }
+        async alarmTime() { return this.ctx.storage.getAlarm(); }
+        async fireRecovery() { return this.alarm(); }
+      }`,compatibilityDate:'2026-10-11',
+    durableObjects:{REGISTRY:{className:'TestFleetRegistry',useSQLite:true}},
     bindings:{ADMIN_TOKEN:admin,GITHUB_APP_ID:'42',GITHUB_INSTALLATION_ID:'123',
       GITHUB_PRIVATE_KEY:privateKey.export({type:'pkcs8',format:'pem'}).toString()},
     outboundService:async req=>{
@@ -273,4 +280,26 @@ test('draining cancels a definitively rejected intent even after its operator ce
   const before=upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length;
   assert.equal((await hostRequest(id,token,'/v1/slots/1/cancel-registration','POST',{name})).status,200);
   assert.equal(upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length,before);
+});
+test('stuck persisted state fails health, wakes recovery, and permits an unchanged host to retry',async()=>{
+  const namespace=await mf.getDurableObjectNamespace('REGISTRY');
+  const registry=namespace.get(namespace.idFromName('fleet'));
+  const id='c'.repeat(32),token='l'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'7'.repeat(16);
+  await registry.seed({machine_id:id,name:'stuck-host',hash:hash(token),issued:[],created_at:1,
+    slots:{0:{pending:{name,at:Date.now()-700000,failure:{kind:'github_http',status:502,request_id:'abc'}}}}});
+  const unhealthy=await request('/healthz');
+  assert.equal(unhealthy.status,503);
+  assert.equal((await unhealthy.json()).stuck_registrations,1);
+  assert.ok(await registry.alarmTime()>Date.now());
+  const posts=upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length;
+  await registry.fireRecovery();
+  assert.equal(upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length,posts);
+  const healthy=await request('/healthz');
+  assert.equal(healthy.status,200);
+  assert.equal((await healthy.json()).stuck_registrations,0);
+  const hosts=(await (await adminRequest('/admin/hosts')).json()).hosts;
+  const recovered=hosts.find(h=>h.machine_id===id).slots[0];
+  assert.equal(recovered.registration_pending,false);
+  assert.equal(recovered.last_recovery.failure.status,502);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name})).status,200);
 });

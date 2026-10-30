@@ -37,7 +37,8 @@ test('setup requires admin authentication; callback requires the bound unexpired
 test('public health and registration pages contain no credentials', async()=>{
   const health=await request('/healthz');
   assert.equal(health.headers.get('Cache-Control'),'no-store');
-  assert.deepEqual(await health.json(),{service:'tauceti-ci-broker',app_configured:false});
+  assert.equal(health.status,503);
+  assert.deepEqual(await health.json(),{service:'tauceti-ci-broker',app_configured:false,pending_registrations:0,stuck_registrations:0});
   const page=await (await request('/setup/register')).text();
   assert.ok(!page.includes(admin));
   assert.match(page,/location.hash/);

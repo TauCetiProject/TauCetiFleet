@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
 import {capacity,validCapacity,slots,labels} from './capacity.mjs';
+import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'"};
@@ -35,7 +36,10 @@ export function manifest(origin) {
 }
 
 export class FleetRegistry extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map(); }
+  constructor(ctx, env) {
+    super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map();
+    this.recovery=new RegistrationRecovery(ctx.storage,this.github);
+  }
   admit(id, maximum=1) {
     const now=Date.now();
     const bucket=this.buckets.get(id) || {tokens:32,at:now};
@@ -47,18 +51,27 @@ export class FleetRegistry extends DurableObject {
     if (this.buckets.size>2000) this.buckets.delete(this.buckets.keys().next().value);
     return allowed;
   }
-  fetch(req) {
+  serialize(work) {
     // Serialize the whole decision, including GitHub awaits, so concurrent host
     // requests cannot register twice or overwrite an administrator's revocation.
-    const result=this.queue.then(()=>this.handle(req));
+    const result=this.queue.then(work);
     this.queue=result.catch(()=>{});
     return result;
   }
+  fetch(req) { return this.serialize(()=>this.handle(req)); }
+  alarm() { return this.serialize(()=>this.recovery.run()); }
   async handle(req) {
     const url = new URL(req.url);
     // All mutations and authorization checks run on one strongly consistent object.
     if (url.pathname === '/healthz') {
-      return json({service: 'tauceti-ci-broker', app_configured: Boolean(this.env.GITHUB_APP_ID && this.env.GITHUB_PRIVATE_KEY)});
+      const hosts=await this.recovery.hosts();
+      // Also adopts reservations written before automatic recovery was deployed.
+      await this.recovery.schedule(hosts);
+      const pending=hosts.flatMap(h=>Object.values(slots(h)).filter(s=>s.pending).map(s=>s.pending));
+      const stuck=pending.filter(p=>Date.now()-p.at>=STUCK_AFTER).length;
+      const configured=Boolean(this.env.GITHUB_APP_ID && this.env.GITHUB_INSTALLATION_ID && this.env.GITHUB_PRIVATE_KEY);
+      return json({service:'tauceti-ci-broker',app_configured:configured,
+        pending_registrations:pending.length,stuck_registrations:stuck},configured && !stuck ? 200 : 503);
     }
     if (url.pathname === '/setup/register' && req.method === 'GET') {
       return html(`<title>Register TauCeti Fleet</title><h1>Register the TauCeti Fleet GitHub App</h1>
@@ -131,7 +144,10 @@ export class FleetRegistry extends DurableObject {
         const hosts=await this.ctx.storage.list({prefix:'host:',limit:1000});
         return json({hosts:Array.from(hosts.values(), h=>({machine_id:h.machine_id,name:h.name,revoked:!!h.revoked,
           ...capacity(h),slots:Object.entries(slots(h)).map(([slot,s])=>({slot:Number(slot),runner_id:s.runner_id || null,
-            registration_pending:!!s.pending,kinds:s.kinds || ['staging']})),created_at:h.created_at}))});
+            registration_pending:!!s.pending,pending_since:s.pending?.at ?? null,
+            registration_failure:s.pending?.failure ?? null,recovery_error:s.pending?.recovery_error ?? null,
+            recovery_attempts:s.pending?.attempts ?? 0,last_recovery:s.last_recovery ?? null,
+            kinds:s.kinds || ['staging']})),created_at:h.created_at}))});
       }
       const policy=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/capacity$/);
       if (policy && req.method==='POST') {
@@ -179,24 +195,11 @@ export class FleetRegistry extends DurableObject {
         if (!Number.isInteger(index) || index<0 || index>=16) return json({error:'invalid slot'},400);
         const slot=host && slots(host)[String(index)];
         if (!slot?.pending) return json({error:'no pending registration'},409);
-        if (Date.now()-slot.pending.at<120000) return json({error:'wait two minutes before reconciling a registration'},409);
-        await this.github.policy({fresh:true});
-        const matches=[]; let complete=false;
-        for (let page=1;page<=20;page++) {
-          const data=await this.github.request(`orgs/${ORG}/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
-          matches.push(...data.runners.filter(r=>r.name===slot.pending.name));
-          if (page*100>=data.total_count) { complete=true; break; }
-          if (!data.runners.length) break;
+        try { return json(await this.recovery.reconcile(host,index)); }
+        catch (error) {
+          if (error.code==='registration_settling' || error.code==='runner_active') return json({error:error.code},409);
+          throw error;
         }
-        if (!complete) return json({error:'runner inventory incomplete'},503);
-        if (matches.some(r=>r.busy || r.status!=='offline')) return json({error:'matching runner is active; inspect in GitHub before recovery'},409);
-        for (const runner of matches) {
-          try { await this.github.request(`orgs/${ORG}/actions/runners/${runner.id}`,{kind:'runners',method:'DELETE'}); }
-          catch (e) { if (!(e instanceof UpstreamError) || e.status!==404) throw e; }
-        }
-        delete slot.pending;
-        await this.ctx.storage.put('host:'+host.machine_id,host);
-        return json({reconciled:true,removed:matches.map(r=>r.id)});
       }
     }
     if (url.pathname==='/v1/enroll' && req.method==='POST') {
@@ -258,7 +261,10 @@ export class FleetRegistry extends DurableObject {
         if (Object.entries(registrations).some(([i,s])=>i!==String(index) &&
             (s.runner_name===input.name || s.pending?.name===input.name)))
           return json({error:'runner identity belongs to another slot'},409);
-        if (slot.pending) return json({error:'registration outcome uncertain; operator reconciliation required'},409);
+        if (slot.pending) {
+          await this.recovery.schedule([host]);
+          return json({error:'registration recovery pending; retry automatically',code:'registration_recovery_pending'},409);
+        }
         if (slot.runner_id) {
           if (slot.runner_name===input.name && slot.jit && JSON.stringify(slot.kinds || ['staging'])===JSON.stringify(kinds))
             return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
@@ -268,7 +274,7 @@ export class FleetRegistry extends DurableObject {
         // Reserve before the non-idempotent GitHub POST. An ambiguous result fails
         // closed instead of silently creating extra runners on a retry.
         slot.pending={name:input.name,at:Date.now()};
-        await save();
+        await this.recovery.reserve(host);
         let value;
         try {
           value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
@@ -278,6 +284,10 @@ export class FleetRegistry extends DurableObject {
             // These are definite rejections, so no runner was created. Only
             // ambiguous transport/server failures keep the reservation pinned.
             delete slot.pending; await save();
+          } else {
+            slot.pending.failure=diagnosis(e);
+            await save();
+            console.error(JSON.stringify({event:'ci_registration_uncertain',machine_id:id,slot:index,...slot.pending.failure}));
           }
           throw e;
         }
@@ -294,7 +304,10 @@ export class FleetRegistry extends DurableObject {
         if (index>=16 || !new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
           return json({error:'invalid registration identity'},400);
         const slot=slots(host)[String(index)];
-        if (slot?.pending) return json({error:'registration uncertain; reconcile this slot before draining'},409);
+        if (slot?.pending) {
+          await this.recovery.schedule([host]);
+          return json({error:'registration recovery pending; draining will retry automatically'},409);
+        }
         if (slot?.runner_id) {
           if (slot.runner_name!==input.name) return json({error:'another registration occupies this slot'},409);
           try {
