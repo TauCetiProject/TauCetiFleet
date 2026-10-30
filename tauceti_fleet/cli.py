@@ -245,6 +245,19 @@ def main(argv=None):
                         print()
                     for worker in status.get("workers", []):
                         print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
+                        if worker.get("isolation_error"):
+                            print("    Isolation degraded: " + worker["isolation_error"])
+                    isolation = status.get("worker_isolation", {})
+                    if isolation.get("events"):
+                        print("\nRecent userspace OOM events (separate from kernel OOM counters):")
+                        for event in isolation["events"][-3:]:
+                            when = datetime.fromtimestamp(event["at"], UTC).strftime("%m-%d %H:%M:%S UTC")
+                            recovered = sum(event.get("replacement_alive", {}).values())
+                            outcome = (f"{recovered}/{len(event['workers'])} replacements alive"
+                                       if event["workers"] else event.get("role", "other host unit"))
+                            print(f"  {when}: {event['unit']}; ancestor {event['ancestor']}; {outcome}")
+                    if isolation.get("error"):
+                        print("Isolation diagnostics: " + isolation["error"])
                     print()
                     activity.display(value.get("activity", {}))
                 else:
