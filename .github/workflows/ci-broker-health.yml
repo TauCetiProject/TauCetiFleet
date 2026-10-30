@@ -15,7 +15,9 @@ jobs:
           python3 - <<'PY'
           import json
           import urllib.request
-          with urllib.request.urlopen('https://fleet.taucetiproject.org/healthz', timeout=60) as response:
+          request = urllib.request.Request('https://fleet.taucetiproject.org/healthz',
+              headers={'User-Agent': 'TauCetiFleet/health', 'Accept': 'application/json'})
+          with urllib.request.urlopen(request, timeout=60) as response:
               health = json.load(response)
           print(json.dumps(health, sort_keys=True))
           if health.get('app_configured') is not True or health.get('stuck_registrations') != 0:
