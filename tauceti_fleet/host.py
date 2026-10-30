@@ -298,7 +298,7 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
-        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\n"
+        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
@@ -314,6 +314,7 @@ def run_workers():
         TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
         TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
+        TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
     )
     os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
     gh_config = state_dir() / "gh"
@@ -408,9 +409,19 @@ def worker_statuses():
         value = read(path, {})
         if value.get("id"):
             values.append(
-                {k: value.get(k) for k in ("id", "state", "alive", "heartbeat_at", "phase", "target", "detail")}
+                {k: value.get(k) for k in (
+                    "id", "state", "alive", "heartbeat_at", "phase", "target", "detail",
+                    "wrapper_pid", "scope_unit", "isolation_error", "restart_count",
+                )}
             )
     return values
+
+
+def worker_isolation():
+    try:
+        return read(state_dir() / "workers/diagnostics/isolation.json", {})
+    except FleetError:
+        return dict(error="Worker isolation diagnostics unavailable")
 
 
 def ci_infrastructure_failure(job):
@@ -778,6 +789,7 @@ def daemon():
                         resources=caps,
                         cpu_idle_fraction=idle,
                         workers=worker_statuses(),
+                        worker_isolation=worker_isolation(),
                         error=None,
                         ci_vm=next((v for v in values if v.get("slot", 0) == 0), None),
                         ci_vms=values,
@@ -856,7 +868,9 @@ def rpc(payload):
             w.get("alive") and w.get("state") not in waiting for w in worker_statuses()
         ):
             raise FleetError("Active work is still draining; wait before updating")
-        run(["systemctl", "--user", "stop", "tauceti-fleet-workers.service"], check=False)
+        # A manager-service stop no longer contains all workers. Slice stop
+        # includes scopes, manager survivors, and direct-launch fallback work.
+        run(["systemctl", "--user", "stop", "tauceti-fleet-workers.slice"], timeout=45)
         return dict(quiescent=True)
     if action == "doctor":
         result = doctor()

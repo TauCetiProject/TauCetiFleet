@@ -177,6 +177,23 @@ sessions can keep running while CI builds. CI has CPUWeight 1000 and workers 10.
 memory-bandwidth isolation are not provided. CI throughput must be measured
 under representative load; scheduling weights alone do not guarantee a runtime.
 
+Each worker runs in an independent systemd scope inside the same worker slice;
+memory remains pooled. A manager-service restart preserves scoped workers. Scope
+setup failures report degraded isolation and continue the same process. Whole-host
+worker shutdown for an update stops the worker slice, including detached children
+and workers that outlived the manager; draining still allows active rounds to finish.
+Status reports recent userspace OOM kills separately from kernel OOM counters.
+CI VM units use `ManagedOOMPreference=avoid` and keep their already-reserved RAM
+resident with `MemorySwapMax=0`. Worker limits and CI CPU priority are unchanged.
+This avoids swapping the guest's memory while physical RAM is reserved for it,
+reduces reclaim activity, and bounds CI's memory consumption within its existing
+RAM reservation. Root-owned ancestor monitors can ignore user preferences: verify
+CI reclaim activity and throughput during rollout rather than treating the
+preference as an unconditional exemption from OOM kills. With administrator access,
+[`docs/oom-pressure-policy.nix`](docs/oom-pressure-policy.nix) is an optional NixOS
+policy that moves the root-owned `user.slice` pressure monitor to each delegated
+`user@.service` at the current 80% threshold. It is not an admission prerequisite.
+
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
 are informational. The controller refreshes worker MemoryHigh from current host headroom every five seconds,

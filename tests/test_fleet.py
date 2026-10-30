@@ -146,7 +146,7 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "--no-ci"):
             host.enable(ci=True)
 
-    def test_update_refuses_active_round_and_only_stops_an_idle_manager(self):
+    def test_update_refuses_active_round_and_stops_the_complete_worker_slice(self):
         store.host_config()
         with patch.object(host, "worker_statuses", return_value=[dict(alive=True, state="authoring")]):
             with self.assertRaisesRegex(store.FleetError, "draining"):
@@ -156,7 +156,7 @@ class Isolated(unittest.TestCase):
             patch.object(host, "run") as run,
         ):
             self.assertTrue(host.rpc(dict(action="prepare_update"))["quiescent"])
-            self.assertEqual(run.call_args.args[0][-1], "tauceti-fleet-workers.service")
+            self.assertEqual(run.call_args.args[0][-1], "tauceti-fleet-workers.slice")
 
     def test_worker_launcher_uses_only_the_selected_credential_without_saved_gh_selection(self):
         secret = self.root / "token"
@@ -167,6 +167,7 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["GH_TOKEN"], "fake-selected-token")
             self.assertEqual(Path(os.environ["GH_CONFIG_DIR"]), store.state_dir() / "gh")
             self.assertNotIn("fake-selected-token", str(launch.call_args))
+            self.assertEqual(os.environ["TAUCETI_WORKER_SLICE"], "tauceti-fleet-workers.slice")
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
