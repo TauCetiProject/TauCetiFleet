@@ -80,6 +80,14 @@ permissions, and `runner_group_id` selects the trusted group described below.
 
 ## Roles, resource priority, and activation
 
+For routine production updates, the operator prefers live updates with normal
+worker and CI admissions left enabled, followed by checking and repairing any
+fallout. Do not drain or pause the fleet merely as a deployment precaution:
+this confuses other agents monitoring the system. Use a drain only when
+explicitly requested or when a concrete constraint prevents a safe live update,
+and explain that constraint first. The `update` command below requires a drain;
+that restriction does not make draining the default rollout procedure.
+
 ```sh
 tauceti-fleet enable big-server --ci staging
 tauceti-fleet enable big-server --workers
