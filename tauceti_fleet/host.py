@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, github, vm
+from . import activity, capacity, ci, focus, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -772,9 +772,16 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
+                roadmap_focus = focus.policy(config, ids[:target])
                 atomic(
                     state_dir() / "admission.json",
-                    dict(version=1, expires_at=time.time() + 15, workers=ids[:target], reason=reason),
+                    dict(
+                        version=1,
+                        expires_at=time.time() + 15,
+                        workers=ids[:target],
+                        reason=reason,
+                        roadmap_focus=roadmap_focus,
+                    ),
                 )
                 atomic(
                     state_dir() / "status.json",
@@ -787,6 +794,7 @@ def daemon():
                         ci_busy=busy,
                         ci_cooldown=circuit if cooling else None,
                         active_worker_limit=target,
+                        roadmap_focus=roadmap_focus,
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_memory=memory,
@@ -888,6 +896,8 @@ def rpc(payload):
         return enable(ci=payload.get("ci"), workers=bool(payload.get("workers")),
                       maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
                       memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"))
+    if action == "focus":
+        return focus.configure(payload)
     if action == "workers":
         return set_worker_maximum(payload["maximum"])
     if action == "drain":

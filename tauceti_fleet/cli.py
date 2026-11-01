@@ -49,6 +49,14 @@ def parser():
     workers.add_argument("host")
     workers.add_argument("--max", dest="maximum", type=int, required=True)
     workers.add_argument("--json", action="store_true")
+    focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
+    focus.add_argument("host")
+    focus.add_argument("--percent", type=int)
+    selection = focus.add_mutually_exclusive_group()
+    selection.add_argument("--preset", choices=["pde-symplectic"])
+    selection.add_argument("--areas", help="comma-separated roadmap directory names")
+    selection.add_argument("--clear", action="store_true")
+    focus.add_argument("--json", action="store_true")
     for name in ("_host", "host-daemon", "run-workers"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
@@ -118,6 +126,17 @@ def main(argv=None):
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib)
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
+            if args.command == "focus":
+                if args.percent is not None:
+                    payload["percent"] = args.percent
+                if args.preset:
+                    payload["preset"] = args.preset
+                if args.areas is not None:
+                    payload["areas"] = [a.strip() for a in args.areas.split(",") if a.strip()]
+                if args.clear:
+                    if args.percent is not None:
+                        raise FleetError("--clear cannot be combined with --percent")
+                    payload["clear"] = True
             if args.command == "update":
                 status = remote.call(entry["target"], dict(action="status"), expected_machine_id=entry["machine_id"])
                 if status["ci_enabled"] or status["workers_enabled"]:
@@ -241,6 +260,18 @@ def main(argv=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    focus = status.get("roadmap_focus", {})
+                    if focus.get("percent"):
+                        print(
+                            f"Roadmap focus: {focus['percent']}% ({len(focus.get('workers', []))} slots"
+                            + (
+                                f" + {focus['fractional_percent']}% of one slot"
+                                if focus.get("fractional_percent")
+                                else ""
+                            )
+                            + "); "
+                            + ", ".join(focus["areas"])
+                        )
                     if status.get("workers"):
                         print()
                     for worker in status.get("workers", []):

@@ -386,3 +386,53 @@ archives. `release.json` pins the required TauCetiWorker commit.
 
 See [local validation](docs/validation.md) for measured rootless tests and the
 remaining activation checks.
+
+## Roadmap focus
+
+Steer a configurable share of worker slots toward any set of roadmap directories:
+
+```sh
+tauceti-fleet focus big-server --percent 20 --areas PDE,SymplecticGeometry,DGFloer
+tauceti-fleet focus big-server --percent 35  # keep the same areas
+tauceti-fleet focus big-server             # show the saved setting
+tauceti-fleet focus big-server --clear     # return every slot to ordinary selection
+```
+
+The host saves this setting in `host.json` and publishes it in its live admission
+policy. Changes take effect on subsequent roadmap rounds without rewriting worker
+definitions, restarting workers, or changing worker/CI admissions. Existing PR
+maintenance and reviews keep their usual priority across all roadmaps. An explicit
+worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
+Workers require the corresponding TauCetiWorker focus support; older workers
+ignore the additional policy field.
+
+At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
+from the eligible focus areas each time they start new roadmap work. The other
+32 draw from the entire eligible roadmap list, including focus areas. The share
+therefore reserves attention rather than capping the total attention those areas
+receive. It describes slots, not a guaranteed percentage of runtime or completed
+PRs. Whole slots are spread through admission order; any fractional remainder
+uses one additional slot with a per-round probability. One worker with 20% focus
+therefore draws from the focus list on 20% of its authoring rounds on average.
+The allocation follows the current admitted capacity automatically.
+
+For an initial PDE and symplectic-topology focus:
+
+```sh
+tauceti-fleet focus big-server --percent 20 --preset pde-symplectic
+```
+
+This preset is a convenience list, not a separate scheduling mode. It includes
+PDE, SymplecticGeometry, HeegaardFloer, DGFloer, HamiltonianFloerOperations,
+TaubesGromov, and their related analytic/geometric foundations: Morse theory,
+complex and Riemannian geometry, geometric measure theory/currents, operator
+and Banach space theory, gauge/Dirac theory, optimal transport, isoperimetry,
+and Yamabe/positive scalar curvature. The concrete directory names live in
+[`focus.py`](tauceti_fleet/focus.py); the selection was checked against
+[TauCetiRoadmap at fa41b374](https://github.com/TauCetiProject/TauCetiRoadmap/tree/fa41b374/TauCetiRoadmap).
+Use `--areas` to replace it with any list. Names are case-sensitive top-level
+roadmap directories. Unknown, completed, or skipped areas are filtered against
+the worker's current roadmap inventory; when none remain, it logs the condition
+and uses ordinary selection so focus cannot strand a worker. Future roadmap
+additions require updating the configured list or reapplying an updated preset.
+`status` reports the effective whole and fractional slot allocation.
