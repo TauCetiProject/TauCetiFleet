@@ -173,7 +173,9 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
             # host health: runner completion and the host receipt do. A failed
             # GitHub publication also does not establish a machine fault.
             # Actual infrastructure failures and host faults were handled above.
-            if step.get("name") != REPORT or timestamp(step.get("started_at")) < requested:
+            # Its start time relative to cancellation does not change that:
+            # runner step timestamps and GitHub status timestamps can disagree.
+            if step.get("name") != REPORT:
                 return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
     except (ValueError, TypeError, OverflowError):
         return result(True, "cancellation_timestamps_invalid")

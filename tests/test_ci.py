@@ -257,9 +257,23 @@ class Classification(unittest.TestCase):
         job["steps"].insert(3, step(ci.BUILD, "skipped", 6, "00:00:50", "00:00:50"))
         job["steps"].insert(4, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
         self.assertFalse(self.classify(job, run, statuses)["cooldown"])
-        # Failure before the coordinator cancelled is conflicting evidence.
+        # Reporting failures do not establish a host fault before cancellation
+        # either. Runner step times need not agree with GitHub status times.
         job["steps"][4]["started_at"] = "2026-10-16T00:00:20Z"
+        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
+
+    def test_reporting_step_clock_skew_does_not_remove_healthy_capacity(self):
+        job, run, statuses = evidence()
+        # Batch 2365: GitHub's run/status metadata was an hour ahead of its
+        # runner step timestamps. Keep the server-side run/status time check.
+        job["completed_at"] = "2026-10-16T01:01:00Z"
+        statuses[0]["created_at"] = "2026-10-16T01:00:30Z"
+        job["steps"].insert(3, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
+        self.assertEqual(self.classify(job, run, statuses)["reason"], "verified_bors_cancellation")
+        job["steps"][3]["name"] = "Unknown finalizer"
         self.assertTrue(self.classify(job, run, statuses)["cooldown"])
+        job["steps"][3]["name"] = "Install bubblewrap"
+        self.assertEqual(self.classify(job, run, statuses)["reason"], "infrastructure_step_failed")
 
     def test_missing_host_health_is_unknown_even_with_valid_github_proof(self):
         job, run, statuses = evidence()
