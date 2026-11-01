@@ -161,13 +161,16 @@ class Isolated(unittest.TestCase):
     def test_worker_launcher_uses_only_the_selected_credential_without_saved_gh_selection(self):
         secret = self.root / "token"
         secret.write_text("fake-selected-token")
-        store.update_host(github_token_file=str(secret))
+        store.update_host(github_token_file=str(secret), github_state_url="https://state.example",
+                          github_state_token_file=str(self.root / "state-client-token"))
         with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv") as launch:
             host.run_workers()
             self.assertEqual(os.environ["GH_TOKEN"], "fake-selected-token")
             self.assertEqual(Path(os.environ["GH_CONFIG_DIR"]), store.state_dir() / "gh")
             self.assertNotIn("fake-selected-token", str(launch.call_args))
             self.assertEqual(os.environ["TAUCETI_WORKER_SLICE"], "tauceti-fleet-workers.slice")
+            self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
+            self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")

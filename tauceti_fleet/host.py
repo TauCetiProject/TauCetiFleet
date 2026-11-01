@@ -316,6 +316,11 @@ def run_workers():
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
     )
+    # Historical PRs can belong to workers no longer in workers.toml. Give the
+    # manager the host's client context as well as each current worker's spec.
+    for field in ("github_state_url", "github_state_token_file"):
+        if config.get(field):
+            os.environ["TAUCETI_" + field.upper()] = config[field]
     os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
