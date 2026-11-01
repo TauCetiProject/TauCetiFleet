@@ -57,7 +57,7 @@ def policy(config, workers):
     # Spread selected slots through the admission order: 20% selects 5,10,15,...
     # Every prefix has floor(n * percent / 100) slots; ceiling changes keep
     # existing whole-slot assignments stable. A fractional slot supplies the
-    # remainder probabilistically each authoring round, including on tiny fleets.
+    # remainder probabilistically each round, including on tiny fleets.
     selected = [w for n, w in enumerate(workers, 1) if n * percent // 100 > (n - 1) * percent // 100]
     remainder = len(workers) * percent % 100
     fractional = next((w for w in reversed(workers) if w not in selected), None) if remainder else None

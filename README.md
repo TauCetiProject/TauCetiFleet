@@ -400,20 +400,21 @@ tauceti-fleet focus big-server --clear     # return every slot to ordinary selec
 
 The host saves this setting in `host.json` and publishes it in its live admission
 policy. Changes take effect on subsequent roadmap rounds without rewriting worker
-definitions, restarting workers, or changing worker/CI admissions. Existing PR
-maintenance and reviews keep their usual priority across all roadmaps. An explicit
+definitions, restarting workers, or changing worker/CI admissions. Focused slots select an area before their survey and run the usual maintenance,
+review, and authoring cascade within that area. The remaining slots keep the
+existing global maintenance behavior. An explicit
 worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
 Workers require the corresponding TauCetiWorker focus support; older workers
 ignore the additional policy field.
 
 At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
-from the eligible focus areas each time they start new roadmap work. The other
-32 draw from the entire eligible roadmap list, including focus areas. The share
+from the eligible focus areas at the start of each round. The other
+32 draw from the entire eligible roadmap list for new authoring, including focus areas. The share
 therefore reserves attention rather than capping the total attention those areas
 receive. It describes slots, not a guaranteed percentage of runtime or completed
 PRs. Whole slots are spread through admission order; any fractional remainder
 uses one additional slot with a per-round probability. One worker with 20% focus
-therefore draws from the focus list on 20% of its authoring rounds on average.
+therefore draws from the focus list on 20% of its rounds on average.
 The allocation follows the current admitted capacity automatically.
 
 For an initial PDE and symplectic-topology focus:
