@@ -257,9 +257,33 @@ class Classification(unittest.TestCase):
         job["steps"].insert(3, step(ci.BUILD, "skipped", 6, "00:00:50", "00:00:50"))
         job["steps"].insert(4, step(ci.REPORT, "failure", 5, "00:00:51", "00:00:55"))
         self.assertFalse(self.classify(job, run, statuses)["cooldown"])
-        # Failure before the coordinator cancelled is conflicting evidence.
+        # Reporting failures do not establish a host fault before cancellation
+        # either. Runner step times need not agree with GitHub status times.
         job["steps"][4]["started_at"] = "2026-10-16T00:00:20Z"
+        self.assertFalse(self.classify(job, run, statuses)["cooldown"])
+
+    def test_reporting_step_clock_skew_does_not_remove_healthy_capacity(self):
+        job, run, statuses = evidence()
+        # Actual batch 2365 timestamps: GitHub's cancellation and job completion
+        # times are later than the runner-reported finalizer. No clock adjustment
+        # is needed to establish health; retain the run/status interval check.
+        run["created_at"] = "2026-11-01T07:57:36Z"
+        job["started_at"] = "2026-11-01T07:58:19Z"
+        job["completed_at"] = "2026-11-01T09:05:56Z"
+        statuses[0]["created_at"] = "2026-11-01T09:03:43Z"
+        job["steps"] = [
+            step("Install bubblewrap", "cancelled", 1, "08:03:43", "08:04:35"),
+            step(ci.REPORT, "failure", 2, "08:04:57", "08:05:29"),
+            step("Complete job", number=3, start="08:05:54", end="08:05:54"),
+        ]
+        for item in job["steps"]:
+            for field in ("started_at", "completed_at"):
+                item[field] = item[field].replace("2026-10-16", "2026-11-01")
+        self.assertEqual(self.classify(job, run, statuses)["reason"], "verified_bors_cancellation")
+        job["steps"][1]["name"] = "Unknown finalizer"
         self.assertTrue(self.classify(job, run, statuses)["cooldown"])
+        job["steps"][1]["name"] = "Install bubblewrap"
+        self.assertEqual(self.classify(job, run, statuses)["reason"], "infrastructure_step_failed")
 
     def test_missing_host_health_is_unknown_even_with_valid_github_proof(self):
         job, run, statuses = evidence()
