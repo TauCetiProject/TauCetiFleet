@@ -203,7 +203,7 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(row.count("$12.34"), 5)
         per_worker = next(line for line in lines if line.startswith("API spend ($/worker-hour)"))
         self.assertEqual(per_worker.count("$6.17"), 5)
-        section = next(i for i, line in enumerate(lines) if line.startswith("Spending (recorded usage)"))
+        section = next(i for i, line in enumerate(lines) if line.startswith("Spending "))
         self.assertEqual(lines[section - 1], "")
         self.assertIn("All time", lines[section])
         hours = next(line for line in lines if line.startswith("Worker-hours recorded"))
@@ -212,6 +212,44 @@ class ActivityTests(unittest.TestCase):
         self.assertLess(lines.index(per_worker), lines.index(row))
         self.assertIn("Currently: 0 workers working;", output.getvalue())
         self.assertNotIn("closed/merged PRs lack landing evidence", output.getvalue())
+
+        # The same rows use live rates, with recorded fallback for old windows.
+        summary["costs"].update(
+            accounting_version=3,
+            quality=dict(native=10, estimated=3, incomplete=1),
+            accounting=dict(live=1, settled_estimates=3, recovered_estimates=3, unresolved_stopped=0),
+            spending_including_live={
+                w: dict(summary["costs"]["spending"][w], usd_per_hour="15", usd_per_worker_hour="7.5")
+                for w in ("1h", "3h", "24h", "7d")
+            },
+            live_estimate=dict(observed_at=990, session_observed_at=995),
+        )
+        with (
+            patch("tauceti_fleet.activity_summary.time.time", return_value=1000),
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            activity.display(dict(available=True, summary=summary))
+        text = output.getvalue()
+        lines = text.splitlines()
+        row = next(line for line in lines if line.startswith("API spend ($/elapsed hour)"))
+        self.assertEqual(re.findall(r"\$\d+\.\d+", row), ["$15.00"] * 4 + ["$12.34"])
+        per_worker = next(line for line in lines if line.startswith("API spend ($/worker-hour)"))
+        self.assertEqual(re.findall(r"\$\d+\.\d+", per_worker), ["$7.50"] * 4 + ["$6.17"])
+        self.assertEqual([m.end() for m in re.finditer(r"\$\d+\.\d+", row)], ends)
+        for label in ("With live estimates", "Costs:", "Live estimates", "Accounting:"):
+            self.assertNotIn(label, text)
+
+        summary["costs"]["accounting"]["unresolved_stopped"] = 2
+        summary["costs"]["live_estimate"]["session_observed_at"] = 800
+        with (
+            patch("tauceti_fleet.activity_summary.time.time", return_value=1000),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            activity.display(dict(available=True, summary=summary))
+        self.assertIn("Accounting: 2 stopped conversations with unresolved usage.", output.getvalue())
+        self.assertIn("Live estimates stale: updated 200s ago.", output.getvalue())
 
     def test_snapshot_rpc_cannot_request_github_refresh(self):
         with patch.object(host, "snapshot", return_value={}) as snapshot:
