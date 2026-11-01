@@ -1,9 +1,12 @@
 import io
 import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import focus, host, remote
+from tauceti_fleet import capabilities, focus, host, remote
 from tauceti_fleet.cli import main
 from tauceti_fleet.store import FleetError
 
@@ -36,7 +39,11 @@ class FocusTests(unittest.TestCase):
         for areas in ([], "PDE", [True], ["../PDE"], ["PDE,Other"], [""]):
             with self.assertRaises(FleetError):
                 focus.validate(20, areas)
-        with patch.object(focus, "update_host") as update, patch.object(host, "install_service") as service:
+        with (
+            patch.object(focus, "host_config", return_value={}),
+            patch.object(focus, "update_host") as update,
+            patch.object(host, "install_service") as service,
+        ):
             self.assertEqual(
                 host.rpc(dict(action="focus", areas=["PDE", "PDE"], percent=20)), dict(percent=20, areas=["PDE"])
             )
@@ -71,13 +78,81 @@ class FocusTests(unittest.TestCase):
     def test_local_cli_needs_no_inventory_enrollment(self):
         with (
             patch.object(remote, "inventory", return_value={}),
-            patch.object(host, "host_config", return_value=dict(machine_id="local-id")),
+            patch("tauceti_fleet.cli.read", return_value=dict(machine_id="local-id")),
             patch.object(remote, "call", return_value=dict(percent=0, areas=[])) as call,
             patch("sys.stdout", new=io.StringIO()),
         ):
             self.assertEqual(main(["focus", "local", "--json"]), 0)
             self.assertEqual(call.call_args.args, ("local", dict(action="focus")))
             self.assertEqual(call.call_args.kwargs["expected_machine_id"], "local-id")
+
+    def test_missing_local_host_config_does_not_enroll_a_machine(self):
+        with (
+            patch.object(remote, "inventory", return_value={}),
+            patch("tauceti_fleet.cli.read", return_value=None),
+            patch.object(host, "host_config") as create,
+            patch.object(remote, "call") as call,
+            patch("sys.stderr", new=io.StringIO()),
+        ):
+            self.assertEqual(main(["focus", "local", "--json"]), 1)
+            create.assert_not_called()
+            call.assert_not_called()
+
+    def test_advisory_policy_errors_do_not_raise_and_new_keys_are_ignored(self):
+        for raw in (None, [], "PDE", dict(percent="bad", areas=["PDE"]), dict(percent=20, areas=[])):
+            with self.subTest(raw=raw):
+                result = focus.policy(dict(roadmap_focus=raw), ["w"])
+                self.assertEqual(result["percent"], 0)
+                self.assertEqual(result["workers"], [])
+                self.assertTrue(result["error"])
+        result = focus.policy(dict(roadmap_focus=dict(percent=100, areas=["PDE"], future=True)), ["w"])
+        self.assertEqual(result["workers"], ["w"])
+        self.assertNotIn("error", result)
+
+    def test_replacing_areas_keeps_the_saved_percentage(self):
+        with (
+            patch.object(focus, "host_config", return_value=dict(roadmap_focus=dict(percent=35, areas=["PDE"]))),
+            patch.object(focus, "update_host"),
+        ):
+            self.assertEqual(focus.configure(dict(areas=["DGFloer"]))["percent"], 35)
+            self.assertEqual(focus.configure(dict(preset="pde-symplectic"))["percent"], 35)
+            self.assertEqual(focus.configure(dict(areas=["DGFloer"], percent=15))["percent"], 15)
+        with patch.object(focus, "host_config", return_value={}), patch.object(focus, "update_host"):
+            self.assertEqual(focus.configure(dict(areas=["PDE"]))["percent"], 20)
+
+    def test_doctor_reports_worker_focus_capability_without_blocking_admissions(self):
+        config = dict(
+            machine_id="test",
+            ci_allowed=False,
+            ci_memory_gib=64,
+            ci_vcpus=32,
+            ci_disk_gib=100,
+            roadmap_focus=dict(percent=20, areas=["PDE"]),
+        )
+        for version, expected in ((None, "warning"), (1, "ok")):
+            protocol = dict(version=1)
+            if version is not None:
+                protocol["roadmap_focus"] = version
+
+            def run(args, *, protocol=protocol, **kwargs):
+                return subprocess.CompletedProcess(args, 0, json.dumps(protocol) if "_fleet-protocol" in args else "0")
+
+            with (
+                tempfile.TemporaryDirectory() as tmp,
+                patch.object(
+                    capabilities,
+                    "resources",
+                    return_value=dict(cpus=64, memory_total=128 * 1024**3, memory_available=128 * 1024**3),
+                ),
+                patch.object(capabilities, "run", side_effect=run),
+                patch.object(capabilities, "executable", return_value="/fake/tool"),
+                patch.object(capabilities.os, "open", side_effect=PermissionError),
+                patch.object(capabilities, "data_dir", return_value=Path(tmp)),
+                patch.object(capabilities, "state_dir", return_value=Path(tmp)),
+            ):
+                checks = capabilities.doctor(config, probe=False)["checks"]
+            check = next(c for c in checks if c["name"] == "roadmap-focus")
+            self.assertEqual(check["status"], expected)
 
     def test_preset_is_the_six_direct_focus_roadmaps(self):
         areas = focus.PRESETS["pde-symplectic"]

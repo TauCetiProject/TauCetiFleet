@@ -326,10 +326,15 @@ def doctor(config=None, *, probe=True):
             roles=("workers",),
         )
     compatible = False
+    protocol = {}
     if worker:
         try:
             result = run([worker, "_fleet-protocol"], check=False)
-            compatible = result.returncode == 0 and json.loads(result.stdout).get("version") == 1
+            if result.returncode == 0:
+                protocol = json.loads(result.stdout)
+                compatible = isinstance(protocol, dict) and protocol.get("version") == 1
+            if not isinstance(protocol, dict):
+                protocol = {}
         except (FleetError, ValueError, AttributeError):
             pass
     add(
@@ -339,6 +344,21 @@ def doctor(config=None, *, probe=True):
         "Run prepare to install the pinned TauCetiWorker package",
         roles=("workers",),
     )
+    from .focus import policy as focus_policy
+
+    allocation = focus_policy(config, [])
+    if allocation.get("error"):
+        add(
+            "roadmap-focus", "warning", allocation["error"],
+            "Repair or clear the saved focus setting; ordinary admissions continue", roles=("workers",),
+        )
+    elif allocation["percent"]:
+        supported = compatible and protocol.get("roadmap_focus") == 1
+        add(
+            "roadmap-focus", "ok" if supported else "warning",
+            "Worker supports live roadmap focus" if supported else "Installed worker ignores the configured roadmap focus",
+            "Install a Worker release with roadmap_focus protocol support using a live update", roles=("workers",),
+        )
     image = data_dir() / "images/prepared.json"
     add(
         "ci-image",

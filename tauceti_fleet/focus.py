@@ -30,7 +30,14 @@ def validate(percent, areas):
 
 
 def policy(config, workers):
-    focus = validate(**config.get("roadmap_focus", dict(percent=0, areas=[])))
+    raw = config.get("roadmap_focus", {})
+    try:
+        if not isinstance(raw, dict):
+            raise FleetError("Focus configuration must be an object")
+        # Ignore newer optional keys while validating the fields this release uses.
+        focus = validate(raw.get("percent", 0), raw.get("areas", []))
+    except FleetError as exc:
+        return dict(percent=0, areas=[], workers=[], fractional_worker=None, fractional_percent=0, error=str(exc))
     percent = focus["percent"]
     # Spread selected slots through the admission order: 20% selects 5,10,15,...
     # Every prefix has floor(n * percent / 100) slots; ceiling changes keep
@@ -51,9 +58,12 @@ def configure(payload):
         preset = payload.get("preset")
         if preset is not None and preset not in PRESETS:
             raise FleetError(f"Unknown focus preset: {preset}")
-        value = validate(payload.get("percent", 20), PRESETS[preset] if preset else payload["areas"])
+        current = policy(host_config(), [])
+        value = validate(
+            payload.get("percent", current["percent"] or 20), PRESETS[preset] if preset else payload["areas"]
+        )
     elif "percent" in payload:
-        value = validate(payload["percent"], host_config().get("roadmap_focus", {}).get("areas", []))
+        value = validate(payload["percent"], policy(host_config(), [])["areas"])
     else:
         return host_config().get("roadmap_focus", dict(percent=0, areas=[]))
     update_host(roadmap_focus=value)

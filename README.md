@@ -415,7 +415,12 @@ receive. It describes slots, not a guaranteed percentage of runtime or completed
 PRs. Whole slots are spread through admission order; any fractional remainder
 uses one additional slot with a per-round probability. One worker with 20% focus
 therefore draws from the focus list on 20% of its rounds on average.
-The allocation follows the current admitted capacity automatically.
+The allocation follows the current admitted capacity automatically. Focused slots
+retain the account-wide open-PR limit. When capped with no available maintenance
+in the chosen area, they fall back to global maintenance instead of exceeding
+that limit. Changing only the areas preserves the saved percentage; the first
+configuration defaults to 20%. Invalid saved focus disables only focus, with a
+diagnostic in `status`; worker and CI admissions continue.
 
 For an initial PDE and symplectic-topology focus:
 
@@ -428,7 +433,7 @@ HeegaardFloer, DGFloer, HamiltonianFloerOperations, and TaubesGromov.
 Supporting analytic and geometric roadmaps remain available to the ordinary pool.
 The concrete directory names live in [`focus.py`](tauceti_fleet/focus.py).
 Use `--areas` to replace it with any list. Names are case-sensitive top-level
-roadmap directories. Unknown, completed, or skipped areas are filtered against
+roadmap directories. Unknown or skipped areas are filtered against
 the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.

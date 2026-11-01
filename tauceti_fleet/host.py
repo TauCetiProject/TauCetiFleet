@@ -795,6 +795,7 @@ def daemon():
                         ci_cooldown=circuit if cooling else None,
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
+                        roadmap_focus_error=roadmap_focus.get("error"),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_memory=memory,
