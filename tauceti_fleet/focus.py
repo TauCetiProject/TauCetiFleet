@@ -4,38 +4,16 @@ import re
 
 from .store import FleetError, host_config, update_host
 
-# Active roadmaps at TauCetiRoadmap fa41b374 (2026-11-01). Include direct
-# analytic/geometric foundations, but not every transitive algebraic dependency.
+# Initial direct PDE / symplectic-topology pool. Operators can replace it with
+# any roadmap list through --areas; supporting areas remain in ordinary selection.
 PRESETS = {
     "pde-symplectic": [
-        "AffineMorseLefschetz",
-        "BanachSpaceTheory",
-        "CombinatorialHeegaardFloer",
-        "CompactOperators",
-        "ComplexKahlerGeometry",
-        "ComplexManifolds",
         "DGFloer",
-        "DifferentialGeometry",
-        "GeometricCurrents",
-        "GeometricMeasureTheory",
         "HamiltonianFloerOperations",
         "HeegaardFloer",
-        "Hyperfunctions",
-        "Isoperimetry",
-        "MorseNovikov",
-        "MorseTheory",
-        "OperatorTheory",
-        "OptimalTransport",
         "PDE",
-        "PositiveScalarCurvature",
-        "QuaternionicAnalysis",
-        "RiemannianGeometry",
-        "SeibergWittenTheory",
-        "SmoothBundlesConnections",
-        "SpinGeometry",
         "SymplecticGeometry",
         "TaubesGromov",
-        "Yamabe",
     ]
 }
 

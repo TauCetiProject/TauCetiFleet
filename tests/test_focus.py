@@ -79,11 +79,12 @@ class FocusTests(unittest.TestCase):
             self.assertEqual(call.call_args.args, ("local", dict(action="focus")))
             self.assertEqual(call.call_args.kwargs["expected_machine_id"], "local-id")
 
-    def test_preset_has_core_and_foundations_without_duplicates(self):
+    def test_preset_is_the_six_direct_focus_roadmaps(self):
         areas = focus.PRESETS["pde-symplectic"]
         self.assertEqual(areas, sorted(set(areas)))
-        self.assertTrue(
-            {"PDE", "SymplecticGeometry", "HeegaardFloer", "DGFloer", "TaubesGromov", "Yamabe"} <= set(areas)
+        self.assertEqual(
+            set(areas),
+            {"PDE", "SymplecticGeometry", "HeegaardFloer", "DGFloer", "HamiltonianFloerOperations", "TaubesGromov"},
         )
         json.dumps(focus.validate(20, areas))
 

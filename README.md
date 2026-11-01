@@ -423,14 +423,10 @@ For an initial PDE and symplectic-topology focus:
 tauceti-fleet focus big-server --percent 20 --preset pde-symplectic
 ```
 
-This preset is a convenience list, not a separate scheduling mode. It includes
-PDE, SymplecticGeometry, HeegaardFloer, DGFloer, HamiltonianFloerOperations,
-TaubesGromov, and their related analytic/geometric foundations: Morse theory,
-complex and Riemannian geometry, geometric measure theory/currents, operator
-and Banach space theory, gauge/Dirac theory, optimal transport, isoperimetry,
-and Yamabe/positive scalar curvature. The concrete directory names live in
-[`focus.py`](tauceti_fleet/focus.py); the selection was checked against
-[TauCetiRoadmap at fa41b374](https://github.com/TauCetiProject/TauCetiRoadmap/tree/fa41b374/TauCetiRoadmap).
+The preset contains exactly six roadmaps: PDE, SymplecticGeometry,
+HeegaardFloer, DGFloer, HamiltonianFloerOperations, and TaubesGromov.
+Supporting analytic and geometric roadmaps remain available to the ordinary pool.
+The concrete directory names live in [`focus.py`](tauceti_fleet/focus.py).
 Use `--areas` to replace it with any list. Names are case-sensitive top-level
 roadmap directories. Unknown, completed, or skipped areas are filtered against
 the worker's current roadmap inventory; when none remain, it logs the condition
