@@ -68,6 +68,17 @@ class FocusTests(unittest.TestCase):
             self.assertEqual(main(["focus", "test", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="focus"))
 
+    def test_local_cli_needs_no_inventory_enrollment(self):
+        with (
+            patch.object(remote, "inventory", return_value={}),
+            patch.object(host, "host_config", return_value=dict(machine_id="local-id")),
+            patch.object(remote, "call", return_value=dict(percent=0, areas=[])) as call,
+            patch("sys.stdout", new=io.StringIO()),
+        ):
+            self.assertEqual(main(["focus", "local", "--json"]), 0)
+            self.assertEqual(call.call_args.args, ("local", dict(action="focus")))
+            self.assertEqual(call.call_args.kwargs["expected_machine_id"], "local-id")
+
     def test_preset_has_core_and_foundations_without_duplicates(self):
         areas = focus.PRESETS["pde-symplectic"]
         self.assertEqual(areas, sorted(set(areas)))

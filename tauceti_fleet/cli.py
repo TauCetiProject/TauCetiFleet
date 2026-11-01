@@ -110,7 +110,10 @@ def main(argv=None):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
-        selected = {args.host: remote.resolve(args.host)} if args.host else entries
+        if args.command == "focus" and args.host == "local":
+            selected = {"local": dict(target="local", machine_id=host.host_config()["machine_id"])}
+        else:
+            selected = {args.host: remote.resolve(args.host)} if args.host else entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
         results = {}
