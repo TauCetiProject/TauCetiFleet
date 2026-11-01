@@ -386,3 +386,55 @@ archives. `release.json` pins the required TauCetiWorker commit.
 
 See [local validation](docs/validation.md) for measured rootless tests and the
 remaining activation checks.
+
+## Roadmap focus
+
+Steer a configurable share of worker slots toward any set of roadmap directories:
+
+```sh
+tauceti-fleet focus big-server --percent 20 --areas PDE,SymplecticGeometry,DGFloer
+tauceti-fleet focus big-server --percent 35  # keep the same areas
+tauceti-fleet focus big-server             # show the saved setting
+tauceti-fleet focus big-server --clear     # return every slot to ordinary selection
+```
+
+The host saves this setting in `host.json` and publishes it in its live admission
+policy. Changes take effect on subsequent roadmap rounds without rewriting worker
+definitions, restarting workers, or changing worker/CI admissions. Focused slots select an area before their survey and run the usual maintenance,
+review, and authoring cascade within that area. The remaining slots keep the
+existing global maintenance behavior. An explicit
+worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
+Workers require the corresponding TauCetiWorker focus support; older workers
+ignore the additional policy field.
+
+At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
+from the eligible focus areas at the start of each round. The other
+32 draw from the entire eligible roadmap list for new authoring, including focus areas. The share
+therefore reserves attention rather than capping the total attention those areas
+receive. It describes slots, not a guaranteed percentage of runtime or completed
+PRs. Whole slots are spread through admission order; any fractional remainder
+uses one additional slot with a per-round probability. One worker with 20% focus
+therefore draws from the focus list on 20% of its rounds on average.
+The allocation follows the current admitted capacity automatically. Focused slots
+retain the account-wide open-PR limit. When capped with no available maintenance
+in the chosen area, they fall back to global maintenance instead of exceeding
+that limit. Changing only the areas preserves the saved percentage; the first
+configuration defaults to 20%. Invalid saved focus disables only focus, with a
+diagnostic in `status`; worker and CI admissions continue.
+
+For an initial PDE and symplectic-topology focus:
+
+```sh
+tauceti-fleet focus big-server --percent 20 --preset pde-symplectic
+```
+
+The preset contains exactly six roadmaps: PDE, SymplecticGeometry,
+HeegaardFloer, DGFloer, HamiltonianFloerOperations, and TaubesGromov.
+Supporting analytic and geometric roadmaps remain available to the ordinary pool.
+The concrete directory names live in [`focus.py`](tauceti_fleet/focus.py).
+Use `--areas` to replace it with any list. Names are case-sensitive top-level
+roadmap directories. Unknown or skipped areas are filtered against
+the worker's current roadmap inventory; when none remain, it logs the condition
+and uses ordinary selection so focus cannot strand a worker. Future roadmap
+additions require updating the configured list or reapplying an updated preset.
+`status` reports the effective whole and fractional slot allocation.
