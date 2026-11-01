@@ -165,20 +165,20 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
             timestamp(run.get("created_at")) <= requested <= timestamp(job.get("completed_at"))
         ):
             return result(True, "cancellation_status_time_mismatch")
-        for step in steps:
-            if step.get("conclusion") != "failure":
-                continue
-            # This finalizer deliberately exits 1 for cancellation, including
-            # before build/guard outputs exist. Its status writes do not prove
-            # host health: runner completion and the host receipt do. A failed
-            # GitHub publication also does not establish a machine fault.
-            # Actual infrastructure failures and host faults were handled above.
-            # Its start time relative to cancellation does not change that:
-            # runner step timestamps and GitHub status timestamps can disagree.
-            if step.get("name") != REPORT:
-                return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
     except (ValueError, TypeError, OverflowError):
         return result(True, "cancellation_timestamps_invalid")
+    for step in steps:
+        if step.get("conclusion") != "failure":
+            continue
+        # This finalizer deliberately exits 1 for cancellation, including
+        # before build/guard outputs exist. Its status writes do not prove
+        # host health: runner completion and the host receipt do. A failed
+        # GitHub publication also does not establish a machine fault.
+        # Actual infrastructure failures and host faults were handled above.
+        # Its start time relative to cancellation does not change that:
+        # runner step timestamps and GitHub status timestamps can disagree.
+        if step.get("name") != REPORT:
+            return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
     return result(
         False,
         "verified_bors_cancellation",

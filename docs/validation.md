@@ -96,8 +96,9 @@ these host/GitHub facts agree:
   It represents coordinator withdrawal/supersession, not runner failure. A
   cancelled conclusion or absence of failed steps alone grants no exemption.
 - The trusted report step intentionally exits 1 when its build was cancelled,
-  including before guard outputs exist. Its failure after the cancellation is
-  allowed without requiring successful guard-status writes. A failed GitHub
+  including before guard outputs exist. Its failure is allowed regardless of
+  its runner-reported start time, which need not agree with GitHub status times,
+  and without requiring successful guard-status writes. A failed GitHub
   publication does not establish a machine fault; runner completion and the
   host-service receipt supply the health evidence.
 
