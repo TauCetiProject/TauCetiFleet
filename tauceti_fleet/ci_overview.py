@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import github
+from . import github, bors_history as history_jobs
 from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
@@ -74,6 +74,29 @@ def bors(config):
         batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"])))
     held = value.get("held")
     return dict(batches=batches, held=len(held) if isinstance(held, list) else None), time.time()
+
+
+def bors_history(config):
+    value = fetch("https://bors.taucetiproject.org/repositories/1/statistics?base=main")
+    if (value.get("schema") != "tauceti-bors.statistics/v1" or value.get("repo") != REPOSITORY
+            or value.get("base") != "main" or value.get("queue_authority") is not False):
+        raise FleetError("Invalid Bors history observation")
+    data = dict(windows=value.get("windows"), durations=[])
+    observed = value.get("observed_at")
+    if source_value("bors_history", dict(value=data, observed_at=observed)) is None:
+        raise FleetError("Invalid Bors history metrics")
+    try:
+        runtime = history_jobs.collect(config, value.get("staging_run_ids", []), fetch,
+                                       allow_reads=bool(config.get("ci_enabled") or config.get("workers_enabled")))
+        data["durations"] = runtime["windows"]
+        data["runtime_runs_total"] = runtime["runs_total"]
+        data["runtime_runs_checked"] = runtime["runs_checked"]
+    except Exception as error:
+        data["durations_error"] = str(error)[:200] if isinstance(error, FleetError) else type(error).__name__
+    observed = value.get("observed_at")
+    if source_value("bors_history", dict(value=data, observed_at=observed)) is None:
+        raise FleetError("Invalid Bors history metrics")
+    return data, observed
 
 
 def pools(config):
@@ -290,7 +313,7 @@ def collect(config):
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         try:
-            futures = {executor.submit(fn, config): name for name, fn in (("bors", bors), ("pools", pools), ("backlog", backlog), ("pressure", pressure))}
+            futures = {executor.submit(fn, config): name for name, fn in (("bors", bors), ("bors_history", bors_history), ("pools", pools), ("backlog", backlog), ("pressure", pressure))}
             for future in concurrent.futures.as_completed(futures, timeout=40):
                 name = futures[future]
                 try:
@@ -328,6 +351,27 @@ def source_value(name, source):
                 return None
             if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"]) for b in data["batches"]):
                 return None
+        elif name == "bors_history":
+            windows = data.get("windows")
+            if not isinstance(windows, list) or {r.get("window") for r in windows if isinstance(r, dict)} != {"1h", "3h", "24h", "7d"} or len(windows) != 4:
+                return None
+            counts = ("completed_batches", "successful_batches", "failed_batches", "canceled_batches", "landed_prs", "landed_batches_without_receipts", "staging_pr_runs", "staging_unique_prs", "batches_with_unknown_membership")
+            for row in windows:
+                if not all(integer(row.get(key)) for key in counts):
+                    return None
+                if sum(row[k] for k in ("successful_batches", "failed_batches", "canceled_batches")) != row["completed_batches"]:
+                    return None
+                mean = row.get("mean_staging_runs_per_pr")
+                if mean is not None and (type(mean) not in (int, float) or not math.isfinite(mean) or mean < 1):
+                    return None
+            if not isinstance(data.get("durations"), list):
+                return None
+            for row in data["durations"]:
+                if not isinstance(row, dict) or row.get("window") not in {"1h", "3h", "24h", "7d"} or not integer(row.get("samples")):
+                    return None
+                mean = row.get("mean_seconds")
+                if mean is not None and (type(mean) not in (int, float) or not math.isfinite(mean) or mean < 0):
+                    return None
         elif name == "pools":
             if not isinstance(data.get("counts"), dict) or any(not isinstance(k, str) or not re.fullmatch(r"github|namespace|self-hosted|fleet-(?:[a-f0-9]{12}|[a-f0-9]{32})", k) or not integer(v) for k, v in data["counts"].items()):
                 return None
@@ -392,6 +436,37 @@ def display(value):
         held = data["held"] if data.get("held") is not None else "unknown"
         total = sum(b["size"] for b in batches)
         print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
+    data, note = source("bors_history")
+    if data:
+        print(f"Bors history ({note}; completed batches):")
+        durations = {r["window"]: r for r in data["durations"]}
+        windows = {r["window"]: r for r in data["windows"]}
+        for label in ("1h", "3h", "24h", "7d"):
+            row = windows[label]
+            count = row["completed_batches"]
+            fractions = (f"{100 * row['successful_batches'] / count:.1f}% succeeded / {100 * row['failed_batches'] / count:.1f}% failed"
+                         if count else "success/failure n/a")
+            canceled = f"; {row['canceled_batches']} canceled" if row["canceled_batches"] else ""
+            mean = row.get("mean_staging_runs_per_pr")
+            attempts = f"{mean:.2f}" if mean is not None else "unknown"
+            if row["batches_with_unknown_membership"]:
+                attempts += " (partial membership)"
+            landed = f"{row['landed_prs']} PRs landed"
+            if row["landed_batches_without_receipts"]:
+                landed += " (partial receipts)"
+            duration = durations.get(label, {})
+            runtime = duration.get("mean_seconds")
+            build = f"{int(runtime) // 60}m {int(runtime) % 60}s ({duration['samples']} observed builds)" if runtime is not None else "unknown"
+            if data.get("runtime_runs_checked", 0) < data.get("runtime_runs_total", 0):
+                build += " (sample mean; history filling)"
+            if data.get("durations_truncated"):
+                build += " (partial history)"
+            print(f"  {label}: {count} batches; {fractions}{canceled}; {landed}; {attempts} staging runs/PR; mean build {build}")
+        checked, total = data.get("runtime_runs_checked", 0), data.get("runtime_runs_total", 0)
+        print(f"  Build-time history: {checked}/{total} recorded staging runs checked; means use observed job start/finish times.")
+        print("  Runs/PR counts distinct completed staging batches per PR in each window.")
+    else:
+        print("Bors history: unknown (background observation unavailable)")
     data, note = source("pools")
     if data is None:
         print("CI jobs running: unknown (prepared shared inventory unavailable)")
