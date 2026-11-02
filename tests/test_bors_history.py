@@ -52,6 +52,22 @@ class JobHistory(unittest.TestCase):
         self.assertEqual(history.job_facts([dict(job, runner_id=0)], 1, self.now), [])
         self.assertEqual(history.job_facts([dict(job, run_id=2)], 1, self.now), [])
 
+    def test_percentiles_use_cached_durations_without_provider_reads(self):
+        durations = [60, 120, 180, 240, 600]
+        runs = {str(i): dict(complete=True, jobs=[dict(id=str(i), finished_at=self.now - 10, seconds=s)])
+                for i, s in enumerate(durations, 1)}
+        (Path(self.tmp.name) / "bors-job-durations.json").write_text(json.dumps(
+            dict(source="github_actions_jobs/v1", runs=runs)))
+        fetch = unittest.mock.Mock(side_effect=AssertionError("percentiles must not fetch jobs"))
+        value = history.collect({}, list(range(1, 6)), fetch, now=self.now, allow_reads=False)
+        row = value["windows"][0]
+        self.assertEqual(row["samples"], 5)
+        self.assertEqual(row["p50_seconds"], 180)
+        self.assertAlmostEqual(row["p95_seconds"], 528)
+        self.assertEqual(history.percentile([600], .95), 600)
+        self.assertIsNone(history.percentile([], .5))
+        fetch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

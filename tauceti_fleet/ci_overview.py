@@ -369,9 +369,10 @@ def source_value(name, source):
             for row in data["durations"]:
                 if not isinstance(row, dict) or row.get("window") not in {"1h", "3h", "24h", "7d"} or not integer(row.get("samples")):
                     return None
-                mean = row.get("mean_seconds")
-                if mean is not None and (type(mean) not in (int, float) or not math.isfinite(mean) or mean < 0):
-                    return None
+                for metric in ("mean_seconds", "p50_seconds", "p95_seconds"):
+                    number = row.get(metric)
+                    if number is not None and (type(number) not in (int, float) or not math.isfinite(number) or number < 0):
+                        return None
         elif name == "pools":
             if not isinstance(data.get("counts"), dict) or any(not isinstance(k, str) or not re.fullmatch(r"github|namespace|self-hosted|fleet-(?:[a-f0-9]{12}|[a-f0-9]{32})", k) or not integer(v) for k, v in data["counts"].items()):
                 return None
@@ -456,29 +457,27 @@ def display(value):
         windows = {r["window"]: r for r in data["windows"]}
         periods = ("1h", "3h", "24h", "7d")
         rows = [("Completed batches", [str(windows[p]["completed_batches"]) for p in periods])]
-        success, failure = [], []
+        success = []
         for period in periods:
             row = windows[period]
             decided = row["successful_batches"] + row["failed_batches"]
             percent = round(100 * row["successful_batches"] / decided, 1) if decided else None
             success.append(f"{percent:.1f}%" if percent is not None else "—")
-            failure.append(f"{100 - percent:.1f}%" if percent is not None else "—")
-        rows.extend([("Succeeded", success), ("Failed", failure),
+        rows.extend([("Succeeded", success),
                      ("Canceled", [str(windows[p]["canceled_batches"]) for p in periods]),
                      ("PRs landed", [str(windows[p]["landed_prs"]) for p in periods]),
                      ("Staging runs / PR", [f"{windows[p]['mean_staging_runs_per_pr']:.2f}"
                                             if windows[p]["mean_staging_runs_per_pr"] is not None else "—"
                                             for p in periods])])
-        builds = []
-        for period in periods:
-            runtime = durations.get(period, {}).get("mean_seconds")
-            builds.append(f"{int(runtime) // 60}m {int(runtime) % 60}s" if runtime is not None else "—")
-        rows.extend([("Mean build", builds),
-                     ("Build samples", [str(durations[p]["samples"]) if p in durations else "—" for p in periods])])
-        for title, key in (("Batches missing PR lists", "batches_with_unknown_membership"),
-                           ("Batches missing landing receipts", "landed_batches_without_receipts")):
-            if any(windows[p][key] for p in periods):
-                rows.append((title, [str(windows[p][key]) for p in periods]))
+        for title, metric in (("Build p50", "p50_seconds"), ("Build p95", "p95_seconds")):
+            builds = []
+            for period in periods:
+                runtime = durations.get(period, {}).get(metric)
+                builds.append(f"{int(runtime) // 60}m {int(runtime) % 60}s" if runtime is not None else "—")
+            rows.append((title, builds))
+        rows.append(("Build samples", [str(durations[p]["samples"]) if p in durations else "—" for p in periods]))
+        if any(windows[p]["landed_batches_without_receipts"] for p in periods):
+            rows.append(("Batches missing landing receipts", [str(windows[p]["landed_batches_without_receipts"]) for p in periods]))
         width = max(len(title) for title, _ in rows)
         print("  " + " " * width + "".join(f"{p:>10}" for p in periods))
         for title, cells in rows:

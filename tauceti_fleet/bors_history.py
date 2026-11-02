@@ -10,6 +10,16 @@ WINDOWS = (("1h", 3600), ("3h", 10800), ("24h", 86400), ("7d", 604800))
 MAX_READS = 5
 
 
+def percentile(values, fraction):
+    """Linearly interpolate a percentile of sorted cached durations."""
+    if not values:
+        return None
+    index = (len(values) - 1) * fraction
+    lower = int(index)
+    upper = min(lower + 1, len(values) - 1)
+    return values[lower] + (values[upper] - values[lower]) * (index - lower)
+
+
 def job_facts(jobs, run_id, now):
     facts = []
     for job in jobs:
@@ -80,7 +90,8 @@ def collect(config, run_ids, fetch, *, now=None, allow_reads=True):
             and type(job.get("finished_at")) in (int, float) and type(job.get("seconds")) in (int, float)}
     windows = []
     for label, seconds in WINDOWS:
-        selected = [j for j in jobs.values() if now - seconds < j["finished_at"] <= now]
+        selected = sorted(j["seconds"] for j in jobs.values() if now - seconds < j["finished_at"] <= now)
         windows.append(dict(window=label, samples=len(selected), mean_seconds=
-                            sum(j["seconds"] for j in selected) / len(selected) if selected else None))
+                            sum(selected) / len(selected) if selected else None,
+                            p50_seconds=percentile(selected, .5), p95_seconds=percentile(selected, .95)))
     return dict(windows=windows, runs_total=len(ids), runs_checked=sum(e.get("complete") is True for e in runs.values()))
