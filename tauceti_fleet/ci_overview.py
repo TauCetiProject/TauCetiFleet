@@ -396,13 +396,26 @@ def source_value(name, source):
 def combine(values, pool_names=None):
     sources = {}
     accounts = {}
+
+    def history_rank(observation):
+        # An inactive status host has fewer local duration facts. Within the
+        # normal freshness window, keep the host whose backfill is furthest on.
+        observed = observation.get("observed_at", 0)
+        fresh = observed >= time.time() - 600 and not observation.get("error")
+        checked = observation.get("value", {}).get("runtime_runs_checked", 0)
+        checked = checked if type(checked) is int and checked >= 0 else 0
+        return fresh, checked if fresh else 0, observed
+
     for value in values:
         if not isinstance(value, dict) or not isinstance(value.get("sources"), dict):
             continue
         for name, source in value.get("sources", {}).items():
             if source_value(name, source) is None:
                 continue
-            if source.get("observed_at", 0) > sources.get(name, {}).get("observed_at", -1):
+            preferred = (history_rank(source) > history_rank(sources.get(name, {}))
+                         if name == "bors_history" else
+                         source.get("observed_at", 0) > sources.get(name, {}).get("observed_at", -1))
+            if preferred:
                 sources[name] = source
             if name == "pressure" and isinstance(source.get("value"), dict):
                 account = source["value"]["account"]
