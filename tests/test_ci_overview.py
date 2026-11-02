@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci_overview as overview, github, host, store
+from tauceti_fleet import ci_overview as overview, cli, github, host, remote, store
 
 
 class Overview(unittest.TestCase):
@@ -193,3 +193,15 @@ class Overview(unittest.TestCase):
         self.assertIn("RandomizedDelaySec=30", units["tauceti-fleet-observe.timer"])
         self.assertIn("TAUCETI_FLEET_STATE=/other/state", units["tauceti-fleet-observe.service"])
         self.assertNotIn("status\"", units["tauceti-fleet-observe.timer"])
+
+    def test_zero_admissions_does_not_claim_running_rounds_are_stopped(self):
+        workers = [dict(id=str(i), state="running" if i < 28 else "waiting-capacity") for i in range(40)]
+        value = dict(machine_id=self.config["machine_id"], max_workers=40,
+                     status=dict(active_worker_limit=0, workers=workers, memory_pressure=["host memory headroom low"]))
+        entry = dict(target="local", machine_id=self.config["machine_id"])
+        out = io.StringIO()
+        with patch.object(remote, "inventory", return_value=dict(local=entry)), patch.object(remote, "call", return_value=value), patch.object(github, "request", side_effect=AssertionError("foreground API")), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["status"]), 0)
+        self.assertIn("28 running", out.getvalue())
+        self.assertIn("12 waiting for RAM", out.getvalue())
+        self.assertIn("New-round admission limit: 0 / 40", out.getvalue())
