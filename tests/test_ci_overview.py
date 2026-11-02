@@ -221,7 +221,8 @@ class Overview(unittest.TestCase):
                         staging_pr_runs=30, staging_unique_prs=10,
                         mean_staging_runs_per_pr=3.0, batches_with_unknown_membership=0)
                    for label in ("1h", "3h", "24h", "7d")]
-        data = dict(windows=windows, durations=[dict(window="1h", samples=2, mean_seconds=625)])
+        data = dict(windows=windows, durations=[dict(window="1h", samples=2, mean_seconds=625,
+                                                    p50_seconds=625, p95_seconds=1000)])
         windows[2]["batches_with_unknown_membership"] = 1
         windows[3]["batches_with_unknown_membership"] = 20
         windows[3].update(completed_batches=1, successful_batches=0, failed_batches=0, canceled_batches=1,
@@ -234,11 +235,13 @@ class Overview(unittest.TestCase):
         lines = [line.split() for line in text.splitlines()]
         self.assertIn(["1h", "3h", "24h", "7d"], lines)
         self.assertIn(["Succeeded", "66.7%", "66.7%", "66.7%", "—"], lines)
-        self.assertIn(["Failed", "33.3%", "33.3%", "33.3%", "—"], lines)
+        self.assertFalse(any(line[:1] == ["Failed"] for line in lines))
         self.assertIn(["Canceled", "1", "1", "1", "1"], lines)
-        self.assertIn(["Mean", "build", "10m", "25s", "—", "—", "—"], lines)
+        self.assertIn(["Build", "p50", "10m", "25s", "—", "—", "—"], lines)
+        self.assertIn(["Build", "p95", "16m", "40s", "—", "—", "—"], lines)
         self.assertIn(["Build", "samples", "2", "—", "—", "—"], lines)
-        self.assertIn(["Batches", "missing", "PR", "lists", "0", "0", "1", "20"], lines)
+        self.assertNotIn("Batches missing PR lists", text)
+        self.assertNotIn("Mean build", text)
         self.assertNotIn("partial membership", text)
         self.assertNotIn("sample mean; history filling", text)
         self.assertNotIn("Runs/PR counts distinct", text)
