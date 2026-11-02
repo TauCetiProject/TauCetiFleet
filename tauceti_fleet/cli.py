@@ -27,6 +27,8 @@ def parser():
         cmd = sub.add_parser(name)
         cmd.add_argument("host", nargs="?")
         cmd.add_argument("--json", action="store_true")
+        if name == "status":
+            cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -62,7 +64,7 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
-    for name in ("_host", "host-daemon", "run-workers", "collect-status"):
+    for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
 
@@ -79,9 +81,17 @@ def print_doctor(value):
                 print("          Ask administrator: " + check["administrator_request"])
 
 
-def main(argv=None):
+def main(argv=None, *, _status_results=None):
     args = parser().parse_args(argv)
     try:
+        if args.command == "_watch-status":
+            from . import status_follow
+
+            raw = sys.stdin.buffer.readline(65537)
+            if len(raw) > 65536:
+                raise FleetError("Live status request exceeds limit")
+            status_follow.serve(json.loads(raw))
+            return 0
         if args.command == "_host":
             try:
                 raw = sys.stdin.buffer.read(1024 * 1024 + 1)
@@ -129,8 +139,17 @@ def main(argv=None):
             selected = {args.host: remote.resolve(args.host)} if args.host else entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
+        if args.command == "status" and args.follow:
+            from . import status_follow
+
+            command = ["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
+            return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
+                                     json_output=args.json)
         results = {}
         for name, entry in selected.items():
+            if _status_results is not None:
+                results[name] = _status_results.get(name, dict(error="Waiting for prepared status"))
+                continue
             action = args.command
             payload = dict(action=action)
             if args.command == "doctor":
@@ -235,6 +254,8 @@ def main(argv=None):
                         print(
                             f"Host unreachable; cached status from {max(0, int(time.time() - value['collected_at']))}s ago"
                         )
+                        if _status_results is not None:
+                            print(value.get("error", "Live reports unavailable"))
                         print()
                     workers = status.get("workers")
                     if isinstance(workers, list):
