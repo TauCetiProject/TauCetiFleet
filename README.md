@@ -109,8 +109,11 @@ the host kernel without per-guest CPU quotas or core pinning. Their total may
 exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
-scheduling overhead. Memory (including guest overhead) and disk reservations
-cover every configured job. Workers receive bounded remaining memory after CI and OS
+scheduling overhead. By default, the physical CI memory budget covers guest RAM
+and 2 GiB of overhead for every configured job. An explicit
+`--ci-memory-budget-gib N` instead bounds the whole CI slice at N GiB and permits
+guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
+completions and memory events when choosing concurrency. Workers receive bounded remaining memory after CI and OS
 headroom, considering actual available memory on a shared host. CI receives
 priority over this fleet, not an entitlement over other users' allocations.
 
@@ -123,11 +126,28 @@ tauceti-fleet enable local --ci both --max-jobs 12 --ci-vcpus 16 --ci-memory-gib
 tauceti-fleet enable local --ci both --max-jobs 24 --ci-vcpus 16 --ci-memory-gib 32
 # 32 cores / 128 GB RAM: 3 jobs, 102 GiB including guest overhead.
 tauceti-fleet enable local --ci both --max-jobs 3 --ci-vcpus 16 --ci-memory-gib 32
+# Explicit memory-overcommit trial; 384 GiB virtual RAM shares an 80 GiB CI ceiling.
+tauceti-fleet enable local --ci both --max-jobs 12 --ci-vcpus 16 --ci-memory-gib 32 --ci-memory-budget-gib 80
 ```
+
+Before enabling memory overcommit on an existing installation, update and load
+the new controller first, then verify its revision, and only then raise the slot
+count with the explicit budget. Older controllers do not understand that budget.
+For rollback, restore the prior slot count and budget configuration before
+restoring an older controller. Keep busy guest services and worker admissions
+enabled during a live controller handover. In explicit-budget mode, a confirmed
+QEMU OOM is recorded without triggering the host-wide CI cooldown; other host
+faults retain that cooldown. New guests enable virtio free-page reporting.
 
 These are starting points for otherwise available machines, not measured
 optima. Keep the existing OS headroom and check actual RAM and disk availability
-with `doctor`. The default disk allowance is 100 GiB per slot. Increase or reduce
+with `doctor`. The default virtual disk limit is 100 GiB per slot. QCOW2 overlays
+allocate on write, so doctor requires up to 4 GiB of startup space per slot on
+the guest overlay filesystem, rather than the sum of virtual disk limits. Each launch
+also checks that headroom before registering a runner. Monitor actual overlay
+growth: the startup check does not guarantee that every guest can fill its disk.
+Guests report disk I/O errors instead of silently pausing on a full host disk.
+Increase or reduce
 concurrency based on completed jobs per hour and job latency under load, rather
 than treating virtual CPU counts as physical CPU reservations.
 
@@ -238,7 +258,7 @@ are informational. The controller refreshes worker MemoryHigh from current host 
 without double-counting reclaimable artifact cache or dropping below pinned memory
 plus a 1 GiB cushion (subject to the hard ceiling). Raising it allows workers to
 recover when CI releases RAM. MemoryMax is independent of startup availability and still
-reserves CI's full configured memory plus 2 GiB overhead and at least 10% of host
+reserves the aggregate CI memory budget (guest RAM plus overhead by default) and at least 10% of host
 RAM (minimum 4 GiB) for the OS. A 1 GiB swap cap is included within the worker
 reservation, deducted from its resident RAM limit; swapped bytes also count in
 the estimated working set. This bounds zram use outside resident accounting.

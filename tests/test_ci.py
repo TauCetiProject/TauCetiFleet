@@ -310,7 +310,7 @@ class Classification(unittest.TestCase):
                 (False, "healthy"),
             ),
             ("ActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\n", 0, (True, "unknown")),
-            ("ActiveState=failed\nSubState=failed\nResult=oom-kill\nExecMainStatus=9\n", 0, (False, "fault")),
+            ("ActiveState=failed\nSubState=failed\nResult=oom-kill\nExecMainStatus=9\n", 0, (False, "oom")),
             ("ActiveState=inactive\nSubState=dead\nResult=success\nExecMainStatus=7\n", 0, (False, "fault")),
         ):
             with (

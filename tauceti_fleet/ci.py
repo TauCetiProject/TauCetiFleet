@@ -41,13 +41,15 @@ INFRA_PREFIXES = (
 )
 
 
-def classify(job, *, run=None, statuses=None, host_health=None, kind="staging"):
+def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", memory_overcommit=False):
     """Return a bounded, non-secret decision; missing/conflicting facts fail closed."""
 
     def result(cooldown, reason, **evidence):
         return dict(cooldown=cooldown, reason=reason, evidence=evidence)
 
     steps = job.get("steps", [])
+    if host_health == "oom":
+        return result(not memory_overcommit, "memory_budget_oom" if memory_overcommit else "host_service_fault")
     if host_health == "fault":
         return result(True, "host_service_fault")
     if kind == "pr":

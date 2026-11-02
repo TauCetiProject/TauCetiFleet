@@ -6,12 +6,13 @@ KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 MAX_JOBS = 4096
 
 
-def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None):
+def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
     if not isinstance(ci, str) or ci not in KINDS:
         raise FleetError("Select CI jobs explicitly: --ci pr, --ci staging, or --ci both")
     result = dict(config, ci_kinds=KINDS[ci], ci_max_jobs=jobs(config))
     for name, value, upper in (("ci_max_jobs", maximum, MAX_JOBS), ("ci_vcpus", vcpus, 4096),
-                               ("ci_memory_gib", memory_gib, 4096), ("ci_disk_gib", disk_gib, 4096)):
+                               ("ci_memory_gib", memory_gib, 4096), ("ci_disk_gib", disk_gib, 4096),
+                               ("ci_memory_budget_gib", memory_budget_gib, 1048576)):
         if value is None:
             continue
         if type(value) is not int or not 1 <= value <= upper:
@@ -19,6 +20,30 @@ def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=
         result[name] = value
     staging_slots(result)
     return result
+
+
+def memory_budget_gib(config):
+    """Physical CI slice ceiling, independent of overcommitted guest RAM."""
+    value = config.get("ci_memory_budget_gib")
+    if value is None:
+        return jobs(config) * (config["ci_memory_gib"] + 2)
+    if type(value) is not int or not 1 <= value <= 1048576:
+        raise FleetError("ci_memory_budget_gib must be a positive integer at most 1048576")
+    return value
+
+
+def disk_startup_gib(config):
+    """QCOW2 disks allocate on write; virtual size is not reserved space."""
+    return min(4, config["ci_disk_gib"])
+
+
+def disk_root():
+    from .store import state_dir
+
+    root = state_dir() / "vms"
+    while not root.exists():
+        root = root.parent
+    return root
 
 
 def jobs(config):
