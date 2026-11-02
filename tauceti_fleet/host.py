@@ -181,7 +181,7 @@ def worker_memory_limits(config, caps, pinned=0):
     Only high moves during work: lowering max could kill an active paid round.
     """
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    ci = capacity.jobs(config) * (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
+    ci = capacity.memory_budget_gib(config) * GIB if config["ci_allowed"] else 0
     maximum = max(16 * 1024**2, caps["memory_total"] - ci - reserve - GIB)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
@@ -212,7 +212,7 @@ def refresh_worker_memory(config, caps, memory):
 
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    ci = capacity.jobs(config) * (config["ci_memory_gib"] + 2) * GIB if config["ci_allowed"] else 0
+    ci = capacity.memory_budget_gib(config) * GIB if config["ci_allowed"] else 0
 
     def current(name):
         result = run(
@@ -226,6 +226,8 @@ def write_slices(config, caps):
             return 0
 
     current_workers = current("workers")
+    if ci and current("ci") > ci:
+        raise FleetError("Requested CI memory budget is below current CI usage; retain the running guest limit")
     _, worker = worker_memory_limits(config, caps)
     live_workers = any(w.get("alive") for w in worker_statuses())
     if live_workers and worker < max(GIB, current_workers):
@@ -329,12 +331,12 @@ def run_workers():
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
-def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None):
+def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
     config = host_config()
     if ci and not config["ci_allowed"]:
         raise FleetError("This host was deployed with --no-ci; reconfigure its role first")
     if ci:
-        proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib)
+        proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib, memory_budget_gib=memory_budget_gib)
         changed = any(proposed.get(k) != config.get(k) for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
         # The controller reads the slot count every iteration and admits added
         # slots independently. Existing guests need neither retirement nor a
@@ -361,7 +363,7 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     if ci:
         # Persist the policy before launch, so crash recovery never loses the
         # admission ceiling or tries to replace these guests with the old shape.
-        update_host(**{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib") if k in config})
+        update_host(**{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_memory_budget_gib") if k in config})
         if not config["ci_enabled"] and not vm.outstanding():
             # Verify registration once. The controller admits remaining slots
             # independently, so a later startup error cannot leave a half-enabled role.
@@ -371,7 +373,8 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     )
     install_service(restart=False)
     return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
-                ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value))
+                ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value),
+                ci_memory_budget_gib=capacity.memory_budget_gib(value))
 
 
 def drain():
@@ -462,6 +465,8 @@ def ci_service_state(unit):
     if result.returncode or not all(fields.get(k) for k in ("ActiveState", "SubState", "Result", "ExecMainStatus")):
         return None, "unknown"
     running = fields["SubState"] in ("running", "start", "start-pre", "start-post")
+    if fields["Result"] == "oom-kill":
+        return running, "oom"
     if fields["Result"] != "success" or fields["ExecMainStatus"] != "0":
         return running, "fault"
     healthy_exit = (
@@ -519,7 +524,8 @@ def collect_ci_results(config):
                 # event/title. Guest events never claim PR versus staging trust.
                 if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
                     kind = "pr"
-            decision = ci.classify(job, host_health=value.get("host_health"), kind=kind)
+            decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
+                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None)
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
                     run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))
@@ -812,6 +818,7 @@ def daemon():
                         ci_vms=values,
                         ci_jobs_busy=sum(bool(v.get("busy")) for v in values),
                         ci_max_jobs=capacity.jobs(config),
+                        ci_memory_budget_gib=capacity.memory_budget_gib(config),
                         ci_kinds=capacity.kinds(config),
                         ci_errors=slot_errors,
                     ),
@@ -899,7 +906,8 @@ def rpc(payload):
     if action == "enable":
         return enable(ci=payload.get("ci"), workers=bool(payload.get("workers")),
                       maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
-                      memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"))
+                      memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"),
+                      memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
     if action == "workers":
@@ -922,6 +930,7 @@ def rpc(payload):
             ci_enabled=config["ci_enabled"],
             ci_kinds=capacity.kinds(config),
             ci_max_jobs=capacity.jobs(config),
+            ci_memory_budget_gib=capacity.memory_budget_gib(config),
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],

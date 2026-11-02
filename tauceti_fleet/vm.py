@@ -119,13 +119,15 @@ def qemu_args(config, directory, disk, seed, *, small=False):
         "-serial",
         "file:" + str(directory / "console.log"),
         "-drive",
-        f"file={disk},format=qcow2,if=virtio",
+        f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report",
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
         "-netdev",
         "user,id=net0",
         "-device",
         "virtio-net-pci,netdev=net0",
+        "-device",
+        "virtio-balloon-pci,free-page-reporting=on",
         "-chardev",
         f"socket,id=events,path={directory / 'events.sock'},server=on,wait=off",
         "-device",
@@ -271,6 +273,8 @@ def cancel_registration(config):
 
 
 def _start(config):
+    from .capacity import disk_root, disk_startup_gib
+
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
         raise FleetError("Prepared CI image missing; run prepare before enabling CI")
@@ -281,6 +285,8 @@ def _start(config):
         if result.returncode == 0:
             return prior
         _retire(config, prior)
+    if shutil.disk_usage(disk_root()).free < disk_startup_gib(config) * 1024**3:
+        raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
     registration = slot_file(config, "ci-registration.json")
     intent = read(registration, {}) if config.get("ci_broker_url") else {}
     instance = intent.get("instance") or secrets.token_hex(8)

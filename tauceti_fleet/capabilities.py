@@ -250,20 +250,22 @@ def doctor(config=None, *, probe=True):
         f"Effective allocation: {caps['cpus']:g} CPUs, {caps['memory_total'] / GIB:.1f} GiB RAM",
         "Effective ancestor cgroup limits must be readable",
     )
-    from .capacity import jobs, kinds
+    from .capacity import disk_root, disk_startup_gib, jobs, kinds, memory_budget_gib
 
     count = jobs(config)
     ci_memory = count * config["ci_memory_gib"] * GIB
+    budget = memory_budget_gib(config) * GIB
+    overcommit = config.get("ci_memory_budget_gib") is not None
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     # QEMU vCPUs are runnable host threads, not reserved physical CPUs. The
     # kernel shares CPU across guests; unlike RAM, their counts need not sum
     # to less than the host allocation.
-    fits = caps["memory_total"] >= ci_memory + count * 2 * GIB + reserve
+    fits = caps["memory_total"] >= budget + reserve
     add(
         "ci-shape",
         "ok" if fits else "blocked",
-        f"CI requests {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB, plus 2 GiB per guest and {reserve / GIB:.1f} GiB OS headroom; {count * config['ci_vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
-        "Configure fewer jobs or less guest RAM, or redeploy with --no-ci",
+        f"CI exposes {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB guest RAM; aggregate physical CI ceiling {budget / GIB:g} GiB, OS headroom {reserve / GIB:.1f} GiB. {count * config['ci_vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
+        "Reduce the aggregate CI memory budget or guest RAM",
         roles=("ci",),
     )
     try:
@@ -275,7 +277,8 @@ def doctor(config=None, *, probe=True):
             committed = 0
     except (FleetError, ValueError):
         committed = 0
-    needed = max(0, ci_memory + count * 2 * GIB - committed) + reserve
+    additional = max(0, budget - committed)
+    needed = (min(2 * GIB, additional) if overcommit else additional) + reserve
     add(
         "available-memory-headroom",
         "ok" if caps["memory_available"] >= needed else "blocked",
@@ -283,6 +286,11 @@ def doctor(config=None, *, probe=True):
         "Wait for other workloads to release memory, configure a smaller CI shape, or use --no-ci",
         roles=("ci",),
     )
+    if overcommit:
+        add("ci-memory-overcommit", "warning",
+            f"Explicit physical budget: {ci_memory / GIB:g} GiB of virtual guest RAM shares {budget / GIB:g} GiB; simultaneous memory peaks may OOM CI guests",
+            "Observe CI completions and memory.events; adjust slots or the aggregate budget if useful throughput falls",
+            roles=("ci",))
     try:
         fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
         try:
@@ -310,12 +318,13 @@ def doctor(config=None, *, probe=True):
             "Run tauceti-fleet prepare on this host to fetch the pinned Nix tools; otherwise ask for qemu and cloud-image-utils",
             roles=("ci",),
         )
-    free = shutil.disk_usage(Path.home()).free
+    free = shutil.disk_usage(disk_root()).free
+    startup = count * disk_startup_gib(config) * GIB
     add(
         "storage",
-        "ok" if free >= count * config["ci_disk_gib"] * GIB else "blocked",
-        f"{free / GIB:.1f} GiB free; CI requires {count * config['ci_disk_gib']} GiB for {count} jobs",
-        "Free space, lower ci_disk_gib, or choose a larger writable data directory",
+        "ok" if free >= startup else "blocked",
+        f"{free / GIB:.1f} GiB free on the guest overlay filesystem; {startup / GIB:g} GiB startup headroom for {count} jobs. QCOW2 disks grow on write; their {count * config['ci_disk_gib']} GiB virtual limit is not a reservation",
+        "Free space on the guest overlay filesystem; monitor actual overlay growth during builds",
         roles=("ci",),
     )
     worker = executable("tauceti")
@@ -475,6 +484,6 @@ def doctor(config=None, *, probe=True):
         checks=checks,
         resources=caps,
         ci_shape=dict({k: config[k] for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib")},
-                      ci_max_jobs=count, ci_kinds=kinds(config)),
+                      ci_max_jobs=count, ci_kinds=kinds(config), ci_memory_budget_gib=budget / GIB),
         observed_at=__import__("time").time(),
     )
