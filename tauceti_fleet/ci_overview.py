@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import github
+from . import github, bors_history as history_jobs
 from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
@@ -82,16 +82,15 @@ def bors_history(config):
             or value.get("base") != "main" or value.get("queue_authority") is not False):
         raise FleetError("Invalid Bors history observation")
     data = dict(windows=value.get("windows"), durations=[])
-    base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
-    if urllib.parse.urlsplit(base).scheme != "https":
-        raise FleetError("History source requires HTTPS")
+    observed = value.get("observed_at")
+    if source_value("bors_history", dict(value=data, observed_at=observed)) is None:
+        raise FleetError("Invalid Bors history metrics")
     try:
-        runtime = fetch(base + "/v1/ci-statistics/cached?" + urllib.parse.urlencode(dict(repository=REPOSITORY)),
-                        token_file=config.get("github_state_token_file"))
-        if runtime.get("schema") != "tauceti-ci.staging-durations/v1" or runtime.get("read_only") is not True:
-            raise FleetError("Invalid staging duration observation")
-        data["durations"] = runtime.get("windows")
-        data["durations_truncated"] = runtime.get("truncated") is True
+        runtime = history_jobs.collect(config, value.get("staging_run_ids", []), fetch,
+                                       allow_reads=bool(config.get("ci_enabled") or config.get("workers_enabled")))
+        data["durations"] = runtime["windows"]
+        data["runtime_runs_total"] = runtime["runs_total"]
+        data["runtime_runs_checked"] = runtime["runs_checked"]
     except Exception as error:
         data["durations_error"] = str(error)[:200] if isinstance(error, FleetError) else type(error).__name__
     observed = value.get("observed_at")
@@ -356,7 +355,7 @@ def source_value(name, source):
             windows = data.get("windows")
             if not isinstance(windows, list) or {r.get("window") for r in windows if isinstance(r, dict)} != {"1h", "3h", "24h", "7d"} or len(windows) != 4:
                 return None
-            counts = ("completed_batches", "successful_batches", "failed_batches", "canceled_batches", "landed_prs", "staging_pr_runs", "staging_unique_prs", "batches_with_unknown_membership")
+            counts = ("completed_batches", "successful_batches", "failed_batches", "canceled_batches", "landed_prs", "landed_batches_without_receipts", "staging_pr_runs", "staging_unique_prs", "batches_with_unknown_membership")
             for row in windows:
                 if not all(integer(row.get(key)) for key in counts):
                     return None
@@ -452,13 +451,20 @@ def display(value):
             attempts = f"{mean:.2f}" if mean is not None else "unknown"
             if row["batches_with_unknown_membership"]:
                 attempts += " (partial membership)"
+            landed = f"{row['landed_prs']} PRs landed"
+            if row["landed_batches_without_receipts"]:
+                landed += " (partial receipts)"
             duration = durations.get(label, {})
             runtime = duration.get("mean_seconds")
             build = f"{int(runtime) // 60}m {int(runtime) % 60}s ({duration['samples']} observed builds)" if runtime is not None else "unknown"
+            if data.get("runtime_runs_checked", 0) < data.get("runtime_runs_total", 0):
+                build += " (sample mean; history filling)"
             if data.get("durations_truncated"):
                 build += " (partial history)"
-            print(f"  {label}: {count} batches; {fractions}{canceled}; {row['landed_prs']} PRs landed; {attempts} staging runs/PR; mean build {build}")
-        print("  Runs/PR counts distinct completed staging batches per PR in each window; build means use mirrored job start/finish timestamps.")
+            print(f"  {label}: {count} batches; {fractions}{canceled}; {landed}; {attempts} staging runs/PR; mean build {build}")
+        checked, total = data.get("runtime_runs_checked", 0), data.get("runtime_runs_total", 0)
+        print(f"  Build-time history: {checked}/{total} recorded staging runs checked; means use observed job start/finish times.")
+        print("  Runs/PR counts distinct completed staging batches per PR in each window.")
     else:
         print("Bors history: unknown (background observation unavailable)")
     data, note = source("pools")

@@ -217,7 +217,7 @@ class Overview(unittest.TestCase):
 
     def test_history_windows_show_outcome_fractions_attempts_and_sampled_job_runtime(self):
         windows = [dict(window=label, completed_batches=4, successful_batches=2,
-                        failed_batches=1, canceled_batches=1, landed_prs=12,
+                        failed_batches=1, canceled_batches=1, landed_prs=12, landed_batches_without_receipts=0,
                         staging_pr_runs=30, staging_unique_prs=10,
                         mean_staging_runs_per_pr=3.0, batches_with_unknown_membership=0)
                    for label in ("1h", "3h", "24h", "7d")]
