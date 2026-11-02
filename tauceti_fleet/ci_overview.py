@@ -428,9 +428,10 @@ def display(value):
             continue
         age = max(0, int(time.time() - observation.get("observed_at", time.time())))
         note = f"{age}s old" + ("; stale" if age > 600 or observation.get("error") else "")
-        rows = sorted(data["scopes"], key=lambda r: (r["scope"] not in ("any", "auto"), -r["observed_at"]))
+        rows = sorted((r for r in data["scopes"] if r["scope"] in ("any", "auto") and not r["skip"]),
+                      key=lambda r: -r["observed_at"])
         parts = []
-        for row in rows[:4]:
+        for row in rows[:1]:
             scope = "all roadmaps" if row["scope"] in ("any", "auto") else row["scope"]
             if row["skip"]:
                 scope += " (with exclusions)"
@@ -440,4 +441,4 @@ def display(value):
                 parts[-1] += f" (stale {scope_age}s)"
         machine = data.get("machine_id")
         label = " on " + pool_names.get("fleet-" + machine[:12], machine[:12]) if isinstance(machine, str) else ""
-        print(f"Backpressure {data['account']}{label}: " + "; ".join(parts) + f" open non-draft roadmap PRs ({note})")
+        print(f"Backpressure {data['account']}{label}: " + ("; ".join(parts) or "all roadmaps: unknown") + f" open non-draft roadmap PRs ({note})")
