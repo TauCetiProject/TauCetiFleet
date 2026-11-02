@@ -35,7 +35,7 @@ class Overview(unittest.TestCase):
         return value
 
     def test_foreground_status_never_queries_or_starts_collectors(self):
-        value = self.snapshot(dict(backlog=dict(value=dict(pr_builds=732, all_workflows=1352), observed_at=100)))
+        value = self.snapshot(dict(backlog=dict(value=dict(pr_builds=732, all_workflows=1352, created_since=overview.QUEUED_RUNS_CREATED_SINCE), observed_at=100)))
         with patch.object(overview, "fetch", side_effect=AssertionError("API in status")), patch.object(github, "request", side_effect=AssertionError("API in status")), patch.object(overview, "collect", side_effect=AssertionError("collector in status")), patch.object(overview.concurrent.futures, "ThreadPoolExecutor", side_effect=AssertionError("background work in status")):
             self.assertEqual(overview.cached(self.config), value)
             self.assertEqual(host.rpc(dict(action="status"))["ci_overview"], value)
@@ -155,7 +155,7 @@ class Overview(unittest.TestCase):
     def test_malformed_source_does_not_abort_other_status_lines(self):
         out = io.StringIO()
         value = dict(sources={name: dict(value={}, observed_at="invalid") for name in ("bors", "pools", "pressure")})
-        value["sources"]["backlog"] = dict(value=dict(pr_builds=3, all_workflows=8), observed_at=time.time())
+        value["sources"]["backlog"] = dict(value=dict(pr_builds=3, all_workflows=8, created_since=overview.QUEUED_RUNS_CREATED_SINCE), observed_at=time.time())
         with contextlib.redirect_stdout(out):
             overview.display(value)
         self.assertIn("Bors: unknown", out.getvalue())
@@ -175,7 +175,7 @@ class Overview(unittest.TestCase):
             data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
         self.assertEqual(request.call_count, 2)
         self.assertTrue(all("per_page=1" in c.args[0] for c in request.call_args_list))
-        self.assertEqual(data, dict(pr_builds=0, all_workflows=0))
+        self.assertEqual(data, dict(pr_builds=0, all_workflows=0, created_since=overview.QUEUED_RUNS_CREATED_SINCE))
 
     def test_oldest_queued_run_uses_one_final_page_without_scanning_jobs(self):
         responses = [dict(total_count=7), dict(total_count=900),
@@ -183,7 +183,8 @@ class Overview(unittest.TestCase):
         with patch.object(github, "request", side_effect=responses) as request:
             data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
         self.assertEqual(request.call_count, 3)
-        self.assertTrue(request.call_args.args[0].endswith("status=queued&per_page=1&page=900"))
+        self.assertTrue(request.call_args.args[0].endswith("&page=900"))
+        self.assertTrue(all("created=%3E%3D2026-10-08T00%3A00%3A00Z" in c.args[0] for c in request.call_args_list))
         self.assertEqual(data["oldest_created_at"], 1767225600)
         value = dict(sources=dict(backlog=dict(value=data, observed_at=1767287100)))
         out = io.StringIO()
@@ -199,6 +200,20 @@ class Overview(unittest.TestCase):
             self.assertEqual(request.call_count, len(responses))
             self.assertNotIn("oldest_created_at", data)
             self.assertIn("oldest_unavailable", data)
+
+    def test_bors_total_and_legacy_backlog_cache(self):
+        batches = [dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]
+        value = dict(sources=dict(
+            bors=dict(value=dict(batches=batches, held=0), observed_at=time.time()),
+            backlog=dict(value=dict(pr_builds=71, all_workflows=100,
+                                    oldest_created_at=time.time() - 631 * 3600), observed_at=time.time())))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(value)
+        self.assertIn("Bors: 54=26+26+2", out.getvalue())
+        self.assertIn("CI backlog: refreshing", out.getvalue())
+        self.assertNotIn("631h", out.getvalue())
+        self.assertIn("excluding stuck runs through 2026-10-07", out.getvalue())
 
     def test_presentation_keeps_runner_groups_on_one_line(self):
         value = dict(sources=dict(pools=dict(value=dict(counts={"github": 3, "namespace": 15, "fleet-11e2756fc11042d798f759410573a935": 12}), observed_at=time.time())))
