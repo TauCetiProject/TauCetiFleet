@@ -140,6 +140,11 @@ class Capacity(unittest.TestCase):
             host.CISlot(0).step(store.host_config(), inventory=[], refresh=False, cooling=False)
             host.CISlot(1).step(store.host_config(), inventory=[], refresh=False, cooling=False)
             retire.assert_not_called()
+            saved = store.host_config()
+            with self.assertRaises(store.FleetError):
+                host.enable(ci="both", maximum=1)
+            self.assertEqual(store.host_config(), saved)
+            self.assertEqual(store.read(vm.slot_file(config, "vm.json")), busy)
         self.assertEqual(result["ci_max_jobs"], 2)
         self.assertEqual(start.call_count, 1)
         self.assertEqual(start.call_args.args[0]["ci_slot"], 1)
