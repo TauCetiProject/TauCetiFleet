@@ -53,7 +53,7 @@ class Overview(unittest.TestCase):
     def test_failed_attempt_is_rate_limited_and_keeps_last_known_facts(self):
         old = dict(value=dict(pr_builds=9, all_workflows=10), observed_at=123)
         self.snapshot(dict(backlog=old))
-        with patch.object(overview, "bors", side_effect=RuntimeError), patch.object(overview, "pools", side_effect=RuntimeError), patch.object(overview, "backlog", side_effect=RuntimeError) as api, patch.object(overview, "pressure", side_effect=RuntimeError):
+        with patch.object(overview, "bors_history", side_effect=RuntimeError), patch.object(overview, "bors", side_effect=RuntimeError), patch.object(overview, "pools", side_effect=RuntimeError), patch.object(overview, "backlog", side_effect=RuntimeError) as api, patch.object(overview, "pressure", side_effect=RuntimeError):
             first = overview.collect(self.config)
             second = overview.collect(self.config)
         api.assert_called_once()
@@ -81,7 +81,7 @@ class Overview(unittest.TestCase):
             release.wait(5)
             return {}, time.time()
 
-        with patch.object(overview, "bors", side_effect=slow) as request, patch.object(overview, "pools", return_value=({}, 100)), patch.object(overview, "backlog", return_value=(dict(pr_builds=1, all_workflows=2), 100)), patch.object(overview, "pressure", return_value=({}, 100)):
+        with patch.object(overview, "bors_history", side_effect=RuntimeError), patch.object(overview, "bors", side_effect=slow) as request, patch.object(overview, "pools", return_value=({}, 100)), patch.object(overview, "backlog", return_value=(dict(pr_builds=1, all_workflows=2), 100)), patch.object(overview, "pressure", return_value=({}, 100)):
             thread = threading.Thread(target=overview.collect, args=(self.config,))
             thread.start()
             try:
@@ -103,7 +103,7 @@ class Overview(unittest.TestCase):
     def test_corrupt_attempt_or_backward_clock_does_not_disable_collection(self):
         for attempt in ([], dict(next_attempt_at=time.time() + overview.INTERVAL * 2)):
             store.atomic(store.state_dir() / "ci-overview-attempt.json", attempt)
-            with patch.object(overview, "bors", side_effect=RuntimeError) as request, patch.object(overview, "pools", side_effect=RuntimeError), patch.object(overview, "backlog", side_effect=RuntimeError), patch.object(overview, "pressure", side_effect=RuntimeError):
+            with patch.object(overview, "bors_history", side_effect=RuntimeError), patch.object(overview, "bors", side_effect=RuntimeError) as request, patch.object(overview, "pools", side_effect=RuntimeError), patch.object(overview, "backlog", side_effect=RuntimeError), patch.object(overview, "pressure", side_effect=RuntimeError):
                 overview.collect(self.config)
                 request.assert_called_once()
 
@@ -214,6 +214,25 @@ class Overview(unittest.TestCase):
         self.assertIn("CI backlog: refreshing", out.getvalue())
         self.assertNotIn("631h", out.getvalue())
         self.assertIn("excluding stuck runs through 2026-10-07", out.getvalue())
+
+    def test_history_windows_show_outcome_fractions_attempts_and_sampled_job_runtime(self):
+        windows = [dict(window=label, completed_batches=4, successful_batches=2,
+                        failed_batches=1, canceled_batches=1, landed_prs=12,
+                        staging_pr_runs=30, staging_unique_prs=10,
+                        mean_staging_runs_per_pr=3.0, batches_with_unknown_membership=0)
+                   for label in ("1h", "3h", "24h", "7d")]
+        data = dict(windows=windows, durations=[dict(window="1h", samples=2, mean_seconds=625)])
+        value = dict(sources=dict(bors_history=dict(value=data, observed_at=time.time())))
+        out = io.StringIO()
+        with patch.object(overview, "fetch", side_effect=AssertionError("foreground network")), contextlib.redirect_stdout(out):
+            overview.display(value)
+        text = out.getvalue()
+        self.assertIn("1h: 4 batches; 50.0% succeeded / 25.0% failed; 1 canceled", text)
+        self.assertIn("12 PRs landed; 3.00 staging runs/PR; mean build 10m 25s (2 observed builds)", text)
+        self.assertIn("7d: 4 batches", text)
+        self.assertIn("mean build unknown", text)
+        data["windows"][0]["successful_batches"] = 10
+        self.assertIsNone(overview.source_value("bors_history", dict(value=data, observed_at=time.time())))
 
     def test_presentation_keeps_runner_groups_on_one_line(self):
         value = dict(sources=dict(pools=dict(value=dict(counts={"github": 3, "namespace": 15, "fleet-11e2756fc11042d798f759410573a935": 12}), observed_at=time.time())))
