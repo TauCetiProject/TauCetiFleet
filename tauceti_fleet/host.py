@@ -228,14 +228,8 @@ def write_slices(config, caps):
     current_workers = current("workers")
     _, worker = worker_memory_limits(config, caps)
     live_workers = any(w.get("alive") for w in worker_statuses())
-    if live_workers:
-        previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
-        try:
-            prior_limit = int(previous.stdout.strip())
-        except ValueError:
-            prior_limit = caps["memory_total"]
-        if previous.returncode or worker < max(GIB, current_workers, prior_limit):
-            raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
+    if live_workers and worker < max(GIB, current_workers):
+        raise FleetError("Requested CI capacity leaves insufficient memory for the running workers")
     if worker < GIB and config["workers_enabled"]:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"

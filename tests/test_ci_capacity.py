@@ -170,15 +170,19 @@ class Capacity(unittest.TestCase):
         self.assertEqual(low, recovered)
         self.assertGreater(low, 40 * gib)
 
-    def test_live_workers_keep_their_configured_headroom_even_when_usage_is_low(self):
+    def test_live_slot_increase_can_reassign_unused_worker_headroom(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=2, memory_gib=32)
         def current(args, **kwargs):
             value = 60 * gib if "MemoryMax" in args else 2 * gib
             return subprocess.CompletedProcess([], 0, stdout=str(value))
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run", side_effect=current), patch.object(host, "worker_statuses", return_value=[dict(alive=True)]):
-            with self.assertRaisesRegex(store.FleetError, "draining workers"):
-                host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
+            maximum = host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
+            self.assertLess(maximum, 60 * gib)
+            self.assertGreater(maximum, 2 * gib)
+            with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout=str(60 * gib))):
+                with self.assertRaisesRegex(store.FleetError, "insufficient memory for the running workers"):
+                    host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
 
     def test_pending_cleanup_respects_backoff_after_ambiguous_registration(self):
         slot = host.CISlot(1)
