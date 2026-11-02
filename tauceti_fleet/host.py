@@ -41,7 +41,7 @@ def units():
     return path
 
 
-def install_service():
+def install_service(*, restart=True):
     args = " ".join(unit_argument(a) for a in [Path.home() / ".local/bin/tauceti-fleet", "host-daemon"])
     environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
     for name in ("TAUCETI_FLEET_CONFIG", "TAUCETI_FLEET_STATE", "TAUCETI_FLEET_DATA"):
@@ -55,7 +55,8 @@ def install_service():
     target.write_text(text)
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "enable", "--now", target.name])
-    run(["systemctl", "--user", "restart", target.name])
+    if restart:
+        run(["systemctl", "--user", "restart", target.name])
 
 
 def configure(payload):
@@ -227,14 +228,8 @@ def write_slices(config, caps):
     current_workers = current("workers")
     _, worker = worker_memory_limits(config, caps)
     live_workers = any(w.get("alive") for w in worker_statuses())
-    if live_workers:
-        previous = run(["systemctl", "--user", "show", "tauceti-fleet-workers.slice", "-p", "MemoryMax", "--value"], check=False)
-        try:
-            prior_limit = int(previous.stdout.strip())
-        except ValueError:
-            prior_limit = caps["memory_total"]
-        if previous.returncode or worker < max(GIB, current_workers, prior_limit):
-            raise FleetError("Wait for draining workers to finish before shrinking their memory reservation for CI")
+    if live_workers and worker < max(GIB, current_workers):
+        raise FleetError("Requested CI capacity leaves insufficient memory for the running workers")
     if worker < GIB and config["workers_enabled"]:
         raise FleetError(
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
@@ -341,7 +336,15 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     if ci:
         proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib)
         changed = any(proposed.get(k) != config.get(k) for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
-        if changed and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
+        # The controller reads the slot count every iteration and admits added
+        # slots independently. Existing guests need neither retirement nor a
+        # controller restart when their shape and labels remain unchanged.
+        growing = (
+            capacity.jobs(proposed) >= capacity.jobs(config)
+            and capacity.kinds(proposed) == capacity.kinds(config)
+            and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
+        )
+        if changed and not growing and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
             raise FleetError("Drain this host and wait for every CI slot to retire before changing its CI classes or capacity")
         config = proposed
     result = doctor(config)
@@ -366,7 +369,7 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     value = update_host(
         ci_enabled=config["ci_enabled"] or bool(ci), workers_enabled=config["workers_enabled"] or workers, draining=False
     )
-    install_service()
+    install_service(restart=False)
     return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value))
 

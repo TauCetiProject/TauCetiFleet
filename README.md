@@ -118,7 +118,11 @@ tauceti-fleet enable chris --ci both --max-jobs 2 --ci-vcpus 16 --ci-memory-gib 
 tauceti-fleet enable tauchonki --ci staging --max-jobs 1 --ci-vcpus 32 --ci-memory-gib 64
 ```
 
-Drain every slot before changing these settings. Enrollment also imposes an
+Increase `--max-jobs` live when the guest shape and accepted job classes are
+unchanged: existing builds keep running and the controller starts the added
+slots independently. Enabling does not restart the controller. Changes to guest
+shape or job classes, and reductions in the slot count, still require retiring
+the current guests first. Enrollment also imposes an
 operator-controlled ceiling on classes and shared capacity. A host can request
 less capacity, but cannot exceed its enrollment. Legacy installations retain
 one staging slot. Each guest has its own registration intent, state, event
