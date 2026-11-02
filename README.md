@@ -357,6 +357,27 @@ aliases never multiply costs or output. Offline hosts retain their last small
 status snapshot with an explicit age and unavailable-host error; new machines
 without a snapshot contribute no invented financial totals.
 
+The first lines report Bors batch sizes, one line of running jobs by runner pool,
+the queued PR-build and total workflow backlogs, and account authoring pressure
+against its configured PR limit. Running-job counts cover all organization
+workflows, including small control jobs. Backlog counts are queued workflow runs,
+not individual jobs. Authoring pressure uses the workers' complete cached survey:
+non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
+worker can have spare authoring capacity even when the account's all-roadmap
+limit is reached. Missing facts are unknown; old observations retain their age.
+
+`status` only reads a small prepared file for these lines. The independent
+`tauceti-fleet-observe.timer` prepares observations about every five minutes,
+with a randomized delay. A nonblocking lock and a persisted attempt deadline
+also bound concurrent and failed refreshes. Each refresh uses one Bors snapshot,
+two `per_page=1` GitHub queued-run counts, the shared service's **cached-only**
+running-job snapshot, and existing local worker survey responses. It does not
+scan GitHub runs or jobs. The shared snapshot adds no discovery requests and can
+remain stale when no scheduler has refreshed it. Existing host-service setup
+installs the observation timer; for a live code update, install/start only that
+timer while leaving the controller, workers, and CI guests running. JSON status
+includes the combined observations under `_ci` and each host's `ci_overview`.
+
 Costs have 7 days and All time columns. All conversation costs, including reviews
 and fixes for others, are amortized over initiated PR output: landed Lean lines
 added plus half of currently open Lean lines added. The seven-day output cohort

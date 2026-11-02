@@ -61,7 +61,7 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
-    for name in ("_host", "host-daemon", "run-workers"):
+    for name in ("_host", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
 
@@ -93,6 +93,11 @@ def main(argv=None):
             return 0
         if args.command == "host-daemon":
             host.daemon()
+            return 0
+        if args.command == "collect-status":
+            from . import ci_overview
+
+            ci_overview.collect(host.host_config())
             return 0
         if args.command == "run-workers":
             host.run_workers()
@@ -201,6 +206,16 @@ def main(argv=None):
                 distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
             if len(distinct) > 1:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
+        if args.command == "status":
+            from . import ci_overview
+
+            pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
+            overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
+            if args.json:
+                results["_ci"] = overview
+            else:
+                ci_overview.display(overview)
+                print()
         if args.json:
             if fleet is not None:
                 results["_fleet"] = dict(activity=fleet)
@@ -219,9 +234,16 @@ def main(argv=None):
                             f"Host unreachable; cached status from {max(0, int(time.time() - value['collected_at']))}s ago"
                         )
                         print()
-                    print(
-                        f"Workers: {status.get('active_worker_limit', 0)} admitted / {value.get('max_workers', 0)} maximum; CI busy: {status.get('ci_busy', 'unknown')}"
-                    )
+                    workers = status.get("workers")
+                    if isinstance(workers, list):
+                        running = sum(w.get("state") == "running" for w in workers)
+                        surveying = sum(w.get("state") == "surveying" for w in workers)
+                        waiting = sum(w.get("state") == "waiting-capacity" for w in workers)
+                        waiting_for = "RAM" if status.get("memory_pressure") else "admission"
+                        print(f"Worker rounds: {running} running, {surveying} surveying, {waiting} waiting for {waiting_for}")
+                    else:
+                        print("Worker rounds: unknown")
+                    print(f"New-round admission limit: {status.get('active_worker_limit', 0)} / {value.get('max_workers', 0)}")
                     if "ci_max_jobs" in value:
                         print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     if value.get("ci_staging_slots"):
@@ -293,7 +315,10 @@ def main(argv=None):
                     if status.get("workers"):
                         print()
                     for worker in status.get("workers", []):
-                        print(f"  {worker['id']}: {worker.get('state', 'unknown')} — {worker.get('detail') or ''}")
+                        state = worker.get("state", "unknown")
+                        if state == "waiting-capacity":
+                            state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
+                        print(f"  {worker['id']}: {state} — {worker.get('detail') or ''}")
                         if worker.get("isolation_error"):
                             print("    Isolation degraded: " + worker["isolation_error"])
                     isolation = status.get("worker_isolation", {})

@@ -1,0 +1,401 @@
+"""Prepared CI observations. Foreground status reads this cache only."""
+
+import concurrent.futures
+import fcntl
+import hashlib
+import heapq
+import json
+import math
+import os
+import re
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+from . import github
+from .store import FleetError, atomic, read, state_dir
+
+REPOSITORY = "TauCetiProject/TauCeti"
+INTERVAL = 300
+POOL_NAMES = {
+    "github": "GitHub", "namespace": "Namespace",
+    "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
+    "fleet-11e2756fc110": "Tauchonki", "fleet-a26dbb028408": "Yaël",
+}
+
+
+def unit_files(command, environment=None):
+    service = ("[Unit]\nDescription=Prepare TauCeti CI status observations\n\n[Service]\n"
+               "Type=oneshot\nExecStart=" + command + "\nTimeoutStartSec=60\n"
+               "Nice=10\nUMask=0077\nMemoryMax=256M\n")
+    service += "".join("Environment=" + json.dumps((k + "=" + str(v)).replace("%", "%%")) + "\n"
+                       for k, v in (environment or {}).items())
+    timer = ("[Unit]\nDescription=Refresh cached TauCeti CI status\n\n[Timer]\n"
+             "OnBootSec=45\nOnUnitInactiveSec=300\nRandomizedDelaySec=30\n"
+             "Unit=tauceti-fleet-observe.service\n\n[Install]\nWantedBy=timers.target\n")
+    return {"tauceti-fleet-observe.service": service, "tauceti-fleet-observe.timer": timer}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def fetch(url, *, token_file=None):
+    headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetStatus/1.0"}
+    if token_file:
+        token = Path(token_file).expanduser().read_text().strip()
+        if not token or any(c.isspace() for c in token):
+            raise FleetError("Invalid status credential")
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
+        raw = response.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise FleetError("Status response exceeds limit")
+    return json.loads(raw)
+
+
+def bors(config):
+    value = fetch("https://bors.taucetiproject.org/repositories/1/active-batches?base=main")
+    if (value.get("schema") != "tauceti-bors.observation/v1" or value.get("repo") != REPOSITORY
+            or value.get("base") != "main" or not isinstance(value.get("batches"), list)):
+        raise FleetError("Invalid Bors observation")
+    batches = []
+    for batch in value["batches"]:
+        if (type(batch.get("id")) is not int or not isinstance(batch.get("state"), str)
+                or not re.fullmatch(r"[a-z_]{1,32}", batch["state"]) or not isinstance(batch.get("members"), list)):
+            raise FleetError("Invalid Bors batch")
+        batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"])))
+    held = value.get("held")
+    return dict(batches=batches, held=len(held) if isinstance(held, list) else None), time.time()
+
+
+def pools(config):
+    base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
+    if urllib.parse.urlsplit(base).scheme != "https":
+        raise FleetError("Status source requires HTTPS")
+    # A distinct path fails cheaply on old servers; an ignored query parameter
+    # on the discovery endpoint could otherwise accidentally trigger a scan.
+    value = fetch(base + "/v1/runner-capacity/cached?" + urllib.parse.urlencode(dict(repository=REPOSITORY)),
+                  token_file=config.get("github_state_token_file"))
+    counts = value.get("running_jobs")
+    if value.get("read_only") is not True or value.get("complete") is not True or not isinstance(counts, dict):
+        raise FleetError("Prepared running-job inventory unavailable")
+    if any(type(n) is not int or n < 0 for n in counts.values()):
+        raise FleetError("Invalid running-job counts")
+    observed = value.get("observed_at")
+    if type(observed) not in (int, float) or observed <= 0 or observed > time.time() * 1000 + 5000:
+        raise FleetError("Invalid running-job timestamp")
+    return dict(counts=counts, scope="organization_all_workflow_jobs"), observed / 1000
+
+
+def backlog(config):
+    token_file = config.get("github_token_file") or config.get("ci_token_file")
+    if not token_file:
+        raise FleetError("No direct read credential for queued-run counts")
+    counts = {}
+    for name, path in (("pr_builds", "actions/workflows/pr-build.yml/runs"), ("all_workflows", "actions/runs")):
+        value = github.request("repos/" + REPOSITORY + "/" + path + "?status=queued&per_page=1", token_file=token_file)
+        count = value.get("total_count")
+        if type(count) is not int or count < 0:
+            raise FleetError("Invalid queued-run count")
+        counts[name] = count
+    return counts, time.time()
+
+
+def worker_policies(config):
+    if not config.get("workers_enabled"):
+        return []
+    account = config.get("github_account", "tauceti-ai-for-science")
+    fallback_limit = config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8)
+    policies = set()
+    prefix = "fleet-" + config["machine_id"][:8] + "-"
+    for path in (state_dir() / "workers").glob("*.json"):
+        value = read(path, {})
+        if not str(value.get("id", "")).startswith(prefix) or not value.get("alive"):
+            continue
+        spec = value.get("applied_spec") or {}
+        if value.get("github_account", spec.get("github_account", account)) != account:
+            continue
+        scope = spec.get("roadmap_only")
+        scope = "auto" if scope is None else scope or "any"
+        skip = spec.get("roadmap_skip") or []
+        skip = skip.split(",") if isinstance(skip, str) else skip
+        limit = value.get("max_open_prs", spec.get("max_open_prs", fallback_limit))
+        if type(limit) is int and limit > 0:
+            policies.add((scope, tuple(sorted(set(skip))), limit))
+    if not policies:
+        raise FleetError("No live Fleet worker policy available")
+    focus = config.get("roadmap_focus") or {}
+    if focus.get("percent", 0) > 0:
+        for scope, skip, limit in list(policies):
+            if scope in ("auto", "any"):
+                policies.update((area, skip, limit) for area in focus.get("areas", []))
+    return sorted(policies)
+
+
+def pressure_row(path, identity, account, policies):
+    if path.stat().st_size > 8 * 1024 * 1024:
+        return []
+    cached = read(path, {})
+    query, payload = cached.get("query", {}), cached.get("payload", {})
+    args = query.get("args", {})
+    if (query.get("identity") != identity or query.get("repository") != REPOSITORY
+            or query.get("operation") != "survey" or args.get("numbers")
+            or payload.get("status") != "ok" or payload.get("complete") is not True or payload.get("cursor")):
+        return []
+    scope, skip = args.get("roadmap", "any") or "any", args.get("skip", "")
+    skipped = tuple(sorted(set(filter(None, skip.split(",")))))
+    limits = {limit for area, excluded, limit in policies if area == scope and excluded == skipped}
+    if not limits:
+        return []
+    if scope in ("any", "auto"):
+        counts = payload.get("author_counts")
+        if not isinstance(counts, dict):
+            return []
+        count = counts.get(account, 0)
+    else:
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            return []
+        count = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
+    if type(count) is not int or count < 0:
+        return []
+    return [dict(scope=scope, skip=skip, count=count, limit=limit, blocked=count >= limit,
+                 observed_at=path.stat().st_mtime) for limit in limits]
+
+
+def pressure(config):
+    """Reuse complete survey responses for this machine's live Fleet workers."""
+    policies = worker_policies(config)
+    if not policies:
+        raise FleetError("No Fleet worker role configured")
+    account = config.get("github_account", "tauceti-ai-for-science")
+    base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
+    token_file = config.get("github_state_token_file")
+    token = Path(token_file).expanduser().read_text().strip() if token_file else ""
+    identity = hashlib.sha256((base + "\0" + token).encode()).hexdigest()
+    root = Path(os.environ.get("TAUCETI_GITHUB_SHARED_DIR", Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "tauceti/github-shared"))
+    directory = root / "gateway" / identity / "responses"
+    scopes = {}
+    deadline = time.monotonic() + 5
+
+    def observe(path):
+        try:
+            for row in pressure_row(Path(path), identity, account, policies):
+                key = (row["scope"], row["skip"], row["limit"])
+                if row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
+                    scopes[key] = row
+        except (OSError, FleetError, KeyError, TypeError, ValueError):
+            pass
+
+    # Current automatic survey shape is a lookup hint, not a policy dependency:
+    # an older/newer worker's stage list is covered by the bounded fallback scan.
+    stages = "bump,fix,fix-ci,lint-repair,overlap-fix,overlap-scan,progress,rebase,review"
+    for scope, skip, _ in policies:
+        args = dict(roadmap=scope, skip=",".join(skip), numbers="", stages=stages)
+        key = hashlib.sha256(json.dumps([REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
+        observe(directory / (key + ".json"))
+    if len(scopes) < len(policies):
+        newest = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if time.monotonic() > deadline:
+                    break
+                if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False):
+                    stat = entry.stat(follow_symlinks=False)
+                    if stat.st_size <= 8 * 1024 * 1024:
+                        heapq.heappush(newest, (stat.st_mtime, entry.path))
+                        if len(newest) > 256:
+                            heapq.heappop(newest)
+        for _, path in sorted(newest, reverse=True):
+            if time.monotonic() > deadline:
+                break
+            observe(path)
+    if not scopes:
+        raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
+    rows = list(scopes.values())
+    return dict(account=account, machine_id=config["machine_id"], scopes=rows), max(r["observed_at"] for r in rows)
+
+
+def cached(config=None):
+    """Small, bounded file read; never starts a collector or makes API calls."""
+    try:
+        path = state_dir() / "ci-overview.json"
+        if path.stat().st_size > 256 * 1024:
+            raise FleetError("Oversized status cache")
+        value = read(path, {})
+        if not isinstance(value, dict) or value.get("version") != 1 or value.get("repository") != REPOSITORY or not isinstance(value.get("sources"), dict):
+            raise FleetError("Invalid status cache")
+        if any(not isinstance(source, dict) for source in value["sources"].values()):
+            raise FleetError("Invalid status source")
+        return value
+    except (OSError, FleetError, ValueError, TypeError):
+        return dict(version=1, repository=REPOSITORY, sources={}, available=False)
+
+
+def collect(config):
+    """At most one attempt per five minutes, even after failures or restarts."""
+    state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (state_dir() / "ci-overview.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return cached(config)
+        attempt = state_dir() / "ci-overview-attempt.json"
+        now = time.time()
+        try:
+            retry = read(attempt, {}).get("next_attempt_at", 0)
+        except (FleetError, AttributeError):
+            retry = 0
+        if type(retry) in (int, float) and math.isfinite(retry) and now < retry <= now + INTERVAL:
+            return cached(config)
+        atomic(attempt, dict(at=now, next_attempt_at=now + INTERVAL))
+        value = cached(config)
+        sources = dict(value.get("sources", {}))
+        def save():
+            snapshot = dict(version=1, repository=REPOSITORY, sources=dict(sources), prepared_at=time.time(), next_attempt_at=now + INTERVAL)
+            atomic(state_dir() / "ci-overview.json", snapshot)
+            return snapshot
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        try:
+            futures = {executor.submit(fn, config): name for name, fn in (("bors", bors), ("pools", pools), ("backlog", backlog), ("pressure", pressure))}
+            for future in concurrent.futures.as_completed(futures, timeout=40):
+                name = futures[future]
+                try:
+                    data, observed = future.result()
+                    sources[name] = dict(value=data, observed_at=observed)
+                except Exception as error:
+                    reason = str(error) if isinstance(error, FleetError) else type(error).__name__
+                    sources[name] = dict(sources.get(name, {}), error=reason[:200], failed_at=time.time())
+                save()
+        except concurrent.futures.TimeoutError:
+            for future, name in futures.items():
+                if not future.done():
+                    sources[name] = dict(sources.get(name, {}), error="Background observation deadline", failed_at=time.time())
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return save()
+
+
+def source_value(name, source):
+    """Mixed-version or corrupt observations must not break foreground status."""
+    def integer(value):
+        return type(value) is int and value >= 0
+
+    def timestamp(value):
+        return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= time.time() + 5
+
+    try:
+        if not isinstance(source, dict) or not timestamp(source.get("observed_at")):
+            return None
+        data = source.get("value")
+        if not isinstance(data, dict):
+            return None
+        if name == "bors":
+            if not isinstance(data.get("batches"), list) or not (data.get("held") is None or integer(data["held"])):
+                return None
+            if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"]) for b in data["batches"]):
+                return None
+        elif name == "pools":
+            if not isinstance(data.get("counts"), dict) or any(not isinstance(k, str) or not re.fullmatch(r"github|namespace|self-hosted|fleet-(?:[a-f0-9]{12}|[a-f0-9]{32})", k) or not integer(v) for k, v in data["counts"].items()):
+                return None
+        elif name == "backlog":
+            if not all(integer(data.get(k)) for k in ("pr_builds", "all_workflows")):
+                return None
+        elif name == "pressure":
+            if not isinstance(data.get("account"), str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", data["account"]) or not isinstance(data.get("scopes"), list):
+                return None
+            if any(not isinstance(r, dict) or not integer(r.get("count")) or not integer(r.get("limit")) or r["limit"] == 0
+                   or type(r.get("blocked")) is not bool or r["blocked"] != (r["count"] >= r["limit"])
+                   or not timestamp(r.get("observed_at")) or not isinstance(r.get("scope"), str) or not r["scope"].isprintable()
+                   or not isinstance(r.get("skip"), str) for r in data["scopes"]):
+                return None
+        else:
+            return None
+        return data
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def combine(values, pool_names=None):
+    sources = {}
+    accounts = {}
+    for value in values:
+        if not isinstance(value, dict) or not isinstance(value.get("sources"), dict):
+            continue
+        for name, source in value.get("sources", {}).items():
+            if source_value(name, source) is None:
+                continue
+            if source.get("observed_at", 0) > sources.get(name, {}).get("observed_at", -1):
+                sources[name] = source
+            if name == "pressure" and isinstance(source.get("value"), dict):
+                account = source["value"]["account"]
+                machine = source["value"].get("machine_id")
+                key = account + ("@" + machine if isinstance(machine, str) else "")
+                if source.get("observed_at", 0) > accounts.get(key, {}).get("observed_at", -1):
+                    accounts[key] = source
+    return dict(version=1, repository=REPOSITORY, sources=sources, pressure_accounts=accounts, pool_names=pool_names or {})
+
+
+def display(value):
+    sources = value.get("sources", {}) if isinstance(value.get("sources"), dict) else {}
+    names = value.get("pool_names", {})
+    pool_names = {**POOL_NAMES, **(names if isinstance(names, dict) else {})}
+
+    def source(name):
+        row = sources.get(name, {})
+        data = source_value(name, row)
+        if data is None:
+            return None, "incompatible or unavailable observation"
+        age = max(0, int(time.time() - row.get("observed_at", time.time())))
+        note = f"{age}s old" + ("; stale" if age > 600 or row.get("error") else "")
+        return data, note
+
+    data, note = source("bors")
+    if data is None:
+        print("Bors: unknown (background observation unavailable)")
+    else:
+        batches = data["batches"]
+        parts = [f"#{b['id']} {b['size']} PRs {b['state']}" for b in batches]
+        held = data["held"] if data.get("held") is not None else "unknown"
+        print("Bors: " + ("; ".join(parts) or "empty") + f"; held {held} ({note})")
+    data, note = source("pools")
+    if data is None:
+        print("CI jobs running: unknown (prepared shared inventory unavailable)")
+    else:
+        counts = {name: 0 for name in POOL_NAMES.values()}
+        for key, count in data["counts"].items():
+            key = key[:18] if key.startswith("fleet-") else key
+            name = pool_names.get(key, key)
+            counts[name] = counts.get(name, 0) + count
+        print("CI jobs running: " + ", ".join(f"{name} {count}" for name, count in counts.items()) + f" ({note}; organization-wide, all workflows)")
+    data, note = source("backlog")
+    print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows ({note})" if data else "CI backlog: unknown (background observation unavailable)")
+    accounts = value.get("pressure_accounts", {})
+    pressures = list(accounts.values()) if isinstance(accounts, dict) else []
+    pressures = pressures or [sources.get("pressure", {})]
+    if not any(source_value("pressure", row) is not None for row in pressures):
+        print("Backpressure: unknown (no prepared worker survey)")
+    for observation in pressures:
+        data = source_value("pressure", observation)
+        if data is None:
+            continue
+        age = max(0, int(time.time() - observation.get("observed_at", time.time())))
+        note = f"{age}s old" + ("; stale" if age > 600 or observation.get("error") else "")
+        rows = sorted(data["scopes"], key=lambda r: (r["scope"] not in ("any", "auto"), -r["observed_at"]))
+        parts = []
+        for row in rows[:4]:
+            scope = "all roadmaps" if row["scope"] in ("any", "auto") else row["scope"]
+            if row["skip"]:
+                scope += " (with exclusions)"
+            parts.append(f"{scope}: {row['count']}/{row['limit']}" + (" blocked" if row["blocked"] else ""))
+            scope_age = max(0, int(time.time() - row["observed_at"]))
+            if scope_age > 600:
+                parts[-1] += f" (stale {scope_age}s)"
+        machine = data.get("machine_id")
+        label = " on " + pool_names.get("fleet-" + machine[:12], machine[:12]) if isinstance(machine, str) else ""
+        print(f"Backpressure {data['account']}{label}: " + "; ".join(parts) + f" open non-draft roadmap PRs ({note})")
