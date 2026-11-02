@@ -82,11 +82,13 @@ def configure(payload):
         from .broker import validate_url
 
         validate_url(updates["ci_broker_url"])
-    for name in ("max_workers", "max_open_prs", "runner_group_id", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_max_jobs"):
+    for name in ("max_workers", "max_open_prs", "runner_group_id", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"):
         if name in updates and (type(updates[name]) is not int or not 1 <= updates[name] <= 4096):
             raise FleetError(f"{name} must be a positive integer at most 4096")
     if "ci_allowed" in updates and type(updates["ci_allowed"]) is not bool:
         raise FleetError("ci_allowed must be a boolean")
+    if "ci_max_jobs" in updates:
+        capacity.jobs(updates)
     if "ci_kinds" in updates and updates["ci_kinds"] not in capacity.KINDS.values():
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     credentials = payload.get("credentials", {})

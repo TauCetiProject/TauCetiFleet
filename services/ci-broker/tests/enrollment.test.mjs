@@ -246,6 +246,7 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   assert.equal(extra.status,200);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:23,kinds:['pr','staging']})).status,409);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:24,kinds:['pr']})).status,409);
+  assert.equal((await hostRequest(id,token,'/v1/slots/23/cancel-registration','POST',{name:prefix+'3'.repeat(16)})).status,200);
   const revoked=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
   assert.equal(revoked.runner_busy,true);
   assert.ok(!runners.has(registered[0].runner_id)); assert.ok(runners.has(registered[1].runner_id));

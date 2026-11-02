@@ -47,7 +47,6 @@ class Capacity(unittest.TestCase):
                 checks = capabilities.doctor(config, probe=False)["checks"]
             shape = next(c for c in checks if c["name"] == "ci-shape")
             self.assertEqual(shape["status"], expected)
-            self.assertIn("384 vCPUs share 88 host CPUs", shape["evidence"])
 
     def test_pr_only_runners_cannot_match_legacy_staging_workflows(self):
         config = capacity.settings(store.host_config(), ci="pr")

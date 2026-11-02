@@ -3,13 +3,14 @@
 from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
+MAX_JOBS = 4096
 
 
 def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None):
     if not isinstance(ci, str) or ci not in KINDS:
         raise FleetError("Select CI jobs explicitly: --ci pr, --ci staging, or --ci both")
     result = dict(config, ci_kinds=KINDS[ci], ci_max_jobs=jobs(config))
-    for name, value, upper in (("ci_max_jobs", maximum, 4096), ("ci_vcpus", vcpus, 4096),
+    for name, value, upper in (("ci_max_jobs", maximum, MAX_JOBS), ("ci_vcpus", vcpus, 4096),
                                ("ci_memory_gib", memory_gib, 4096), ("ci_disk_gib", disk_gib, 4096)):
         if value is None:
             continue
@@ -21,8 +22,8 @@ def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=
 
 def jobs(config):
     count = config.get("ci_max_jobs", 1)
-    if type(count) is not int or not 1 <= count <= 4096:
-        raise FleetError("ci_max_jobs must be an integer between 1 and 4096")
+    if type(count) is not int or not 1 <= count <= MAX_JOBS:
+        raise FleetError(f"ci_max_jobs must be an integer between 1 and {MAX_JOBS}")
     return count
 
 
