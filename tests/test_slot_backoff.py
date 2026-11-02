@@ -26,7 +26,7 @@ class SlotBackoff(unittest.TestCase):
                    steps=[dict(name="Install bubblewrap (pinned + checksum)", conclusion="failure")])
         receipt = dict(slot=5, run_id=42, runner_id=12, ci_kinds=["pr", "staging"], host_health="healthy", started_at=time.time())
         store.atomic(store.state_dir() / "pending-ci.json", [receipt])
-        def read(path, **kwargs):
+        def read(config, path, **kwargs):
             return dict(jobs=[job]) if "/jobs?" in path else dict(event="pull_request_target", display_title="pr-build 123")
         with patch.object(github, "ci_read", side_effect=read):
             host.collect_ci_results(config)
