@@ -4,7 +4,6 @@ import contextlib
 import hashlib
 import io
 import json
-import queue
 import subprocess
 import sys
 import threading
@@ -200,7 +199,7 @@ def screen_view(screen, update, render, results):
 
 
 def run(selected, render, *, json_output=False):
-    events = queue.Queue(maxsize=max(4, len(selected) * 2))
+    pending, pending_lock = {}, threading.Lock()
     stop = threading.Event()
     processes, process_lock = set(), threading.Lock()
     results, groups = {}, {}
@@ -216,27 +215,20 @@ def run(selected, render, *, json_output=False):
     def publish(name, frame):
         if frame.get("heartbeat"):
             return
-        try:
-            events.put_nowait((name, frame))
-        except queue.Full:
-            with contextlib.suppress(queue.Empty):
-                events.get_nowait()
-            with contextlib.suppress(queue.Full):
-                events.put_nowait((name, frame))
+        with pending_lock:
+            pending[name] = frame
 
     def update():
-        changed = False
-        while True:
-            try:
-                name, frame = events.get_nowait()
-            except queue.Empty:
-                return changed
+        with pending_lock:
+            updates = list(pending.items())
+            pending.clear()
+        for name, frame in updates:
             entry = selected[name]
             previous = results[name]
             value = apply_frame(entry, frame, previous)
             for alias in groups[entry["machine_id"]]:
                 results[alias] = value
-            changed = True
+        return bool(updates)
 
     threads = []
     try:

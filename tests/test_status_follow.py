@@ -92,6 +92,33 @@ class Follow(unittest.TestCase):
         self.assertIn("server1:", text)
         self.assertIn("0 running", text)
 
+    def test_aliases_share_a_stream_and_pending_updates_keep_the_latest_report(self):
+        class ImmediateThread:
+            def __init__(self, *, target, args, daemon):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+            def join(self, **kwargs):
+                pass
+
+        def receive(entry, emit, *args):
+            for generation in range(10):
+                emit(dict(ok=True, result=dict(machine_id=self.machine, generation=generation)))
+
+        displayed = []
+
+        def render(results):
+            displayed.append(dict(results))
+            raise KeyboardInterrupt
+
+        with patch.object(follow, "receive", side_effect=receive) as source, patch.object(follow.threading, "Thread", ImmediateThread), patch.object(follow.sys, "stdin", io.StringIO()):
+            self.assertEqual(follow.run(dict(first=self.entry, alias=self.entry), render), 0)
+        source.assert_called_once()
+        self.assertEqual(displayed[0]["first"]["generation"], 9)
+        self.assertEqual(displayed[0]["alias"], displayed[0]["first"])
+
 
 if __name__ == "__main__":
     unittest.main()
