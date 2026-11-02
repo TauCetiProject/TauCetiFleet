@@ -255,12 +255,15 @@ def doctor(config=None, *, probe=True):
     count = jobs(config)
     ci_memory = count * config["ci_memory_gib"] * GIB
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    fits = caps["cpus"] >= count * config["ci_vcpus"] and caps["memory_total"] >= ci_memory + count * 2 * GIB + reserve
+    # QEMU vCPUs are runnable host threads, not reserved physical CPUs. The
+    # kernel shares CPU across guests; unlike RAM, their counts need not sum
+    # to less than the host allocation.
+    fits = caps["memory_total"] >= ci_memory + count * 2 * GIB + reserve
     add(
         "ci-shape",
         "ok" if fits else "blocked",
-        f"CI requests {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB, plus 2 GiB per guest and {reserve / GIB:.1f} GiB OS headroom",
-        "Configure a smaller CI shape, or redeploy with --no-ci",
+        f"CI requests {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB, plus 2 GiB per guest and {reserve / GIB:.1f} GiB OS headroom; {count * config['ci_vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
+        "Configure fewer jobs or less guest RAM, or redeploy with --no-ci",
         roles=("ci",),
     )
     try:

@@ -2,7 +2,7 @@ export function capacity(host) {
   return {max_jobs:host.max_jobs ?? 1,kinds:host.kinds ?? ['staging']};
 }
 export function validCapacity(value) {
-  return Number.isInteger(value.max_jobs) && value.max_jobs>=1 && value.max_jobs<=16 &&
+  return Number.isInteger(value.max_jobs) && value.max_jobs>=1 && value.max_jobs<=4096 &&
     Array.isArray(value.kinds) && value.kinds.length>=1 && value.kinds.length<=2 &&
     new Set(value.kinds).size===value.kinds.length && value.kinds.every(k=>['pr','staging'].includes(k));
 }

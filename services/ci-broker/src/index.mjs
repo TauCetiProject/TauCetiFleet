@@ -155,7 +155,10 @@ export class FleetRegistry extends DurableObject {
         if (!host) return json({error:'not found'},404);
         const input=await req.json();
         if (!validCapacity(input)) return json({error:'invalid CI classes or shared capacity'},400);
-        if (Object.values(slots(host)).some(s=>s.runner_id || s.pending))
+        const previous=capacity(host);
+        const growing=input.max_jobs>=previous.max_jobs && input.kinds.length===previous.kinds.length &&
+          input.kinds.every(k=>previous.kinds.includes(k));
+        if (!growing && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
           return json({error:'drain and retire all slots before changing classes or capacity'},409);
         Object.assign(host,{kinds:input.kinds,max_jobs:input.max_jobs});
         await this.ctx.storage.put('host:'+host.machine_id,host);
@@ -192,7 +195,7 @@ export class FleetRegistry extends DurableObject {
         const host=await this.ctx.storage.get('host:'+reconcile[1]);
         const input=await req.json();
         const index=input.slot ?? 0;
-        if (!Number.isInteger(index) || index<0 || index>=16) return json({error:'invalid slot'},400);
+        if (!Number.isInteger(index) || index<0 || index>=4096) return json({error:'invalid slot'},400);
         const slot=host && slots(host)[String(index)];
         if (!slot?.pending) return json({error:'no pending registration'},409);
         try { return json(await this.recovery.reconcile(host,index)); }

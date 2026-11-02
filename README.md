@@ -104,19 +104,38 @@ The host uses separate user slices: CI CPU weight 1000, the complete worker
 fleet weight 10. The default CI shape is 32 vCPUs / 64 GiB, with 2 GiB additional
 host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
-explicitly declares which jobs the machine accepts. CPU, memory (including guest
-overhead), and disk reservations cover every configured job. Workers receive bounded remaining memory after CI and OS
+explicitly declares which jobs the machine accepts. Guest vCPUs are shared by
+the host kernel without per-guest CPU quotas or core pinning. Their total may
+exceed the host's CPU count: a quiet host lets a guest use up to its configured
+vCPUs, while concurrent guests share the available CPU. More vCPUs do not
+guarantee faster builds; excessive build parallelism can increase memory and
+scheduling overhead. Memory (including guest overhead) and disk reservations
+cover every configured job. Workers receive bounded remaining memory after CI and OS
 headroom, considering actual available memory on a shared host. CI receives
 priority over this fleet, not an entitlement over other users' allocations.
 
-For the initial two-server configuration:
+Example CI configurations for dedicated volunteer hosts:
 
 ```sh
-# Chris: two jobs total, regardless of the mix of PR and staging builds.
-tauceti-fleet enable chris --ci both --max-jobs 2 --ci-vcpus 16 --ci-memory-gib 32
-# Tauchonki: one staging job and no PR jobs.
-tauceti-fleet enable tauchonki --ci staging --max-jobs 1 --ci-vcpus 32 --ci-memory-gib 64
+# 64 cores / 500 GB RAM: 12 jobs, 408 GiB including guest overhead.
+tauceti-fleet enable local --ci both --max-jobs 12 --ci-vcpus 16 --ci-memory-gib 32
+# 88 cores / 1 TB RAM: 24 jobs, 816 GiB including guest overhead.
+tauceti-fleet enable local --ci both --max-jobs 24 --ci-vcpus 16 --ci-memory-gib 32
+# 32 cores / 128 GB RAM: 3 jobs, 102 GiB including guest overhead.
+tauceti-fleet enable local --ci both --max-jobs 3 --ci-vcpus 16 --ci-memory-gib 32
 ```
+
+These are starting points for otherwise available machines, not measured
+optima. Keep the existing OS headroom and check actual RAM and disk availability
+with `doctor`. The default disk allowance is 100 GiB per slot. Increase or reduce
+concurrency based on completed jobs per hour and job latency under load, rather
+than treating virtual CPU counts as physical CPU reservations.
+
+After upgrading an already running installation, restart its controller with
+`systemctl --user restart tauceti-fleet.service` before raising capacity above
+16 slots. This loads the new slot validation; upgrading the CLI alone leaves
+the old Python controller running. Existing CI guests run in separate transient
+services and survive the controller restart. No drain or guest restart is needed.
 
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added

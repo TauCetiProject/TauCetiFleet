@@ -114,15 +114,15 @@ def main():
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
     parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
     parser.add_argument("--ci", choices=("pr", "staging", "both"), help="allowed CI job classes")
-    parser.add_argument("--max-jobs", type=int, help="one shared PR + staging build limit, 1–16")
+    parser.add_argument("--max-jobs", type=int, help="one shared PR + staging build limit, 1–4096")
     parser.add_argument("--slot", type=int, default=0, help="slot to reconcile (default: 0)")
     args = parser.parse_args()
     limits = {}
     if args.ci:
         limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
     if args.max_jobs is not None:
-        if not 1 <= args.max_jobs <= 16:
-            raise SystemExit("Use --max-jobs between 1 and 16")
+        if not 1 <= args.max_jobs <= 4096:
+            raise SystemExit("Use --max-jobs between 1 and 4096")
         limits["max_jobs"] = args.max_jobs
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
@@ -208,8 +208,8 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
             if result.get("cleanup_pending") or result.get("runner_busy"):
                 print("Run revoke again after the active job finishes or GitHub connectivity recovers to finish runner cleanup")
         else:
-            if not 0 <= args.slot < 16:
-                raise SystemExit("Use --slot between 0 and 15")
+            if not 0 <= args.slot < 4096:
+                raise SystemExit("Use --slot between 0 and 4095")
             result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/reconcile", token=admin(), data={"slot": args.slot})
             print(json.dumps(result))
 

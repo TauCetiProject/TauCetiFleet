@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import broker, capacity, ci, github, host, store, vm
+from tauceti_fleet import broker, capabilities, capacity, ci, github, host, store, vm
 
 
 class Capacity(unittest.TestCase):
@@ -26,12 +26,28 @@ class Capacity(unittest.TestCase):
         for policy in ({}, dict(max_jobs=1, kinds=["pr", "staging"]), dict(max_jobs=2, kinds=["staging"])):
             with self.assertRaises(store.FleetError):
                 capacity.authorize(config, policy)
-        for maximum in (0, True, 1.5, 17):
+        self.assertEqual(capacity.jobs(capacity.settings(config, ci="both", maximum=24)), 24)
+        for maximum in (0, True, 1.5, 4097):
             with self.assertRaises(store.FleetError):
                 capacity.settings(config, ci="both", maximum=maximum)
         for kind in (True, {}, "unknown"):
             with self.assertRaises(store.FleetError):
                 capacity.settings(config, ci=kind)
+
+    def test_cpu_sharing_does_not_block_guests_but_ram_must_still_fit(self):
+        gib = 1024**3
+        config = capacity.settings(store.host_config(), ci="both", maximum=24, vcpus=16, memory_gib=32)
+        for ram, expected in ((1024, "ok"), (800, "blocked")):
+            with (
+                patch.object(capabilities, "resources", return_value=dict(cpus=88, memory_total=ram * gib, memory_available=ram * gib)),
+                patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+                patch.object(capabilities, "executable", return_value=None),
+                patch.object(capabilities.os, "open", side_effect=PermissionError),
+            ):
+                checks = capabilities.doctor(config, probe=False)["checks"]
+            shape = next(c for c in checks if c["name"] == "ci-shape")
+            self.assertEqual(shape["status"], expected)
+            self.assertIn("384 vCPUs share 88 host CPUs", shape["evidence"])
 
     def test_pr_only_runners_cannot_match_legacy_staging_workflows(self):
         config = capacity.settings(store.host_config(), ci="pr")
