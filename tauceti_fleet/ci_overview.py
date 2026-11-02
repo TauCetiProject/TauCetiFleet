@@ -360,9 +360,9 @@ def display(value):
         print("Bors: unknown (background observation unavailable)")
     else:
         batches = data["batches"]
-        parts = [f"#{b['id']} {b['size']} PRs {b['state']}" for b in batches]
+        parts = [str(b["size"]) for b in batches]
         held = data["held"] if data.get("held") is not None else "unknown"
-        print("Bors: " + ("; ".join(parts) or "empty") + f"; held {held} ({note})")
+        print("Bors: " + ("+".join(parts) or "empty") + f"; held {held} ({note})")
     data, note = source("pools")
     if data is None:
         print("CI jobs running: unknown (prepared shared inventory unavailable)")
