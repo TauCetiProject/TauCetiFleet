@@ -19,6 +19,9 @@ from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
 INTERVAL = 300
+# Operator-confirmed uncancellable GitHub runs from 2026-10-07. Keep this a
+# fixed cohort boundary: a rolling window could hide genuinely delayed new work.
+QUEUED_RUNS_CREATED_SINCE = "2026-10-08T00:00:00Z"
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
     "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
@@ -97,8 +100,10 @@ def backlog(config):
     if not token_file:
         raise FleetError("No direct read credential for queued-run counts")
     counts = {}
+    query = "?status=queued&per_page=1&created=" + urllib.parse.quote(
+        ">=" + QUEUED_RUNS_CREATED_SINCE, safe="")
     for name, path in (("pr_builds", "actions/workflows/pr-build.yml/runs"), ("all_workflows", "actions/runs")):
-        value = github.request("repos/" + REPOSITORY + "/" + path + "?status=queued&per_page=1", token_file=token_file)
+        value = github.request("repos/" + REPOSITORY + "/" + path + query, token_file=token_file)
         count = value.get("total_count")
         if type(count) is not int or count < 0:
             raise FleetError("Invalid queued-run count")
@@ -112,7 +117,7 @@ def backlog(config):
                 continue
             if count > 1:
                 oldest = github.request("repos/" + REPOSITORY + "/" + path
-                                        + f"?status=queued&per_page=1&page={count}", token_file=token_file)
+                                        + query + f"&page={count}", token_file=token_file)
             if oldest.get("total_count") != count:
                 counts["oldest_unavailable"] = "queue changed during observation"
                 continue
@@ -124,6 +129,7 @@ def backlog(config):
                 counts["oldest_created_at"] = stamp.timestamp()
             except (KeyError, IndexError, TypeError, ValueError):
                 counts["oldest_unavailable"] = "queued-run creation time unavailable"
+    counts["created_since"] = QUEUED_RUNS_CREATED_SINCE
     return counts, time.time()
 
 
@@ -384,7 +390,8 @@ def display(value):
         batches = data["batches"]
         parts = [str(b["size"]) for b in batches]
         held = data["held"] if data.get("held") is not None else "unknown"
-        print("Bors: " + ("+".join(parts) or "empty") + f"; held {held} ({note})")
+        total = sum(b["size"] for b in batches)
+        print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
     data, note = source("pools")
     if data is None:
         print("CI jobs running: unknown (prepared shared inventory unavailable)")
@@ -396,7 +403,12 @@ def display(value):
             counts[name] = counts.get(name, 0) + count
         print("CI jobs running: " + ", ".join(f"{name} {count}" for name, count in counts.items()) + f" ({note}; organization-wide, all workflows)")
     data, note = source("backlog")
-    if data:
+    if data is None:
+        print("CI backlog: unknown (background observation unavailable)")
+    elif data.get("created_since") != QUEUED_RUNS_CREATED_SINCE:
+        # Older caches include the ignored cohort; do not reuse its counts or age.
+        print(f"CI backlog: refreshing (excluding stuck runs through 2026-10-07; {note})")
+    else:
         stamp = data.get("oldest_created_at")
         if type(stamp) in (int, float) and math.isfinite(stamp) and 0 < stamp <= time.time() + 5:
             minutes = max(0, int((time.time() - stamp) / 60))
@@ -404,9 +416,7 @@ def display(value):
             oldest = f"{hours}h {minutes}m old" if hours else f"{minutes}m old"
         else:
             oldest = "none" if data["all_workflows"] == 0 else "unknown"
-        print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note})")
-    else:
-        print("CI backlog: unknown (background observation unavailable)")
+        print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note}; excluding stuck runs through 2026-10-07)")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
     pressures = pressures or [sources.get("pressure", {})]
