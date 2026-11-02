@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
-import {capacity,validCapacity,slots,labels} from './capacity.mjs';
+import {MAX_JOBS,capacity,validCapacity,slots,labels} from './capacity.mjs';
 import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -155,7 +155,10 @@ export class FleetRegistry extends DurableObject {
         if (!host) return json({error:'not found'},404);
         const input=await req.json();
         if (!validCapacity(input)) return json({error:'invalid CI classes or shared capacity'},400);
-        if (Object.values(slots(host)).some(s=>s.runner_id || s.pending))
+        const previous=capacity(host);
+        const growing=input.max_jobs>=previous.max_jobs && input.kinds.length===previous.kinds.length &&
+          input.kinds.every(k=>previous.kinds.includes(k));
+        if (!growing && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
           return json({error:'drain and retire all slots before changing classes or capacity'},409);
         Object.assign(host,{kinds:input.kinds,max_jobs:input.max_jobs});
         await this.ctx.storage.put('host:'+host.machine_id,host);
@@ -192,7 +195,7 @@ export class FleetRegistry extends DurableObject {
         const host=await this.ctx.storage.get('host:'+reconcile[1]);
         const input=await req.json();
         const index=input.slot ?? 0;
-        if (!Number.isInteger(index) || index<0 || index>=16) return json({error:'invalid slot'},400);
+        if (!Number.isInteger(index) || index<0 || index>=MAX_JOBS) return json({error:'invalid slot'},400);
         const slot=host && slots(host)[String(index)];
         if (!slot?.pending) return json({error:'no pending registration'},409);
         try { return json(await this.recovery.reconcile(host,index)); }
@@ -301,7 +304,7 @@ export class FleetRegistry extends DurableObject {
       const cancel=url.pathname.match(/^\/v1\/slots\/(0|[1-9][0-9]*)\/cancel-registration$/);
       if (cancel && req.method==='POST') {
         const index=Number(cancel[1]), input=await req.json();
-        if (index>=16 || !new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
+        if (index>=MAX_JOBS || !new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
           return json({error:'invalid registration identity'},400);
         const slot=slots(host)[String(index)];
         if (slot?.pending) {

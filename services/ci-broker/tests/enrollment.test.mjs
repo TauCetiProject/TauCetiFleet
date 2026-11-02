@@ -237,6 +237,16 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[0],slot:1})).status,409);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['staging']})).status,409);
   runners.get(registered[1].runner_id).busy=true;
+  const grow=await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:24,kinds:['staging','pr']});
+  assert.equal(grow.status,200);
+  assert.equal((await grow.json()).max_jobs,24);
+  for (const r of registered) assert.ok(runners.has(r.runner_id));
+  assert.equal(runners.get(registered[1].runner_id).busy,true);
+  const extra=await hostRequest(id,token,'/v1/runners','POST',{slot:23,kinds:['pr'],name:prefix+'3'.repeat(16)});
+  assert.equal(extra.status,200);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:23,kinds:['pr','staging']})).status,409);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:24,kinds:['pr']})).status,409);
+  assert.equal((await hostRequest(id,token,'/v1/slots/23/cancel-registration','POST',{name:prefix+'3'.repeat(16)})).status,200);
   const revoked=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
   assert.equal(revoked.runner_busy,true);
   assert.ok(!runners.has(registered[0].runner_id)); assert.ok(runners.has(registered[1].runner_id));

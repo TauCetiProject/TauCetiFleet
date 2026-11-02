@@ -31,7 +31,10 @@ python3 scripts/setup.py invite --name chris-server --ci both --max-jobs 2
 
 The invitation authorizes two jobs total, shared across PR and staging builds.
 Omitting the capacity flags retains one staging slot. The host can request a
-subset of these classes and fewer slots, but cannot expand its policy.
+subset of these classes and fewer slots, but cannot expand its policy. An operator
+can increase the policy's slot count live with `setup.py capacity` when its job
+classes are unchanged; existing registrations and active jobs are preserved.
+Reductions and class changes still require retiring registered slots first.
 
 The command saves a seven-day enrollment code in a private file under
 `~/.config/tauceti-ci-broker/invitations/`. Transfer that code privately to the
@@ -99,7 +102,7 @@ explicitly. Reverting broker code alone does not restore the old record format.
 python3 scripts/setup.py hosts
 python3 scripts/setup.py revoke --machine-id HEX_ID
 python3 scripts/setup.py reconcile --machine-id HEX_ID --slot 0
-# After draining and retiring every slot:
+# Increase the slot ceiling live, keeping the existing classes:
 python3 scripts/setup.py capacity --machine-id HEX_ID --ci both --max-jobs 2
 ```
 

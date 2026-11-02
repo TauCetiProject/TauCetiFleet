@@ -87,8 +87,8 @@ def configure(payload):
             raise FleetError(f"{name} must be a positive integer at most 4096")
     if "ci_allowed" in updates and type(updates["ci_allowed"]) is not bool:
         raise FleetError("ci_allowed must be a boolean")
-    if "ci_max_jobs" in updates and (type(updates["ci_max_jobs"]) is not int or not 1 <= updates["ci_max_jobs"] <= 16):
-        raise FleetError("ci_max_jobs must be an integer between 1 and 16")
+    if "ci_max_jobs" in updates:
+        capacity.jobs(updates)
     if "ci_kinds" in updates and updates["ci_kinds"] not in capacity.KINDS.values():
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     credentials = payload.get("credentials", {})
