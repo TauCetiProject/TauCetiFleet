@@ -125,6 +125,32 @@ class Capacity(unittest.TestCase):
         self.assertEqual(retire.call_count, 1)
         self.assertEqual(retire.call_args.args[1]["slot"], 0)
 
+    def test_live_slot_increase_preserves_the_busy_guest_and_adds_the_second_slot(self):
+        config = capacity.settings(store.host_config(), ci="both", maximum=1, vcpus=16, memory_gib=32)
+        store.update_host(**dict(config, ci_enabled=True))
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        busy = dict(slot=0, unit="vm-0", directory=str(self.root / "guest"), runner_id=100,
+                    started_at=0, phase="ready", busy=True, run_id=42)
+        store.atomic(vm.slot_file(config, "vm.json"), busy)
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))), patch.object(github, "capacity_policy", return_value=dict(max_jobs=2, kinds=["pr", "staging"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service") as install, patch.object(vm, "retire") as retire, patch.object(host, "ci_service_state", return_value=(True, "healthy")):
+            result = host.enable(ci="both", maximum=2, vcpus=16, memory_gib=32)
+            start.assert_not_called()
+            install.assert_called_once_with(restart=False)
+            self.assertEqual(store.read(vm.slot_file(config, "vm.json")), busy)
+            host.CISlot(0).step(store.host_config(), inventory=[], refresh=False, cooling=False)
+            host.CISlot(1).step(store.host_config(), inventory=[], refresh=False, cooling=False)
+            retire.assert_not_called()
+        self.assertEqual(result["ci_max_jobs"], 2)
+        self.assertEqual(start.call_count, 1)
+        self.assertEqual(start.call_args.args[0]["ci_slot"], 1)
+        self.assertEqual(start.call_args.args[0]["ci_memory_gib"], 32)
+
+    def test_live_enable_keeps_the_existing_controller_running(self):
+        with patch.object(host, "units", return_value=self.root), patch.object(host, "run") as run:
+            host.install_service(restart=False)
+        self.assertIn(["systemctl", "--user", "enable", "--now", "tauceti-fleet.service"], [c.args[0] for c in run.call_args_list])
+        self.assertFalse(any("restart" in c.args[0] for c in run.call_args_list))
+
     def test_slice_reservation_counts_both_guests_and_their_overheads(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=2, vcpus=16, memory_gib=32)
