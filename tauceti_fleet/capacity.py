@@ -17,6 +17,7 @@ def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=
         if type(value) is not int or not 1 <= value <= upper:
             raise FleetError(f"{name} must be an integer between 1 and {upper}")
         result[name] = value
+    staging_slots(result)
     return result
 
 
@@ -32,6 +33,29 @@ def kinds(config):
     if value not in KINDS.values():
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
+
+
+def staging_slots(config):
+    """Slots whose future guests accept staging work exclusively."""
+    count = config.get("ci_staging_slots", 0)
+    if type(count) is not int or not 0 <= count <= jobs(config):
+        raise FleetError("ci_staging_slots must be an integer between zero and ci_max_jobs")
+    if count and "staging" not in kinds(config):
+        raise FleetError("Staging reservations require staging in the machine's CI classes")
+    return count
+
+
+def reservation(config):
+    """Report a corrupt reservation without stopping unrelated worker admissions."""
+    try:
+        return staging_slots(config), None
+    except FleetError as exc:
+        return 0, str(exc)
+
+
+def for_slot(config, index):
+    reserved, _ = reservation(config)
+    return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
 
 
 def authorize(config, policy):

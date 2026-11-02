@@ -137,6 +137,13 @@ After upgrading an already running installation, restart its controller with
 the old Python controller running. Existing CI guests run in separate transient
 services and survive the controller restart. No drain or guest restart is needed.
 
+Reserve staging capacity on a mixed host with
+`tauceti-fleet reserve-staging HOST --slots 1`. The first slot's future guests
+advertise staging labels only; other slots retain the host's configured classes.
+The shared job ceiling and worker admissions stay enabled. Existing guests finish
+with their original classes, and the command reports slots awaiting replacement.
+Use `--slots 0` to remove the reservation as guests are replaced.
+
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
 slots independently. Enabling does not restart the controller. Changes to guest

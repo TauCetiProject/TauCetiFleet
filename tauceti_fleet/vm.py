@@ -234,6 +234,9 @@ def prepare_image(config=None):
 
 
 def start(config):
+    from .capacity import for_slot
+
+    config = for_slot(config, config.get("ci_slot", 0))
     with locked(slot_file(config, "vm.lock")):
         return _start(config)
 
@@ -257,17 +260,21 @@ def outstanding():
 def cancel_registration(config):
     """Retire an unlaunched registration without minting another runner."""
     with locked(slot_file(config, "vm.lock")):
-        path = slot_file(config, "ci-registration.json")
-        intent = read(path)
-        if not intent or slot_file(config, "vm.json").exists():
-            return
-        if not config.get("ci_broker_url"):
-            raise FleetError("Retain the broker enrollment until its pending CI registration is reconciled")
-        from .broker import request
+        return _cancel_registration(config)
 
-        name = "fleet-" + config["machine_id"][:12] + "-" + intent["instance"]
-        request(config, f"/v1/slots/{config.get('ci_slot', 0)}/cancel-registration", method="POST", data=dict(name=name))
-        path.unlink(missing_ok=True)
+
+def _cancel_registration(config):
+    path = slot_file(config, "ci-registration.json")
+    intent = read(path)
+    if not intent or slot_file(config, "vm.json").exists():
+        return
+    if not config.get("ci_broker_url"):
+        raise FleetError("Retain the broker enrollment until its pending CI registration is reconciled")
+    from .broker import request
+
+    name = "fleet-" + config["machine_id"][:12] + "-" + intent["instance"]
+    request(config, f"/v1/slots/{config.get('ci_slot', 0)}/cancel-registration", method="POST", data=dict(name=name))
+    path.unlink(missing_ok=True)
 
 
 def _start(config):
@@ -283,11 +290,18 @@ def _start(config):
         _retire(config, prior)
     registration = slot_file(config, "ci-registration.json")
     intent = read(registration, {}) if config.get("ci_broker_url") else {}
+    if intent and (intent.get("ci_kinds") is not None or config.get("ci_staging_slots", 0)):
+        if intent.get("ci_kinds") != config["ci_kinds"]:
+            # The broker cannot replay a JIT registration with different classes.
+            # It retains ambiguous/busy registrations; never forget ownership or
+            # mint another instance until cancellation is positively confirmed.
+            _cancel_registration(config)
+            intent = {}
     instance = intent.get("instance") or secrets.token_hex(8)
     if config.get("ci_broker_url"):
         # Keep the request identity across lost replies and controller restarts.
         # The broker can replay the existing JIT config without registering twice.
-        atomic(registration, dict(instance=instance))
+        atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
