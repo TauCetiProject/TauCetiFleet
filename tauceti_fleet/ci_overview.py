@@ -1,6 +1,7 @@
 """Prepared CI observations. Foreground status reads this cache only."""
 
 import concurrent.futures
+import datetime
 import fcntl
 import hashlib
 import heapq
@@ -102,6 +103,27 @@ def backlog(config):
         if type(count) is not int or count < 0:
             raise FleetError("Invalid queued-run count")
         counts[name] = count
+        if name == "all_workflows" and count:
+            # GitHub returns newest first and caps filtered results at 1,000.
+            # Fetch just the final entry, never walk the queue or scan job APIs.
+            oldest = value
+            if count > 1000:
+                counts["oldest_unavailable"] = "GitHub's 1,000-run result limit"
+                continue
+            if count > 1:
+                oldest = github.request("repos/" + REPOSITORY + "/" + path
+                                        + f"?status=queued&per_page=1&page={count}", token_file=token_file)
+            if oldest.get("total_count") != count:
+                counts["oldest_unavailable"] = "queue changed during observation"
+                continue
+            try:
+                created = oldest["workflow_runs"][0]["created_at"]
+                stamp = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if stamp.tzinfo is None or not 0 < stamp.timestamp() <= time.time() + 5:
+                    raise ValueError("Invalid creation timestamp")
+                counts["oldest_created_at"] = stamp.timestamp()
+            except (KeyError, IndexError, TypeError, ValueError):
+                counts["oldest_unavailable"] = "queued-run creation time unavailable"
     return counts, time.time()
 
 
@@ -360,9 +382,9 @@ def display(value):
         print("Bors: unknown (background observation unavailable)")
     else:
         batches = data["batches"]
-        parts = [f"#{b['id']} {b['size']} PRs {b['state']}" for b in batches]
+        parts = [str(b["size"]) for b in batches]
         held = data["held"] if data.get("held") is not None else "unknown"
-        print("Bors: " + ("; ".join(parts) or "empty") + f"; held {held} ({note})")
+        print("Bors: " + ("+".join(parts) or "empty") + f"; held {held} ({note})")
     data, note = source("pools")
     if data is None:
         print("CI jobs running: unknown (prepared shared inventory unavailable)")
@@ -374,7 +396,17 @@ def display(value):
             counts[name] = counts.get(name, 0) + count
         print("CI jobs running: " + ", ".join(f"{name} {count}" for name, count in counts.items()) + f" ({note}; organization-wide, all workflows)")
     data, note = source("backlog")
-    print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows ({note})" if data else "CI backlog: unknown (background observation unavailable)")
+    if data:
+        stamp = data.get("oldest_created_at")
+        if type(stamp) in (int, float) and math.isfinite(stamp) and 0 < stamp <= time.time() + 5:
+            minutes = max(0, int((time.time() - stamp) / 60))
+            hours, minutes = divmod(minutes, 60)
+            oldest = f"{hours}h {minutes}m old" if hours else f"{minutes}m old"
+        else:
+            oldest = "none" if data["all_workflows"] == 0 else "unknown"
+        print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note})")
+    else:
+        print("CI backlog: unknown (background observation unavailable)")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
     pressures = pressures or [sources.get("pressure", {})]

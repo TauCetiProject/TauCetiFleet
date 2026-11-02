@@ -171,11 +171,34 @@ class Overview(unittest.TestCase):
         self.assertNotIn("fleet-" + machine, out.getvalue())
 
     def test_background_queue_counts_cost_only_two_small_requests(self):
-        with patch.object(github, "request", return_value=dict(total_count=7)) as request:
+        with patch.object(github, "request", return_value=dict(total_count=0)) as request:
             data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
         self.assertEqual(request.call_count, 2)
         self.assertTrue(all("per_page=1" in c.args[0] for c in request.call_args_list))
-        self.assertEqual(data, dict(pr_builds=7, all_workflows=7))
+        self.assertEqual(data, dict(pr_builds=0, all_workflows=0))
+
+    def test_oldest_queued_run_uses_one_final_page_without_scanning_jobs(self):
+        responses = [dict(total_count=7), dict(total_count=900),
+                     dict(total_count=900, workflow_runs=[dict(created_at="2026-01-01T00:00:00Z")])]
+        with patch.object(github, "request", side_effect=responses) as request:
+            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
+        self.assertEqual(request.call_count, 3)
+        self.assertTrue(request.call_args.args[0].endswith("status=queued&per_page=1&page=900"))
+        self.assertEqual(data["oldest_created_at"], 1767225600)
+        value = dict(sources=dict(backlog=dict(value=data, observed_at=1767287100)))
+        out = io.StringIO()
+        with patch.object(overview.time, "time", return_value=1767287100), contextlib.redirect_stdout(out):
+            overview.display(value)
+        self.assertIn("oldest queued run 17h 5m old", out.getvalue())
+
+    def test_oldest_queue_age_does_not_claim_accuracy_past_api_limit_or_on_race(self):
+        for count, final in ((1001, None), (5, dict(total_count=6, workflow_runs=[]))):
+            responses = [dict(total_count=3), dict(total_count=count)] + ([final] if final else [])
+            with patch.object(github, "request", side_effect=responses) as request:
+                data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
+            self.assertEqual(request.call_count, len(responses))
+            self.assertNotIn("oldest_created_at", data)
+            self.assertIn("oldest_unavailable", data)
 
     def test_presentation_keeps_runner_groups_on_one_line(self):
         value = dict(sources=dict(pools=dict(value=dict(counts={"github": 3, "namespace": 15, "fleet-11e2756fc11042d798f759410573a935": 12}), observed_at=time.time())))
