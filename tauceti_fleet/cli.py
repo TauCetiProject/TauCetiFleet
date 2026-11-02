@@ -209,7 +209,8 @@ def main(argv=None):
         if args.command == "status":
             from . import ci_overview
 
-            overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()])
+            pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
+            overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
             if args.json:
                 results["_ci"] = overview
             else:
