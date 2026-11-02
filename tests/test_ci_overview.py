@@ -66,7 +66,7 @@ class Overview(unittest.TestCase):
         value = dict(read_only=True, complete=True, running_jobs=dict(github=3, namespace=15), observed_at=time.time() * 1000)
         with patch.object(overview, "fetch", return_value=value) as fetch:
             data, _ = overview.pools(self.config)
-        self.assertIn("cached_only=true", fetch.call_args.args[0])
+        self.assertIn("/runner-capacity/cached?", fetch.call_args.args[0])
         self.assertEqual(data["counts"]["namespace"], 15)
         for field in ("read_only", "complete", "running_jobs"):
             with patch.object(overview, "fetch", return_value={k: v for k, v in value.items() if k != field}):

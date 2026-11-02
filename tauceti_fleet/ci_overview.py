@@ -76,7 +76,9 @@ def pools(config):
     base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
     if urllib.parse.urlsplit(base).scheme != "https":
         raise FleetError("Status source requires HTTPS")
-    value = fetch(base + "/v1/runner-capacity?" + urllib.parse.urlencode(dict(repository=REPOSITORY, cached_only="true")),
+    # A distinct path fails cheaply on old servers; an ignored query parameter
+    # on the discovery endpoint could otherwise accidentally trigger a scan.
+    value = fetch(base + "/v1/runner-capacity/cached?" + urllib.parse.urlencode(dict(repository=REPOSITORY)),
                   token_file=config.get("github_state_token_file"))
     counts = value.get("running_jobs")
     if value.get("read_only") is not True or value.get("complete") is not True or not isinstance(counts, dict):
