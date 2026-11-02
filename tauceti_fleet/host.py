@@ -95,6 +95,7 @@ def configure(payload):
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
+    capacity.staging_slots(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -118,7 +119,7 @@ def configure(payload):
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         updates[key] = str(path)
-    value = update_host(**updates)
+    value = update_host(validate=capacity.staging_slots, **updates)
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
     # Inactive installation never adopts or starts the existing worker fleet.
@@ -363,7 +364,8 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     if ci:
         # Persist the policy before launch, so crash recovery never loses the
         # admission ceiling or tries to replace these guests with the old shape.
-        update_host(**{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_memory_budget_gib") if k in config})
+        update_host(validate=capacity.staging_slots,
+                    **{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_memory_budget_gib") if k in config})
         if not config["ci_enabled"] and not vm.outstanding():
             # Verify registration once. The controller admits remaining slots
             # independently, so a later startup error cannot leave a half-enabled role.
@@ -375,6 +377,27 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
     return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value),
                 ci_memory_budget_gib=capacity.memory_budget_gib(value))
+
+
+def reserve_staging(maximum):
+    """Change future guest classes without stopping guests or either admission role."""
+    config = host_config()
+    proposed = dict(config, ci_staging_slots=maximum)
+    capacity.staging_slots(proposed)
+    value = update_host(ci_staging_slots=maximum, validate=capacity.staging_slots)
+    pending = []
+    for index in range(maximum):
+        guest = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
+        if guest and guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]:
+            pending.append(index)
+        elif not guest:
+            intent = read(vm.slot_file({"ci_slot": index}, "ci-registration.json"), {})
+            if intent and intent.get("ci_kinds") != ["staging"]:
+                pending.append(index)
+    event("ci_staging_reservation", staging_slots=maximum, pending_slots=pending)
+    return dict(ci_staging_slots=maximum, ci_max_jobs=capacity.jobs(value),
+                ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
+                pending_slots=pending)
 
 
 def drain():
@@ -607,7 +630,7 @@ class CISlot:
         self.buffer = b""
 
     def step(self, config, *, inventory, refresh, cooling):
-        config = dict(config, ci_slot=self.index,
+        config = dict(capacity.for_slot(config, self.index),
                       ci_enabled=config["ci_enabled"] and self.index < capacity.jobs(config))
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
@@ -820,6 +843,8 @@ def daemon():
                         ci_max_jobs=capacity.jobs(config),
                         ci_memory_budget_gib=capacity.memory_budget_gib(config),
                         ci_kinds=capacity.kinds(config),
+                        ci_staging_slots=capacity.reservation(config)[0],
+                        ci_staging_reservation_error=capacity.reservation(config)[1],
                         ci_errors=slot_errors,
                     ),
                 )
@@ -912,6 +937,8 @@ def rpc(payload):
         return focus.configure(payload)
     if action == "workers":
         return set_worker_maximum(payload["maximum"])
+    if action == "reserve-staging":
+        return reserve_staging(payload["maximum"])
     if action == "drain":
         return drain()
     if action == "budget":
@@ -931,6 +958,8 @@ def rpc(payload):
             ci_kinds=capacity.kinds(config),
             ci_max_jobs=capacity.jobs(config),
             ci_memory_budget_gib=capacity.memory_budget_gib(config),
+            ci_staging_slots=capacity.reservation(config)[0],
+            ci_staging_reservation_error=capacity.reservation(config)[1],
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],

@@ -46,6 +46,10 @@ def parser():
     enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
+    reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
+    reserve.add_argument("host")
+    reserve.add_argument("--slots", dest="maximum", type=int, required=True)
+    reserve.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change the admission ceiling without interrupting active work")
     workers.add_argument("host")
     workers.add_argument("--max", dest="maximum", type=int, required=True)
@@ -133,6 +137,8 @@ def main(argv=None):
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
                                memory_budget_gib=args.ci_memory_budget_gib)
             if args.command == "workers":
+                payload.update(maximum=args.maximum)
+            if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
             if args.command == "focus":
                 if args.percent is not None:
@@ -222,6 +228,10 @@ def main(argv=None):
                         print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
+                    if value.get("ci_staging_slots"):
+                        print(f"Reserved for staging: {value['ci_staging_slots']} slots")
+                    if value.get("ci_staging_reservation_error"):
+                        print("Staging reservation invalid: " + value["ci_staging_reservation_error"])
                     memory = status.get("worker_memory")
                     if memory:
                         print()

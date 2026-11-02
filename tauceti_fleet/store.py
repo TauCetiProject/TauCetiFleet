@@ -84,12 +84,14 @@ def host_config():
         return value
 
 
-def update_host(**changes):
+def update_host(*, validate=None, **changes):
     host_config()
     path = config_dir() / "host.json"
     with locked(path.with_suffix(".lock")):
         value = read(path)
         value.update(changes)
+        if validate is not None:
+            validate(value)
         atomic(path, value)
         return value
 
