@@ -330,7 +330,7 @@ class Collection(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.pending = Path(self.temp.name) / "pending-ci.json"
-        self.backoff = Path(self.temp.name) / "ci-backoff.json"
+        self.backoff = Path(self.temp.name) / "ci-slot-backoff.json"
         self.config = store.host_config()
 
     def collect(self, *, fault=False, api_fault=False, host_health="healthy", phase=ci.BUILD):
