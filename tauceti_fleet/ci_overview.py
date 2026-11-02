@@ -10,6 +10,7 @@ import math
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -22,6 +23,9 @@ INTERVAL = 300
 # Operator-confirmed uncancellable GitHub runs from 2026-10-07. Keep this a
 # fixed cohort boundary: a rolling window could hide genuinely delayed new work.
 QUEUED_RUNS_CREATED_SINCE = "2026-10-08T00:00:00Z"
+# Zero jobs; both cancel and force-cancel return 409 "has not yet queued".
+# PR #25086 received a replacement build. Do not generalize to other old runs.
+CONFIRMED_ORPHAN_RUN_IDS = (41474083442,)
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
     "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
@@ -131,27 +135,46 @@ def backlog(config):
         if type(count) is not int or count < 0:
             raise FleetError("Invalid queued-run count")
         counts[name] = count
-        if name == "all_workflows" and count:
-            # GitHub returns newest first and caps filtered results at 1,000.
-            # Fetch just the final entry, never walk the queue or scan job APIs.
-            oldest = value
-            if count > 1000:
-                counts["oldest_unavailable"] = "GitHub's 1,000-run result limit"
-                continue
-            if count > 1:
-                oldest = github.request("repos/" + REPOSITORY + "/" + path
-                                        + query + f"&page={count}", token_file=token_file)
-            if oldest.get("total_count") != count:
-                counts["oldest_unavailable"] = "queue changed during observation"
-                continue
+    raw_total = counts["all_workflows"]
+    excluded = set()
+    if raw_total:
+        for run_id in CONFIRMED_ORPHAN_RUN_IDS:
             try:
-                created = oldest["workflow_runs"][0]["created_at"]
-                stamp = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
-                if stamp.tzinfo is None or not 0 < stamp.timestamp() <= time.time() + 5:
-                    raise ValueError("Invalid creation timestamp")
-                counts["oldest_created_at"] = stamp.timestamp()
-            except (KeyError, IndexError, TypeError, ValueError):
-                counts["oldest_unavailable"] = "queued-run creation time unavailable"
+                run = fetch(f"https://api.github.com/repos/{REPOSITORY}/actions/runs/{run_id}", token_file=token_file)
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    continue
+                raise
+            if (run.get("id") == run_id and run.get("status") == "queued"
+                    and isinstance(run.get("created_at"), str) and run["created_at"] >= QUEUED_RUNS_CREATED_SINCE):
+                excluded.add(run_id)
+                counts["all_workflows"] = max(0, counts["all_workflows"] - 1)
+                if run.get("path") == ".github/workflows/pr-build.yml":
+                    counts["pr_builds"] = max(0, counts["pr_builds"] - 1)
+    if excluded:
+        counts["excluded_orphans"] = len(excluded)
+    if counts["all_workflows"]:
+        if raw_total > 1000:
+            counts["oldest_unavailable"] = "GitHub's 1,000-run result limit"
+        else:
+            # At most one extra tiny page per explicitly confirmed orphan.
+            for position in range(raw_total, max(0, raw_total - len(excluded) - 1), -1):
+                oldest = value if raw_total == 1 else github.request(
+                    "repos/" + REPOSITORY + "/actions/runs" + query + f"&page={position}", token_file=token_file)
+                if oldest.get("total_count") != raw_total:
+                    counts["oldest_unavailable"] = "queue changed during observation"
+                    break
+                try:
+                    run = oldest["workflow_runs"][0]
+                    if run.get("id") in excluded:
+                        continue
+                    stamp = datetime.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+                    if stamp.tzinfo is None or not 0 < stamp.timestamp() <= time.time() + 5:
+                        raise ValueError("Invalid creation timestamp")
+                    counts["oldest_created_at"] = stamp.timestamp()
+                except (KeyError, IndexError, TypeError, ValueError):
+                    counts["oldest_unavailable"] = "queued-run creation time unavailable"
+                break
     counts["created_since"] = QUEUED_RUNS_CREATED_SINCE
     return counts, time.time()
 
@@ -510,6 +533,8 @@ def display(value):
             oldest = f"{hours}h {minutes}m old" if hours else f"{minutes}m old"
         else:
             oldest = "none" if data["all_workflows"] == 0 else "unknown"
+        if data.get("excluded_orphans"):
+            note += f"; {data['excluded_orphans']} confirmed orphan excluded"
         print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note}; excluding stuck runs through 2026-10-07)")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []

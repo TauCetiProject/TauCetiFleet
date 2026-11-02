@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import hashlib
 import io
 import json
@@ -22,6 +23,9 @@ class Overview(unittest.TestCase):
                                      "TAUCETI_GITHUB_SHARED_DIR": str(self.root / "shared")})
         env.start()
         self.addCleanup(env.stop)
+        orphans = patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", ())
+        orphans.start()
+        self.addCleanup(orphans.stop)
         self.config = dict(store.host_config(), github_account="science", profile="ai-for-science", max_open_prs=128, workers_enabled=True)
 
     def worker(self, slot, scope=None):
@@ -191,6 +195,24 @@ class Overview(unittest.TestCase):
         with patch.object(overview.time, "time", return_value=1767287100), contextlib.redirect_stdout(out):
             overview.display(value)
         self.assertIn("oldest queued run 17h 5m old", out.getvalue())
+
+    def test_confirmed_orphan_is_removed_from_counts_and_oldest_age_only_while_queued(self):
+        orphan = dict(id=41474083442, status="queued", created_at="2026-11-02T15:41:35Z",
+                      path=".github/workflows/pr-build.yml")
+        responses = [dict(total_count=2), dict(total_count=2),
+                     dict(total_count=2, workflow_runs=[orphan]),
+                     dict(total_count=2, workflow_runs=[dict(id=99, created_at="2026-11-02T23:00:00Z")])]
+        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (orphan["id"],)), patch.object(overview, "fetch", return_value=orphan) as direct, patch.object(github, "request", side_effect=responses) as request:
+            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
+        self.assertEqual(data["pr_builds"], 1)
+        self.assertEqual(data["all_workflows"], 1)
+        self.assertEqual(data["excluded_orphans"], 1)
+        self.assertEqual(data["oldest_created_at"], datetime.datetime.fromisoformat("2026-11-02T23:00:00+00:00").timestamp())
+        self.assertEqual(request.call_count + direct.call_count, 5)
+        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (orphan["id"],)), patch.object(overview, "fetch", return_value=dict(orphan, status="completed")), patch.object(github, "request", side_effect=[dict(total_count=1), dict(total_count=1, workflow_runs=[dict(id=99, created_at="2026-11-02T23:00:00Z")])]):
+            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
+        self.assertEqual(data["all_workflows"], 1)
+        self.assertNotIn("excluded_orphans", data)
 
     def test_oldest_queue_age_does_not_claim_accuracy_past_api_limit_or_on_race(self):
         for count, final in ((1001, None), (5, dict(total_count=6, workflow_runs=[]))):
