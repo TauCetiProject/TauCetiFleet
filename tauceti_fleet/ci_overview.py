@@ -451,33 +451,40 @@ def display(value):
         print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
     data, note = source("bors_history")
     if data:
-        print(f"Bors history ({note}; completed batches):")
+        print(f"Bors history ({note}):")
         durations = {r["window"]: r for r in data["durations"]}
         windows = {r["window"]: r for r in data["windows"]}
-        for label in ("1h", "3h", "24h", "7d"):
-            row = windows[label]
-            count = row["completed_batches"]
-            fractions = (f"{100 * row['successful_batches'] / count:.1f}% succeeded / {100 * row['failed_batches'] / count:.1f}% failed"
-                         if count else "success/failure n/a")
-            canceled = f"; {row['canceled_batches']} canceled" if row["canceled_batches"] else ""
-            mean = row.get("mean_staging_runs_per_pr")
-            attempts = f"{mean:.2f}" if mean is not None else "unknown"
-            if row["batches_with_unknown_membership"]:
-                attempts += " (partial membership)"
-            landed = f"{row['landed_prs']} PRs landed"
-            if row["landed_batches_without_receipts"]:
-                landed += " (partial receipts)"
-            duration = durations.get(label, {})
-            runtime = duration.get("mean_seconds")
-            build = f"{int(runtime) // 60}m {int(runtime) % 60}s ({duration['samples']} observed builds)" if runtime is not None else "unknown"
-            if data.get("runtime_runs_checked", 0) < data.get("runtime_runs_total", 0):
-                build += " (sample mean; history filling)"
-            if data.get("durations_truncated"):
-                build += " (partial history)"
-            print(f"  {label}: {count} batches; {fractions}{canceled}; {landed}; {attempts} staging runs/PR; mean build {build}")
+        periods = ("1h", "3h", "24h", "7d")
+        rows = [("Completed batches", [str(windows[p]["completed_batches"]) for p in periods])]
+        success, failure = [], []
+        for period in periods:
+            row = windows[period]
+            decided = row["successful_batches"] + row["failed_batches"]
+            percent = round(100 * row["successful_batches"] / decided, 1) if decided else None
+            success.append(f"{percent:.1f}%" if percent is not None else "—")
+            failure.append(f"{100 - percent:.1f}%" if percent is not None else "—")
+        rows.extend([("Succeeded", success), ("Failed", failure),
+                     ("Canceled", [str(windows[p]["canceled_batches"]) for p in periods]),
+                     ("PRs landed", [str(windows[p]["landed_prs"]) for p in periods]),
+                     ("Staging runs / PR", [f"{windows[p]['mean_staging_runs_per_pr']:.2f}"
+                                            if windows[p]["mean_staging_runs_per_pr"] is not None else "—"
+                                            for p in periods])])
+        builds = []
+        for period in periods:
+            runtime = durations.get(period, {}).get("mean_seconds")
+            builds.append(f"{int(runtime) // 60}m {int(runtime) % 60}s" if runtime is not None else "—")
+        rows.extend([("Mean build", builds),
+                     ("Build samples", [str(durations[p]["samples"]) if p in durations else "—" for p in periods])])
+        for title, key in (("Batches missing PR lists", "batches_with_unknown_membership"),
+                           ("Batches missing landing receipts", "landed_batches_without_receipts")):
+            if any(windows[p][key] for p in periods):
+                rows.append((title, [str(windows[p][key]) for p in periods]))
+        width = max(len(title) for title, _ in rows)
+        print("  " + " " * width + "".join(f"{p:>10}" for p in periods))
+        for title, cells in rows:
+            print(f"  {title:<{width}}" + "".join(f"{cell:>10}" for cell in cells))
         checked, total = data.get("runtime_runs_checked", 0), data.get("runtime_runs_total", 0)
-        print(f"  Build-time history: {checked}/{total} recorded staging runs checked; means use observed job start/finish times.")
-        print("  Runs/PR counts distinct completed staging batches per PR in each window.")
+        print(f"  Build-time history: {checked}/{total} runs checked.")
     else:
         print("Bors history: unknown (background observation unavailable)")
     data, note = source("pools")
