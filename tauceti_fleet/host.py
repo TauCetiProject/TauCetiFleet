@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, focus, github, vm
+from . import activity, capacity, ci, ci_overview, focus, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -53,8 +53,12 @@ def install_service(*, restart=True):
     text += "Restart=on-failure\nRestartSec=5\nTimeoutStopSec=15\n\n[Install]\nWantedBy=default.target\n"
     target = units() / "tauceti-fleet.service"
     target.write_text(text)
+    observation_command = " ".join(unit_argument(a) for a in [Path.home() / ".local/bin/tauceti-fleet", "collect-status"])
+    for name, content in ci_overview.unit_files(observation_command, environment).items():
+        (units() / name).write_text(content)
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "enable", "--now", target.name])
+    run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-observe.timer"])
     if restart:
         run(["systemctl", "--user", "restart", target.name])
 
@@ -956,5 +960,6 @@ def rpc(payload):
             max_workers=config["max_workers"],
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
+            ci_overview=ci_overview.cached(config),
         )
     raise FleetError("Unknown host operation")

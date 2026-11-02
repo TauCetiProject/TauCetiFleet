@@ -61,7 +61,7 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
-    for name in ("_host", "host-daemon", "run-workers"):
+    for name in ("_host", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
 
@@ -93,6 +93,11 @@ def main(argv=None):
             return 0
         if args.command == "host-daemon":
             host.daemon()
+            return 0
+        if args.command == "collect-status":
+            from . import ci_overview
+
+            ci_overview.collect(host.host_config())
             return 0
         if args.command == "run-workers":
             host.run_workers()
@@ -201,6 +206,15 @@ def main(argv=None):
                 distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
             if len(distinct) > 1:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
+        if args.command == "status":
+            from . import ci_overview
+
+            overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()])
+            if args.json:
+                results["_ci"] = overview
+            else:
+                ci_overview.display(overview)
+                print()
         if args.json:
             if fleet is not None:
                 results["_fleet"] = dict(activity=fleet)
