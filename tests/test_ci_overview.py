@@ -234,6 +234,24 @@ class Overview(unittest.TestCase):
         data["windows"][0]["successful_batches"] = 10
         self.assertIsNone(overview.source_value("bors_history", dict(value=data, observed_at=time.time())))
 
+    def test_history_keeps_more_complete_fresh_runtime_backfill_across_hosts(self):
+        windows = [dict(window=label, completed_batches=0, successful_batches=0,
+                        failed_batches=0, canceled_batches=0, landed_prs=0,
+                        landed_batches_without_receipts=0, staging_pr_runs=0,
+                        staging_unique_prs=0, mean_staging_runs_per_pr=None,
+                        batches_with_unknown_membership=0)
+                   for label in ("1h", "3h", "24h", "7d")]
+        now = time.time()
+        complete = dict(value=dict(windows=windows, durations=[], runtime_runs_checked=20),
+                        observed_at=now - 300)
+        recent = dict(value=dict(windows=windows, durations=[], runtime_runs_checked=2),
+                      observed_at=now)
+        hosts = [dict(sources=dict(bors_history=row)) for row in (complete, recent)]
+        for values in (hosts, list(reversed(hosts))):
+            self.assertEqual(overview.combine(values)["sources"]["bors_history"], complete)
+        complete["observed_at"] = now - 700
+        self.assertEqual(overview.combine(hosts)["sources"]["bors_history"], recent)
+
     def test_presentation_keeps_runner_groups_on_one_line(self):
         value = dict(sources=dict(pools=dict(value=dict(counts={"github": 3, "namespace": 15, "fleet-11e2756fc11042d798f759410573a935": 12}), observed_at=time.time())))
         out = io.StringIO()
