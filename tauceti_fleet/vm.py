@@ -326,6 +326,12 @@ def _start(config):
         # Actions runs .sh hooks with bash, regardless of their shebang.
         hook = "#!/bin/sh\nexec /usr/bin/python3 - <<'PY'\nimport json,os,time\nwith open('/dev/virtio-ports/org.tauceti.events','w') as f: print(json.dumps(dict(kind=KIND,run_id=os.environ.get('GITHUB_RUN_ID'),at=time.time())),file=f)\nPY\n"
         commands = [
+            # Disposable, image-pinned guests must not run apt's periodic
+            # upgrades concurrently with the workflow's checksum-pinned dpkg.
+            # Stop timers, not a running package transaction; let it finish.
+            "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer",
+            "systemctl mask apt-daily.service apt-daily-upgrade.service",
+            "while systemctl is-active --quiet apt-daily.service || systemctl is-active --quiet apt-daily-upgrade.service; do sleep 1; done",
             "printf %s "
             + shlex.quote(jit)
             + " > /opt/actions-runner/.jit; chmod 600 /opt/actions-runner/.jit; chown runner:runner /opt/actions-runner/.jit",

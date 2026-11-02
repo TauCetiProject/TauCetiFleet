@@ -388,11 +388,13 @@ class Isolated(unittest.TestCase):
         ):
             vm.start(store.host_config())
         commands = seed.call_args.args[1]
-        for command, kind in zip(commands[1:3], ("ci_started", "ci_completed"), strict=True):
+        hooks = [c for c in commands if c.startswith("printf %s ") and "/opt/hook-" in c]
+        env_command = next(c for c in commands if "ACTIONS_RUNNER_HOOK_JOB_STARTED=" in c)
+        for command, kind in zip(hooks, ("ci_started", "ci_completed"), strict=True):
             words = shlex.split(command)
             script, path = words[2], words[4].removesuffix(";")
             self.assertTrue(path.endswith(".sh"), path)
-            self.assertIn(path, commands[3])
+            self.assertIn(path, env_command)
             output = self.root / (kind + ".jsonl")
             hook = self.root / Path(path).name
             hook.write_text(
@@ -425,7 +427,7 @@ class Isolated(unittest.TestCase):
         ):
             host.collect_ci_results(store.host_config())
         self.assertEqual(
-            store.read(store.state_dir() / "ci-backoff.json")["until"], report.timestamp(job["completed_at"]) + 900
+            store.read(store.state_dir() / "ci-slot-backoff.json")["until"], report.timestamp(job["completed_at"]) + 900
         )
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
 

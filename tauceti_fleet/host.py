@@ -553,13 +553,16 @@ def collect_ci_results(config):
                     decision = ci.classify(job, run=run_data, statuses=statuses, host_health=value.get("host_health"))
                 except (FleetError, ValueError, KeyError, TypeError, OSError):
                     decision = dict(cooldown=True, reason="cancellation_evidence_unavailable", evidence={})
-            circuit_path = state_dir() / "ci-backoff.json"
+            # One disposable guest's failed job is not evidence that the other
+            # slots are unhealthy. Keep automatic recovery local to that slot.
+            circuit_path = vm.slot_file({"ci_slot": value.get("slot", 0)}, "ci-slot-backoff.json")
             if decision["cooldown"]:
                 # Anchor to the actual failure, so replay/crash recovery never
                 # renews the same cooldown or shortens a newer fault's cooldown.
                 circuit = read(circuit_path, {})
-                if completed + 900 > circuit.get("until", 0):
-                    atomic(circuit_path, dict(until=completed + 900, job_id=job["id"], reason=decision["reason"]))
+                delay = 60 if decision["reason"] == "pr_runner_step_failed" else 900
+                if completed + delay > circuit.get("until", 0):
+                    atomic(circuit_path, dict(until=completed + delay, job_id=job["id"], reason=decision["reason"]))
             event(
                 "ci_result",
                 identity=identity,
@@ -630,6 +633,7 @@ class CISlot:
     def step(self, config, *, inventory, refresh, cooling):
         config = dict(capacity.for_slot(config, self.index),
                       ci_enabled=config["ci_enabled"] and self.index < capacity.jobs(config))
+        cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
         if not config["ci_enabled"] and not value:
