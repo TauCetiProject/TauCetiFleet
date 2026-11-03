@@ -389,6 +389,14 @@ snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
 
+`tauceti-fleet top` is a local, read-only dashboard for the machine it runs on. It
+refreshes every few seconds (`--interval`) and shows CPU, disk, network and memory
+use with pressure stall figures; CI slice memory against its limit, split into guest
+RAM and overlay pages; the controller's own CPU and memory; and, per guest, its CPU,
+resident memory, overlay size, job time and run link, followed by the last hour's
+results. `--once` prints a single frame. It reads the
+local events log and kernel counters only and makes no GitHub requests.
+
 The first lines report running jobs by runner pool,
 the queued PR-build and total workflow backlogs, and account authoring pressure
 against its configured PR limit. Running-job counts cover all organization

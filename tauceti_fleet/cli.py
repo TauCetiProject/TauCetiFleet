@@ -48,6 +48,9 @@ def parser():
     enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
+    top = sub.add_parser("top", help="live dashboard of this host's CI guests, memory, disk and network (read-only)")
+    top.add_argument("--interval", type=float, default=3.0, help="seconds between refreshes")
+    top.add_argument("--once", action="store_true", help="print one frame and exit")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
@@ -98,6 +101,12 @@ def print_isolation(status):
 def main(argv=None, *, _status_results=None):
     args = parser().parse_args(argv)
     try:
+        if args.command == "top":
+            from . import top
+
+            if args.interval <= 0:
+                raise FleetError("--interval must be positive")
+            return top.run(args.interval, once=args.once)
         if args.command == "_watch-status":
             from . import status_follow
 
