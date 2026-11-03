@@ -119,12 +119,12 @@ class LiveUpdate(unittest.TestCase):
 
     def test_handover_uses_sighup_for_modern_controller_and_main_only_kill_for_legacy(self):
         for protocol, signal in ((1, "SIGHUP"), (None, "SIGKILL")):
-            store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=protocol))
+            store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=protocol, controller_pid=42))
             def command(argv, **kwargs):
                 self.assertIn("--kill-whom=main", argv)
                 self.assertIn("--signal=" + signal, argv)
                 store.atomic(store.state_dir() / "status.json", dict(
-                    observed_at=time.time() + 1, controller_release=str(self.release)))
+                    observed_at=time.time() + 1, controller_release=str(self.release), controller_pid=42))
                 return subprocess.CompletedProcess(argv, 0)
             with patch.object(update, "service", return_value=dict(MainPID="42", Restart="on-failure")), \
                     patch.object(update, "run", side_effect=command):
@@ -132,6 +132,66 @@ class LiveUpdate(unittest.TestCase):
             admission = store.read(store.state_dir() / "admission.json")
             self.assertEqual(admission["workers"], ["paid-session"])
             self.assertGreater(admission["expires_at"], time.time() + 100)
+
+    def test_hup_during_startup_recovers_an_inactive_controller(self):
+        store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=1, controller_pid=42))
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if "start" in argv:
+                store.atomic(store.state_dir() / "status.json", dict(
+                    observed_at=time.time() + 1, controller_release=str(self.release), controller_pid=43))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.object(update, "service", side_effect=[dict(MainPID="42", Restart="on-failure"), dict(MainPID="0"), dict(MainPID="43")]), \
+                patch.object(update, "run", side_effect=command), patch.object(update.time, "sleep"):
+            update.handover(self.release)
+        self.assertIn("--signal=SIGHUP", calls[0])
+        self.assertEqual([v[2] for v in calls[1:]], ["reset-failed", "start"])
+
+    def test_rollback_forces_kill_even_with_stale_modern_protocol_and_confirms_legacy(self):
+        store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=1, controller_pid=42))
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if "kill" in argv:
+                store.atomic(store.state_dir() / "status.json", dict(observed_at=time.time() + 1, error=None))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.object(update, "service", return_value=dict(MainPID="42", Restart="on-failure")), \
+                patch.object(update, "run", side_effect=command):
+            update.handover(self.previous, rollback=True)
+        self.assertIn("reset-failed", calls[0])
+        self.assertIn("--signal=SIGKILL", calls[1])
+
+    def test_unexpected_activation_errors_restore_release_without_signalling_healthy_controller(self):
+        original = update.write_binary
+        for error in (TypeError("unexpected"), KeyboardInterrupt()):
+            calls = 0
+            def write(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise error
+                return original(*args)
+            with patch.object(update, "service", return_value=dict(MainPID="42", Restart="on-failure")), \
+                    patch.object(update, "stage_worker", return_value=self.home / "new-worker"), \
+                    patch.object(update, "write_binary", side_effect=write), patch.object(update, "handover") as handover:
+                with self.assertRaisesRegex(store.FleetError, "before handover; previous release restored"):
+                    self.install()
+            handover.assert_not_called()
+            self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+            self.assert_work_preserved()
+
+    def test_uvx_interpreter_is_not_retained_in_the_installed_launcher(self):
+        base = os.sys.executable
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker", return_value=self.home / "new-worker"), \
+                patch.object(update, "handover", return_value=dict(controller_release=str(self.release))), \
+                patch.object(update.sys, "executable", "/temporary/uvx/bin/python"), \
+                patch.object(update.sys, "_base_executable", base):
+            self.install()
+        self.assertNotIn("/temporary/uvx", self.binary.read_text())
+        self.assertIn(str(Path(base).resolve()), self.binary.read_text())
+        self.assertIn("os.path.realpath", self.binary.read_text())
 
     def test_cached_healthy_status_cannot_confirm_a_handover(self):
         store.atomic(store.state_dir() / "status.json", dict(

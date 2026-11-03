@@ -282,7 +282,7 @@ def worker_config(config):
 
 
 def start_workers():
-    root = str(Path(__file__).resolve().parent.parent)
+    root = RUNNING_RELEASE
     argv = " ".join(unit_argument(a) for a in [*command(), "run-workers"])
     target = units() / "tauceti-fleet-workers.service"
     target.write_text(
@@ -324,6 +324,7 @@ def run_workers():
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
+    binary = str(Path(binary).resolve())
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
@@ -826,6 +827,7 @@ def daemon():
                         version=1,
                         machine_id=config["machine_id"],
                         controller_release=RUNNING_RELEASE,
+                        controller_pid=os.getpid(),
                         live_update_protocol=1,
                         observed_at=time.time(),
                         ci_enabled=config["ci_enabled"],
@@ -867,7 +869,8 @@ def daemon():
                 )
                 atomic(
                     state_dir() / "status.json",
-                    dict(machine_id=config["machine_id"], observed_at=time.time(), error=message),
+                    dict(machine_id=config["machine_id"], observed_at=time.time(), error=message,
+                         controller_release=RUNNING_RELEASE, controller_pid=os.getpid(), live_update_protocol=1),
                 )
                 for slot in slots.values():
                     slot.next_vm = max(slot.next_vm, time.time() + 60)

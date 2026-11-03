@@ -91,8 +91,9 @@ metadata=json.loads((release/'release.json').read_text())
 (base/'release.json').write_text(json.dumps(metadata))
 binary=pathlib.Path.home()/'.local/bin/tauceti-fleet'
 binary.parent.mkdir(parents=True,exist_ok=True)
-launcher='import sys; sys.path.insert(0,'+repr(str(current))+'); from tauceti_fleet.cli import main; raise SystemExit(main())'
-binary.write_text('#!/bin/sh\nexec '+shlex.quote(sys.executable)+' -c '+shlex.quote(launcher)+' "$@"\n')
+launcher='import os,sys; sys.path.insert(0,os.path.realpath('+repr(str(current))+')); from tauceti_fleet.cli import main; raise SystemExit(main())'
+python=os.path.realpath(getattr(sys,'_base_executable',sys.executable))
+binary.write_text('#!/bin/sh\nexec '+shlex.quote(python)+' -c '+shlex.quote(launcher)+' "$@"\n')
 binary.chmod(0o755)
 print(json.dumps(dict(installed=True,release=digest)))
 """
@@ -185,12 +186,16 @@ def deploy(target, *, live=False, expected_machine_id=None):
     if target != "local":
         command = "python3 -c " + shlex.quote(BOOTSTRAP)
         command += "".join(" " + shlex.quote(a) for a in args)
-        result = ssh(target, command, input=archive(), timeout=900 if live else 120)
+        result = ssh(target, command, input=archive(), timeout=1800 if live else 120)
     else:
         import sys
 
-        result = run([sys.executable, "-c", BOOTSTRAP, *args], input=archive(), timeout=900 if live else 120)
-    reply = json.loads(result.stdout)
+        python = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=1800 if live else 120)
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError:
+        raise FleetError("Deployment did not return a Fleet response; inspect the installed release before retrying") from None
     if not reply.get("installed"):
         raise FleetError(reply.get("error", "Deployment did not complete"))
     return reply

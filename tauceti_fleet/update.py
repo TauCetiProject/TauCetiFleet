@@ -70,30 +70,41 @@ def extend_admission():
         atomic(path, dict(value, expires_at=time.time() + 120))
 
 
-def handover(release, *, legacy=False):
+def handover(release, *, rollback=False):
     previous = read(state_dir() / "status.json", {})
     before = service()
+    if rollback:
+        run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
     pid = before.get("MainPID", "0")
     if pid != "0":
-        modern = previous.get("live_update_protocol") == 1
-        if not modern and before.get("Restart") not in ("on-failure", "always"):
-            raise FleetError("Legacy controller requires Restart=on-failure for live handover")
+        modern = (not rollback and previous.get("live_update_protocol") == 1
+                  and str(previous.get("controller_pid")) == pid)
+        if before.get("Restart") not in ("on-failure", "always"):
+            raise FleetError("Controller requires Restart=on-failure for live handover")
         extend_admission()
         # Legacy controllers empty the admission lease on SIGTERM. Kill only
         # their main process; independent worker scopes and VM services survive.
         run(["systemctl", "--user", "kill", "--kill-whom=main",
              "--signal=" + ("SIGHUP" if modern else "SIGKILL"), "tauceti-fleet.service"])
     else:
+        if not rollback:
+            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
         run(["systemctl", "--user", "start", "tauceti-fleet.service"])
     started = time.time()
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         current = read(state_dir() / "status.json", {})
-        if current.get("observed_at", 0) > started and not current.get("error"):
-            if current.get("controller_release") == str(release):
+        running = service().get("MainPID", "0")
+        if current.get("observed_at", 0) > started and not current.get("error") and running != "0":
+            if current.get("controller_release") == str(release) and str(current.get("controller_pid")) == running:
                 return current
-            if legacy and "controller_release" not in current and service().get("MainPID", "0") not in ("0", pid):
+            if rollback and "controller_release" not in current:
                 return current
+        if running == "0":
+            # HUP before Python installs its handler is a clean systemd exit;
+            # a crash loop can also exhaust the service's automatic retries.
+            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+            run(["systemctl", "--user", "start", "tauceti-fleet.service"])
         extend_admission()
         time.sleep(1)
     raise FleetError("Controller did not publish a healthy status after live handover")
@@ -115,12 +126,12 @@ def install(release, *, expected_machine_id):
         controller = service()
         if (previous == release and status.get("controller_release") == str(release)
                 and not status.get("error") and status.get("observed_at", 0) > time.time() - 15
-                and controller.get("MainPID", "0") != "0"):
+                and controller.get("MainPID", "0") != "0"
+                and str(status.get("controller_pid")) == controller.get("MainPID")):
             return dict(installed=True, release=release.name, unchanged=True)
         # Fail before activation if the existing controller cannot be handed over.
-        if (controller.get("MainPID", "0") != "0" and status.get("live_update_protocol") != 1
-                and controller.get("Restart") not in ("on-failure", "always")):
-            raise FleetError("Legacy controller requires Restart=on-failure for live handover")
+        if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
+            raise FleetError("Controller requires Restart=on-failure for live handover")
         worker_link = data_dir() / "bin/tauceti"
         if worker_link.exists() and not worker_link.is_symlink():
             raise FleetError("Preserve the existing non-symlink worker executable before updating")
@@ -133,16 +144,19 @@ def install(release, *, expected_machine_id):
         binary = Path.home() / ".local/bin/tauceti-fleet"
         old_binary = binary.read_bytes()
         old_mode = binary.stat().st_mode & 0o777
+        signalled = False
         try:
             if worker:
                 symlink(worker_link, worker / "bin/tauceti")
                 atomic(data_dir() / "worker-runtime.json", dict(revision=metadata["worker_revision"]))
             atomic(data_dir() / "release.json", metadata)
             symlink(current, release)
-            launcher = "import sys; sys.path.insert(0," + repr(str(current)) + "); from tauceti_fleet.cli import main; raise SystemExit(main())"
-            write_binary(binary, ("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " -c " + shlex.quote(launcher) + ' "$@"\n').encode())
+            launcher = "import os,sys; sys.path.insert(0,os.path.realpath(" + repr(str(current)) + ")); from tauceti_fleet.cli import main; raise SystemExit(main())"
+            python = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+            write_binary(binary, ("#!/bin/sh\nexec " + shlex.quote(python) + " -c " + shlex.quote(launcher) + ' "$@"\n').encode())
+            signalled = True
             result = handover(release)
-        except (FleetError, OSError, ValueError) as exc:
+        except BaseException as exc:
             symlink(current, previous)
             if old_worker:
                 symlink(worker_link, old_worker)
@@ -156,9 +170,12 @@ def install(release, *, expected_machine_id):
                     atomic(path, value)
             write_binary(binary, old_binary, old_mode)
             try:
-                handover(previous, legacy=True)
+                if signalled:
+                    handover(previous, rollback=True)
             except (FleetError, OSError, ValueError):
                 raise FleetError("Live update failed; previous release restored, but controller recovery needs operator attention") from exc
+            if not signalled:
+                raise FleetError("Live update failed before handover; previous release restored, controller left running") from exc
             raise FleetError("Live update failed; previous release restored and controller recovered") from exc
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
                     worker_revision=metadata.get("worker_revision") if worker else None,
