@@ -28,7 +28,48 @@ MARKER = ".tauceti-lean.json"
 HOST_PRESSURE = Path("/usr/local/share/tauceti/host-pressure.json")
 HOST_REQUIRED = Path("/usr/local/share/tauceti/host-pressure.required")
 MAX_SAMPLE_AGE = 10
-ADMISSION_SOCKET = Path('/usr/local/share/tauceti/admission.sock')
+ADMISSION_SOCKET = Path("/usr/local/share/tauceti/admission.sock")
+_TRACE = None
+
+
+class Trace:
+    """Optional inherited socket; accounting never changes compiler process semantics."""
+
+    def __init__(self):
+        self.client = None
+        path = (
+            Path("/usr/local/share/tauceti/lean-statistics.sock")
+            if HOST_REQUIRED.exists()
+            else Path("/run/user") / str(os.getuid()) / "tauceti-lean-statistics.sock"
+        )
+        try:
+            if path.exists():
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(0.01)
+                client.connect(str(path))
+                client.set_inheritable(True)
+                self.client = client
+        except OSError:
+            if "client" in locals():
+                client.close()
+
+    def event(self, phase):
+        if self.client:
+            try:
+                self.client.sendall(f"{phase}:{time.monotonic():.6f}\n".encode())
+            except OSError:
+                self.client.close()
+                self.client = None
+
+
+def pause(seconds, reason):
+    if _TRACE:
+        _TRACE.event(reason)
+    try:
+        time.sleep(seconds)
+    finally:
+        if _TRACE:
+            _TRACE.event("prepare")
 
 
 def host_pressure():
@@ -38,10 +79,15 @@ def host_pressure():
         age = time.monotonic() - value["received_monotonic"]
         source_age = time.time() - value["at"]
         cpu, total, available = (value[k] for k in ("cpu_percent", "memory_total", "memory_available"))
-        if (value.get("version") != 1 or not 0 <= age <= MAX_SAMPLE_AGE
-                or not -2 <= source_age <= MAX_SAMPLE_AGE
-                or any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
-                or not 0 <= cpu <= 100 or not 0 <= available <= total or total <= 0):
+        if (
+            value.get("version") != 1
+            or not 0 <= age <= MAX_SAMPLE_AGE
+            or not -2 <= source_age <= MAX_SAMPLE_AGE
+            or any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
+            or not 0 <= cpu <= 100
+            or not 0 <= available <= total
+            or total <= 0
+        ):
             return None
         return cpu, total, available
     except (OSError, ValueError, TypeError, KeyError):
@@ -136,20 +182,37 @@ def wait_for_capacity():
             if host_ready:
                 try:
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        if _TRACE:
+                            _TRACE.event("admission")
                         client.settimeout(30)
                         client.connect(str(ADMISSION_SOCKET))
-                        if client.recv(1) == b'1' and capacity_available():
+                        if client.recv(1) == b"1" and capacity_available():
                             return
                 except OSError:
                     pass
+                finally:
+                    if _TRACE:
+                        _TRACE.event("prepare")
             if not waiting and debug:
-                print("tauceti-lean: waiting for fresh host capacity or guest RAM headroom", file=sys.stderr, flush=True)
+                print(
+                    "tauceti-lean: waiting for fresh host capacity or guest RAM headroom", file=sys.stderr, flush=True
+                )
             waiting = True
-            time.sleep(random.uniform(1, 5))
+            sample = host_pressure()
+            reason = (
+                "signal"
+                if sample is None
+                else "cpu"
+                if sample[0] > CPU_LIMIT_PERCENT
+                else "ram"
+                if not host_ready
+                else "admission"
+            )
+            pause(random.uniform(1, 5), reason)
             continue
         if before is None:
             before = cpu_sample()
-            time.sleep(random.uniform(0.2, 0.5))
+            pause(random.uniform(0.2, 0.5), "probe")
         after = cpu_sample()
         cpu = cpu_percent(before, after)
         total, available = memory()
@@ -168,7 +231,10 @@ def wait_for_capacity():
             )
         waiting = True
         before = after
-        time.sleep(random.uniform(1, 5))
+        pause(
+            random.uniform(1, 5),
+            "cpu+ram" if cpu > CPU_LIMIT_PERCENT and used > limit else "cpu" if cpu > CPU_LIMIT_PERCENT else "ram",
+        )
 
 
 def is_wrapper(binary):
@@ -312,6 +378,7 @@ def exec_lean(lean, args):
 
 
 def main(args=None):
+    global _TRACE
     args = sys.argv[1:] if args is None else args
     try:
         if sys.platform != "linux":
@@ -329,7 +396,9 @@ def main(args=None):
             return 0
         # Lake probes these during discovery. Keep them fast and stdout pristine.
         if args not in (["--githash"], ["--version"], ["-v"], ["--help"], ["-h"], ["--print-libdir"]):
+            _TRACE = Trace()
             wait_for_capacity()
+            _TRACE.event("run")
         exec_lean(lean, args)
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:
         print(f"tauceti-lean: {error}", file=sys.stderr)

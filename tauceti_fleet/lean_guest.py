@@ -4,11 +4,16 @@ import io
 import json
 import math
 import os
-import select
 import secrets
+import select
 import socket
 import time
 from pathlib import Path
+
+try:
+    from . import lean_statistics
+except ImportError:  # Standalone copy installed in disposable guests.
+    import tauceti_lean_statistics as lean_statistics
 
 TARGET = Path("/usr/local/share/tauceti/host-pressure.json")
 PORT = Path("/dev/virtio-ports/org.tauceti.pressure")
@@ -49,8 +54,12 @@ def receive(stream, target=TARGET, last_reclaim=-math.inf):
             if value.get("version") != 1:
                 continue
             cpu, total, available = (value[k] for k in ("cpu_percent", "memory_total", "memory_available"))
-            if (any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
-                    or not 0 <= cpu <= 100 or not 0 <= available <= total or total <= 0):
+            if (
+                any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
+                or not 0 <= cpu <= 100
+                or not 0 <= available <= total
+                or total <= 0
+            ):
                 continue
             value["received_monotonic"] = time.monotonic()
             temporary = target.with_suffix(".next")
@@ -67,23 +76,24 @@ class Broker:
         self.clients = []
         # A receiver restart cannot reuse a request the host already granted.
         self.request = 1 + secrets.randbits(48)
+        self.statistics = None
 
     def grant(self, value):
-        age = time.time() - value.get('at', 0)
-        if value.get('permit') != self.request:
+        age = time.time() - value.get("at", 0)
+        if value.get("permit") != self.request:
             return
         # Consume even an expired token so the next request can recover without
         # disconnecting a healthy serial link after a guest pause.
         self.request += 1
         if not -2 <= age <= 10:
             return
-        remaining = value.get('starts', 1)
+        remaining = value.get("starts", 1)
         if type(remaining) is not int or not 1 <= remaining <= 256:
             return
         while self.clients:
             client = self.clients.pop(0)
             try:
-                client.sendall(b'1')
+                client.sendall(b"1")
                 remaining -= 1
                 if remaining <= 0:
                     return
@@ -94,9 +104,18 @@ class Broker:
 
     def run(self, port, listener):
         last_request = 0
-        buffer = b''
+        buffer = b""
         last_reclaim = -math.inf
         while True:
+            if self.statistics:
+                try:
+                    self.statistics.poll()
+                except (OSError, KeyError, ValueError):
+                    try:
+                        self.statistics.close()
+                    except (OSError, KeyError, ValueError):
+                        pass
+                    self.statistics = None
             ready, _, _ = select.select([port, listener, *self.clients], [], [], 0.05)
             if listener in ready:
                 client, _ = listener.accept()
@@ -116,28 +135,42 @@ class Broker:
                 if not chunk:
                     return
                 buffer = (buffer + chunk)[-8192:]
-                while b'\n' in buffer:
-                    line, buffer = buffer.split(b'\n', 1)
-                    last_reclaim = receive(io.BytesIO(line + b'\n'), last_reclaim=last_reclaim)
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    last_reclaim = receive(io.BytesIO(line + b"\n"), last_reclaim=last_reclaim)
                     try:
                         self.grant(json.loads(line))
                     except (ValueError, TypeError, AttributeError):
                         pass
             if time.monotonic() - last_request >= 0.05:
-                os.write(port, (str(self.request if self.clients else 0) + ':' + str(len(self.clients)) + '\n').encode())
+                os.write(
+                    port, (str(self.request if self.clients else 0) + ":" + str(len(self.clients)) + "\n").encode()
+                )
                 last_request = time.monotonic()
+            if self.statistics and time.monotonic() - getattr(self, "last_statistics", 0) >= 1:
+                frame = json.dumps(self.statistics.snapshot(), allow_nan=False, separators=(",", ":"))
+                try:
+                    os.write(port, ("S" + frame + "\n").encode())
+                except OSError:
+                    pass
+                self.last_statistics = time.monotonic()
 
 
 def main():
     SOCKET.unlink(missing_ok=True)
     broker = Broker()
+    try:
+        broker.statistics = lean_statistics.Collector("/usr/local/share/tauceti/lean-statistics.sock")
+        broker.statistics.listen()
+    except OSError:
+        broker.statistics = None
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(SOCKET))
         SOCKET.chmod(0o666)
         listener.listen(256)
         while True:
             try:
-                with PORT.open('r+b', buffering=0) as port:
+                with PORT.open("r+b", buffering=0) as port:
                     broker.run(port.fileno(), listener)
             except OSError:
                 pass
