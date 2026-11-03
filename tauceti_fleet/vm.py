@@ -422,11 +422,25 @@ def retire(config, value):
         return _retire(config, value)
 
 
-def _retire(config, value):
+def retire_idle(config, value):
+    """GitHub must accept deregistration before an idle guest is stopped."""
+    config = dict(config, ci_slot=value.get("slot", 0))
+    with locked(slot_file(config, "vm.lock")):
+        current = read(slot_file(config, "vm.json"), {})
+        if current.get("instance") != value.get("instance") or current.get("busy"):
+            return False
+        # GitHub rejects deletion if a job started after our last observation.
+        github.retire_runner(config, value["runner_id"])
+        _retire(config, value, registration_removed=True)
+        return True
+
+
+def _retire(config, value, *, registration_removed=False):
     run(["systemctl", "--user", "stop", value["unit"]], check=False)
     run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
     try:
-        github.retire_runner(config, value["runner_id"])
+        if not registration_removed:
+            github.retire_runner(config, value["runner_id"])
     except FleetError:
         if config.get("ci_broker_url"):
             # Preserve local ownership for an idempotent retirement retry. The

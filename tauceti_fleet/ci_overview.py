@@ -50,7 +50,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def fetch(url, *, token_file=None):
+def fetch(url, *, token_file=None, timeout=10):
     headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetStatus/1.0"}
     if token_file:
         token = Path(token_file).expanduser().read_text().strip()
@@ -58,7 +58,7 @@ def fetch(url, *, token_file=None):
             raise FleetError("Invalid status credential")
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         raise FleetError("Status response exceeds limit")

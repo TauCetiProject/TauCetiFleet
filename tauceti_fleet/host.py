@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, focus, github, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, focus, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -650,9 +650,9 @@ class CISlot:
         self.client = None
         self.buffer = b""
 
-    def step(self, config, *, inventory, refresh, cooling):
+    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None):
         config = dict(capacity.for_slot(config, self.index),
-                      ci_enabled=config["ci_enabled"] and self.index < capacity.jobs(config))
+                      ci_enabled=config["ci_enabled"] and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
@@ -730,13 +730,19 @@ class CISlot:
                 value["busy"] = True
                 atomic(path, value)
             if (value and not value.get("busy")
-                    and (not config["ci_enabled"] or cooling
+                    and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
-                    and not (time.time() - value["started_at"] < 60)):
-                vm.retire(config, value)
-                value = {}
-                self.close()
-                self.next_vm = time.time() + 60
+                    and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
+                if config.get("ci_idle_pool"):
+                    retired = (ci_pool.withdraw(config, value, own, reservations, path)
+                               and vm.retire_idle(config, value))
+                else:
+                    vm.retire(config, value)
+                    retired = True
+                if retired:
+                    value = {}
+                    self.close()
+                    self.next_vm = time.time() + 5
         if config["ci_enabled"] and not cooling and not value and time.time() >= self.next_vm:
             value = vm.start(config)
             self.next_vm = time.time() + 60
@@ -768,6 +774,8 @@ def daemon():
         slots = {}
         last_github = 0
         inventory = []
+        reservations = None
+        pool_error = None
         error = None
         ids = []
         last_results = 0
@@ -787,14 +795,25 @@ def daemon():
                 if refresh:
                     inventory = github.runners(config)
                     last_github = time.time()
+                    if config.get("ci_idle_pool"):
+                        try:
+                            reservations = ci_pool.reservations(config)
+                            pool_error = None
+                        except Exception as exc:
+                            reservations = None
+                            pool_error = str(exc)[:200]
+                            event("ci_pool_observation_unavailable", reason=str(exc)[:200])
+                existing = [read(vm.slot_file({"ci_slot": index}, "vm.json"), {}) for index in indexes]
+                admitted = ci_pool.plan(config, existing, inventory, reservations)
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
                 values = []
-                slot_errors = {}
+                slot_errors = {"pool": pool_error} if pool_error else {}
                 for index in indexes:
                     slot = slots.setdefault(index, CISlot(index))
                     try:
-                        value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling)
+                        value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling,
+                                          admitted=index in admitted, reservations=reservations)
                     except (FleetError, OSError, ValueError, KeyError) as exc:
                         slot_errors[str(index)] = str(exc)
                         slot.next_vm = max(slot.next_vm, time.time() + 60)
