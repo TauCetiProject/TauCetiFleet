@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, focus, github, vm
+from . import activity, capacity, ci, ci_overview, focus, github, lean_runtime, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -178,16 +178,15 @@ def prepare(config=None):
 
 
 def worker_memory_limits(config, caps, pinned=0):
-    """Borrow presently spare RAM; retain a fixed host/swap emergency bound.
+    """Use presently spare RAM; retain a fixed host/swap emergency bound.
 
-    The hard bound reserves the full CI shape. The soft bound tracks actual
-    headroom without subtracting unused CI RAM again. As CI or other host
+    Workers and CI share the parent slice's hard ceiling, without a fixed RAM
+    split. The soft bound tracks actual headroom. As CI or other host
     processes grow, MemAvailable falls and the existing controller lowers high.
     Only high moves during work: lowering max could kill an active paid round.
     """
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    ci = capacity.memory_budget_gib(config) * GIB if config["ci_allowed"] else 0
-    maximum = max(16 * 1024**2, caps["memory_total"] - ci - reserve - GIB)
+    maximum = max(16 * 1024**2, caps["memory_total"] - reserve - GIB)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
     high = min(int(maximum * 0.95), max(pinned + GIB, pinned + caps["memory_available"] - reserve))
@@ -217,7 +216,8 @@ def refresh_worker_memory(config, caps, memory):
 
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    ci = capacity.memory_budget_gib(config) * GIB if config["ci_allowed"] else 0
+    shared = max(16 * 1024**2, caps["memory_total"] - reserve - GIB)
+    ci = (config["ci_memory_budget_gib"] * GIB if config.get("ci_memory_budget_gib") else shared) if config["ci_allowed"] else 0
 
     def current(name):
         result = run(
@@ -242,6 +242,11 @@ def write_slices(config, caps):
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
     worker = max(16 * 1024**2, worker)
+    # The existing hyphenated child slice names already belong to this parent.
+    # Both may use free RAM; their combined usage still leaves OS/swap headroom.
+    (units() / "tauceti-fleet.slice").write_text(
+        f"[Slice]\nMemoryHigh={int(shared)}\nMemoryMax={int(shared)}\nTasksMax=32768\n"
+    )
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
@@ -308,6 +313,7 @@ def start_workers():
 
 def run_workers():
     config = host_config()
+    os.environ.update(lean_runtime.environment())
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
     os.environ.update(
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
@@ -849,7 +855,7 @@ def daemon():
                         ci_vms=values,
                         ci_jobs_busy=sum(bool(v.get("busy")) for v in values),
                         ci_max_jobs=capacity.jobs(config),
-                        ci_memory_budget_gib=capacity.memory_budget_gib(config),
+                        ci_memory_budget_gib=config.get("ci_memory_budget_gib") or (caps["memory_total"] - reserve - GIB) / GIB,
                         ci_kinds=capacity.kinds(config),
                         ci_staging_slots=capacity.reservation(config)[0],
                         ci_staging_reservation_error=capacity.reservation(config)[1],
@@ -965,7 +971,7 @@ def rpc(payload):
             ci_enabled=config["ci_enabled"],
             ci_kinds=capacity.kinds(config),
             ci_max_jobs=capacity.jobs(config),
-            ci_memory_budget_gib=capacity.memory_budget_gib(config),
+            ci_memory_budget_gib=read(state_dir() / "status.json", {}).get("ci_memory_budget_gib", capacity.memory_budget_gib(config)),
             ci_staging_slots=capacity.reservation(config)[0],
             ci_staging_reservation_error=capacity.reservation(config)[1],
             ci_enrolled=bool(config.get("ci_broker_url")),

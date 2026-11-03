@@ -34,10 +34,10 @@ class Capacity(unittest.TestCase):
             with self.assertRaises(store.FleetError):
                 capacity.settings(config, ci=kind)
 
-    def test_cpu_sharing_does_not_block_guests_but_ram_must_still_fit(self):
+    def test_cpu_and_virtual_guest_ram_share_host_capacity(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=24, vcpus=16, memory_gib=32)
-        for ram, expected in ((1024, "ok"), (800, "blocked")):
+        for ram, expected in ((1024, "ok"), (800, "ok")):
             with (
                 patch.object(capabilities, "resources", return_value=dict(cpus=88, memory_total=ram * gib, memory_available=ram * gib)),
                 patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
@@ -171,12 +171,13 @@ class Capacity(unittest.TestCase):
         self.assertIn(["systemctl", "--user", "enable", "--now", "tauceti-fleet.service"], [c.args[0] for c in run.call_args_list])
         self.assertFalse(any("restart" in c.args[0] for c in run.call_args_list))
 
-    def test_slice_reservation_counts_both_guests_and_their_overheads(self):
+    def test_ci_slice_uses_shared_parent_capacity_instead_of_sum_of_guest_shapes(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=2, vcpus=16, memory_gib=32)
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")):
             host.write_slices(config, dict(memory_total=128 * gib, memory_available=120 * gib))
-        self.assertIn(f"MemoryMax={68 * gib}", (self.root / "tauceti-fleet-ci.slice").read_text())
+        maximum = 128 * gib - int(128 * gib * .1) - gib
+        self.assertIn(f"MemoryMax={maximum}", (self.root / "tauceti-fleet-ci.slice").read_text())
 
     def test_temporary_low_availability_cannot_freeze_a_small_hard_limit(self):
         gib = 1024**3
@@ -190,7 +191,7 @@ class Capacity(unittest.TestCase):
         self.assertEqual(low, recovered)
         self.assertGreater(low, 40 * gib)
 
-    def test_live_slot_increase_can_reassign_unused_worker_headroom(self):
+    def test_live_slot_increase_keeps_workers_using_shared_capacity(self):
         gib = 1024**3
         config = capacity.settings(store.host_config(), ci="both", maximum=2, memory_gib=32)
         def current(args, **kwargs):
@@ -198,11 +199,10 @@ class Capacity(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, stdout=str(value))
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run", side_effect=current), patch.object(host, "worker_statuses", return_value=[dict(alive=True)]):
             maximum = host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
-            self.assertLess(maximum, 60 * gib)
+            self.assertGreater(maximum, 100 * gib)
             self.assertGreater(maximum, 2 * gib)
             with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout=str(60 * gib))):
-                with self.assertRaisesRegex(store.FleetError, "insufficient memory for the running workers"):
-                    host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib))
+                self.assertEqual(host.write_slices(config, dict(memory_total=128 * gib, memory_available=90 * gib)), maximum)
 
     def test_pending_cleanup_respects_backoff_after_ambiguous_registration(self):
         slot = host.CISlot(1)

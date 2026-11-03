@@ -20,7 +20,7 @@ class ElasticMemory(unittest.TestCase):
         self.assertEqual(maximum, same_maximum)
         self.assertLess(initial, 20 * GIB)
         self.assertGreater(recovered, 40 * GIB)
-        self.assertLessEqual(maximum + GIB + 66 * GIB + int(125 * GIB * .1), 125 * GIB)
+        self.assertLessEqual(maximum + GIB + int(125 * GIB * .1), 125 * GIB)
 
     def test_ci_growth_reclaims_cache_and_release_restores_headroom(self):
         caps = dict(memory_total=125 * GIB, memory_available=70 * GIB)

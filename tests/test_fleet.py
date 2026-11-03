@@ -96,7 +96,7 @@ class Isolated(unittest.TestCase):
         args["maximum"] = 6
         self.assertEqual(scaler.step(now=102, ci_busy=True, **args)[0], 6)
 
-    def test_slices_keep_ci_and_os_reservations_and_prioritize_ci(self):
+    def test_slices_share_ram_keep_os_reserve_and_prioritize_ci(self):
         gib = 1024**3
         with (
             patch.object(host, "units", return_value=self.root),
@@ -106,7 +106,7 @@ class Isolated(unittest.TestCase):
                 dict(ci_allowed=True, ci_memory_gib=64),
                 dict(memory_total=128 * gib, memory_available=128 * gib),
             )
-        self.assertLessEqual(worker + gib + 66 * gib + int(128 * gib * 0.1), 128 * gib)
+        self.assertLessEqual(worker + gib + int(128 * gib * 0.1), 128 * gib)
         workers = (self.root / "tauceti-fleet-workers.slice").read_text()
         ci = (self.root / "tauceti-fleet-ci.slice").read_text()
         self.assertIn("CPUWeight=10\n", workers)
