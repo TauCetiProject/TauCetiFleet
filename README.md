@@ -147,6 +147,32 @@ the guest overlay filesystem, rather than the sum of virtual disk limits. Each l
 also checks that headroom before registering a runner. Monitor actual overlay
 growth: the startup check does not guarantee that every guest can fill its disk.
 Guests report disk I/O errors instead of silently pausing on a full host disk.
+
+`--ci-memory-pause-gib P` adds a soft admission limit below the CI memory budget.
+While the CI slice uses at least P GiB, the controller starts no new guests and
+retires idle ones; busy guests finish normally. Admissions resume once usage falls
+to `--ci-memory-resume-gib` (default 85% of P). The thresholds apply live without a
+drain, `status` shows the guard's state, and the events log records
+`ci_memory_paused`/`ci_memory_resumed`. `--ci-memory-pause-gib 0` turns the guard off.
+Usage grows after admission, mostly during guest setup, so the guard is a safety
+margin for overlapping large jobs, not a substitute for sizing `--max-jobs`: every
+admitted guest must still fit within the budget at its peak.
+
+The guest overlay directory is `$TAUCETI_FLEET_STATE/vms`. On a host with spare
+RAM and a slow or wear-limited disk, it may live on tmpfs. Each guest's setup
+writes tens of GiB that are discarded when it retires, so a tmpfs overlay removes
+that disk I/O. Overlay pages on tmpfs are charged to the CI slice, so set
+`--ci-memory-budget-gib` to cover guest RAM plus overlay growth, and pair it with
+the memory guard:
+
+```sh
+# 1 TB host, guest overlays on /dev/shm: ~40 GiB guest RAM + ~35 GiB overlay per typical job.
+tauceti-fleet enable local --ci both --max-jobs 10 --ci-vcpus 28 --ci-memory-gib 48 \
+  --ci-memory-budget-gib 880 --ci-memory-pause-gib 760 --ci-memory-resume-gib 650
+```
+
+tmpfs is emptied on reboot. Recreate the overlay directory before the controller
+starts, for example with a user service ordered before `tauceti-fleet.service`.
 Increase or reduce
 concurrency based on completed jobs per hour and job latency under load, rather
 than treating virtual CPU counts as physical CPU reservations.

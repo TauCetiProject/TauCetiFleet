@@ -6,7 +6,8 @@ KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 MAX_JOBS = 4096
 
 
-def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
+def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None,
+             memory_pause_gib=None, memory_resume_gib=None):
     if not isinstance(ci, str) or ci not in KINDS:
         raise FleetError("Select CI jobs explicitly: --ci pr, --ci staging, or --ci both")
     result = dict(config, ci_kinds=KINDS[ci], ci_max_jobs=jobs(config))
@@ -18,8 +19,36 @@ def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=
         if type(value) is not int or not 1 <= value <= upper:
             raise FleetError(f"{name} must be an integer between 1 and {upper}")
         result[name] = value
+    if memory_pause_gib == 0:
+        # Zero turns the guard off; a resume threshold alone is meaningless.
+        result["ci_memory_pause_gib"] = result["ci_memory_resume_gib"] = None
+    else:
+        for name, value in (("ci_memory_pause_gib", memory_pause_gib), ("ci_memory_resume_gib", memory_resume_gib)):
+            if value is not None:
+                result[name] = value
     staging_slots(result)
+    memory_guard(result)
     return result
+
+
+def memory_guard(config):
+    """Soft admission thresholds on actual CI slice memory, or None when disabled.
+
+    The slice charge includes guest RAM and any guest disk pages that live in RAM
+    (tmpfs-backed state). Usage grows after admission, so this is a safety margin
+    below the hard budget, not a replacement for sizing ci_max_jobs.
+    """
+    pause = config.get("ci_memory_pause_gib")
+    if pause is None:
+        return None
+    resume = config.get("ci_memory_resume_gib")
+    if resume is None:
+        resume = pause * 85 // 100
+    if type(pause) is not int or type(resume) is not int or not 1 <= resume < pause:
+        raise FleetError("ci_memory_resume_gib must be a positive integer below ci_memory_pause_gib")
+    if pause >= memory_budget_gib(config):
+        raise FleetError("ci_memory_pause_gib must be below the CI memory budget, which the kernel enforces as a hard limit")
+    return pause, resume
 
 
 def memory_budget_gib(config):

@@ -336,12 +336,15 @@ def run_workers():
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
-def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
+def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None,
+           memory_pause_gib=None, memory_resume_gib=None):
     config = host_config()
     if ci and not config["ci_allowed"]:
         raise FleetError("This host was deployed with --no-ci; reconfigure its role first")
     if ci:
-        proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib, memory_budget_gib=memory_budget_gib)
+        proposed = capacity.settings(config, ci=ci, maximum=maximum, vcpus=vcpus, memory_gib=memory_gib, disk_gib=disk_gib,
+                                     memory_budget_gib=memory_budget_gib, memory_pause_gib=memory_pause_gib,
+                                     memory_resume_gib=memory_resume_gib)
         changed = any(proposed.get(k) != config.get(k) for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
         # The controller reads the slot count every iteration and admits added
         # slots independently. Existing guests need neither retirement nor a
@@ -369,7 +372,8 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         # Persist the policy before launch, so crash recovery never loses the
         # admission ceiling or tries to replace these guests with the old shape.
         update_host(validate=capacity.staging_slots,
-                    **{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_memory_budget_gib") if k in config})
+                    **{k: config[k] for k in ("ci_kinds", "ci_max_jobs", "ci_vcpus", "ci_memory_gib", "ci_disk_gib", "ci_memory_budget_gib",
+                                              "ci_memory_pause_gib", "ci_memory_resume_gib") if k in config})
         if not config["ci_enabled"] and not vm.outstanding():
             # Verify registration once. The controller admits remaining slots
             # independently, so a later startup error cannot leave a half-enabled role.
@@ -378,9 +382,37 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         ci_enabled=config["ci_enabled"] or bool(ci), workers_enabled=config["workers_enabled"] or workers, draining=False
     )
     install_service(restart=False)
+    guard = capacity.memory_guard(value)
     return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value),
-                ci_memory_budget_gib=capacity.memory_budget_gib(value))
+                ci_memory_budget_gib=capacity.memory_budget_gib(value),
+                ci_memory_guard=dict(pause_gib=guard[0], resume_gib=guard[1]) if guard else None)
+
+
+def ci_slice_memory():
+    """Bytes charged to the CI slice, including guest disk pages on tmpfs; None if unknown."""
+    result = run(["systemctl", "--user", "show", "tauceti-fleet-ci.slice", "-p", "MemoryCurrent", "--value"], check=False)
+    try:
+        return int(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def ci_memory_guard(config, current, paused):
+    """Hysteresis over actual CI slice usage; returns (paused, status detail).
+
+    Pausing reuses the CI cooldown path: no new guests start and idle guests retire,
+    while busy guests finish. An unknown measurement keeps the previous decision.
+    """
+    thresholds = capacity.memory_guard(config)
+    if thresholds is None:
+        return False, None
+    pause, resume = thresholds
+    if current is not None:
+        gib = current / GIB
+        paused = gib > resume if paused else gib >= pause
+    return paused, dict(paused=paused, current_gib=None if current is None else round(current / GIB, 1),
+                        pause_gib=pause, resume_gib=resume)
 
 
 def reserve_staging(maximum):
@@ -749,6 +781,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        ci_memory_paused = False
         while not stopping:
             config = host_config()
             try:
@@ -766,6 +799,12 @@ def daemon():
                     last_github = time.time()
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
+                was_paused = ci_memory_paused
+                ci_memory_paused, memory_guard = ci_memory_guard(
+                    config, ci_slice_memory() if capacity.memory_guard(config) else None, ci_memory_paused)
+                if ci_memory_paused != was_paused:
+                    event("ci_memory_paused" if ci_memory_paused else "ci_memory_resumed", **memory_guard)
+                cooling = cooling or ci_memory_paused
                 values = []
                 slot_errors = {}
                 for index in indexes:
@@ -832,7 +871,8 @@ def daemon():
                         ci_enabled=config["ci_enabled"],
                         workers_enabled=config["workers_enabled"],
                         ci_busy=busy,
-                        ci_cooldown=circuit if cooling else None,
+                        ci_cooldown=circuit if circuit.get("until", 0) > time.time() else None,
+                        ci_memory_guard=memory_guard,
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
@@ -940,7 +980,9 @@ def rpc(payload):
         return enable(ci=payload.get("ci"), workers=bool(payload.get("workers")),
                       maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
                       memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"),
-                      memory_budget_gib=payload.get("memory_budget_gib"))
+                      memory_budget_gib=payload.get("memory_budget_gib"),
+                      memory_pause_gib=payload.get("memory_pause_gib"),
+                      memory_resume_gib=payload.get("memory_resume_gib"))
     if action == "focus":
         return focus.configure(payload)
     if action == "workers":

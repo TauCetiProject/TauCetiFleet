@@ -46,6 +46,10 @@ def parser():
     enable.add_argument("--ci-memory-gib", type=int, help="GiB of guest RAM per CI job")
     enable.add_argument("--ci-memory-budget-gib", type=int, help="aggregate physical CI RAM ceiling; permits guest RAM overcommit and possible OOM failures")
     enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
+    enable.add_argument("--ci-memory-pause-gib", type=int,
+                        help="pause new CI guests while the CI slice uses at least this many GiB (0 disables); applies live")
+    enable.add_argument("--ci-memory-resume-gib", type=int,
+                        help="resume CI admissions once usage falls to this many GiB (default 85%% of the pause threshold)")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
@@ -140,7 +144,8 @@ def main(argv=None, *, _status_results=None):
         entries = remote.inventory()
         if args.command == "enable" and not (args.ci or args.workers):
             raise FleetError("Select --ci and/or --workers explicitly")
-        if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
+        if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib,
+                                                                                 args.ci_memory_pause_gib, args.ci_memory_resume_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
@@ -173,7 +178,8 @@ def main(argv=None, *, _status_results=None):
             if args.command == "enable":
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
-                               memory_budget_gib=args.ci_memory_budget_gib)
+                               memory_budget_gib=args.ci_memory_budget_gib,
+                               memory_pause_gib=args.ci_memory_pause_gib, memory_resume_gib=args.ci_memory_resume_gib)
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
@@ -295,6 +301,12 @@ def main(argv=None, *, _status_results=None):
                         print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
+                    guard = status.get("ci_memory_guard")
+                    if guard:
+                        used = "unknown" if guard.get("current_gib") is None else f"{guard['current_gib']:g} GiB"
+                        state = "PAUSED new CI guests" if guard.get("paused") else "admitting"
+                        print(f"CI memory guard: {state}; using {used}, pause at {guard['pause_gib']} GiB, "
+                              f"resume at {guard['resume_gib']} GiB")
                     if value.get("ci_staging_slots"):
                         print(f"Reserved for staging: {value['ci_staging_slots']} slots")
                     if value.get("ci_staging_reservation_error"):
