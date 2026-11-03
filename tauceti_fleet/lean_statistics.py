@@ -392,6 +392,11 @@ def display(value):
             f"Untimed Lean processes: {legacy.get('waiting', 0)} sleeping wrappers, "
             f"{legacy.get('running', 0)} running compilers; oldest observed wait ≥{duration(legacy.get('oldest_observed', 0))}"
         )
+        total = legacy.get("sampled_wait_seconds", 0) + legacy.get("sampled_run_seconds", 0)
+        if total:
+            print(
+                f"  Existing processes' sampled wait share: {100 * legacy.get('sampled_wait_seconds', 0) / total:.1f}% (5s samples)"
+            )
     if not any(valid(r) and r["observed"] for r in rows):
         print("Lean throttling: no timed compiler invocations yet")
         return

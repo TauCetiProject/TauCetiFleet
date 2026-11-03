@@ -65,6 +65,7 @@ class Publisher:
             if isinstance(saved.get("archived_keys", []), list)
             else []
         )
+        self.legacy = saved.get("legacy", {}) if isinstance(saved.get("legacy"), dict) else {}
         try:
             if collect:
                 self.statistics = lean_statistics.Collector(
@@ -214,6 +215,7 @@ class Publisher:
             )
             self.last_workers = workers
             if time.time() - getattr(self, "legacy_at", 0) >= 5:
+                previous_stats = self.legacy
                 self.legacy = legacy_compilers(
                     {v["pid"] for v in self.statistics.clients.values()} if self.statistics else set()
                 )
@@ -222,6 +224,16 @@ class Publisher:
                 self.legacy["oldest_observed"] = max(
                     (time.monotonic() - t for t in self.legacy_waiters.values()), default=0.0
                 )
+                elapsed = time.time() - previous_stats.get("sampled_at", 0)
+                elapsed = elapsed if 0 <= elapsed <= 10 else 0
+                self.legacy["sampled_wait_seconds"] = (
+                    previous_stats.get("sampled_wait_seconds", 0.0) + previous_stats.get("waiting", 0) * elapsed
+                )
+                self.legacy["sampled_run_seconds"] = (
+                    previous_stats.get("sampled_run_seconds", 0.0) + previous_stats.get("running", 0) * elapsed
+                )
+                self.legacy["sampled_since"] = previous_stats.get("sampled_since", time.time())
+                self.legacy["sampled_at"] = time.time()
                 self.legacy_at = time.time()
             fresh = {
                 path
@@ -298,7 +310,10 @@ def legacy_compilers(known):
                 continue
             name = (p / "comm").read_text(errors="replace").strip()
             if name == "lean":
-                counts["running"] += 1
+                with (p / "cmdline").open("rb") as stream:
+                    args = stream.read(2048).split(b"\0")
+                if b"--server" not in args:
+                    counts["running"] += 1
                 continue
             if not name.startswith("python"):
                 continue
