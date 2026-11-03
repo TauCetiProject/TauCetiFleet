@@ -450,7 +450,7 @@ def combine(values, pool_names=None):
     return dict(version=1, repository=REPOSITORY, sources=sources, pressure_accounts=accounts, pool_names=pool_names or {})
 
 
-def display(value):
+def display(value, *, section="all"):
     sources = value.get("sources", {}) if isinstance(value.get("sources"), dict) else {}
     names = value.get("pool_names", {})
     pool_names = {**POOL_NAMES, **(names if isinstance(names, dict) else {})}
@@ -464,51 +464,54 @@ def display(value):
         note = f"{age}s old" + ("; stale" if age > 600 or row.get("error") else "")
         return data, note
 
-    data, note = source("bors")
-    if data is None:
-        print("Bors: unknown (background observation unavailable)")
-    else:
-        batches = data["batches"]
-        parts = [str(b["size"]) for b in batches]
-        held = data["held"] if data.get("held") is not None else "unknown"
-        total = sum(b["size"] for b in batches)
-        print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
-    data, note = source("bors_history")
-    if data:
-        print(f"Bors history ({note}):")
-        durations = {r["window"]: r for r in data["durations"]}
-        windows = {r["window"]: r for r in data["windows"]}
-        periods = ("1h", "3h", "24h", "7d")
-        rows = [("Completed batches", [str(windows[p]["completed_batches"]) for p in periods])]
-        success = []
-        for period in periods:
-            row = windows[period]
-            decided = row["successful_batches"] + row["failed_batches"]
-            percent = round(100 * row["successful_batches"] / decided, 1) if decided else None
-            success.append(f"{percent:.1f}%" if percent is not None else "—")
-        rows.extend([("Succeeded", success),
-                     ("Canceled", [str(windows[p]["canceled_batches"]) for p in periods]),
-                     ("PRs landed", [str(windows[p]["landed_prs"]) for p in periods]),
-                     ("Staging runs / PR", [f"{windows[p]['mean_staging_runs_per_pr']:.2f}"
-                                            if windows[p]["mean_staging_runs_per_pr"] is not None else "—"
-                                            for p in periods])])
-        for title, metric in (("Build p50", "p50_seconds"), ("Build p95", "p95_seconds")):
-            builds = []
+    if section != "overview":
+        data, note = source("bors")
+        if data is None:
+            print("Bors: unknown (background observation unavailable)")
+        else:
+            batches = data["batches"]
+            parts = [str(b["size"]) for b in batches]
+            held = data["held"] if data.get("held") is not None else "unknown"
+            total = sum(b["size"] for b in batches)
+            print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
+        data, note = source("bors_history")
+        if data:
+            print(f"Bors history ({note}):")
+            durations = {r["window"]: r for r in data["durations"]}
+            windows = {r["window"]: r for r in data["windows"]}
+            periods = ("1h", "3h", "24h", "7d")
+            rows = [("Completed batches", [str(windows[p]["completed_batches"]) for p in periods])]
+            success = []
             for period in periods:
-                runtime = durations.get(period, {}).get(metric)
-                builds.append(f"{int(runtime) // 60}m {int(runtime) % 60}s" if runtime is not None else "—")
-            rows.append((title, builds))
-        rows.append(("Build samples", [str(durations[p]["samples"]) if p in durations else "—" for p in periods]))
-        if any(windows[p]["landed_batches_without_receipts"] for p in periods):
-            rows.append(("Batches missing landing receipts", [str(windows[p]["landed_batches_without_receipts"]) for p in periods]))
-        width = max(len(title) for title, _ in rows)
-        print("  " + " " * width + "".join(f"{p:>10}" for p in periods))
-        for title, cells in rows:
-            print(f"  {title:<{width}}" + "".join(f"{cell:>10}" for cell in cells))
-        checked, total = data.get("runtime_runs_checked", 0), data.get("runtime_runs_total", 0)
-        print(f"  Build-time history: {checked}/{total} runs checked.")
-    else:
-        print("Bors history: unknown (background observation unavailable)")
+                row = windows[period]
+                decided = row["successful_batches"] + row["failed_batches"]
+                percent = round(100 * row["successful_batches"] / decided, 1) if decided else None
+                success.append(f"{percent:.1f}%" if percent is not None else "—")
+            rows.extend([("Succeeded", success),
+                         ("Canceled", [str(windows[p]["canceled_batches"]) for p in periods]),
+                         ("PRs landed", [str(windows[p]["landed_prs"]) for p in periods]),
+                         ("Staging runs / PR", [f"{windows[p]['mean_staging_runs_per_pr']:.2f}"
+                                                if windows[p]["mean_staging_runs_per_pr"] is not None else "—"
+                                                for p in periods])])
+            for title, metric in (("Build p50", "p50_seconds"), ("Build p95", "p95_seconds")):
+                builds = []
+                for period in periods:
+                    runtime = durations.get(period, {}).get(metric)
+                    builds.append(f"{int(runtime) // 60}m {int(runtime) % 60}s" if runtime is not None else "—")
+                rows.append((title, builds))
+            rows.append(("Build samples", [str(durations[p]["samples"]) if p in durations else "—" for p in periods]))
+            if any(windows[p]["landed_batches_without_receipts"] for p in periods):
+                rows.append(("Batches missing landing receipts", [str(windows[p]["landed_batches_without_receipts"]) for p in periods]))
+            width = max(len(title) for title, _ in rows)
+            print("  " + " " * width + "".join(f"{p:>10}" for p in periods))
+            for title, cells in rows:
+                print(f"  {title:<{width}}" + "".join(f"{cell:>10}" for cell in cells))
+            checked, total = data.get("runtime_runs_checked", 0), data.get("runtime_runs_total", 0)
+            print(f"  Build-time history: {checked}/{total} runs checked.")
+        else:
+            print("Bors history: unknown (background observation unavailable)")
+    if section == "bors":
+        return
     data, note = source("pools")
     if data is None:
         print("CI jobs running: unknown (prepared shared inventory unavailable)")

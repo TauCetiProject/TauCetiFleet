@@ -99,17 +99,10 @@ def loc_estimate(row):
     )
 
 
-def display(value, default_kinds=()):
+def display_storage(value):
     if not value.get("available"):
-        print("Activity: " + value.get("reason", "unavailable"))
         return
     s = value["summary"]
-    # An older preparer may not have published the new windows yet. Never
-    # invent shorter-window counts from a longer window or break cached status.
-    report_windows = tuple(w for w in WINDOWS if w in s["rounds"] and w in s["pr_windows"])
-    cost_windows = tuple(w for w in COST_WINDOWS if w in s.get("costs", {}).get("windows", {}))
-    age = max(0, int(time.time() - s["prepared_at"]))
-    print(f"Activity: prepared {age}s ago" + (" (stale)" if age > 180 else ""))
     if cleanup := s.get("storage_cleanup"):
         print(
             f"Storage cleanup: {cleanup.get('removed_count', len(cleanup.get('removed', [])))} paths removed; "
@@ -132,6 +125,21 @@ def display(value, default_kinds=()):
                 f"Expanded artifacts (latest preparation per worker): {expanded.get('hits', 0)} reused; "
                 f"{expanded.get('expanded', 0)} expanded; {expanded.get('seconds', 0):.1f}s preparation"
             )
+def display(value, default_kinds=(), *, storage=True, after_budget=None):
+    if not value.get("available"):
+        print("Activity: " + value.get("reason", "unavailable"))
+        if after_budget is not None:
+            after_budget()
+        return
+    s = value["summary"]
+    # An older preparer may not have published the new windows yet. Never
+    # invent shorter-window counts from a longer window or break cached status.
+    report_windows = tuple(w for w in WINDOWS if w in s["rounds"] and w in s["pr_windows"])
+    cost_windows = tuple(w for w in COST_WINDOWS if w in s.get("costs", {}).get("windows", {}))
+    age = max(0, int(time.time() - s["prepared_at"]))
+    print(f"Activity: prepared {age}s ago" + (" (stale)" if age > 180 else ""))
+    if storage:
+        display_storage(value)
 
     since = s.get("history_since")
     print("Activity since: " + (datetime.fromtimestamp(since, UTC).isoformat(timespec="seconds") if since else "none"))
@@ -325,6 +333,8 @@ def display(value, default_kinds=()):
         print(
             f"Budget: {amount(funding['available'])} available; {amount(funding['pending'])} pending; {amount(funding['grant_rate'])}/hour replenishment"
         )
+    if after_budget is not None:
+        after_budget()
     sharing = s.get("shared_mathlib")
     if sharing and (
         sharing.get("shared")
