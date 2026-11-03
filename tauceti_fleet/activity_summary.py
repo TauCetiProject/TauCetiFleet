@@ -125,7 +125,7 @@ def display_storage(value):
                 f"Expanded artifacts (latest preparation per worker): {expanded.get('hits', 0)} reused; "
                 f"{expanded.get('expanded', 0)} expanded; {expanded.get('seconds', 0):.1f}s preparation"
             )
-def display(value, default_kinds=(), *, storage=True, after_budget=None):
+def display(value, default_kinds=(), *, storage=True, recovery=True, after_budget=None):
     if not value.get("available"):
         print("Activity: " + value.get("reason", "unavailable"))
         if after_budget is not None:
@@ -371,39 +371,14 @@ def display(value, default_kinds=(), *, storage=True, after_budget=None):
                 messages.add(reason)
             for message in sorted(messages):
                 print(f"  {label}: {message}")
-    recovery = s.get("work_recovery")
-    if recovery and (any(recovery.get(key) for key in RECOVERY_COUNTS) or recovery.get("preparation_metadata_entries")):
-        print()
-        print(
-            f"Local work recovery: {recovery.get('records', 0)} saved, "
-            f"{recovery.get('retained', 0)} checkouts moved aside, "
-            f"{recovery.get('incomplete', 0)} incomplete, {recovery.get('corrupt', 0)} corrupt, {recovery.get('errors', 0)} errors"
-        )
-        if any(recovery.get(key, 0) for key in RECOVERY_COUNTS if key.startswith("recovery_")):
-            print(
-                "Repair recovery: "
-                + ", ".join(
-                    f"{recovery.get('recovery_' + state, 0)} {state.replace('_', '-')}"
-                    for state in (
-                        "eligible",
-                        "resuming",
-                        "verified",
-                        "publication_pending",
-                        "published",
-                        "obsolete",
-                        "blocked",
-                    )
-                )
-            )
-        print(
-            f"  Cleanup: {recovery.get('cleanup_backlog', 0)} queued, "
-            f"oldest {int(recovery.get('cleanup_oldest_age_seconds', 0))}s; "
-            f"preparation {recovery.get('preparation_seconds', 0):.3f}s, "
-            f"read {recovery.get('preparation_read_bytes', 0)}B, "
-            f"hashed {recovery.get('preparation_hash_bytes', 0)}B"
-        )
-        for reason in recovery.get("reasons", []):
-            print("  " + reason)
+    saved = s.get("work_recovery") or {}
+    if recovery and any(saved.get(key) for key in ("records", "retained", "incomplete", "corrupt", "errors")):
+        parts = [f"{saved.get('records', 0)} records"]
+        for key, label in (("retained", "checkouts moved aside"), ("incomplete", "incomplete"),
+                           ("corrupt", "corrupt"), ("errors", "errors")):
+            if saved.get(key):
+                parts.append(f"{saved[key]} {label}")
+        print("\nSaved work: " + "; ".join(parts))
     if ci_rows:
         table("CI history", headers, ci_rows, widths)
     print()

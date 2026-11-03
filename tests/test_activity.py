@@ -78,6 +78,9 @@ class ActivityTests(unittest.TestCase):
                 pressure=True,
             ),
             expanded_cache=dict(workers=2, hits=1200, expanded=10, seconds=4),
+            work_recovery=dict(records=57, incomplete=5, corrupt=0, errors=0,
+                               recovery_eligible=26, recovery_resuming=17, cleanup_backlog=219,
+                               reasons=["worker/round: Provider credit balance exhausted"]),
         )
         value = dict(available=True, summary=summary)
         with (
@@ -92,6 +95,12 @@ class ActivityTests(unittest.TestCase):
         self.assertIn("Managed caches: 64.0 GiB", output.getvalue())
         self.assertIn("32.0 GiB held by live workers", output.getvalue())
         self.assertIn("1200 reused; 10 expanded", output.getvalue())
+        self.assertIn("Saved work: 57 records; 5 incomplete", output.getvalue())
+        self.assertNotIn("Repair recovery:", output.getvalue())
+        self.assertNotIn("  Cleanup:", output.getvalue())
+        self.assertNotIn("Provider credit balance exhausted", output.getvalue())
+        self.assertEqual(summary["work_recovery"]["recovery_resuming"], 17)
+        self.assertEqual(len(summary["work_recovery"]["reasons"]), 1)
         self.assertEqual(combined["summary"]["storage_cleanup"]["managed_bytes"], 128 * 2**30)
         self.assertEqual(combined["summary"]["expanded_cache"]["hits"], 2400)
 
