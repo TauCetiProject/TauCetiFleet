@@ -60,6 +60,11 @@ class Publisher:
         self.archived_statistics = (
             saved.get("archived") if lean_statistics.valid(saved.get("archived")) else lean_statistics.empty()
         )
+        self.archived_keys = (
+            [x for x in saved.get("archived_keys", [])[-1024:] if isinstance(x, str) and len(x) < 512]
+            if isinstance(saved.get("archived_keys", []), list)
+            else []
+        )
         try:
             if collect:
                 self.statistics = lean_statistics.Collector(
@@ -104,12 +109,24 @@ class Publisher:
             cpu_percent=max(0, lean_pressure.cpu_percent(self.previous, current) - worker_percent),
             memory_total=total,
             memory_available=available,
+            statistics=1,
         )
         self.previous = current
         self.previous_worker = workers
         paths = set((state_dir() / "vms").glob("*/pressure.sock"))
+        try:
+            status = read(state_dir() / "status.json", {})
+            if not isinstance(status, dict):
+                status = {"unavailable": True}
+        except FleetError:
+            status = {"unavailable": True}
+        owned = (
+            {str(Path(v["directory"]) / "pressure.sock") for v in status["ci_vms"] if v.get("directory")}
+            if isinstance(status.get("ci_vms"), list)
+            else None
+        )
         for path in list(self.remote_statistics):
-            if Path(path) not in paths:
+            if Path(path) not in paths and (path not in owned if owned is not None else not status):
                 self.archive_statistics(path)
         for path in set(self.clients) - paths:
             self.clients.pop(path).close()
@@ -117,7 +134,8 @@ class Publisher:
             self.buffers.pop(path, None)
             self.granted.pop(path, None)
             self.granted_at.pop(path, None)
-            self.archive_statistics(str(path))
+            if owned is not None and str(path) not in owned:
+                self.archive_statistics(str(path))
         ordered = sorted(paths)
         if ordered:
             self.turn = (self.turn + 1) % len(ordered)
@@ -147,16 +165,7 @@ class Publisher:
                     while b"\n" in buffer:
                         request, buffer = buffer.split(b"\n", 1)
                         if request.startswith(b"S"):
-                            try:
-                                sample = json.loads(request[1:])
-                                if lean_statistics.valid(sample):
-                                    prior = self.remote_statistics.get(str(path), {})
-                                    if prior.get("since") != sample["since"]:
-                                        self.archive_statistics(str(path))
-                                    self.remote_statistics[str(path)] = sample
-                                    self.remote_statistics_times[str(path)] = time.time()
-                            except (ValueError, TypeError):
-                                pass
+                            self.observe_statistics(str(path), request[1:])
                             continue
                         fields = request.split(b":")
                         if (
@@ -185,7 +194,9 @@ class Publisher:
             except OSError:
                 # A slow or hostile guest cannot stall the other guests. Close
                 # after a partial frame too; the receiver discards that frame.
-                self.clients.pop(path).close()
+                client = self.clients.pop(path, None)
+                if client:
+                    client.close()
                 self.buffers.pop(path, None)
                 self.pending.pop(path, None)
                 self.granted.pop(path, None)
@@ -215,7 +226,8 @@ class Publisher:
             fresh = {
                 path
                 for path in self.remote_statistics
-                if type(self.remote_statistics_times.get(path)) in (int, float)
+                if Path(path) in self.clients
+                and type(self.remote_statistics_times.get(path)) in (int, float)
                 and 0 <= time.time() - self.remote_statistics_times[path] <= 10
             }
             ci_rows = [
@@ -229,6 +241,7 @@ class Publisher:
                 ci=lean_statistics.merge([self.archived_statistics, *ci_rows]),
                 sources=self.remote_statistics,
                 archived=self.archived_statistics,
+                archived_keys=self.archived_keys,
                 source_times=self.remote_statistics_times,
                 telemetry_guests=len(fresh),
                 connected_guests=len(self.clients),
@@ -239,15 +252,38 @@ class Publisher:
             atomic(state_dir() / "lean-statistics.json", value)
             atomic(
                 state_dir() / "lean-statistics-report.json",
-                {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived")},
+                {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived", "archived_keys")},
             )
 
     def archive_statistics(self, path):
         previous = self.remote_statistics.pop(path, None)
         self.remote_statistics_times.pop(path, None)
         if previous:
+            key = f"{path}@{float(previous['since']):.6f}"
+            if key in self.archived_keys:
+                return
             previous = dict(previous, waiting_now=0, running_now=0, oldest_wait=0.0)
             self.archived_statistics = lean_statistics.merge([self.archived_statistics, previous])
+            self.archived_keys = [*self.archived_keys, key][-1024:]
+
+    def observe_statistics(self, path, payload):
+        # Telemetry is untrusted and observational. Bound JSON nesting before
+        # decoding, and isolate every decoder/validation error from admission.
+        try:
+            if payload[:1] != b"{" or len(payload) > 4096 or payload.count(b"[") > 2 or payload.count(b"{") > 2:
+                return
+            sample = json.loads(payload)
+            if not lean_statistics.valid(sample):
+                return
+            if f"{path}@{float(sample['since']):.6f}" in self.archived_keys:
+                return
+            prior = self.remote_statistics.get(path, {})
+            if prior.get("since") != sample["since"]:
+                self.archive_statistics(path)
+            self.remote_statistics[path] = sample
+            self.remote_statistics_times[path] = time.time()
+        except Exception:
+            pass
 
 
 def legacy_compilers(known):
@@ -260,12 +296,15 @@ def legacy_compilers(known):
                 continue
             if "tauceti-fleet-workers.slice" not in (p / "cgroup").read_text():
                 continue
-            with (p / "cmdline").open("rb") as stream:
-                args = stream.read(2048).split(b"\0", 3)
-            name = (p / "comm").read_text().strip()
+            name = (p / "comm").read_text(errors="replace").strip()
             if name == "lean":
                 counts["running"] += 1
-            elif (
+                continue
+            if not name.startswith("python"):
+                continue
+            with (p / "cmdline").open("rb") as stream:
+                args = stream.read(2048).split(b"\0", 3)
+            if (
                 len(args) > 1
                 and b"python" in args[0]
                 and Path(os.fsdecode(args[1])).name in ("lean", "lean-real", "tauceti-lean")

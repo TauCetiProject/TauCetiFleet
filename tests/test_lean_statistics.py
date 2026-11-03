@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import math
 import os
 import socket
@@ -141,7 +142,7 @@ p.exec_lean(Path(sys.argv[3]),[])
         self.assertGreaterEqual(row["run_seconds"], 0.07)
 
     def test_observer_failure_does_not_change_compiler_exit_or_output(self):
-        trace = lean_pressure.Trace()
+        trace = lean_pressure.Trace.__new__(lean_pressure.Trace)
         a, b = socket.socketpair()
         b.close()
         trace.client = a
@@ -175,7 +176,8 @@ p.exec_lean(Path(sys.argv[3]),[])
         collector = stats.Collector(self.root / "other", initial=row)
         self.addCleanup(collector.close)
         sample = collector.snapshot()
-        self.assertEqual(sample["abandoned"], 2)
+        self.assertEqual(sample["abandoned"], 1)
+        self.assertEqual(sample["lost"], 1)
         self.assertEqual((sample["observed"], sample["completed"], sample["waiting_now"]), (3, 1, 0))
 
     def test_failed_timing_collector_cannot_stop_host_capacity_publication(self):
@@ -195,6 +197,135 @@ p.exec_lean(Path(sys.argv[3]),[])
             self.assertIsNone(publisher.statistics)
             self.assertEqual(store.read(self.root / "lean-host-pressure.json")["memory_available"], 50 * 1024**3)
             self.assertFalse(store.read(self.root / "lean-statistics-report.json")["worker_collector_available"])
+
+    def publisher(self):
+        with patch.object(lean_pressure, "cpu_sample", return_value=(100, 90)):
+            publisher = lean_host.Publisher(collect=False)
+        self.addCleanup(publisher.close)
+        return publisher
+
+    def test_hostile_nested_json_and_decoder_errors_cannot_affect_admission(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
+            publisher = self.publisher()
+            for payload in (b"[" * 2000, b'{"x":' + b"[" * 2000, b"{}" * 2000):
+                publisher.observe_statistics("guest", payload)
+            with patch.object(lean_host.json, "loads", side_effect=RecursionError("hostile nesting")):
+                publisher.observe_statistics("guest", b'{"version":1}')
+            row = stats.empty()
+            row["observed"] = 1
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            self.assertEqual(publisher.remote_statistics["guest"]["observed"], 1)
+            self.assertFalse(publisher.pending)
+
+    def test_archived_session_reappearance_is_not_counted_twice(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
+            publisher = self.publisher()
+            row = stats.empty()
+            row["observed"] = 3
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            publisher.archive_statistics("guest")
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            publisher.archive_statistics("guest")
+            self.assertEqual(publisher.archived_statistics["observed"], 3)
+            row.update(since=row["since"] + 1, observed=2)
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            publisher.archive_statistics("guest")
+            self.assertEqual(publisher.archived_statistics["observed"], 5)
+
+    def test_unavailable_socket_glob_does_not_archive_an_owned_guest(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
+            publisher = self.publisher()
+            path = str(self.root / "vms/guest/pressure.sock")
+            row = stats.empty()
+            row["observed"] = 3
+            publisher.observe_statistics(path, json.dumps(row).encode())
+            store.atomic(self.root / "status.json", dict(ci_vms=[dict(directory=str(self.root / "vms/guest"))]))
+            with (
+                patch.object(lean_pressure, "cpu_sample", return_value=(200, 180)),
+                patch.object(lean_pressure, "memory", return_value=(112 * 1024**3, 50 * 1024**3)),
+                patch.object(lean_host, "legacy_compilers", return_value=dict(waiting=0, running=0, _pids=[])),
+            ):
+                publisher.step()
+            self.assertIn(path, publisher.remote_statistics)
+            self.assertEqual(publisher.archived_statistics["observed"], 0)
+
+    def test_emfile_backs_off_accepts_without_losing_existing_observations(self):
+        import errno
+
+        self.collector.listen()
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(client.close)
+        client.connect(str(self.collector.path))
+        with patch.object(socket.socket, "accept", side_effect=OSError(errno.EMFILE, "full")):
+            self.collector.poll()
+        self.assertFalse(self.collector.listener_registered)
+        self.clock += 2
+        self.collector.poll()
+        self.assertTrue(self.collector.listener_registered)
+        self.assertEqual(self.collector.snapshot()["observed"], 1)
+
+    def test_telemetry_reserves_descriptors_when_hard_limit_cannot_grow(self):
+        import resource
+
+        with patch.object(resource, "getrlimit", return_value=(1024, 1024)):
+            collector = stats.Collector(self.root / "limited")
+        self.addCleanup(collector.close)
+        self.assertLessEqual(collector.max_clients, 384)
+
+    def test_guest_admission_handles_descriptors_above_select_limit(self):
+        import fcntl
+
+        from tauceti_fleet import lean_guest
+
+        try:
+            a, b = socket.socketpair()
+            self.addCleanup(a.close)
+            self.addCleanup(b.close)
+            high = fcntl.fcntl(a.fileno(), fcntl.F_DUPFD, 1100)
+        except OSError:
+            self.skipTest("hard descriptor limit below test fixture")
+        client = socket.socket(fileno=high)
+        self.addCleanup(client.close)
+        port, peer = socket.socketpair()
+        self.addCleanup(port.close)
+        self.addCleanup(peer.close)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.root / "admission"))
+        listener.listen()
+        broker = lean_guest.Broker()
+        broker.clients.append(client)
+        peer.sendall(b"{}\n")
+        peer.shutdown(socket.SHUT_WR)
+        broker.run(port.fileno(), listener)
+
+    def test_missing_permissions_on_optional_observer_and_lsp_are_harmless(self):
+        from unittest.mock import Mock
+
+        required = Mock()
+        required.exists.side_effect = PermissionError("not accessible")
+        with patch.object(lean_pressure, "HOST_REQUIRED", required):
+            self.assertIsNone(lean_pressure.Trace().client)
+        with (
+            patch.object(lean_pressure, "real_lean", return_value=Path("/real/lean")),
+            patch.object(lean_pressure, "Trace") as trace,
+            patch.object(lean_pressure, "wait_for_capacity") as wait,
+            patch.object(lean_pressure, "exec_lean", side_effect=SystemExit(0)),
+        ):
+            with self.assertRaises(SystemExit):
+                lean_pressure.main(["--server"])
+            trace.assert_not_called()
+            wait.assert_called_once()
+
+    def test_stale_reports_do_not_present_live_counts_as_current(self):
+        row = stats.empty()
+        row.update(observed=1, waiting_now=1, waited=1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stats.display(dict(at=time.time() - 30, workers=row, ci=stats.empty()))
+        self.assertIn("live counts unavailable", out.getvalue())
+        self.assertIn("unknown", out.getvalue())
+        self.assertEqual(stats.duration(86400), "1d")
 
 
 if __name__ == "__main__":

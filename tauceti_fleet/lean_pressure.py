@@ -37,28 +37,34 @@ class Trace:
 
     def __init__(self):
         self.client = None
-        path = (
-            Path("/usr/local/share/tauceti/lean-statistics.sock")
-            if HOST_REQUIRED.exists()
-            else Path("/run/user") / str(os.getuid()) / "tauceti-lean-statistics.sock"
-        )
         try:
+            path = (
+                Path("/usr/local/share/tauceti/lean-statistics.sock")
+                if HOST_REQUIRED.exists()
+                else Path("/run/user") / str(os.getuid()) / "tauceti-lean-statistics.sock"
+            )
             if path.exists():
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.settimeout(0.01)
                 client.connect(str(path))
                 client.set_inheritable(True)
                 self.client = client
-        except OSError:
+        except Exception:
             if "client" in locals():
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def event(self, phase):
         if self.client:
             try:
                 self.client.sendall(f"{phase}:{time.monotonic():.6f}\n".encode())
-            except OSError:
-                self.client.close()
+            except Exception:
+                try:
+                    self.client.close()
+                except Exception:
+                    pass
                 self.client = None
 
 
@@ -396,9 +402,10 @@ def main(args=None):
             return 0
         # Lake probes these during discovery. Keep them fast and stdout pristine.
         if args not in (["--githash"], ["--version"], ["-v"], ["--help"], ["-h"], ["--print-libdir"]):
-            _TRACE = Trace()
+            _TRACE = None if "--server" in args else Trace()
             wait_for_capacity()
-            _TRACE.event("run")
+            if _TRACE:
+                _TRACE.event("run")
         exec_lean(lean, args)
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:
         print(f"tauceti-lean: {error}", file=sys.stderr)

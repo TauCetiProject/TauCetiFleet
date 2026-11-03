@@ -1,8 +1,10 @@
 """Bounded, optional compiler timing telemetry. Never used for admission decisions."""
 
 import bisect
+import errno
 import json
 import math
+import resource
 import selectors
 import socket
 import struct
@@ -66,6 +68,8 @@ def empty():
         waited=0,
         completed=0,
         abandoned=0,
+        lost=0,
+        abandoned_wait_max=0.0,
         wait_seconds=0.0,
         run_seconds=0.0,
         probe_seconds=0.0,
@@ -81,7 +85,7 @@ def empty():
 def valid(value):
     if not isinstance(value, dict) or set(value) != set(empty()) or value.get("version") != 1:
         return False
-    for key in ("observed", "admitted", "waited", "completed", "abandoned", "waiting_now", "running_now"):
+    for key in ("observed", "admitted", "waited", "completed", "abandoned", "lost", "waiting_now", "running_now"):
         if type(value[key]) is not int or not 0 <= value[key] <= 10**12:
             return False
     if (
@@ -96,10 +100,23 @@ def valid(value):
         value["admitted"] > value["observed"]
         or value["waited"] > value["observed"]
         or value["completed"] > value["admitted"]
-        or sum(value["waits"]) > value["waited"]
+        or sum(value["waits"]) > min(value["waited"], value["admitted"])
+        or value["completed"] + value["abandoned"] + value["lost"] > value["observed"]
+        or value["waiting_now"] + value["running_now"] > value["observed"]
     ):
         return False
-    numbers = [value[k] for k in ("since", "wait_seconds", "run_seconds", "probe_seconds", "wait_max", "oldest_wait")]
+    numbers = [
+        value[k]
+        for k in (
+            "since",
+            "wait_seconds",
+            "run_seconds",
+            "probe_seconds",
+            "wait_max",
+            "oldest_wait",
+            "abandoned_wait_max",
+        )
+    ]
     return all(
         type(x) in (int, float) and math.isfinite(x) and 0 <= x <= 10**15
         for x in [*numbers, *value["reasons"].values()]
@@ -118,6 +135,7 @@ def merge(rows):
             "waited",
             "completed",
             "abandoned",
+            "lost",
             "wait_seconds",
             "run_seconds",
             "probe_seconds",
@@ -125,11 +143,27 @@ def merge(rows):
             "running_now",
         ):
             result[key] += row[key]
-        for key in ("wait_max", "oldest_wait"):
+        for key in ("wait_max", "oldest_wait", "abandoned_wait_max"):
             result[key] = max(result[key], row[key])
         result["waits"] = [a + b for a, b in zip(result["waits"], row["waits"], strict=True)]
         for key in REASONS:
             result["reasons"][key] += row["reasons"][key]
+    for key in ("observed", "admitted", "waited", "completed", "abandoned", "lost", "waiting_now", "running_now"):
+        result[key] = min(result[key], 10**12)
+    count = sum(result["waits"])
+    if count > 10**12:
+        result["waits"] = [int(n * 10**12 // count) for n in result["waits"]]
+    outcomes = sum(result[k] for k in ("completed", "abandoned", "lost"))
+    if outcomes > result["observed"]:
+        for key in ("completed", "abandoned", "lost"):
+            result[key] = int(result[key] * result["observed"] // outcomes)
+    active = result["waiting_now"] + result["running_now"]
+    if active > result["observed"]:
+        for key in ("waiting_now", "running_now"):
+            result[key] = int(result[key] * result["observed"] // active)
+    for key in ("wait_seconds", "run_seconds", "probe_seconds", "wait_max", "oldest_wait", "abandoned_wait_max"):
+        result[key] = min(result[key], 10**15)
+    result["reasons"] = {k: min(v, 10**15) for k, v in result["reasons"].items()}
     return result
 
 
@@ -150,16 +184,33 @@ class Collector:
 
     def __init__(self, path, *, now=time.monotonic, initial=None):
         self.path = Path(path)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY:
+            soft = 2**31
+        desired = 16384 if hard == resource.RLIM_INFINITY else min(16384, hard)
+        if soft < desired:
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+                soft = desired
+            except (OSError, ValueError):
+                pass
+        self.max_clients = min(4096, max(0, (soft - 256) // 2))
         self.now = now
         self.selector = selectors.DefaultSelector()
         self.clients = {}
         self.totals = json.loads(json.dumps(initial)) if valid(initial) else empty()
-        self.totals["abandoned"] += max(
-            0, self.totals["observed"] - self.totals["completed"] - self.totals["abandoned"]
+        unfinished = max(
+            0, self.totals["observed"] - self.totals["completed"] - self.totals["abandoned"] - self.totals["lost"]
         )
+        lost = min(unfinished, self.totals["running_now"])
+        self.totals["lost"] += lost
+        self.totals["abandoned"] += unfinished - lost
+        self.totals["abandoned_wait_max"] = max(self.totals["abandoned_wait_max"], self.totals["oldest_wait"])
         self.totals["waiting_now"] = self.totals["running_now"] = 0
         self.totals["oldest_wait"] = 0.0
         self.listener = None
+        self.accept_after = 0.0
+        self.listener_registered = False
 
     def listen(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,9 +221,10 @@ class Collector:
         self.path.chmod(0o666 if str(self.path).startswith("/usr/local/") else 0o600)
         self.listener.listen(256)
         self.selector.register(self.listener, selectors.EVENT_READ, None)
+        self.listener_registered = True
 
     def accept(self, client):
-        if len(self.clients) >= 4096:
+        if len(self.clients) >= self.max_clients:
             client.close()
             return
         client.setblocking(False)
@@ -213,7 +265,7 @@ class Collector:
             phase not in (*REASONS, "prepare", "probe", "run")
             or not math.isfinite(at)
             or at < state["at"] - 0.01
-            or abs(self.now() - at) > 600
+            or abs(self.now() - at) > 5
         ):
             raise ValueError("invalid compiler observation")
         at = max(at, state["at"])
@@ -237,10 +289,15 @@ class Collector:
         state = self.clients.pop(client)
         self.account(state, self.now())
         self.totals["completed" if state["started"] else "abandoned"] += 1
+        if not state["started"]:
+            self.totals["abandoned_wait_max"] = max(self.totals["abandoned_wait_max"], state["wait"])
         self.selector.unregister(client)
         client.close()
 
     def poll(self):
+        if self.listener and not self.listener_registered and self.now() >= self.accept_after:
+            self.selector.register(self.listener, selectors.EVENT_READ, None)
+            self.listener_registered = True
         for key, _ in self.selector.select(0):
             if key.data is None:
                 for _ in range(64):
@@ -249,6 +306,13 @@ class Collector:
                         self.accept(client)
                     except BlockingIOError:
                         break
+                    except OSError as error:
+                        if error.errno in (errno.EMFILE, errno.ENFILE):
+                            self.selector.unregister(self.listener)
+                            self.listener_registered = False
+                            self.accept_after = self.now() + 1
+                            break
+                        raise
                 continue
             client, state = key.fileobj, key.data
             try:
@@ -291,7 +355,8 @@ class Collector:
         for client in list(self.clients):
             self.finish(client)
         if self.listener:
-            self.selector.unregister(self.listener)
+            if self.listener_registered:
+                self.selector.unregister(self.listener)
             self.listener.close()
             self.path.unlink(missing_ok=True)
         self.selector.close()
@@ -302,13 +367,23 @@ def duration(value):
         return "—"
     if math.isinf(value):
         return ">1d"
-    return f"{value:.2g}s" if value < 60 else f"{value / 60:.2g}m"
+    if value < 60:
+        return f"{value:.2g}s"
+    if value < 3600:
+        return f"{value / 60:.2g}m"
+    if value < 86400:
+        return f"{value / 3600:.2g}h"
+    return f"{value / 86400:.2g}d"
 
 
 def display(value):
     if not isinstance(value, dict):
         return
     rows = [value.get(k, empty()) for k in ("workers", "ci")]
+    age = max(0.0, time.time() - value.get("at", 0))
+    stale = age > 10
+    if stale:
+        print(f"Lean timing observation is {duration(age)} old; live counts unavailable")
     if value.get("worker_collector_available") is False:
         print("Lean worker timing collector unavailable; retaining previous totals")
     legacy = value.get("legacy", {})
@@ -328,11 +403,17 @@ def display(value):
         print(f"  {label:24s}" + "".join(f"{v:>16s}" for v in values))
 
     line("Observed invocations", [str(r["observed"]) for r in rows])
+    line("Abandoned / lost traces", [f"{r['abandoned']} / {r['lost']}" for r in rows])
     line(
         "Timing since (UTC)",
-        [time.strftime("%H:%M:%S", time.gmtime(r["since"])) if r["observed"] else "—" for r in rows],
+        [
+            time.strftime("%Y-%m-%d %H:%M", time.gmtime(min(time.time(), r["since"]))) if r["observed"] else "—"
+            for r in rows
+        ],
     )
-    line("Waiting / running now", [f"{r['waiting_now']} / {r['running_now']}" for r in rows])
+    line(
+        "Waiting / running now", [f"{r['waiting_now']} / {r['running_now']}" if not stale else "unknown" for r in rows]
+    )
     line(
         "Invocations with waits", [f"{100 * r['waited'] / r['observed']:.1f}%" if r["observed"] else "—" for r in rows]
     )
@@ -346,7 +427,11 @@ def display(value):
         ],
     )
     line("Admitted wait p50 / p95", [f"{duration(percentile(r, 0.5))} / {duration(percentile(r, 0.95))}" for r in rows])
-    line("Max / oldest active wait", [f"{duration(r['wait_max'])} / {duration(r['oldest_wait'])}" for r in rows])
+    line(
+        "Admitted max / oldest now",
+        [f"{duration(r['wait_max'])} / {duration(r['oldest_wait']) if not stale else '?'}" for r in rows],
+    )
+    line("Abandoned maximum wait", [duration(r["abandoned_wait_max"]) for r in rows])
     line("CPU measurement probes", [duration(r["probe_seconds"]) for r in rows])
     for label, r in zip(("Workers", "CI"), rows, strict=True):
         causes = ", ".join(f"{k} {duration(v)}" for k, v in r["reasons"].items() if v)

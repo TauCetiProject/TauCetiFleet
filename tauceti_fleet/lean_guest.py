@@ -13,7 +13,12 @@ from pathlib import Path
 try:
     from . import lean_statistics
 except ImportError:  # Standalone copy installed in disposable guests.
-    import tauceti_lean_statistics as lean_statistics
+    try:
+        import tauceti_lean_statistics as lean_statistics
+    except Exception:
+        lean_statistics = None
+except Exception:
+    lean_statistics = None
 
 TARGET = Path("/usr/local/share/tauceti/host-pressure.json")
 PORT = Path("/dev/virtio-ports/org.tauceti.pressure")
@@ -77,6 +82,7 @@ class Broker:
         # A receiver restart cannot reuse a request the host already granted.
         self.request = 1 + secrets.randbits(48)
         self.statistics = None
+        self.statistics_supported = False
 
     def grant(self, value):
         age = time.time() - value.get("at", 0)
@@ -116,8 +122,11 @@ class Broker:
                     except (OSError, KeyError, ValueError):
                         pass
                     self.statistics = None
-            ready, _, _ = select.select([port, listener, *self.clients], [], [], 0.05)
-            if listener in ready:
+            poller = select.poll()
+            for fd in [port, listener, *self.clients]:
+                poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            ready = {fd for fd, _ in poller.poll(50)}
+            if listener.fileno() in ready:
                 client, _ = listener.accept()
                 client.settimeout(0.01)
                 if len(self.clients) < 256:
@@ -125,7 +134,7 @@ class Broker:
                 else:
                     client.close()
             for client in list(self.clients):
-                if client in ready:
+                if client.fileno() in ready:
                     # Clients send no data. Readability means a disconnected
                     # compiler, or malformed input; either is safe to discard.
                     client.close()
@@ -139,7 +148,9 @@ class Broker:
                     line, buffer = buffer.split(b"\n", 1)
                     last_reclaim = receive(io.BytesIO(line + b"\n"), last_reclaim=last_reclaim)
                     try:
-                        self.grant(json.loads(line))
+                        frame = json.loads(line)
+                        self.statistics_supported = frame.get("statistics") == 1
+                        self.grant(frame)
                     except (ValueError, TypeError, AttributeError):
                         pass
             if time.monotonic() - last_request >= 0.05:
@@ -147,11 +158,15 @@ class Broker:
                     port, (str(self.request if self.clients else 0) + ":" + str(len(self.clients)) + "\n").encode()
                 )
                 last_request = time.monotonic()
-            if self.statistics and time.monotonic() - getattr(self, "last_statistics", 0) >= 1:
-                frame = json.dumps(self.statistics.snapshot(), allow_nan=False, separators=(",", ":"))
+            if (
+                self.statistics
+                and self.statistics_supported
+                and time.monotonic() - getattr(self, "last_statistics", 0) >= 1
+            ):
                 try:
+                    frame = json.dumps(self.statistics.snapshot(), allow_nan=False, separators=(",", ":"))
                     os.write(port, ("S" + frame + "\n").encode())
-                except OSError:
+                except Exception:
                     pass
                 self.last_statistics = time.monotonic()
 
@@ -162,7 +177,7 @@ def main():
     try:
         broker.statistics = lean_statistics.Collector("/usr/local/share/tauceti/lean-statistics.sock")
         broker.statistics.listen()
-    except OSError:
+    except Exception:
         broker.statistics = None
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(SOCKET))
