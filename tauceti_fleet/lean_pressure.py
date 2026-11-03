@@ -34,8 +34,10 @@ def host_pressure():
     try:
         value = json.loads(HOST_PRESSURE.read_text())
         age = time.monotonic() - value["received_monotonic"]
+        source_age = time.time() - value["at"]
         cpu, total, available = (value[k] for k in ("cpu_percent", "memory_total", "memory_available"))
         if (value.get("version") != 1 or not 0 <= age <= MAX_SAMPLE_AGE
+                or not -2 <= source_age <= MAX_SAMPLE_AGE
                 or any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
                 or not 0 <= cpu <= 100 or not 0 <= available <= total or total <= 0):
             return None

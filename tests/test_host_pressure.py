@@ -29,7 +29,10 @@ class HostPressure(unittest.TestCase):
         p = patch.object(lean_pressure.time, "monotonic", return_value=100)
         p.start()
         self.addCleanup(p.stop)
-        self.value = dict(version=1, received_monotonic=100, cpu_percent=20,
+        p = patch.object(lean_pressure.time, "time", return_value=100)
+        p.start()
+        self.addCleanup(p.stop)
+        self.value = dict(version=1, at=100, received_monotonic=100, cpu_percent=20,
                           memory_total=112 * GIB, memory_available=50 * GIB)
 
     def sample(self, **changes):
@@ -63,6 +66,12 @@ class HostPressure(unittest.TestCase):
         self.assertFalse(lean_pressure.capacity_available())
         self.required.unlink()
         self.assertIsNone(lean_pressure.capacity_available())
+
+    def test_buffered_old_host_frames_do_not_become_fresh_when_guest_resumes(self):
+        self.sample(at=89, received_monotonic=100)
+        self.assertFalse(lean_pressure.capacity_available())
+        self.sample(at=103, received_monotonic=100)
+        self.assertFalse(lean_pressure.capacity_available())
 
     def test_receiver_cache_is_readable_in_sandbox_without_network_or_environment(self):
         frame = json.dumps(dict(self.value, received_monotonic=-100)).encode() + b"\n"
