@@ -102,13 +102,19 @@ print(json.dumps(dict(installed=True,release=digest)))
 def archive():
     root = Path(__file__).resolve().parent
     stream = io.BytesIO()
+    def member(zipped, name, contents):
+        # A release is identified by contents, including when a host packages
+        # its own extracted installation. Extraction timestamps are incidental.
+        entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        zipped.writestr(entry, contents)
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zipped:
         for path in sorted(root.glob("*.py")):
-            zipped.write(path, "tauceti_fleet/" + path.name)
+            member(zipped, "tauceti_fleet/" + path.name, path.read_bytes())
         manifest = read(root / "release.json", read(root.parent / "release.json", {}))
         if not manifest.get("worker_revision"):
             raise FleetError("Release manifest has no pinned worker revision")
-        zipped.writestr("release.json", json.dumps(manifest))
+        member(zipped, "release.json", json.dumps(manifest, sort_keys=True))
     return stream.getvalue()
 
 

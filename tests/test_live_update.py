@@ -222,6 +222,17 @@ class LiveUpdate(unittest.TestCase):
         self.assertFalse((store.config_dir() / "inventory.json").exists())
         self.assert_work_preserved()
 
+    def test_release_archive_ignores_extraction_timestamps(self):
+        package = self.home / "package"
+        package.mkdir()
+        module = package / "module.py"
+        module.write_text("print('release contents')\n")
+        store.atomic(package / "release.json", dict(worker_revision=self.revision))
+        with patch.object(remote, "__file__", str(package / "remote.py")):
+            before = remote.archive()
+            os.utime(module, (1000000000, 1000000000))
+            self.assertEqual(remote.archive(), before)
+
     def test_bootstrap_staged_code_checks_identity_before_switching_current(self):
         raw = remote.archive()
         result = subprocess.run([os.sys.executable, "-c", remote.BOOTSTRAP, "live", "c" * 32],
