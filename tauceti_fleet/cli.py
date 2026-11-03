@@ -339,13 +339,19 @@ def main(argv=None, *, _status_results=None):
                         )
                     if status.get("workers"):
                         print()
+                    groups = {}
                     for worker in status.get("workers", []):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
-                        print(f"  {worker['id']}: {state} — {worker.get('detail') or ''}")
-                        if worker.get("isolation_error"):
-                            print("    Isolation degraded: " + worker["isolation_error"])
+                        error = worker.get("isolation_error")
+                        key = (state, worker.get("detail") or "", error, worker["id"] if error else None)
+                        groups.setdefault(key, []).append(worker["id"])
+                    for (state, detail, error, _), workers in groups.items():
+                        label = workers[0] if len(workers) == 1 else f"{len(workers)} workers"
+                        print(f"  {label}: {state} — {detail}")
+                        if error:
+                            print("    Isolation degraded: " + error)
                     isolation = status.get("worker_isolation", {})
                     if isolation.get("events"):
                         print("\nRecent userspace OOM events (separate from kernel OOM counters):")
