@@ -272,7 +272,7 @@ def main(argv=None, *, _status_results=None):
                     if pressure is not None:
                         health = "healthy" if pressure.get("healthy") else "STALE or unavailable; new CI compilers wait"
                         print(f"Lean host admission: {health}; {pressure.get('guests', 0)} guests connected; "
-                              f"{pressure.get('waiting_guests', 0)} guests waiting")
+                              f"{pressure.get('waiting_guests', 0)} guests requesting starts")
                     if value.get('lean_statistics'):
                         from .lean_statistics import display as show_lean_statistics
 

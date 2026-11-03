@@ -371,6 +371,7 @@ def _start(config):
             busy=False,
             phase="starting",
             pressure_protocol=2,
+            lean_statistics_protocol=1,
             **guest_shape(config),
         )
         # Record the prospective unit before launch: a controller/process crash

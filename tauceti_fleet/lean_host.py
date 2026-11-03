@@ -233,6 +233,7 @@ class Publisher:
                 telemetry_guests=len(fresh),
                 connected_guests=len(self.clients),
                 worker_collector_available=self.statistics is not None,
+                wait_bucket_upper_seconds=[*lean_statistics.BINS, None],
                 legacy=getattr(self, "legacy", {}),
             )
             atomic(state_dir() / "lean-statistics.json", value)
@@ -256,6 +257,8 @@ def legacy_compilers(known):
             continue
         try:
             if p.stat().st_uid != os.getuid():
+                continue
+            if "tauceti-fleet-workers.slice" not in (p / "cgroup").read_text():
                 continue
             with (p / "cmdline").open("rb") as stream:
                 args = stream.read(2048).split(b"\0", 3)
