@@ -5,6 +5,7 @@ import json
 import math
 import os
 import select
+import secrets
 import socket
 import time
 from pathlib import Path
@@ -64,7 +65,8 @@ def receive(stream, target=TARGET, last_reclaim=-math.inf):
 class Broker:
     def __init__(self):
         self.clients = []
-        self.request = 1
+        # A receiver restart cannot reuse a request the host already granted.
+        self.request = 1 + secrets.randbits(48)
 
     def grant(self, value):
         age = time.time() - value.get('at', 0)

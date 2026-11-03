@@ -104,6 +104,7 @@ class Publisher:
                 self.clients.pop(path).close()
                 self.buffers.pop(path, None)
                 self.pending.pop(path, None)
+                self.granted.pop(path, None)
         atomic(state_dir() / "lean-host-pressure.json", dict(value, guests=len(self.clients),
                waiting_guests=sum(bool(n) and n != self.granted.get(p) for p, n in self.pending.items())))
 

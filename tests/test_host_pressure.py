@@ -198,21 +198,22 @@ class HostPressure(unittest.TestCase):
 
     def test_guest_rejects_replayed_or_stale_permissions_and_serves_only_one_waiter(self):
         broker = lean_guest.Broker()
+        request = broker.request
         a, b = socket.socketpair()
         c, d = socket.socketpair()
         for s in (a, b, c, d):
             self.addCleanup(s.close)
             s.settimeout(0.01)
         broker.clients.extend([a, c])
-        broker.grant(dict(self.value, permit=1))
+        broker.grant(dict(self.value, permit=request))
         self.assertEqual(b.recv(1), b'1')
-        broker.grant(dict(self.value, permit=1))
+        broker.grant(dict(self.value, permit=request))
         with self.assertRaises(TimeoutError):
             d.recv(1)
-        broker.grant(dict(self.value, permit=2, at=80))
+        broker.grant(dict(self.value, permit=request + 1, at=80))
         with self.assertRaises(TimeoutError):
             d.recv(1)
-        broker.grant(dict(self.value, permit=2))
+        broker.grant(dict(self.value, permit=request + 1))
         self.assertEqual(d.recv(1), b'1')
 
 

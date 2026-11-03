@@ -7,7 +7,7 @@ from . import lean_guest, lean_pressure
 
 # Disposable guests install toolchains during a job, before later sandbox steps
 # clear the environment. Host workers need only the scoped PATH alias and overlay.
-STARTUP = """if [ -n "${TAUCETI_LEAN_WRAPPER:-}" ] && [ -n "${WATCHDOG_TOOLCHAIN:-}" ] && [ -L "$WATCHDOG_TOOLCHAIN/bin/lean-real" ] && [ ! -e "$WATCHDOG_TOOLCHAIN/bin/lean-watchdog" ]; then
+STARTUP = """if [ -n "${TAUCETI_LEAN_WRAPPER:-}" ] && [ -n "${WATCHDOG_TOOLCHAIN:-}" ] && [ -L "$WATCHDOG_TOOLCHAIN/bin/lean-real" ] && [ ! -e "$WATCHDOG_TOOLCHAIN/.tauceti-lean-ready" ]; then
     BASH_ENV= "$TAUCETI_LEAN_WRAPPER" --install-watchdog "$WATCHDOG_TOOLCHAIN/bin/lean-real" ||
         printf '%s\\n' '::warning::Lean pressure gate could not wrap the watchdog; continuing without the gate' >&2
 fi

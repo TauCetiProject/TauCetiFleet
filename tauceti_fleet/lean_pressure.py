@@ -243,6 +243,7 @@ def install_watchdog(binary):
         fcntl.flock(lock, fcntl.LOCK_EX)
         command = binary.parent / "lean"
         if is_wrapper(command):
+            (root / ".tauceti-lean-ready").touch()
             return
         if not binary.is_symlink():
             raise ValueError("expected an unmodified watchdog compiler symlink")
@@ -259,6 +260,7 @@ def install_watchdog(binary):
                 stream.write(source)
             os.chmod(temporary, 0o755)
             os.replace(temporary, command)
+            (root / ".tauceti-lean-ready").touch()
         finally:
             Path(temporary).unlink(missing_ok=True)
 
