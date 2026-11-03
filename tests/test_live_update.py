@@ -1,4 +1,5 @@
 import io
+import fcntl
 import json
 import os
 import shlex
@@ -159,6 +160,10 @@ class LiveUpdate(unittest.TestCase):
         def command(argv, **kwargs):
             calls.append(argv)
             if "kill" in argv:
+                for slot in range(5):
+                    with update.vm.slot_file({"ci_slot": slot}, "vm.lock").open("a") as stream:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 store.atomic(store.state_dir() / "status.json", dict(observed_at=time.time() + 1, error=None))
             return subprocess.CompletedProcess(argv, 0)
         with patch.object(update, "service", return_value=dict(MainPID="42", Restart="on-failure")), \
@@ -166,6 +171,9 @@ class LiveUpdate(unittest.TestCase):
             update.handover(self.previous, rollback=True)
         self.assertIn("reset-failed", calls[0])
         self.assertIn("--signal=SIGKILL", calls[1])
+        # Locks cover the kill only, never the replacement controller's startup.
+        with update.vm.slot_file({"ci_slot": 0}, "vm.lock").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_unexpected_activation_errors_restore_release_without_signalling_healthy_controller(self):
         original = update.write_binary

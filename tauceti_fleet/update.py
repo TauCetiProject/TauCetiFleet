@@ -1,5 +1,6 @@
 """Stage releases and hand the controller over without stopping useful work."""
 
+import contextlib
 import os
 import re
 import shlex
@@ -8,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import capacity, vm
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
@@ -84,8 +86,16 @@ def handover(release, *, rollback=False, on_signal=None):
         extend_admission()
         # Legacy controllers empty the admission lease on SIGTERM. Kill only
         # their main process; independent worker scopes and VM services survive.
-        run(["systemctl", "--user", "kill", "--kill-whom=main",
-             "--signal=" + ("SIGHUP" if modern else "SIGKILL"), "tauceti-fleet.service"])
+        with contextlib.ExitStack() as transactions:
+            if not modern:
+                # A legacy direct-registration host has no durable intent before
+                # the JIT reply. Finish any slot transaction before SIGKILL, then
+                # release the locks immediately so the replacement can adopt it.
+                indexes = sorted(set(range(capacity.jobs(host_config()))) | set(vm.slots_in_use()))
+                for index in indexes:
+                    transactions.enter_context(locked(vm.slot_file({"ci_slot": index}, "vm.lock")))
+            run(["systemctl", "--user", "kill", "--kill-whom=main",
+                 "--signal=" + ("SIGHUP" if modern else "SIGKILL"), "tauceti-fleet.service"])
     else:
         if not rollback:
             run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
