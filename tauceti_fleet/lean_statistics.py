@@ -202,9 +202,9 @@ class Collector:
         unfinished = max(
             0, self.totals["observed"] - self.totals["completed"] - self.totals["abandoned"] - self.totals["lost"]
         )
-        lost = min(unfinished, self.totals["running_now"])
-        self.totals["lost"] += lost
-        self.totals["abandoned"] += unfinished - lost
+        # Restarting an observer does not cancel compilers, including compilers
+        # which are still waiting. Their later outcomes are simply unknown.
+        self.totals["lost"] += unfinished
         self.totals["abandoned_wait_max"] = max(self.totals["abandoned_wait_max"], self.totals["oldest_wait"])
         self.totals["waiting_now"] = self.totals["running_now"] = 0
         self.totals["oldest_wait"] = 0.0
@@ -408,7 +408,7 @@ def display(value):
         print(f"  {label:24s}" + "".join(f"{v:>16s}" for v in values))
 
     line("Observed invocations", [str(r["observed"]) for r in rows])
-    line("Abandoned / lost traces", [f"{r['abandoned']} / {r['lost']}" for r in rows])
+    line("Incomplete timings", [str(r["abandoned"] + r["lost"]) for r in rows])
     line(
         "Timing since (UTC)",
         [
@@ -436,7 +436,7 @@ def display(value):
         "Admitted max / oldest now",
         [f"{duration(r['wait_max'])} / {duration(r['oldest_wait']) if not stale else '?'}" for r in rows],
     )
-    line("Abandoned maximum wait", [duration(r["abandoned_wait_max"]) for r in rows])
+    line("Max incomplete wait", [duration(r["abandoned_wait_max"]) for r in rows])
     line("CPU measurement probes", [duration(r["probe_seconds"]) for r in rows])
     for label, r in zip(("Workers", "CI"), rows, strict=True):
         causes = ", ".join(f"{k} {duration(v)}" for k, v in r["reasons"].items() if v)

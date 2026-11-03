@@ -57,6 +57,12 @@ class Publisher:
         self.last_workers = (
             saved.get("workers") if lean_statistics.valid(saved.get("workers")) else lean_statistics.empty()
         )
+        if saved.get("restart_loss_accounting") != 2:
+            # Earlier reports could not distinguish a cancelled wait from an
+            # observation interrupted by our own restart. Preserve it as unknown.
+            self.last_workers = dict(
+                self.last_workers, lost=self.last_workers["lost"] + self.last_workers["abandoned"], abandoned=0
+            )
         self.archived_statistics = (
             saved.get("archived") if lean_statistics.valid(saved.get("archived")) else lean_statistics.empty()
         )
@@ -69,7 +75,7 @@ class Publisher:
         try:
             if collect:
                 self.statistics = lean_statistics.Collector(
-                    Path("/run/user") / str(os.getuid()) / "tauceti-lean-statistics.sock", initial=saved.get("workers")
+                    Path("/run/user") / str(os.getuid()) / "tauceti-lean-statistics.sock", initial=self.last_workers
                 )
                 self.statistics.listen()
         except OSError:
@@ -248,6 +254,7 @@ class Publisher:
             ]
             value = dict(
                 version=1,
+                restart_loss_accounting=2,
                 at=time.time(),
                 workers=workers,
                 ci=lean_statistics.merge([self.archived_statistics, *ci_rows]),
