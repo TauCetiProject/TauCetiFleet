@@ -389,7 +389,7 @@ snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
 
-The first lines report Bors batch sizes, one line of running jobs by runner pool,
+The first lines report running jobs by runner pool,
 the queued PR-build and total workflow backlogs, and account authoring pressure
 against its configured PR limit. Running-job counts cover all organization
 workflows, including small control jobs. Backlog counts are queued workflow runs,
@@ -397,6 +397,12 @@ not individual jobs. Authoring pressure uses the workers' complete cached survey
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
 limit is reached. Missing facts are unknown; old observations retain their age.
+
+Bors batch sizes and history follow the spending/budget tables. Per-host OOM
+events and storage/cache diagnostics appear later, after those tables; the fleet
+total does not repeat each host's storage statistics. Storage figures describe
+the last background cleanup, and artifact reuse/time counters sum the latest
+preparation report per worker rather than measuring current work.
 
 `status` only reads a small prepared file for these lines. The independent
 `tauceti-fleet-observe.timer` prepares observations about every five minutes,

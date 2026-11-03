@@ -81,6 +81,20 @@ def print_doctor(value):
                 print("          Ask administrator: " + check["administrator_request"])
 
 
+def print_isolation(status):
+    isolation = status.get("worker_isolation", {})
+    if isolation.get("events"):
+        print("\nRecent userspace OOM events (separate from kernel OOM counters):")
+        for event in isolation["events"][-3:]:
+            when = datetime.fromtimestamp(event["at"], UTC).strftime("%m-%d %H:%M:%S UTC")
+            recovered = sum(event.get("replacement_alive", {}).values())
+            outcome = (f"{recovered}/{len(event['workers'])} replacements alive"
+                       if event["workers"] else event.get("role", "other host unit"))
+            print(f"  {when}: {event['unit']}; ancestor {event['ancestor']}; {outcome}")
+    if isolation.get("error"):
+        print("Isolation diagnostics: " + isolation["error"])
+
+
 def main(argv=None, *, _status_results=None):
     args = parser().parse_args(argv)
     try:
@@ -232,10 +246,20 @@ def main(argv=None, *, _status_results=None):
 
             pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
             overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
+            bors_printed = False
+
+            def show_bors():
+                nonlocal bors_printed
+                if not bors_printed:
+                    print()
+                    ci_overview.display(overview, section="bors")
+                    print()
+                    bors_printed = True
+
             if args.json:
                 results["_ci"] = overview
             else:
-                ci_overview.display(overview)
+                ci_overview.display(overview, section="overview")
                 print()
         if args.json:
             if fleet is not None:
@@ -352,24 +376,27 @@ def main(argv=None, *, _status_results=None):
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
-                    isolation = status.get("worker_isolation", {})
-                    if isolation.get("events"):
-                        print("\nRecent userspace OOM events (separate from kernel OOM counters):")
-                        for event in isolation["events"][-3:]:
-                            when = datetime.fromtimestamp(event["at"], UTC).strftime("%m-%d %H:%M:%S UTC")
-                            recovered = sum(event.get("replacement_alive", {}).values())
-                            outcome = (f"{recovered}/{len(event['workers'])} replacements alive"
-                                       if event["workers"] else event.get("role", "other host unit"))
-                            print(f"  {when}: {event['unit']}; ancestor {event['ancestor']}; {outcome}")
-                    if isolation.get("error"):
-                        print("Isolation diagnostics: " + isolation["error"])
                     print()
-                    activity.display(value.get("activity", {}))
+                    activity.display(value.get("activity", {}), storage=False,
+                                     after_budget=show_bors if fleet is None else None)
                 else:
                     print(json.dumps(value, indent=2))
             if fleet is not None:
                 print("\nFleet totals:")
-                activity.display(fleet)
+                activity.display(fleet, storage=False, after_budget=show_bors)
+            if args.command == "status":
+                show_bors()
+                for name, value in results.items():
+                    status = value.get("status", {})
+                    isolation = status.get("worker_isolation", {})
+                    summary = value.get("activity", {}).get("summary") or {}
+                    storage = summary.get("storage_cleanup") or summary.get("expanded_cache", {}).get("workers")
+                    if isolation.get("events") or isolation.get("error") or storage:
+                        print(f"\n{name} diagnostics:")
+                        print_isolation(status)
+                        if storage:
+                            print()
+                            activity.display_storage(value.get("activity", {}))
         return 1 if any("error" in value for value in results.values()) else 0
     except (FleetError, OSError, ValueError) as exc:
         print("tauceti-fleet: " + str(exc), file=sys.stderr)

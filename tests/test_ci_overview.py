@@ -298,6 +298,32 @@ class Overview(unittest.TestCase):
         self.assertIn("Tauchonki 12", lines[0])
         self.assertIn("Namespace 15", lines[0])
 
+    def test_bors_follows_budgets_and_host_diagnostics_come_last(self):
+        summary = dict(prepared_at=time.time(), history_since=1,
+                       rounds={},
+                       pr_windows={}, running=0, open_prs=0, unknown_prs=0, unknown_landings=0,
+                       costs=dict(funding=dict(balance="10", available="10", pending="0", grant_rate="1")),
+                       storage_cleanup=dict(removed_count=4, free_bytes=100 * 2**30))
+        periods = ("1h", "3h", "24h", "7d", "total")
+        summary["rounds"] = {p: {} for p in periods}
+        summary["pr_windows"] = {p: {} for p in periods}
+        value = dict(machine_id=self.config["machine_id"],
+                     activity=dict(available=True, summary=summary),
+                     status=dict(workers=[], worker_isolation=dict(events=[dict(
+                         at=100, unit="worker.scope", ancestor="workers.slice", workers=[])])))
+        for count in (1, 2):
+            entries = {f"host{i}": dict(target=f"host{i}", machine_id=str(i)) for i in range(count)}
+            values = {name: dict(value, machine_id=entry["machine_id"]) for name, entry in entries.items()}
+            out = io.StringIO()
+            with patch.object(remote, "inventory", return_value=entries), patch.object(remote, "call", side_effect=AssertionError("network during rendering")), contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["status"], _status_results=values), 0)
+            text = out.getvalue()
+            self.assertEqual(text.count("Bors:"), 1)
+            self.assertEqual(text.count("Storage cleanup:"), count)
+            self.assertLess(text.rindex("Budget:"), text.index("Bors:"))
+            self.assertLess(text.index("Bors:"), text.index("Recent userspace OOM"))
+            self.assertLess(text.index("Recent userspace OOM"), text.index("Storage cleanup:"))
+
     def test_timer_is_independent_of_foreground_status_and_preserves_paths(self):
         units = overview.unit_files('"/home/user/tauceti-fleet" "collect-status"', dict(TAUCETI_FLEET_STATE="/other/state"))
         self.assertIn("OnUnitInactiveSec=300", units["tauceti-fleet-observe.timer"])
