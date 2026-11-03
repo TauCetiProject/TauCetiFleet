@@ -256,17 +256,36 @@ The memory-use threshold has a 60% floor for small machines. Retries sleep for
 independent random 1–5 second intervals. Both host workers and newly started CI
 guests receive `LAKE_OVERRIDE_LEAN=true` and the standalone wrapper. Workers use
 a scoped PATH alias and toolchain overlay. A CI-only Bash hook wraps the prepared
-watchdog's compiler link so the CI sandbox also uses the gate. It leaves the
+watchdog entry point, so capacity waits do not spend the compiler's execution
+deadline. It leaves the
 official Lean installation untouched, preserving toolchain snapshot cache hits.
 Metadata probes stay fast and ordinary waits stay silent for `lake build --iofail`.
 Already-running guests finish with their existing setup before replacement.
+
+CI guests use the host's CPU and memory pressure rather than their own utilization
+percentages. A separate user service samples the host once per second, inside
+the same ancestor memory limits as CI, and broadcasts a small JSON frame over
+dedicated virtio serial ports. It accepts no guest commands and makes no network
+or GitHub API requests. A root guest service caches the frame under `/usr/local`,
+readable through the existing offline sandbox's read-only `/usr` mount. Missing,
+invalid, or ten-second-old observations make new compilers wait; existing
+compilers continue. Guest file caches are released at most once per 30 seconds
+when the host needs RAM, allowing free-page reporting to return it to the host.
+The only guest-local admission check is enough absolute RAM for one measured
+worst-case file; a guest's old 60% utilization threshold no longer applies.
+
+Fresh guests expose at least all effective host CPUs and the aggregate CI RAM
+ceiling, rounded up to GiB. `ci_vcpus` and `ci_memory_gib` are minimum virtual
+sizes. No CPU pinning or memory preallocation is added. The physical parent and
+CI slice limits remain the shared emergency bounds. Existing guests retain
+their sizes and admission setup until they complete and are replaced.
 
 Workers and CI can use whatever RAM is currently free. Their parent
 `tauceti-fleet.slice` limits combined resident memory to host RAM minus the OS
 reserve and 1 GiB swap allowance. Worker hard limits no longer reserve CI's full
 configured RAM in advance. CI defaults to the same shared ceiling; an explicit
-`ci_memory_budget_gib` still applies to its child slice. This does not change guest
-RAM shapes or CPU priorities. Concurrent compilers can still grow after passing
+`ci_memory_budget_gib` still applies to its child slice. CPU priorities are
+unchanged. Concurrent compilers can still grow after passing
 the gate, so the aggregate emergency bound remains necessary. Worker processes
 have `OOMScoreAdjust=500`, biasing kernel OOM victim selection toward workers;
 this does not guarantee protection for large CI guests.

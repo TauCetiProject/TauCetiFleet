@@ -3,7 +3,7 @@
 import shlex
 from pathlib import Path
 
-from . import lean_pressure
+from . import lean_guest, lean_pressure
 
 # Disposable guests install toolchains during a job, before later sandbox steps
 # clear the environment. Host workers need only the scoped PATH alias and overlay.
@@ -17,7 +17,15 @@ fi
 def ci_commands():
     binary = "/usr/local/bin/tauceti-lean"
     startup = "/opt/tauceti-lean-env"
+    receiver = "/usr/local/bin/tauceti-host-pressure"
+    unit = ("[Unit]\nDescription=Read host pressure for Lean admission\n\n[Service]\n"
+            "ExecStart=/usr/bin/python3 " + receiver + "\nRestart=always\nRestartSec=1\n"
+            "\n[Install]\nWantedBy=multi-user.target\n")
     return [
+        "install -d -m 755 /usr/local/share/tauceti; touch /usr/local/share/tauceti/host-pressure.required",
+        "printf %s " + shlex.quote(Path(lean_guest.__file__).read_text()) + " > " + receiver,
+        "printf %s " + shlex.quote(unit) + " > /etc/systemd/system/tauceti-host-pressure.service; "
+        "systemctl daemon-reload; systemctl enable --now tauceti-host-pressure.service",
         "printf %s " + shlex.quote(Path(lean_pressure.__file__).read_text()) + " > " + binary + "; chmod 755 " + binary,
         "printf %s " + shlex.quote(STARTUP) + " > " + startup,
         "printf '%s\\n' "

@@ -24,6 +24,9 @@ class LeanRuntime(unittest.TestCase):
             (watchdog / "bin").mkdir(parents=True)
             wrapped = watchdog / "bin/lean-real"
             wrapped.symlink_to(compiler)
+            entry = watchdog / "bin/lean"
+            entry.write_text('#!/bin/sh\nexec "$(dirname "$0")/lean-real" "$@"\n')
+            entry.chmod(0o755)
             helper = root / "tauceti-lean"
             helper.write_bytes(Path(lean_pressure.__file__).read_bytes())
             helper.chmod(0o755)
@@ -44,14 +47,14 @@ class LeanRuntime(unittest.TestCase):
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(wrapped.is_symlink())
+            self.assertTrue(wrapped.is_symlink())
             self.assertEqual(compiler.read_bytes(), snapshot)
             self.assertEqual(sorted(p.name for p in toolchain.rglob("*")), ["bin", "lean"])
             result = subprocess.run(
-                [str(wrapped), "--print-prefix"], env={"PATH": os.environ["PATH"]}, text=True, capture_output=True
+                [str(entry), "--print-prefix"], env={"PATH": os.environ["PATH"]}, text=True, capture_output=True
             )
             self.assertEqual(result.stdout.strip(), str(watchdog))
-            result = subprocess.run([str(wrapped), "--githash"], capture_output=True, text=True)
+            result = subprocess.run([str(entry), "--githash"], capture_output=True, text=True)
             self.assertEqual(result.stdout.strip(), "compiler")
 
     def test_ci_startup_does_not_recurse_through_a_bash_python_shim(self):

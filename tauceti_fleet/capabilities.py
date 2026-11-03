@@ -250,10 +250,11 @@ def doctor(config=None, *, probe=True):
         f"Effective allocation: {caps['cpus']:g} CPUs, {caps['memory_total'] / GIB:.1f} GiB RAM",
         "Effective ancestor cgroup limits must be readable",
     )
-    from .capacity import disk_root, disk_startup_gib, jobs, kinds, memory_budget_gib
+    from .capacity import disk_root, disk_startup_gib, guest_shape, jobs, kinds, memory_budget_gib
 
     count = jobs(config)
-    ci_memory = count * config["ci_memory_gib"] * GIB
+    shape = guest_shape(config, caps)
+    ci_memory = count * shape["memory_gib"] * GIB
     budget = memory_budget_gib(config, caps) * GIB
     overcommit = ci_memory > budget
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
@@ -264,7 +265,7 @@ def doctor(config=None, *, probe=True):
     add(
         "ci-shape",
         "ok" if fits else "blocked",
-        f"CI exposes {count} shared jobs, each {config['ci_vcpus']} vCPUs and {config['ci_memory_gib']} GiB guest RAM; aggregate physical CI ceiling {budget / GIB:g} GiB, OS headroom {reserve / GIB:.1f} GiB. {count * config['ci_vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
+        f"CI exposes {count} shared jobs; new guests see {shape['vcpus']} virtual CPUs and {shape['memory_gib']} GiB virtual RAM each; aggregate physical CI ceiling {budget / GIB:g} GiB, OS headroom {reserve / GIB:.1f} GiB. {count * shape['vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
         "Reduce the aggregate CI memory budget or guest RAM",
         roles=("ci",),
     )

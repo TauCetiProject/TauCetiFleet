@@ -24,6 +24,40 @@ WORST_FILE_RSS_BYTES = 9_431_461_888
 MEMORY_FLOOR_PERCENT = 60
 CPU_LIMIT_PERCENT = 90
 MARKER = ".tauceti-lean.json"
+HOST_PRESSURE = Path("/usr/local/share/tauceti/host-pressure.json")
+HOST_REQUIRED = Path("/usr/local/share/tauceti/host-pressure.required")
+MAX_SAMPLE_AGE = 10
+
+
+def host_pressure():
+    """None means host measurements are unavailable, never permission to start."""
+    try:
+        value = json.loads(HOST_PRESSURE.read_text())
+        age = time.monotonic() - value["received_monotonic"]
+        cpu, total, available = (value[k] for k in ("cpu_percent", "memory_total", "memory_available"))
+        if (value.get("version") != 1 or not 0 <= age <= MAX_SAMPLE_AGE
+                or any(type(x) not in (int, float) or not math.isfinite(x) for x in (cpu, total, available))
+                or not 0 <= cpu <= 100 or not 0 <= available <= total or total <= 0):
+            return None
+        return cpu, total, available
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def capacity_available():
+    """CI uses the host's pressure, retaining only an absolute guest OOM guard."""
+    if HOST_REQUIRED.exists():
+        sample = host_pressure()
+        if sample is None:
+            return False
+        cpu, total, available = sample
+        # A guest's percentage usage is unrelated to spare host capacity. This
+        # guard only protects a genuinely exhausted guest/cgroup, e.g. an old
+        # guest during rollout, rather than imposing a second utilization cap.
+        if memory()[1] < WORST_FILE_RSS_BYTES:
+            return False
+        return cpu <= CPU_LIMIT_PERCENT and 100 * (1 - available / total) <= memory_limit(total)
+    return None
 
 
 def memory():
@@ -94,6 +128,15 @@ def wait_for_capacity():
     # Successful compiler output is a build failure under `lake build --iofail`.
     debug = os.environ.get("TAUCETI_LEAN_PRESSURE_DEBUG") == "1"
     while True:
+        host_ready = capacity_available()
+        if host_ready is not None:
+            if host_ready:
+                return
+            if not waiting and debug:
+                print("tauceti-lean: waiting for fresh host capacity or guest RAM headroom", file=sys.stderr, flush=True)
+            waiting = True
+            time.sleep(random.uniform(1, 5))
+            continue
         after = cpu_sample()
         cpu = cpu_percent(before, after)
         total, available = memory()
@@ -179,7 +222,7 @@ def real_lean():
 
 
 def install_watchdog(binary):
-    """Replace a disposable watchdog's compiler symlink; never replace a real compiler."""
+    """Gate before the watchdog's timeout; never replace the official compiler."""
     binary = Path(binary).absolute()
     if binary.name != "lean-real":
         raise ValueError("expected the watchdog's bin/lean-real symlink")
@@ -187,19 +230,24 @@ def install_watchdog(binary):
     source = Path(__file__).read_bytes()
     with (root / ".tauceti-lean.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if not binary.is_symlink():
+        command = binary.parent / "lean"
+        if is_wrapper(command):
             return
-        real = unwrapped(binary)
+        if not binary.is_symlink():
+            raise ValueError("expected an unmodified watchdog compiler symlink")
+        real = command.with_name("lean-watchdog")
+        shutil.copyfile(command, real)
+        real.chmod(0o755)
         fd, temporary = tempfile.mkstemp(dir=root)
         with os.fdopen(fd, "w") as stream:
             json.dump(dict(lean=str(real)), stream)
         os.replace(temporary, root / MARKER)
-        fd, temporary = tempfile.mkstemp(dir=binary.parent)
+        fd, temporary = tempfile.mkstemp(dir=command.parent)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(source)
             os.chmod(temporary, 0o755)
-            os.replace(temporary, binary)
+            os.replace(temporary, command)
         finally:
             Path(temporary).unlink(missing_ok=True)
 
