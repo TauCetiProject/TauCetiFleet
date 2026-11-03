@@ -72,9 +72,13 @@ def parser():
 def focused_rounds(workers):
     """Describe focus among rounds in progress; slot assignment only affects the next round start."""
     active = [w for w in workers or [] if w.get("state") in ("running", "surveying")]
-    if active and not any("roadmap_focus" in w for w in active):
+    reporting = [w for w in active if "roadmap_focus" in w]
+    unreported = len(active) - len(reporting)
+    if active and not reporting:
         return f"{len(active)} rounds in progress, focus not reported by this worker release"
-    return f"{sum(bool(w.get('roadmap_focus')) for w in active)} of {len(active)} rounds in progress focused"
+    # During a worker rollout, rounds on the older release are neither focused nor unfocused.
+    text = f"{sum(bool(w['roadmap_focus']) for w in reporting)} of {len(reporting)} rounds in progress focused"
+    return text + (f", {unreported} more on a worker release without focus reporting" if unreported else "")
 
 
 def print_doctor(value):
