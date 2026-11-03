@@ -728,8 +728,9 @@ def daemon():
         handover = False
 
         def stop(*_):
-            nonlocal stopping
+            nonlocal stopping, handover
             stopping = True
+            handover = False
 
         def reload_release(*_):
             nonlocal stopping, handover

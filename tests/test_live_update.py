@@ -66,7 +66,7 @@ class LiveUpdate(unittest.TestCase):
 
     def test_live_activation_preserves_credentials_roles_guests_and_workers(self):
         staged = store.data_dir() / "worker-runtimes" / self.revision
-        def handover(release):
+        def handover(release, **kwargs):
             self.assertEqual((store.data_dir() / "current").resolve(), release)
             self.assertEqual((store.data_dir() / "bin/tauceti").readlink(), staged / "bin/tauceti")
             return dict(controller_release=str(release))
@@ -80,10 +80,15 @@ class LiveUpdate(unittest.TestCase):
         self.assert_work_preserved()
 
     def test_failed_activation_restores_both_runtimes_and_recovers_old_controller(self):
+        def fail_then_recover(release, **kwargs):
+            if "on_signal" in kwargs:
+                kwargs["on_signal"]()
+                raise store.FleetError("unhealthy")
+            return {}
         with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
                 patch.object(update, "stage_worker", return_value=self.home / "new-worker"), \
                 patch.object(host, "install_service"), \
-                patch.object(update, "handover", side_effect=[store.FleetError("unhealthy"), {}]) as handover:
+                patch.object(update, "handover", side_effect=fail_then_recover) as handover:
             with self.assertRaisesRegex(store.FleetError, "previous release restored and controller recovered"):
                 self.install()
         self.assertEqual(handover.call_args.args, (self.previous,))
@@ -190,8 +195,23 @@ class LiveUpdate(unittest.TestCase):
                 patch.object(update.sys, "_base_executable", base):
             self.install()
         self.assertNotIn("/temporary/uvx", self.binary.read_text())
-        self.assertIn(str(Path(base).resolve()), self.binary.read_text())
+        self.assertIn(base, self.binary.read_text())
         self.assertIn("os.path.realpath", self.binary.read_text())
+
+    def test_failed_signal_does_not_kill_the_healthy_controller_during_rollback(self):
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            raise store.FleetError("systemctl kill failed")
+        with patch.object(update, "service", return_value=dict(MainPID="42", Restart="on-failure")), \
+                patch.object(update, "stage_worker", return_value=self.home / "new-worker"), \
+                patch.object(update, "run", side_effect=command):
+            with self.assertRaisesRegex(store.FleetError, "before handover; previous release restored"):
+                self.install()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("kill", calls[0])
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        self.assert_work_preserved()
 
     def test_cached_healthy_status_cannot_confirm_a_handover(self):
         store.atomic(store.state_dir() / "status.json", dict(

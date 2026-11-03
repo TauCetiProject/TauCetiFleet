@@ -70,7 +70,7 @@ def extend_admission():
         atomic(path, dict(value, expires_at=time.time() + 120))
 
 
-def handover(release, *, rollback=False):
+def handover(release, *, rollback=False, on_signal=None):
     previous = read(state_dir() / "status.json", {})
     before = service()
     if rollback:
@@ -90,6 +90,8 @@ def handover(release, *, rollback=False):
         if not rollback:
             run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
         run(["systemctl", "--user", "start", "tauceti-fleet.service"])
+    if on_signal:
+        on_signal()
     started = time.time()
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
@@ -145,6 +147,9 @@ def install(release, *, expected_machine_id):
         old_binary = binary.read_bytes()
         old_mode = binary.stat().st_mode & 0o777
         signalled = False
+        def did_signal():
+            nonlocal signalled
+            signalled = True
         try:
             if worker:
                 symlink(worker_link, worker / "bin/tauceti")
@@ -152,10 +157,9 @@ def install(release, *, expected_machine_id):
             atomic(data_dir() / "release.json", metadata)
             symlink(current, release)
             launcher = "import os,sys; sys.path.insert(0,os.path.realpath(" + repr(str(current)) + ")); from tauceti_fleet.cli import main; raise SystemExit(main())"
-            python = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+            python = getattr(sys, "_base_executable", sys.executable)
             write_binary(binary, ("#!/bin/sh\nexec " + shlex.quote(python) + " -c " + shlex.quote(launcher) + ' "$@"\n').encode())
-            signalled = True
-            result = handover(release)
+            result = handover(release, on_signal=did_signal)
         except BaseException as exc:
             symlink(current, previous)
             if old_worker:

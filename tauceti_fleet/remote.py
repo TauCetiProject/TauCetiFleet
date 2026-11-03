@@ -92,7 +92,7 @@ metadata=json.loads((release/'release.json').read_text())
 binary=pathlib.Path.home()/'.local/bin/tauceti-fleet'
 binary.parent.mkdir(parents=True,exist_ok=True)
 launcher='import os,sys; sys.path.insert(0,os.path.realpath('+repr(str(current))+')); from tauceti_fleet.cli import main; raise SystemExit(main())'
-python=os.path.realpath(getattr(sys,'_base_executable',sys.executable))
+python=getattr(sys,'_base_executable',sys.executable)
 binary.write_text('#!/bin/sh\nexec '+shlex.quote(python)+' -c '+shlex.quote(launcher)+' "$@"\n')
 binary.chmod(0o755)
 print(json.dumps(dict(installed=True,release=digest)))
@@ -196,7 +196,7 @@ def deploy(target, *, live=False, expected_machine_id=None):
     else:
         import sys
 
-        python = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+        python = getattr(sys, "_base_executable", sys.executable)
         result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=1800 if live else 120)
     try:
         reply = json.loads(result.stdout)
