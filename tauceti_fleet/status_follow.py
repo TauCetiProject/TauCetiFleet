@@ -216,6 +216,11 @@ def run(selected, render, *, json_output=False):
         if frame.get("heartbeat"):
             return
         with pending_lock:
+            previous = pending.get(name, {})
+            if not frame.get("ok"):
+                last_good = previous if previous.get("ok") else previous.get("_last_good")
+                if last_good:
+                    frame = dict(frame, _last_good=last_good)
             pending[name] = frame
 
     def update():
@@ -225,6 +230,8 @@ def run(selected, render, *, json_output=False):
         for name, frame in updates:
             entry = selected[name]
             previous = results[name]
+            if frame.get("_last_good"):
+                previous = apply_frame(entry, frame["_last_good"], previous)
             value = apply_frame(entry, frame, previous)
             for alias in groups[entry["machine_id"]]:
                 results[alias] = value

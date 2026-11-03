@@ -106,6 +106,7 @@ class Follow(unittest.TestCase):
         def receive(entry, emit, *args):
             for generation in range(10):
                 emit(dict(ok=True, result=dict(machine_id=self.machine, generation=generation)))
+            emit(dict(ok=False, error="disconnected after last report"))
 
         displayed = []
 
@@ -117,6 +118,7 @@ class Follow(unittest.TestCase):
             self.assertEqual(follow.run(dict(first=self.entry, alias=self.entry), render), 0)
         source.assert_called_once()
         self.assertEqual(displayed[0]["first"]["generation"], 9)
+        self.assertTrue(displayed[0]["first"]["offline"])
         self.assertEqual(displayed[0]["alias"], displayed[0]["first"])
 
 
