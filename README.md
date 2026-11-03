@@ -316,8 +316,8 @@ parent process is added. Closing that descriptor measures lifetime, including
 the existing watchdog and descendants that inherit it. A failed collector does
 not change compiler behavior. Guests send bounded cumulative histograms over the
 existing serial link; retired guests are folded into one archive. The host saves
-aggregate counters across publisher restarts, marking unclosed invocations as
-abandoned, and prepares a small report once per second. `status` and JSON
+aggregate counters across publisher restarts, marking interrupted observations as
+timing gaps while compiler processes continue, and prepares a small report once per second. `status` and JSON
 snapshots read only that prepared file, with no process scan or API requests.
 The sandbox requests starts through a Unix socket under the same read-only
 `/usr` mount; its network namespace stays isolated. CPU samples exclude the

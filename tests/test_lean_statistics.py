@@ -170,15 +170,24 @@ p.exec_lean(Path(sys.argv[3]),[])
             publisher.archive_statistics("guest")
             self.assertEqual(publisher.archived_statistics["observed"], 3)
 
-    def test_restart_retains_totals_and_marks_unclosed_invocations_abandoned(self):
+    def test_restart_retains_totals_and_marks_all_unclosed_observations_lost(self):
         row = stats.empty()
         row.update(observed=3, admitted=2, completed=1, waiting_now=1, running_now=1)
         collector = stats.Collector(self.root / "other", initial=row)
         self.addCleanup(collector.close)
         sample = collector.snapshot()
-        self.assertEqual(sample["abandoned"], 1)
-        self.assertEqual(sample["lost"], 1)
+        self.assertEqual(sample["abandoned"], 0)
+        self.assertEqual(sample["lost"], 2)
         self.assertEqual((sample["observed"], sample["completed"], sample["waiting_now"]), (3, 1, 0))
+
+    def test_ambiguous_older_closed_waits_are_preserved_as_unknown(self):
+        row = stats.empty()
+        row.update(observed=3, abandoned=2)
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
+            store.atomic(self.root / "lean-statistics.json", dict(workers=row))
+            publisher = self.publisher()
+            self.assertEqual(publisher.last_workers["abandoned"], 0)
+            self.assertEqual(publisher.last_workers["lost"], 2)
 
     def test_failed_timing_collector_cannot_stop_host_capacity_publication(self):
         with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
