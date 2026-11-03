@@ -298,6 +298,27 @@ compilers continue. Guest file caches are released at most once per 30 seconds
 when the host needs RAM, allowing free-page reporting to return it to the host.
 The only guest-local admission check is enough absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
+
+`status` also shows compiler throttling statistics in Workers/CI columns: observed
+invocations, current waiters and executing compilers, the fraction that waited,
+waiting share of elapsed time, approximate p50/p95 waits, maximum and oldest
+active waits, and wait causes (CPU, RAM, missing signal, or admission queue).
+Waiting share is summed capacity-wait seconds divided by summed wait plus
+execution seconds, including live invocations. It is neither host CPU utilization
+nor a percentage of the report's wall-clock interval. The normal CPU sampling
+delay is counted separately. Quantiles cover admitted invocations that waited;
+active and abandoned waits still contribute elapsed waiting time. The timing
+start and CI guest coverage are explicit; pre-instrumentation worker processes
+have separate observed counts and lower bounds for their current waits.
+
+Optional Unix-socket observation survives the compiler's existing `exec`, so no
+parent process is added. Closing that descriptor measures lifetime, including
+the existing watchdog and descendants that inherit it. A failed collector does
+not change compiler behavior. Guests send bounded cumulative histograms over the
+existing serial link; retired guests are folded into one archive. The host saves
+aggregate counters across publisher restarts, marking unclosed invocations as
+abandoned, and prepares a small report once per second. `status` and JSON
+snapshots read only that prepared file, with no process scan or API requests.
 The sandbox requests starts through a Unix socket under the same read-only
 `/usr` mount; its network namespace stays isolated. CPU samples exclude the
 low-priority worker slice, which yields to CI. `status` reports signal freshness,

@@ -982,6 +982,7 @@ def rpc(payload):
         return budget(payload)
     if action == "snapshot":
         result = snapshot(refresh=False)
+        result["lean_statistics"] = read(state_dir() / 'lean-statistics-report.json', {})
         result["status"] = read(state_dir() / "status.json", {})
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
@@ -1003,6 +1004,7 @@ def rpc(payload):
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
             lean_host_pressure=pressure,
+            lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),

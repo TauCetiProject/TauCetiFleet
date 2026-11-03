@@ -11,6 +11,11 @@ from tauceti_fleet import ci_overview, cli, github, remote, status_follow as fol
 
 
 class Follow(unittest.TestCase):
+    def test_compiler_statistics_trigger_follow_without_collecting_or_calling_apis(self):
+        before = follow.signature(self.machine)
+        store.atomic(store.state_dir() / 'lean-statistics-report.json', dict(at=1))
+        self.assertNotEqual(follow.signature(self.machine), before)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

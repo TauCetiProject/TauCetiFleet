@@ -100,7 +100,7 @@ class HostPressure(unittest.TestCase):
             listener.settimeout(1)
             with (patch.object(lean_pressure, "cpu_sample", side_effect=[(100, 80), (200, 160)]),
                   patch.object(lean_pressure, "memory", return_value=(112 * GIB, 50 * GIB))):
-                publisher = lean_host.Publisher()
+                publisher = lean_host.Publisher(collect=False)
                 self.addCleanup(publisher.close)
                 publisher.step()
             stream, _ = listener.accept()
@@ -171,7 +171,7 @@ class HostPressure(unittest.TestCase):
             with (patch.object(lean_pressure, "cpu_sample", side_effect=[(100, 80), (200, 160), (300, 240), (400, 320), (500, 400)]),
                   patch.object(lean_host, "worker_cpu", return_value=0),
                   patch.object(lean_pressure, "memory", return_value=(112 * GIB, 50 * GIB))):
-                publisher = lean_host.Publisher()
+                publisher = lean_host.Publisher(collect=False)
                 self.addCleanup(publisher.close)
                 publisher.step()
                 clients = []

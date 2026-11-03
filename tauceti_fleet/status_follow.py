@@ -17,7 +17,7 @@ MAX_FRAME = 2 * 1024 * 1024
 
 def signature(machine):
     group = activity.activity_root() / "groups" / (hashlib.sha256(machine.encode()).hexdigest() + ".json")
-    paths = [config_dir() / "host.json", state_dir() / "status.json", state_dir() / "ci-overview.json",
+    paths = [config_dir() / "host.json", state_dir() / "status.json", state_dir() / "ci-overview.json", state_dir() / 'lean-statistics-report.json',
              group, activity.activity_root() / "preparation-error.json"]
     if not group.exists():
         paths.append(activity.activity_root() / "summary.json")
