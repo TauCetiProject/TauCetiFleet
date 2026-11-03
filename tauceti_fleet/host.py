@@ -458,12 +458,14 @@ def worker_statuses():
     for path in (state_dir() / "workers").glob("*.json"):
         value = read(path, {})
         if value.get("id"):
-            values.append(
-                {k: value.get(k) for k in (
-                    "id", "state", "alive", "heartbeat_at", "phase", "target", "detail",
-                    "wrapper_pid", "scope_unit", "isolation_error", "restart_count",
-                )}
-            )
+            status = {k: value.get(k) for k in (
+                "id", "state", "alive", "heartbeat_at", "phase", "target", "detail",
+                "wrapper_pid", "scope_unit", "isolation_error", "restart_count",
+            )}
+            # Workers without focus reporting omit the key; status must not count them as unfocused.
+            if "roadmap_focus" in value:
+                status["roadmap_focus"] = value["roadmap_focus"]
+            values.append(status)
     return values
 
 

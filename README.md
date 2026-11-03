@@ -597,7 +597,10 @@ receive. It describes slots, not a guaranteed percentage of runtime or completed
 PRs. Whole slots are spread through admission order; any fractional remainder
 uses one additional slot with a per-round probability. One worker with 20% focus
 therefore draws from the focus list on 20% of its rounds on average.
-The allocation follows the current admitted capacity automatically. Focused slots
+The allocation follows the current admitted capacity automatically. `status` reports how many
+rounds in progress (running or surveying) chose a focus area, then the slot count at
+the current admission limit. That limit falls to zero while new rounds are paused,
+but rounds already running keep the focus they started with. Focused slots
 retain the account-wide open-PR limit. When capped with no available maintenance
 in the chosen area, they fall back to global maintenance instead of exceeding
 that limit. Changing only the areas preserves the saved percentage; the first

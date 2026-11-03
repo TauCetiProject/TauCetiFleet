@@ -69,6 +69,14 @@ def parser():
     return p
 
 
+def focused_rounds(workers):
+    """Describe focus among rounds in progress; slot assignment only affects the next round start."""
+    active = [w for w in workers or [] if w.get("state") in ("running", "surveying")]
+    if active and not any("roadmap_focus" in w for w in active):
+        return f"{len(active)} rounds in progress, focus not reported by this worker release"
+    return f"{sum(bool(w.get('roadmap_focus')) for w in active)} of {len(active)} rounds in progress focused"
+
+
 def print_doctor(value):
     print(f"Host {value['machine_id']} — workers: {value['readiness']['workers']}; CI: {value['readiness']['ci']}")
     for check in value["checks"]:
@@ -338,13 +346,15 @@ def main(argv=None, *, _status_results=None):
                     focus = status.get("roadmap_focus", {})
                     if focus.get("percent"):
                         print(
-                            f"Roadmap focus: {focus['percent']}% ({len(focus.get('workers', []))} slots"
+                            f"Roadmap focus: {focus['percent']}%; "
+                            + focused_rounds(status.get("workers"))
+                            + f" ({len(focus.get('workers', []))} slots"
                             + (
                                 f" + {focus['fractional_percent']}% of one slot"
                                 if focus.get("fractional_percent")
                                 else ""
                             )
-                            + "); "
+                            + " at the current admission limit); "
                             + ", ".join(focus["areas"])
                         )
                     if status.get("workers"):

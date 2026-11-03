@@ -154,6 +154,29 @@ class FocusTests(unittest.TestCase):
             check = next(c for c in checks if c["name"] == "roadmap-focus")
             self.assertEqual(check["status"], expected)
 
+    def test_status_counts_focused_rounds_in_progress_not_current_slots(self):
+        from tauceti_fleet.cli import focused_rounds
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", TAUCETI_FLEET_STATE=tmp):
+            workers = Path(tmp) / "workers"
+            workers.mkdir()
+            rows = dict(
+                a=dict(state="running", roadmap_focus="PDE"),
+                b=dict(state="surveying", roadmap_focus="DGFloer"),
+                c=dict(state="running", roadmap_focus=None),
+                d=dict(state="waiting-capacity", roadmap_focus="PDE"),
+                e=dict(state="running"),
+            )
+            for name, row in rows.items():
+                (workers / f"{name}.json").write_text(json.dumps(dict(id=name, **row)))
+            statuses = host.worker_statuses()
+        self.assertNotIn("roadmap_focus", next(w for w in statuses if w["id"] == "e"))
+        # A waiting slot is not a round in progress; an older worker's round counts as unfocused.
+        self.assertEqual(focused_rounds(statuses), "2 of 4 rounds in progress focused")
+        old = [dict(state="running"), dict(state="surveying")]
+        self.assertEqual(focused_rounds(old), "2 rounds in progress, focus not reported by this worker release")
+        self.assertEqual(focused_rounds(None), "0 of 0 rounds in progress focused")
+
     def test_preset_is_the_six_direct_focus_roadmaps(self):
         areas = focus.PRESETS["pde-symplectic"]
         self.assertEqual(areas, sorted(set(areas)))
