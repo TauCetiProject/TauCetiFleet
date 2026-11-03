@@ -171,8 +171,12 @@ class FocusTests(unittest.TestCase):
                 (workers / f"{name}.json").write_text(json.dumps(dict(id=name, **row)))
             statuses = host.worker_statuses()
         self.assertNotIn("roadmap_focus", next(w for w in statuses if w["id"] == "e"))
-        # A waiting slot is not a round in progress; an older worker's round counts as unfocused.
-        self.assertEqual(focused_rounds(statuses), "2 of 4 rounds in progress focused")
+        # A waiting slot is not a round in progress; an older worker's round is not counted either way.
+        self.assertEqual(
+            focused_rounds(statuses),
+            "2 of 3 rounds in progress focused, 1 more on a worker release without focus reporting",
+        )
+        self.assertEqual(focused_rounds([dict(state="running", roadmap_focus=None)]), "0 of 1 rounds in progress focused")
         old = [dict(state="running"), dict(state="surveying")]
         self.assertEqual(focused_rounds(old), "2 rounds in progress, focus not reported by this worker release")
         self.assertEqual(focused_rounds(None), "0 of 0 rounds in progress focused")
