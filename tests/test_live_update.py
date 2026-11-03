@@ -211,6 +211,9 @@ class LiveUpdate(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("kill", calls[0])
         self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        admission = store.state_dir() / "admission.json"
+        self.assertEqual(store.read(admission)["workers"], ["paid-session"])
+        self.protected.pop(admission)
         self.assert_work_preserved()
 
     def test_cached_healthy_status_cannot_confirm_a_handover(self):
