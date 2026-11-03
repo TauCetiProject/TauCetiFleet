@@ -214,6 +214,22 @@ class Overview(unittest.TestCase):
         self.assertEqual(data["all_workflows"], 1)
         self.assertNotIn("excluded_orphans", data)
 
+    def test_multiple_confirmed_orphans_leave_the_real_queue_count_and_oldest_run(self):
+        orphans = [dict(id=i, status="queued", created_at=f"2026-11-02T0{i}:00:00Z",
+                        path=".github/workflows/pr-build.yml") for i in (1, 2)]
+        real = dict(id=3, created_at="2026-11-03T01:00:00Z")
+        responses = [dict(total_count=3), dict(total_count=3)] + [
+            dict(total_count=3, workflow_runs=[run]) for run in (*orphans, real)]
+        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (1, 2)), patch.object(overview, "fetch", side_effect=orphans) as direct, patch.object(github, "request", side_effect=responses) as request:
+            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
+        self.assertEqual(data["pr_builds"], 1)
+        self.assertEqual(data["all_workflows"], 1)
+        self.assertEqual(data["excluded_orphans"], 2)
+        self.assertEqual(data["oldest_created_at"], datetime.datetime.fromisoformat("2026-11-03T01:00:00+00:00").timestamp())
+        self.assertEqual(direct.call_count, 2)
+        self.assertEqual(request.call_count, 5)
+        self.assertFalse(any("/jobs" in call.args[0] for call in request.call_args_list))
+
     def test_oldest_queue_age_does_not_claim_accuracy_past_api_limit_or_on_race(self):
         for count, final in ((1001, None), (5, dict(total_count=6, workflow_runs=[]))):
             responses = [dict(total_count=3), dict(total_count=count)] + ([final] if final else [])
