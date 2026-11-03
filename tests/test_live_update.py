@@ -289,6 +289,7 @@ with store.locked(store.state_dir() / 'daemon.lock'):
         child = """
 import os,signal
 from tauceti_fleet import host, store
+host.install_pressure_service=lambda: store.atomic(store.state_dir()/"pressure-installed.json", dict(installed=True))
 host.resources=lambda: dict(memory_total=32*1024**3,memory_available=30*1024**3)
 host.cpu_sample=lambda: (10,9)
 host.collect_ci_results=lambda config: None
@@ -316,6 +317,7 @@ host.daemon()
             self.fail("Controller re-exec or lock acquisition hung")
         self.assertEqual(process.returncode, 0, error)
         result = store.read(store.state_dir() / "reexec.json")
+        self.assertTrue(store.read(store.state_dir() / "pressure-installed.json")["installed"])
         self.assertEqual(result["pid"], process.pid)
         self.assertEqual(result["admission"]["workers"], ["paid-session"])
         self.assertNotEqual(result["admission"].get("reason"), "controller stopped")

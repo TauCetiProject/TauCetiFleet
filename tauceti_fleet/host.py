@@ -60,6 +60,20 @@ def install_service(*, restart=True):
     observation_command = " ".join(unit_argument(a) for a in [Path.home() / ".local/bin/tauceti-fleet", "collect-status"])
     for name, content in ci_overview.unit_files(observation_command, environment).items():
         (units() / name).write_text(content)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", "--now", target.name])
+    run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-observe.timer"])
+    install_pressure_service()
+    if restart:
+        run(["systemctl", "--user", "restart", target.name])
+
+
+def install_pressure_service():
+    """Provision the publisher on both first install and live controller handover."""
+    environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
+    for name in ("TAUCETI_FLEET_CONFIG", "TAUCETI_FLEET_STATE", "TAUCETI_FLEET_DATA"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
     pressure_command = " ".join(unit_argument(a) for a in [sys.executable, "-m", "tauceti_fleet.lean_host"])
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
     pressure = ("[Unit]\nDescription=Host pressure for CI Lean admission\nStartLimitIntervalSec=0\n\n[Service]\n"
@@ -69,12 +83,8 @@ def install_service(*, restart=True):
                 + "\n[Install]\nWantedBy=default.target\n")
     (units() / "tauceti-fleet-pressure.service").write_text(pressure)
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "enable", "--now", target.name])
-    run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-observe.timer"])
     run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-pressure.service"])
     run(["systemctl", "--user", "try-restart", "tauceti-fleet-pressure.service"])
-    if restart:
-        run(["systemctl", "--user", "restart", target.name])
 
 
 def configure(payload):
@@ -734,6 +744,8 @@ class CISlot:
 def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(state_dir() / "daemon.lock"):
+        if host_config()["ci_allowed"]:
+            install_pressure_service()
         stopping = False
         handover = False
 
