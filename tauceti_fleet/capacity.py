@@ -1,9 +1,21 @@
 """CI job classes and a shared, machine-wide build limit."""
 
+import math
+
 from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 MAX_JOBS = 4096
+
+
+def guest_shape(config, caps=None):
+    """Expose shared host capacity, not a fixed fraction reserved per guest."""
+    if caps is None:
+        from .capabilities import resources
+
+        caps = resources()
+    return dict(vcpus=min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"]))),
+                memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
 
 
 def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):

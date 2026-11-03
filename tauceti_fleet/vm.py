@@ -102,15 +102,18 @@ def cloud_seed(directory, commands, *, name):
 
 
 def qemu_args(config, directory, disk, seed, *, small=False):
+    from .capacity import guest_shape
+
+    shape = dict(vcpus=2, memory_gib=2) if small else guest_shape(config)
     return [
         executable("qemu-system-x86_64"),
         "-enable-kvm",
         "-cpu",
         "host",
         "-smp",
-        "2" if small else str(config["ci_vcpus"]),
+        str(shape["vcpus"]),
         "-m",
-        "2048" if small else str(config["ci_memory_gib"] * 1024),
+        str(shape["memory_gib"] * 1024),
         "-display",
         "none",
         "-no-reboot",
@@ -134,6 +137,10 @@ def qemu_args(config, directory, disk, seed, *, small=False):
         "virtio-serial",
         "-device",
         "virtserialport,chardev=events,name=org.tauceti.events",
+        *([] if small else [
+            "-chardev", f"socket,id=pressure,path={directory / 'pressure.sock'},server=on,wait=off",
+            "-device", "virtserialport,chardev=pressure,name=org.tauceti.pressure",
+        ]),
     ]
 
 
@@ -280,7 +287,7 @@ def _cancel_registration(config):
 
 
 def _start(config):
-    from .capacity import disk_root, disk_startup_gib
+    from .capacity import disk_root, disk_startup_gib, guest_shape
 
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
@@ -363,6 +370,8 @@ def _start(config):
             started_at=time.time(),
             busy=False,
             phase="starting",
+            pressure_protocol=2,
+            **guest_shape(config),
         )
         # Record the prospective unit before launch: a controller/process crash
         # can then recover either the existing guest or the unused registration.

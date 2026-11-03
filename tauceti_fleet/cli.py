@@ -268,6 +268,11 @@ def main(argv=None, *, _status_results=None):
                     else:
                         print("Worker rounds: unknown")
                     print(f"New-round admission limit: {status.get('active_worker_limit', 0)} / {value.get('max_workers', 0)}")
+                    pressure = value.get("lean_host_pressure")
+                    if pressure is not None:
+                        health = "healthy" if pressure.get("healthy") else "STALE or unavailable; new CI compilers wait"
+                        print(f"Lean host admission: {health}; {pressure.get('guests', 0)} guests connected; "
+                              f"{pressure.get('waiting_guests', 0)} guests waiting")
                     if "ci_max_jobs" in value:
                         print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
                     if "ci_memory_budget_gib" in value:
