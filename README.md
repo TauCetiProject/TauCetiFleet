@@ -268,7 +268,8 @@ configured RAM in advance. CI defaults to the same shared ceiling; an explicit
 `ci_memory_budget_gib` still applies to its child slice. This does not change guest
 RAM shapes or CPU priorities. Concurrent compilers can still grow after passing
 the gate, so the aggregate emergency bound remains necessary. Worker processes
-have `OOMScoreAdjust=500`, preferring them over CI guests for kernel OOM kills.
+have `OOMScoreAdjust=500`, biasing kernel OOM victim selection toward workers;
+this does not guarantee protection for large CI guests.
 
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages

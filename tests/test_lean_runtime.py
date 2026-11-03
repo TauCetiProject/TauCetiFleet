@@ -36,11 +36,6 @@ class LeanRuntime(unittest.TestCase):
                 "TAUCETI_LEAN_WRAPPER": str(helper),
                 "SHLVL": "1",
             }
-            # A pre-existing startup file still runs in each nested shell.
-            previous = root / "previous-startup"
-            previous_calls = root / "previous-calls"
-            previous.write_text("printf x >> " + shlex.quote(str(previous_calls)) + "\n")
-            env["TAUCETI_PREVIOUS_BASH_ENV"] = str(previous)
             result = subprocess.run(
                 ["bash", "-ec", "bash -ec true"],
                 env=env,
@@ -49,8 +44,7 @@ class LeanRuntime(unittest.TestCase):
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(previous_calls.read_text(), "xx")
-            self.assertTrue((watchdog / "bin/lean-unthrottled").exists())
+            self.assertFalse(wrapped.is_symlink())
             self.assertEqual(compiler.read_bytes(), snapshot)
             self.assertEqual(sorted(p.name for p in toolchain.rglob("*")), ["bin", "lean"])
             result = subprocess.run(
@@ -70,8 +64,9 @@ class LeanRuntime(unittest.TestCase):
             helper.write_text("#!/usr/bin/env bash\nprintf x >> " + shlex.quote(str(calls)) + "\n")
             helper.chmod(0o755)
             (root / "bin").mkdir()
-            (root / "bin/lean-real").write_text("compiler")
-            (root / "bin/lean-real").chmod(0o755)
+            compiler = root / "compiler"
+            compiler.write_text("compiler")
+            (root / "bin/lean-real").symlink_to(compiler)
             result = subprocess.run(
                 ["bash", "-ec", "true"],
                 env={
@@ -88,12 +83,36 @@ class LeanRuntime(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(calls.read_text(), "x")
 
+    def test_ci_install_failure_does_not_block_final_status_reporting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            startup = root / "startup"
+            startup.write_text(lean_runtime.STARTUP)
+            (root / "bin").mkdir()
+            (root / "bin/lean-real").symlink_to("/bin/false")
+            result = subprocess.run(
+                ["bash", "-ec", "printf reported"],
+                env={
+                    **os.environ,
+                    "BASH_ENV": str(startup),
+                    "TAUCETI_LEAN_WRAPPER": "/bin/false",
+                    "WATCHDOG_TOOLCHAIN": str(root),
+                    "SHLVL": "1",
+                },
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "reported")
+            self.assertIn("::warning::", result.stderr)
+
     def test_ci_bootstrap_installs_hook_and_dotenv_without_new_base_image(self):
         commands = lean_runtime.ci_commands()
         text = "\n".join(commands)
         self.assertIn("LAKE_OVERRIDE_LEAN=true", text)
         self.assertIn("BASH_ENV=/opt/tauceti-lean-env", text)
-        self.assertIn("--install-toolchain", text)
+        self.assertIn("--install-watchdog", text)
         self.assertIn("/opt/actions-runner/.env", text)
         subprocess.run(["bash", "-n"], input=text, text=True, check=True)
         with tempfile.TemporaryDirectory() as directory:
