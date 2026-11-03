@@ -7,7 +7,7 @@ from . import lean_guest, lean_pressure
 
 # Disposable guests install toolchains during a job, before later sandbox steps
 # clear the environment. Host workers need only the scoped PATH alias and overlay.
-STARTUP = """if [ -n "${TAUCETI_LEAN_WRAPPER:-}" ] && [ -n "${WATCHDOG_TOOLCHAIN:-}" ] && [ -L "$WATCHDOG_TOOLCHAIN/bin/lean-real" ]; then
+STARTUP = """if [ -n "${TAUCETI_LEAN_WRAPPER:-}" ] && [ -n "${WATCHDOG_TOOLCHAIN:-}" ] && [ -L "$WATCHDOG_TOOLCHAIN/bin/lean-real" ] && [ ! -e "$WATCHDOG_TOOLCHAIN/bin/lean-watchdog" ]; then
     BASH_ENV= "$TAUCETI_LEAN_WRAPPER" --install-watchdog "$WATCHDOG_TOOLCHAIN/bin/lean-real" ||
         printf '%s\\n' '::warning::Lean pressure gate could not wrap the watchdog; continuing without the gate' >&2
 fi
@@ -18,8 +18,8 @@ def ci_commands():
     binary = "/usr/local/bin/tauceti-lean"
     startup = "/opt/tauceti-lean-env"
     receiver = "/usr/local/bin/tauceti-host-pressure"
-    unit = ("[Unit]\nDescription=Read host pressure for Lean admission\n\n[Service]\n"
-            "ExecStart=/usr/bin/python3 " + receiver + "\nRestart=always\nRestartSec=1\n"
+    unit = ("[Unit]\nDescription=Read host pressure for Lean admission\nStartLimitIntervalSec=0\n\n[Service]\n"
+            "ExecStart=/usr/bin/python3 " + receiver + "\nRestart=always\nRestartSec=5\n"
             "\n[Install]\nWantedBy=multi-user.target\n")
     return [
         "install -d -m 755 /usr/local/share/tauceti; touch /usr/local/share/tauceti/host-pressure.required",

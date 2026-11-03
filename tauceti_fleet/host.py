@@ -57,9 +57,10 @@ def install_service(*, restart=True):
     for name, content in ci_overview.unit_files(observation_command, environment).items():
         (units() / name).write_text(content)
     pressure_command = " ".join(unit_argument(a) for a in [sys.executable, "-m", "tauceti_fleet.lean_host"])
-    pressure = ("[Unit]\nDescription=Host pressure for CI Lean admission\n\n[Service]\n"
-                "ExecStart=" + pressure_command + "\nWorkingDirectory=" + unit_argument(Path(__file__).resolve().parent.parent)
-                + "\nSlice=tauceti-fleet-ci.slice\nRestart=always\nRestartSec=1\n"
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+    pressure = ("[Unit]\nDescription=Host pressure for CI Lean admission\nStartLimitIntervalSec=0\n\n[Service]\n"
+                "ExecStart=" + pressure_command
+                + "\nSlice=tauceti-fleet-ci.slice\nRestart=always\nRestartSec=5\n"
                 + "".join("Environment=" + unit_argument(k + "=" + v) + "\n" for k, v in environment.items())
                 + "\n[Install]\nWantedBy=default.target\n")
     (units() / "tauceti-fleet-pressure.service").write_text(pressure)
@@ -67,6 +68,7 @@ def install_service(*, restart=True):
     run(["systemctl", "--user", "enable", "--now", target.name])
     run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-observe.timer"])
     run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-pressure.service"])
+    run(["systemctl", "--user", "try-restart", "tauceti-fleet-pressure.service"])
     if restart:
         run(["systemctl", "--user", "restart", target.name])
 
@@ -971,6 +973,8 @@ def rpc(payload):
         return result
     if action == "status":
         config = host_config()
+        pressure = read(state_dir() / "lean-host-pressure.json", {})
+        pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
         return dict(
             machine_id=config["machine_id"],
             profile=config["profile"],
@@ -984,6 +988,7 @@ def rpc(payload):
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
+            lean_host_pressure=pressure,
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),

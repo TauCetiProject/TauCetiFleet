@@ -134,6 +134,8 @@ class HostPressure(unittest.TestCase):
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run"):
             host.install_service(restart=False)
         self.assertIn("Slice=tauceti-fleet-ci.slice", (self.root / "tauceti-fleet-pressure.service").read_text())
+        self.assertNotIn("WorkingDirectory", (self.root / "tauceti-fleet-pressure.service").read_text())
+        self.assertIn("PYTHONPATH=", (self.root / "tauceti-fleet-pressure.service").read_text())
         commands = "\n".join(lean_runtime.ci_commands())
         self.assertIn("host-pressure.required", commands)
         self.assertIn("systemctl enable --now tauceti-host-pressure.service", commands)
@@ -154,6 +156,64 @@ class HostPressure(unittest.TestCase):
         result = subprocess.run(["python3", "-c", code, str(binary)], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "compiled")
+
+    def test_shared_host_start_permissions_are_bounded_and_demand_driven(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)):
+            peers = []
+            for n in range(8):
+                directory = store.state_dir() / f"vms/guest-{n}"
+                directory.mkdir(parents=True)
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.addCleanup(listener.close)
+                listener.bind(str(directory / "pressure.sock"))
+                listener.listen()
+                peers.append(listener)
+            with (patch.object(lean_pressure, "cpu_sample", side_effect=[(100, 80), (200, 160), (300, 240), (400, 320), (500, 400)]),
+                  patch.object(lean_host, "worker_cpu", return_value=0),
+                  patch.object(lean_pressure, "memory", return_value=(112 * GIB, 50 * GIB))):
+                publisher = lean_host.Publisher()
+                self.addCleanup(publisher.close)
+                publisher.step()
+                clients = []
+                for listener in peers:
+                    client, _ = listener.accept()
+                    self.addCleanup(client.close)
+                    client.recv(4096)
+                    client.sendall(b'1\n')
+                    clients.append(client)
+                publisher.step()
+                frames = [json.loads(c.recv(4096)) for c in clients]
+                admitted = sum(v['permit'] == 1 for v in frames)
+                self.assertGreater(admitted, 0)
+                self.assertLess(admitted, 8)
+                publisher.step()
+                frames = [json.loads(c.recv(4096)) for c in clients]
+                self.assertEqual(sum(bool(v['permit']) for v in frames), 0)
+                # After the short ramp window, other requesting guests get a
+                # turn; a request that was already granted is never replayed.
+                with patch.object(lean_host.time, 'monotonic', return_value=103):
+                    publisher.step()
+                later = [json.loads(c.recv(4096)) for c in clients]
+                self.assertGreater(sum(bool(v['permit']) for v in later), 0)
+
+    def test_guest_rejects_replayed_or_stale_permissions_and_serves_only_one_waiter(self):
+        broker = lean_guest.Broker()
+        a, b = socket.socketpair()
+        c, d = socket.socketpair()
+        for s in (a, b, c, d):
+            self.addCleanup(s.close)
+            s.settimeout(0.01)
+        broker.clients.extend([a, c])
+        broker.grant(dict(self.value, permit=1))
+        self.assertEqual(b.recv(1), b'1')
+        broker.grant(dict(self.value, permit=1))
+        with self.assertRaises(TimeoutError):
+            d.recv(1)
+        broker.grant(dict(self.value, permit=2, at=80))
+        with self.assertRaises(TimeoutError):
+            d.recv(1)
+        broker.grant(dict(self.value, permit=2))
+        self.assertEqual(d.recv(1), b'1')
 
 
 if __name__ == "__main__":

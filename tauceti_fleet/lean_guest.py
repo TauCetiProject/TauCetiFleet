@@ -1,13 +1,17 @@
 """Cache host serial measurements where the offline compiler sandbox can read them."""
 
+import io
 import json
 import math
 import os
+import select
+import socket
 import time
 from pathlib import Path
 
 TARGET = Path("/usr/local/share/tauceti/host-pressure.json")
 PORT = Path("/dev/virtio-ports/org.tauceti.pressure")
+SOCKET = Path("/usr/local/share/tauceti/admission.sock")
 # Match the measured two-file headroom used by the compiler gate. Keep this
 # standalone so cloud-init does not need to install a Python package.
 HEADROOM = 2 * 9_431_461_888
@@ -17,7 +21,7 @@ def reclaim(value, last_reclaim):
     now = time.monotonic()
     limit = max(60, math.floor(100 - 100 * HEADROOM / value["memory_total"]) - 1)
     used = 100 * (1 - value["memory_available"] / value["memory_total"])
-    if used > limit and now - last_reclaim >= 30:
+    if used > limit - 3 and now - last_reclaim >= 30:
         try:
             # Host QEMU RSS includes the guest's file cache. Without reclaim,
             # every compiler can wait on RAM held by caches in other guests.
@@ -57,15 +61,76 @@ def receive(stream, target=TARGET, last_reclaim=-math.inf):
             continue
 
 
+class Broker:
+    def __init__(self):
+        self.clients = []
+        self.request = 1
+
+    def grant(self, value):
+        age = time.time() - value.get('at', 0)
+        if value.get('permit') != self.request or not -2 <= age <= 10:
+            return
+        self.request += 1
+        while self.clients:
+            client = self.clients.pop(0)
+            try:
+                client.sendall(b'1')
+                return
+            except OSError:
+                pass
+            finally:
+                client.close()
+
+    def run(self, port, listener):
+        last_request = 0
+        buffer = b''
+        last_reclaim = -math.inf
+        while True:
+            ready, _, _ = select.select([port, listener, *self.clients], [], [], 0.5)
+            if listener in ready:
+                client, _ = listener.accept()
+                client.settimeout(0.01)
+                if len(self.clients) < 256:
+                    self.clients.append(client)
+                else:
+                    client.close()
+            for client in list(self.clients):
+                if client in ready:
+                    # Clients send no data. Readability means a disconnected
+                    # compiler, or malformed input; either is safe to discard.
+                    client.close()
+                    self.clients.remove(client)
+            if port in ready:
+                chunk = os.read(port, 4096)
+                if not chunk:
+                    return
+                buffer = (buffer + chunk)[-8192:]
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    last_reclaim = receive(io.BytesIO(line + b'\n'), last_reclaim=last_reclaim)
+                    try:
+                        self.grant(json.loads(line))
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+            if time.monotonic() - last_request >= 0.5:
+                os.write(port, (str(self.request if self.clients else 0) + '\n').encode())
+                last_request = time.monotonic()
+
+
 def main():
-    last_reclaim = -math.inf
-    while True:
-        try:
-            with PORT.open("rb", buffering=0) as stream:
-                last_reclaim = receive(stream, last_reclaim=last_reclaim)
-        except OSError:
-            pass
-        time.sleep(1)
+    SOCKET.unlink(missing_ok=True)
+    broker = Broker()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(SOCKET))
+        SOCKET.chmod(0o666)
+        listener.listen(256)
+        while True:
+            try:
+                with PORT.open('r+b', buffering=0) as port:
+                    broker.run(port.fileno(), listener)
+            except OSError:
+                pass
+            time.sleep(1)
 
 
 if __name__ == "__main__":

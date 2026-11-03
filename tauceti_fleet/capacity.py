@@ -14,7 +14,7 @@ def guest_shape(config, caps=None):
         from .capabilities import resources
 
         caps = resources()
-    return dict(vcpus=max(config["ci_vcpus"], math.ceil(caps["cpus"])),
+    return dict(vcpus=min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"]))),
                 memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
 
 

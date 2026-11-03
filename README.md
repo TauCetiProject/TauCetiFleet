@@ -265,16 +265,26 @@ Already-running guests finish with their existing setup before replacement.
 CI guests use the host's CPU and memory pressure rather than their own utilization
 percentages. A separate user service samples the host once per second, inside
 the same ancestor memory limits as CI, and broadcasts a small JSON frame over
-dedicated virtio serial ports. It accepts no guest commands and makes no network
-or GitHub API requests. A root guest service caches the frame under `/usr/local`,
+dedicated virtio serial ports. Guests send only a bounded numeric request ID for
+the next compiler start. The host grants starts fairly across waiting guests,
+limiting bursts using current free RAM and a two-second startup allowance.
+This is transient admission accounting, not a physical resource reservation.
+It accepts no guest commands and makes no network or GitHub API requests.
+A root guest service caches the frame under `/usr/local`,
 readable through the existing offline sandbox's read-only `/usr` mount. Missing,
 invalid, or ten-second-old observations make new compilers wait; existing
 compilers continue. Guest file caches are released at most once per 30 seconds
 when the host needs RAM, allowing free-page reporting to return it to the host.
 The only guest-local admission check is enough absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
+The sandbox requests starts through a Unix socket under the same read-only
+`/usr` mount; its network namespace stays isolated. CPU samples exclude the
+low-priority worker slice, which yields to CI. `status` reports signal freshness,
+connected guests, and waiting guests using cached data only. Host and guest wall
+clocks must agree within two seconds; guest monotonic time additionally expires
+the local cache.
 
-Fresh guests expose at least all effective host CPUs and the aggregate CI RAM
+Fresh guests expose effective host CPUs (up to QEMU's 255-CPU limit) and the aggregate CI RAM
 ceiling, rounded up to GiB. `ci_vcpus` and `ci_memory_gib` are minimum virtual
 sizes. No CPU pinning or memory preallocation is added. The physical parent and
 CI slice limits remain the shared emergency bounds. Existing guests retain

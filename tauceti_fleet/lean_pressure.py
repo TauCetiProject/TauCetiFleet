@@ -11,6 +11,7 @@ import os
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ MARKER = ".tauceti-lean.json"
 HOST_PRESSURE = Path("/usr/local/share/tauceti/host-pressure.json")
 HOST_REQUIRED = Path("/usr/local/share/tauceti/host-pressure.required")
 MAX_SAMPLE_AGE = 10
+ADMISSION_SOCKET = Path('/usr/local/share/tauceti/admission.sock')
 
 
 def host_pressure():
@@ -133,7 +135,14 @@ def wait_for_capacity():
         host_ready = capacity_available()
         if host_ready is not None:
             if host_ready:
-                return
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.settimeout(5)
+                        client.connect(str(ADMISSION_SOCKET))
+                        if client.recv(1) == b'1' and capacity_available():
+                            return
+                except OSError:
+                    pass
             if not waiting and debug:
                 print("tauceti-lean: waiting for fresh host capacity or guest RAM headroom", file=sys.stderr, flush=True)
             waiting = True
