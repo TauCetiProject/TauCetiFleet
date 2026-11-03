@@ -85,20 +85,41 @@ worker and CI admissions left enabled, followed by checking and repairing any
 fallout. Do not drain or pause the fleet merely as a deployment precaution:
 this confuses other agents monitoring the system. Use a drain only when
 explicitly requested or when a concrete constraint prevents a safe live update,
-and explain that constraint first. The `update` command below requires a drain;
-that restriction does not make draining the default rollout procedure.
+and explain that constraint first. `update` performs a live controller handover.
 
 ```sh
 tauceti-fleet enable big-server --ci staging
 tauceti-fleet enable big-server --workers
-tauceti-fleet drain big-server
 tauceti-fleet update big-server
 ```
 
 Enable is explicit and refuses missing required capabilities. A `--no-ci` host
 never registers a runner. Drain prevents new rounds/CI guests and lets active
-work finish. Update requires the host to have drained, and preserves ledgers,
-machine identity, and historical reporting records.
+work finish. Update keeps admissions enabled, preserves configuration and
+credentials on the host, and leaves CI guests and worker processes running.
+It stages the release and a separate pinned worker virtualenv before switching
+the launcher. A healthy status from the new controller confirms the handover;
+failure restores the previous release and attempts to recover its controller.
+An interrupted SSH connection is not retried automatically: inspect `status`
+and the host's `current` release before repeating an update.
+
+Already running worker managers and workers retain their existing Python runtime;
+the staged worker version takes effect at a future manager start. The update
+result reports that scope explicitly. CI backing images are preserved, so image
+maintenance still uses `prepare` separately. Existing releases and worker runtimes
+are retained while processes may still reference them.
+
+An update deploys the version of Fleet running the command. To upgrade an older
+drain-only installation without draining, run the new CLI once from upstream:
+
+```sh
+uvx --from 'git+https://github.com/TauCetiProject/TauCetiFleet.git@main' tauceti-fleet update local
+```
+
+`update local` uses this account's host identity even without an operator
+inventory. The new updater also supports SSH targets running the old controller:
+it restarts only that controller's main process via its existing systemd restart
+policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
 fleet weight 10. The default CI shape is 32 vCPUs / 64 GiB, with 2 GiB additional
@@ -172,7 +193,7 @@ the current guests first. Enrollment also imposes an
 operator-controlled ceiling on classes and shared capacity. A host can request
 less capacity, but cannot exceed its enrollment. Legacy installations retain
 one staging slot. Each guest has its own registration intent, state, event
-socket, and startup retry. Drain, prepare, enrollment, and update inspect all
+socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
 the controller starts the remaining slots independently after the role is enabled.
@@ -238,8 +259,8 @@ under representative load; scheduling weights alone do not guarantee a runtime.
 Each worker runs in an independent systemd scope inside the same worker slice;
 memory remains pooled. A manager-service restart preserves scoped workers. Scope
 setup failures report degraded isolation and continue the same process. Whole-host
-worker shutdown for an update stops the worker slice, including detached children
-and workers that outlived the manager; draining still allows active rounds to finish.
+worker shutdown stops the worker slice, including detached children and workers
+that outlived the manager. Live updates leave that slice running.
 Status reports recent userspace OOM kills separately from kernel OOM counters.
 CI VM units use `ManagedOOMPreference=avoid` and keep guest RAM
 resident with `MemorySwapMax=0`. CI CPU priority remains in effect.

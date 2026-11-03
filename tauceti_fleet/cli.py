@@ -144,7 +144,7 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
-        if args.command == "focus" and args.host == "local":
+        if args.host == "local":
             local = read(config_dir() / "host.json")
             if not local or not local.get("machine_id"):
                 raise FleetError("This account has no Fleet host configuration; use add or enroll first")
@@ -190,30 +190,7 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "update":
-                status = remote.call(entry["target"], dict(action="status"), expected_machine_id=entry["machine_id"])
-                if status["ci_enabled"] or status["workers_enabled"]:
-                    raise FleetError("Drain this host before updating its installed software")
-                waiting = {
-                    "idle",
-                    "waiting-capacity",
-                    "waiting-budget",
-                    "waiting-quota",
-                    "backoff",
-                    "stopped",
-                    "exited",
-                }
-                if status["status"].get("ci_busy") or any(
-                    w.get("alive") and w.get("state") not in waiting for w in status["status"].get("workers", [])
-                ):
-                    raise FleetError(
-                        "Host is draining active work; wait for its round/CI build to finish before update"
-                    )
-                remote.call(entry["target"], dict(action="prepare_update"), expected_machine_id=entry["machine_id"])
-                results[name] = remote.add(
-                    entry["target"], profile_name=entry["profile"], no_ci=not status["ci_allowed"],
-                    preserve_profile=status.get("ci_enrolled", False) or status["profile"] == "ci-enrolled" or entry.get("ci_enrolled", False) or entry["profile"] == "ci-enrolled",
-                    expected_machine_id=entry["machine_id"],
-                )
+                results[name] = remote.deploy(entry["target"], live=True, expected_machine_id=entry["machine_id"])
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:
