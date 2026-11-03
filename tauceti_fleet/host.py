@@ -26,6 +26,10 @@ from .store import (
     update_host,
 )
 
+# Resolve once: switching the current symlink must not make an old controller
+# report that it is already running the newly installed release.
+RUNNING_RELEASE = str(Path(__file__).resolve().parent.parent)
+
 
 def command():
     return [sys.executable, "-m", "tauceti_fleet"]
@@ -150,28 +154,10 @@ def prepare(config=None):
     worker_revision = read(data_dir() / "release.json", {}).get("worker_revision")
     pinned = read(data_dir() / "worker-runtime.json", {}).get("revision") == worker_revision
     if not pinned:
-        if not executable("uv") or not worker_revision:
-            raise FleetError(
-                "Worker runtime unavailable: install uv, then deploy a release with its pinned worker_revision"
-            )
-        venv = data_dir() / "worker-venv"
-        if not (venv / "bin/python").exists():
-            run([executable("uv"), "venv", venv], timeout=120)
-        run(
-            [
-                executable("uv"),
-                "pip",
-                "install",
-                "--python",
-                venv / "bin/python",
-                "git+https://github.com/TauCetiProject/TauCetiWorker.git@" + worker_revision,
-            ],
-            timeout=600,
-        )
-        (data_dir() / "bin").mkdir(parents=True, exist_ok=True)
-        link = data_dir() / "bin/tauceti"
-        link.unlink(missing_ok=True)
-        link.symlink_to(venv / "bin/tauceti")
+        from .update import stage_worker, symlink
+
+        venv = stage_worker(worker_revision)
+        symlink(data_dir() / "bin/tauceti", venv / "bin/tauceti")
         atomic(data_dir() / "worker-runtime.json", dict(revision=worker_revision))
     manifest = vm.prepare_image(config) if config["ci_allowed"] else None
     return dict(worker=executable("tauceti"), image=manifest, smoke=vm.smoke(config) if manifest else None)
@@ -296,7 +282,7 @@ def worker_config(config):
 
 
 def start_workers():
-    root = str(Path(__file__).resolve().parent.parent)
+    root = RUNNING_RELEASE
     argv = " ".join(unit_argument(a) for a in [*command(), "run-workers"])
     target = units() / "tauceti-fleet-workers.service"
     target.write_text(
@@ -338,6 +324,7 @@ def run_workers():
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
+    binary = str(Path(binary).resolve())
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
@@ -738,13 +725,20 @@ def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(state_dir() / "daemon.lock"):
         stopping = False
+        handover = False
 
         def stop(*_):
-            nonlocal stopping
+            nonlocal stopping, handover
             stopping = True
+            handover = False
+
+        def reload_release(*_):
+            nonlocal stopping, handover
+            stopping = handover = True
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGHUP, reload_release)
         scaler = Scaler()
         previous = cpu_sample()
         slots = {}
@@ -833,6 +827,9 @@ def daemon():
                     dict(
                         version=1,
                         machine_id=config["machine_id"],
+                        controller_release=RUNNING_RELEASE,
+                        controller_pid=os.getpid(),
+                        live_update_protocol=1,
                         observed_at=time.time(),
                         ci_enabled=config["ci_enabled"],
                         workers_enabled=config["workers_enabled"],
@@ -873,7 +870,8 @@ def daemon():
                 )
                 atomic(
                     state_dir() / "status.json",
-                    dict(machine_id=config["machine_id"], observed_at=time.time(), error=message),
+                    dict(machine_id=config["machine_id"], observed_at=time.time(), error=message,
+                         controller_release=RUNNING_RELEASE, controller_pid=os.getpid(), live_update_protocol=1),
                 )
                 for slot in slots.values():
                     slot.next_vm = max(slot.next_vm, time.time() + 60)
@@ -881,12 +879,16 @@ def daemon():
                 if stopping:
                     break
                 time.sleep(0.5)
-        atomic(
-            state_dir() / "admission.json",
-            dict(version=1, expires_at=time.time() + 15, workers=[], reason="controller stopped"),
-        )
+        if not handover:
+            atomic(
+                state_dir() / "admission.json",
+                dict(version=1, expires_at=time.time() + 15, workers=[], reason="controller stopped"),
+            )
         for slot in slots.values():
             slot.close()
+        if handover:
+            binary = str(Path.home() / ".local/bin/tauceti-fleet")
+            os.execv(binary, [binary, "host-daemon"])
 
 
 def budget(payload):

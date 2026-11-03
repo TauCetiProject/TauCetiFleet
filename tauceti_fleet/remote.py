@@ -59,7 +59,7 @@ BOOTSTRAP = r"""import hashlib,io,json,os,pathlib,shlex,sys,tempfile,zipfile
 raw=sys.stdin.buffer.read(32*1024*1024+1)
 if len(raw)>32*1024*1024: raise SystemExit('Fleet release exceeds deployment limit')
 digest=hashlib.sha256(raw).hexdigest()
-base=pathlib.Path.home()/'.local/share/tauceti-fleet'
+base=pathlib.Path(os.environ.get('TAUCETI_FLEET_DATA',pathlib.Path.home()/'.local/share/tauceti-fleet')).expanduser()
 base.mkdir(parents=True,exist_ok=True,mode=0o700)
 release=base/'releases'/digest
 release.parent.mkdir(exist_ok=True,mode=0o700)
@@ -73,6 +73,16 @@ with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         temporary=pathlib.Path(tempfile.mkdtemp(dir=release.parent))
         archive.extractall(temporary)
         temporary.rename(release)
+if len(sys.argv)>1 and sys.argv[1]=='live':
+    sys.path.insert(0,str(release))
+    from tauceti_fleet.update import install
+    from tauceti_fleet.store import FleetError
+    try:
+        result=install(release,expected_machine_id=sys.argv[2])
+    except FleetError as exc:
+        result=dict(installed=False,error=str(exc))
+    print(json.dumps(result))
+    raise SystemExit(0)
 current=base/'current'
 temporary=base/('.current-'+str(os.getpid()))
 temporary.symlink_to(release)
@@ -81,8 +91,9 @@ metadata=json.loads((release/'release.json').read_text())
 (base/'release.json').write_text(json.dumps(metadata))
 binary=pathlib.Path.home()/'.local/bin/tauceti-fleet'
 binary.parent.mkdir(parents=True,exist_ok=True)
-launcher='import sys; sys.path.insert(0,'+repr(str(current))+'); from tauceti_fleet.cli import main; raise SystemExit(main())'
-binary.write_text('#!/bin/sh\nexec '+shlex.quote(sys.executable)+' -c '+shlex.quote(launcher)+' "$@"\n')
+launcher='import os,sys; sys.path.insert(0,os.path.realpath('+repr(str(current))+')); from tauceti_fleet.cli import main; raise SystemExit(main())'
+python=getattr(sys,'_base_executable',sys.executable)
+binary.write_text('#!/bin/sh\nexec '+shlex.quote(python)+' -c '+shlex.quote(launcher)+' "$@"\n')
 binary.chmod(0o755)
 print(json.dumps(dict(installed=True,release=digest)))
 """
@@ -91,13 +102,19 @@ print(json.dumps(dict(installed=True,release=digest)))
 def archive():
     root = Path(__file__).resolve().parent
     stream = io.BytesIO()
+    def member(zipped, name, contents):
+        # A release is identified by contents, including when a host packages
+        # its own extracted installation. Extraction timestamps are incidental.
+        entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        zipped.writestr(entry, contents)
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zipped:
         for path in sorted(root.glob("*.py")):
-            zipped.write(path, "tauceti_fleet/" + path.name)
+            member(zipped, "tauceti_fleet/" + path.name, path.read_bytes())
         manifest = read(root / "release.json", read(root.parent / "release.json", {}))
         if not manifest.get("worker_revision"):
             raise FleetError("Release manifest has no pinned worker revision")
-        zipped.writestr("release.json", json.dumps(manifest))
+        member(zipped, "release.json", json.dumps(manifest, sort_keys=True))
     return stream.getvalue()
 
 
@@ -165,16 +182,29 @@ def resolve(name):
     raise FleetError(f"Unknown fleet host {name!r}; use add or enroll first")
 
 
-def deploy(target):
+def deploy(target, *, live=False, expected_machine_id=None):
     """Install this release on the explicitly selected machine."""
+    args = ["live", expected_machine_id] if live else []
+    if live:
+        if not expected_machine_id:
+            raise FleetError("Live update requires the installed host identity")
+        call(target, dict(action="status"), expected_machine_id=expected_machine_id)
     if target != "local":
-        result = ssh(target, "python3 -c " + shlex.quote(BOOTSTRAP), input=archive(), timeout=120)
-        if not json.loads(result.stdout).get("installed"):
-            raise FleetError("Remote deployment did not complete")
+        command = "python3 -c " + shlex.quote(BOOTSTRAP)
+        command += "".join(" " + shlex.quote(a) for a in args)
+        result = ssh(target, command, input=archive(), timeout=1800 if live else 120)
     else:
         import sys
 
-        run([sys.executable, "-c", BOOTSTRAP], input=archive(), timeout=120)
+        python = getattr(sys, "_base_executable", sys.executable)
+        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=1800 if live else 120)
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError:
+        raise FleetError("Deployment did not return a Fleet response; inspect the installed release before retrying") from None
+    if not reply.get("installed"):
+        raise FleetError(reply.get("error", "Deployment did not complete"))
+    return reply
 
 
 def remember(target, status, *, profile_name):

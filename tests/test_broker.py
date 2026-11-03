@@ -94,10 +94,9 @@ class Enrollment(unittest.TestCase):
         status = dict(machine_id="a" * 32, profile="science", ci_enrolled=True,
                       ci_enabled=False, workers_enabled=False, ci_allowed=True, status={})
         remote.remember("chris", status, profile_name="science")
-        with patch.object(remote, "deploy"), patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=[status, {}, status, status, {}]) as call, patch("sys.stdout", new=io.StringIO()):
+        with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=AssertionError("Must use staged release, not configure or prepare_update")), patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(cli.main(["update", "chris", "--json"]), 0)
-        self.assertEqual(call.call_args_list[3].args, ("chris", {"action": "configure"}))
-        self.assertEqual(call.call_args_list[3].kwargs["expected_machine_id"], status["machine_id"])
+        deploy.assert_called_once_with("chris", live=True, expected_machine_id=status["machine_id"])
         self.assertEqual(remote.resolve("chris")["profile"], "science")
 
     def test_legacy_host_identity_is_verified_by_the_caller_before_mutation_or_reenrollment(self):
