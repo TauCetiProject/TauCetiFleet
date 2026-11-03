@@ -214,7 +214,24 @@ class HostPressure(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             d.recv(1)
         broker.grant(dict(self.value, permit=request + 1))
+        with self.assertRaises(TimeoutError):
+            d.recv(1)
+        broker.grant(dict(self.value, permit=request + 2))
         self.assertEqual(d.recv(1), b'1')
+
+    def test_guest_serves_a_batch_of_waiters_from_one_host_grant(self):
+        broker = lean_guest.Broker()
+        peers = []
+        for _ in range(4):
+            a, b = socket.socketpair()
+            self.addCleanup(a.close)
+            self.addCleanup(b.close)
+            b.settimeout(.1)
+            broker.clients.append(a)
+            peers.append(b)
+        broker.grant(dict(self.value, permit=broker.request, starts=4))
+        self.assertEqual([p.recv(1) for p in peers], [b'1'] * 4)
+        self.assertFalse(broker.clients)
 
 
 if __name__ == "__main__":

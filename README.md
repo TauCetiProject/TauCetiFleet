@@ -284,11 +284,11 @@ Metadata probes stay fast and ordinary waits stay silent for `lake build --iofai
 Already-running guests finish with their existing setup before replacement.
 
 CI guests use the host's CPU and memory pressure rather than their own utilization
-percentages. A separate user service samples the host once per second, inside
+percentages. A separate user service samples the host ten times per second, inside
 the same ancestor memory limits as CI, and broadcasts a small JSON frame over
 dedicated virtio serial ports. Guests send only a bounded numeric request ID for
 the next compiler start. The host grants starts fairly across waiting guests,
-limiting bursts using current free RAM and a two-second startup allowance.
+limiting bursts using current free RAM and a quarter-second startup allowance.
 This is transient admission accounting, not a physical resource reservation.
 It accepts no guest commands and makes no network or GitHub API requests.
 A root guest service caches the frame under `/usr/local`,

@@ -126,8 +126,7 @@ def cpu_percent(before, after):
 
 
 def wait_for_capacity():
-    before = cpu_sample()
-    time.sleep(random.uniform(0.2, 0.5))
+    before = None
     waiting = False
     # Successful compiler output is a build failure under `lake build --iofail`.
     debug = os.environ.get("TAUCETI_LEAN_PRESSURE_DEBUG") == "1"
@@ -137,7 +136,7 @@ def wait_for_capacity():
             if host_ready:
                 try:
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                        client.settimeout(5)
+                        client.settimeout(30)
                         client.connect(str(ADMISSION_SOCKET))
                         if client.recv(1) == b'1' and capacity_available():
                             return
@@ -148,6 +147,9 @@ def wait_for_capacity():
             waiting = True
             time.sleep(random.uniform(1, 5))
             continue
+        if before is None:
+            before = cpu_sample()
+            time.sleep(random.uniform(0.2, 0.5))
         after = cpu_sample()
         cpu = cpu_percent(before, after)
         total, available = memory()

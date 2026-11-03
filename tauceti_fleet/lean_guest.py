@@ -70,14 +70,23 @@ class Broker:
 
     def grant(self, value):
         age = time.time() - value.get('at', 0)
-        if value.get('permit') != self.request or not -2 <= age <= 10:
+        if value.get('permit') != self.request:
             return
+        # Consume even an expired token so the next request can recover without
+        # disconnecting a healthy serial link after a guest pause.
         self.request += 1
+        if not -2 <= age <= 10:
+            return
+        remaining = value.get('starts', 1)
+        if type(remaining) is not int or not 1 <= remaining <= 256:
+            return
         while self.clients:
             client = self.clients.pop(0)
             try:
                 client.sendall(b'1')
-                return
+                remaining -= 1
+                if remaining <= 0:
+                    return
             except OSError:
                 pass
             finally:
@@ -88,7 +97,7 @@ class Broker:
         buffer = b''
         last_reclaim = -math.inf
         while True:
-            ready, _, _ = select.select([port, listener, *self.clients], [], [], 0.5)
+            ready, _, _ = select.select([port, listener, *self.clients], [], [], 0.05)
             if listener in ready:
                 client, _ = listener.accept()
                 client.settimeout(0.01)
@@ -114,8 +123,8 @@ class Broker:
                         self.grant(json.loads(line))
                     except (ValueError, TypeError, AttributeError):
                         pass
-            if time.monotonic() - last_request >= 0.5:
-                os.write(port, (str(self.request if self.clients else 0) + '\n').encode())
+            if time.monotonic() - last_request >= 0.05:
+                os.write(port, (str(self.request if self.clients else 0) + ':' + str(len(self.clients)) + '\n').encode())
                 last_request = time.monotonic()
 
 

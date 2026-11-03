@@ -370,6 +370,7 @@ def _start(config):
             started_at=time.time(),
             busy=False,
             phase="starting",
+            pressure_protocol=2,
             **guest_shape(config),
         )
         # Record the prospective unit before launch: a controller/process crash
