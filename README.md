@@ -403,6 +403,9 @@ events and storage/cache diagnostics appear later, after those tables; the fleet
 total does not repeat each host's storage statistics. Storage figures describe
 the last background cleanup, and artifact reuse/time counters sum the latest
 preparation report per worker rather than measuring current work.
+Saved recovery work gets one compact line per host, with nonzero incomplete,
+corrupt or error counts. Per-round retry reasons, internal repair states and
+cleanup instrumentation remain in `status --json`.
 
 `status` only reads a small prepared file for these lines. The independent
 `tauceti-fleet-observe.timer` prepares observations about every five minutes,

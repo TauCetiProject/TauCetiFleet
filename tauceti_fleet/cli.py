@@ -383,7 +383,7 @@ def main(argv=None, *, _status_results=None):
                     print(json.dumps(value, indent=2))
             if fleet is not None:
                 print("\nFleet totals:")
-                activity.display(fleet, storage=False, after_budget=show_bors)
+                activity.display(fleet, storage=False, recovery=False, after_budget=show_bors)
             if args.command == "status":
                 show_bors()
                 for name, value in results.items():

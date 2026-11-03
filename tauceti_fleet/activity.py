@@ -62,8 +62,8 @@ def combine_status(values):
     return activity_summary.combine(values)
 
 
-def display(value, *, storage=True, after_budget=None):
-    activity_summary.display(value, ROUND_TYPES, storage=storage, after_budget=after_budget)
+def display(value, *, storage=True, recovery=True, after_budget=None):
+    activity_summary.display(value, ROUND_TYPES, storage=storage, recovery=recovery, after_budget=after_budget)
 
 
 def display_storage(value):
