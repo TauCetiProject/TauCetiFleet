@@ -6,24 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host, lean_runtime
+from tauceti_fleet import host, lean_pressure, lean_runtime
 from tauceti_fleet.capabilities import GIB
 
 
 class LeanRuntime(unittest.TestCase):
-    def test_worker_environment_installs_standalone_gate_and_preserves_startup(self):
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.object(lean_runtime, "data_dir", return_value=Path(directory)),
-            patch.dict(os.environ, BASH_ENV="/custom/startup"),
-        ):
-            env = lean_runtime.environment()
-            self.assertEqual(env["LAKE_OVERRIDE_LEAN"], "true")
-            self.assertTrue(os.access(env["LEAN"], os.X_OK))
-            self.assertEqual(env["TAUCETI_PREVIOUS_BASH_ENV"], "/custom/startup")
-            self.assertIn("--install-available", Path(env["BASH_ENV"]).read_text())
-
-    def test_bash_step_wraps_toolchain_before_a_clean_environment_sandbox(self):
+    def test_ci_wraps_watchdog_without_invalidating_official_toolchain_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             toolchain = root / "elan/toolchains/snapshot"
@@ -31,47 +19,81 @@ class LeanRuntime(unittest.TestCase):
             compiler = toolchain / "bin/lean"
             compiler.write_text("#!/bin/sh\necho compiler\n")
             compiler.chmod(0o755)
-            tools = root / "tools"
-            tools.mkdir()
-            elan = tools / "elan"
-            # CI's workspace root often has no selected/default toolchain.
-            elan.write_text("#!/bin/sh\nexit 1\n")
-            elan.chmod(0o755)
-            with patch.object(lean_runtime, "data_dir", return_value=root):
-                env = {
-                    **os.environ,
-                    **lean_runtime.environment(),
-                    "PATH": str(tools) + ":" + os.environ["PATH"],
-                    "ELAN_HOME": str(root / "elan"),
-                    # SSH's top-level noninteractive Bash reads .bashrc instead
-                    # of BASH_ENV. This fixture exercises a normal nested step.
-                    "SHLVL": "1",
-                }
-            # A worker can inherit the fleet manager's identical startup hook.
-            # It must source that predecessor once, without sourcing itself again.
+            snapshot = compiler.read_bytes()
+            watchdog = root / "watchdog"
+            (watchdog / "bin").mkdir(parents=True)
+            wrapped = watchdog / "bin/lean-real"
+            wrapped.symlink_to(compiler)
+            helper = root / "tauceti-lean"
+            helper.write_bytes(Path(lean_pressure.__file__).read_bytes())
+            helper.chmod(0o755)
+            startup = root / "ci-startup"
+            startup.write_text(lean_runtime.STARTUP)
+            env = {
+                **os.environ,
+                "BASH_ENV": str(startup),
+                "WATCHDOG_TOOLCHAIN": str(watchdog),
+                "TAUCETI_LEAN_WRAPPER": str(helper),
+                "SHLVL": "1",
+            }
+            # A pre-existing startup file still runs in each nested shell.
             previous = root / "previous-startup"
-            previous.write_text(lean_runtime.STARTUP)
+            previous_calls = root / "previous-calls"
+            previous.write_text("printf x >> " + shlex.quote(str(previous_calls)) + "\n")
             env["TAUCETI_PREVIOUS_BASH_ENV"] = str(previous)
             result = subprocess.run(
-                ["bash", "-c", "test -f " + shlex.quote(str(toolchain / ".tauceti-lean.json"))],
+                ["bash", "-ec", "bash -ec true"],
                 env=env,
                 text=True,
                 capture_output=True,
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((toolchain / "bin/lean-unthrottled").exists())
+            self.assertEqual(previous_calls.read_text(), "xx")
+            self.assertTrue((watchdog / "bin/lean-unthrottled").exists())
+            self.assertEqual(compiler.read_bytes(), snapshot)
+            self.assertEqual(sorted(p.name for p in toolchain.rglob("*")), ["bin", "lean"])
             result = subprocess.run(
-                [str(compiler), "--print-prefix"], env={"PATH": os.environ["PATH"]}, text=True, capture_output=True
+                [str(wrapped), "--print-prefix"], env={"PATH": os.environ["PATH"]}, text=True, capture_output=True
             )
-            self.assertEqual(result.stdout.strip(), str(toolchain))
+            self.assertEqual(result.stdout.strip(), str(watchdog))
+            result = subprocess.run([str(wrapped), "--githash"], capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), "compiler")
+
+    def test_ci_startup_does_not_recurse_through_a_bash_python_shim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            startup = root / "startup"
+            startup.write_text(lean_runtime.STARTUP)
+            calls = root / "calls"
+            helper = root / "wrapped-python"
+            helper.write_text("#!/usr/bin/env bash\nprintf x >> " + shlex.quote(str(calls)) + "\n")
+            helper.chmod(0o755)
+            (root / "bin").mkdir()
+            (root / "bin/lean-real").write_text("compiler")
+            (root / "bin/lean-real").chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-ec", "true"],
+                env={
+                    **os.environ,
+                    "BASH_ENV": str(startup),
+                    "TAUCETI_LEAN_WRAPPER": str(helper),
+                    "WATCHDOG_TOOLCHAIN": str(root),
+                    "SHLVL": "1",
+                },
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.read_text(), "x")
 
     def test_ci_bootstrap_installs_hook_and_dotenv_without_new_base_image(self):
         commands = lean_runtime.ci_commands()
         text = "\n".join(commands)
         self.assertIn("LAKE_OVERRIDE_LEAN=true", text)
         self.assertIn("BASH_ENV=/opt/tauceti-lean-env", text)
-        self.assertIn("--install-available", text)
+        self.assertIn("--install-toolchain", text)
         self.assertIn("/opt/actions-runner/.env", text)
         subprocess.run(["bash", "-n"], input=text, text=True, check=True)
         with tempfile.TemporaryDirectory() as directory:
@@ -99,6 +121,16 @@ class LeanRuntime(unittest.TestCase):
             self.assertLess(maximum + GIB, caps["memory_total"])
             self.assertIn("CPUWeight=1000", (root / "tauceti-fleet-ci.slice").read_text())
             self.assertIn("CPUWeight=10", (root / "tauceti-fleet-workers.slice").read_text())
+
+    def test_worker_service_prefers_workers_over_ci_for_kernel_oom(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(host, "units", return_value=Path(directory)),
+            patch.object(host, "run"),
+        ):
+            host.start_workers()
+            text = (Path(directory) / "tauceti-fleet-workers.service").read_text()
+            self.assertIn("OOMScoreAdjust=500", text)
 
 
 if __name__ == "__main__":

@@ -22,11 +22,21 @@ def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=
     return result
 
 
-def memory_budget_gib(config):
+def shared_memory_bytes(caps):
+    gib = 1024**3
+    reserve = max(4 * gib, int(caps["memory_total"] * 0.1))
+    return max(16 * 1024**2, caps["memory_total"] - reserve - gib)
+
+
+def memory_budget_gib(config, caps=None):
     """Physical CI slice ceiling, independent of overcommitted guest RAM."""
     value = config.get("ci_memory_budget_gib")
     if value is None:
-        return jobs(config) * (config["ci_memory_gib"] + 2)
+        if caps is None:
+            from .capabilities import resources
+
+            caps = resources()
+        return shared_memory_bytes(caps) / 1024**3
     if type(value) is not int or not 1 <= value <= 1048576:
         raise FleetError("ci_memory_budget_gib must be a positive integer at most 1048576")
     return value

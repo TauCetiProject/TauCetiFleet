@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, focus, github, lean_runtime, vm
+from . import activity, capacity, ci, ci_overview, focus, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -186,7 +186,7 @@ def worker_memory_limits(config, caps, pinned=0):
     Only high moves during work: lowering max could kill an active paid round.
     """
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    maximum = max(16 * 1024**2, caps["memory_total"] - reserve - GIB)
+    maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
     high = min(int(maximum * 0.95), max(pinned + GIB, pinned + caps["memory_available"] - reserve))
@@ -216,8 +216,8 @@ def refresh_worker_memory(config, caps, memory):
 
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
-    shared = max(16 * 1024**2, caps["memory_total"] - reserve - GIB)
-    ci = (config["ci_memory_budget_gib"] * GIB if config.get("ci_memory_budget_gib") else shared) if config["ci_allowed"] else 0
+    shared = capacity.shared_memory_bytes(caps)
+    ci = capacity.memory_budget_gib(config, caps) * GIB if config["ci_allowed"] else shared
 
     def current(name):
         result = run(
@@ -305,7 +305,7 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
-        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\n"
+        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=500\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
@@ -313,7 +313,6 @@ def start_workers():
 
 def run_workers():
     config = host_config()
-    os.environ.update(lean_runtime.environment())
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
     os.environ.update(
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
@@ -855,7 +854,7 @@ def daemon():
                         ci_vms=values,
                         ci_jobs_busy=sum(bool(v.get("busy")) for v in values),
                         ci_max_jobs=capacity.jobs(config),
-                        ci_memory_budget_gib=config.get("ci_memory_budget_gib") or (caps["memory_total"] - reserve - GIB) / GIB,
+                        ci_memory_budget_gib=capacity.memory_budget_gib(config, caps),
                         ci_kinds=capacity.kinds(config),
                         ci_staging_slots=capacity.reservation(config)[0],
                         ci_staging_reservation_error=capacity.reservation(config)[1],
@@ -971,7 +970,7 @@ def rpc(payload):
             ci_enabled=config["ci_enabled"],
             ci_kinds=capacity.kinds(config),
             ci_max_jobs=capacity.jobs(config),
-            ci_memory_budget_gib=read(state_dir() / "status.json", {}).get("ci_memory_budget_gib", capacity.memory_budget_gib(config)),
+            ci_memory_budget_gib=capacity.memory_budget_gib(config),
             ci_staging_slots=capacity.reservation(config)[0],
             ci_staging_reservation_error=capacity.reservation(config)[1],
             ci_enrolled=bool(config.get("ci_broker_url")),

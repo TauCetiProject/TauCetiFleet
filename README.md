@@ -254,8 +254,10 @@ Lean starts wait when recent CPU use exceeds 90%, or available RAM falls below
 slightly more than twice the fixed worst-file RSS measured on 2026-11-03.
 The memory-use threshold has a 60% floor for small machines. Retries sleep for
 independent random 1–5 second intervals. Both host workers and newly started CI
-guests receive `LAKE_OVERRIDE_LEAN=true`, the standalone wrapper, and a Bash hook
-that wraps newly installed compilers, including calls inside the CI sandbox.
+guests receive `LAKE_OVERRIDE_LEAN=true` and the standalone wrapper. Workers use
+a scoped PATH alias and toolchain overlay. A CI-only Bash hook wraps the prepared
+watchdog's compiler link so the CI sandbox also uses the gate. It leaves the
+official Lean installation untouched, preserving toolchain snapshot cache hits.
 Metadata probes stay fast and ordinary waits stay silent for `lake build --iofail`.
 Already-running guests finish with their existing setup before replacement.
 
@@ -265,7 +267,8 @@ reserve and 1 GiB swap allowance. Worker hard limits no longer reserve CI's full
 configured RAM in advance. CI defaults to the same shared ceiling; an explicit
 `ci_memory_budget_gib` still applies to its child slice. This does not change guest
 RAM shapes or CPU priorities. Concurrent compilers can still grow after passing
-the gate, so the aggregate emergency bound remains necessary.
+the gate, so the aggregate emergency bound remains necessary. Worker processes
+have `OOMScoreAdjust=500`, preferring them over CI guests for kernel OOM kills.
 
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
