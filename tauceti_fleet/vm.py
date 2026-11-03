@@ -10,7 +10,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import github
+from . import github, lean_runtime
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, event, host_config, locked, read, state_dir
 
@@ -348,6 +348,7 @@ def _start(config):
             + shlex.quote(hook.replace("KIND", "'ci_completed'"))
             + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
             "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
+            *lean_runtime.ci_commands(),
             "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
         ]
         seed = cloud_seed(directory, commands, name=name)

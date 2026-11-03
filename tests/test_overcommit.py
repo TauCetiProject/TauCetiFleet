@@ -35,7 +35,8 @@ class Overcommit(unittest.TestCase):
 
     def test_explicit_budget_allows_cpu_and_guest_ram_overcommit(self):
         unbounded = self.checks(self.config)
-        self.assertEqual(unbounded["ci-shape"]["status"], "blocked")
+        self.assertEqual(unbounded["ci-shape"]["status"], "ok")
+        self.assertEqual(unbounded["ci-memory-overcommit"]["status"], "warning")
         config = capacity.settings(self.config, ci="both", memory_budget_gib=80)
         checks = self.checks(config)
         self.assertEqual(checks["ci-shape"]["status"], "ok")
@@ -53,6 +54,12 @@ class Overcommit(unittest.TestCase):
                 capacity.settings(self.config, ci="both", memory_budget_gib=value)
             with self.assertRaises(store.FleetError):
                 capacity.memory_budget_gib(dict(self.config, ci_memory_budget_gib=value))
+
+    def test_shared_default_requires_startup_headroom_without_reserving_the_ceiling(self):
+        for config in (dict(self.config, ci_max_jobs=1), dict(self.config, ci_max_jobs=1, ci_memory_budget_gib=None)):
+            checks = self.checks(config)
+            self.assertEqual(checks["ci-shape"]["status"], "ok")
+            self.assertEqual(checks["available-memory-headroom"]["status"], "ok")
 
     def test_sparse_disks_require_startup_space_not_sum_of_virtual_sizes(self):
         self.assertEqual(self.checks(self.config)["storage"]["status"], "ok")
@@ -86,10 +93,10 @@ class Overcommit(unittest.TestCase):
                 vm.start(self.config)
             jit.assert_not_called()
 
-    def test_worker_ram_reservation_uses_physical_budget(self):
+    def test_worker_ram_shares_host_capacity_without_subtracting_ci_budget(self):
         config = dict(self.config, ci_allowed=True, ci_memory_budget_gib=80)
         _, maximum = host.worker_memory_limits(config, dict(memory_total=125 * GIB, memory_available=30 * GIB))
-        self.assertEqual(maximum, 31.5 * GIB)
+        self.assertEqual(maximum, 111.5 * GIB)
 
     def test_slice_budget_cannot_shrink_below_live_ci_usage(self):
         config = dict(self.config, ci_allowed=True, ci_memory_budget_gib=80)

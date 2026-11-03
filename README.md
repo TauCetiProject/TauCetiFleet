@@ -109,12 +109,12 @@ the host kernel without per-guest CPU quotas or core pinning. Their total may
 exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
-scheduling overhead. By default, the physical CI memory budget covers guest RAM
-and 2 GiB of overhead for every configured job. An explicit
-`--ci-memory-budget-gib N` instead bounds the whole CI slice at N GiB and permits
+scheduling overhead. By default, CI and workers share a parent memory ceiling
+that preserves host OS headroom. An explicit
+`--ci-memory-budget-gib N` additionally bounds the whole CI child slice at N GiB and permits
 guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
-completions and memory events when choosing concurrency. Workers receive bounded remaining memory after CI and OS
-headroom, considering actual available memory on a shared host. CI receives
+completions and memory events when choosing concurrency. Workers use currently
+available memory under the same parent ceiling. CI receives
 priority over this fleet, not an entitlement over other users' allocations.
 
 Example CI configurations for dedicated volunteer hosts:
@@ -241,25 +241,44 @@ setup failures report degraded isolation and continue the same process. Whole-ho
 worker shutdown for an update stops the worker slice, including detached children
 and workers that outlived the manager; draining still allows active rounds to finish.
 Status reports recent userspace OOM kills separately from kernel OOM counters.
-CI VM units use `ManagedOOMPreference=avoid` and keep their already-reserved RAM
-resident with `MemorySwapMax=0`. Worker limits and CI CPU priority are unchanged.
-This avoids swapping the guest's memory while physical RAM is reserved for it,
-reduces reclaim activity, and bounds CI's memory consumption within its existing
-RAM reservation. Root-owned ancestor monitors can ignore user preferences: verify
+CI VM units use `ManagedOOMPreference=avoid` and keep guest RAM
+resident with `MemorySwapMax=0`. CI CPU priority remains in effect.
+The common parent slice bounds actual combined RAM use. Root-owned ancestor monitors can ignore user preferences: verify
 CI reclaim activity and throughput during rollout rather than treating the
 preference as an unconditional exemption from OOM kills. With administrator access,
 [`docs/oom-pressure-policy.nix`](docs/oom-pressure-policy.nix) is an optional NixOS
 policy that moves the root-owned `user.slice` pressure monitor to each delegated
 `user@.service` at the current 80% threshold. It is not an admission prerequisite.
 
+Lean starts wait when recent CPU use exceeds 90%, or available RAM falls below
+slightly more than twice the fixed worst-file RSS measured on 2026-11-03.
+The memory-use threshold has a 60% floor for small machines. Retries sleep for
+independent random 1–5 second intervals. Both host workers and newly started CI
+guests receive `LAKE_OVERRIDE_LEAN=true` and the standalone wrapper. Workers use
+a scoped PATH alias and toolchain overlay. A CI-only Bash hook wraps the prepared
+watchdog's compiler link so the CI sandbox also uses the gate. It leaves the
+official Lean installation untouched, preserving toolchain snapshot cache hits.
+Metadata probes stay fast and ordinary waits stay silent for `lake build --iofail`.
+Already-running guests finish with their existing setup before replacement.
+
+Workers and CI can use whatever RAM is currently free. Their parent
+`tauceti-fleet.slice` limits combined resident memory to host RAM minus the OS
+reserve and 1 GiB swap allowance. Worker hard limits no longer reserve CI's full
+configured RAM in advance. CI defaults to the same shared ceiling; an explicit
+`ci_memory_budget_gib` still applies to its child slice. This does not change guest
+RAM shapes or CPU priorities. Concurrent compilers can still grow after passing
+the gate, so the aggregate emergency bound remains necessary. Worker processes
+have `OOMScoreAdjust=500`, biasing kernel OOM victim selection toward workers;
+this does not guarantee protection for large CI guests.
+
 Worker RAM includes cached file data. Estimated working memory subtracts cold
 clean inactive file cache, retaining dirty/writeback data. Reclaim wait percentages
 are informational. The controller refreshes worker MemoryHigh from current host headroom every five seconds,
 without double-counting reclaimable artifact cache or dropping below pinned memory
 plus a 1 GiB cushion (subject to the hard ceiling). Raising it allows workers to
-recover when CI releases RAM. MemoryMax is independent of startup availability and still
-reserves the aggregate CI memory budget (guest RAM plus overhead by default) and at least 10% of host
-RAM (minimum 4 GiB) for the OS. A 1 GiB swap cap is included within the worker
+recover when CI releases RAM. MemoryMax is independent of startup availability and
+preserves at least 10% of host RAM (minimum 4 GiB) for the OS through the shared
+parent ceiling. A 1 GiB swap cap is included within the worker
 reservation, deducted from its resident RAM limit; swapped bytes also count in
 the estimated working set. This bounds zram use outside resident accounting.
 

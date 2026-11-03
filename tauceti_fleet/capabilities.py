@@ -254,12 +254,12 @@ def doctor(config=None, *, probe=True):
 
     count = jobs(config)
     ci_memory = count * config["ci_memory_gib"] * GIB
-    budget = memory_budget_gib(config) * GIB
-    overcommit = config.get("ci_memory_budget_gib") is not None
+    budget = memory_budget_gib(config, caps) * GIB
+    overcommit = ci_memory > budget
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     # QEMU vCPUs are runnable host threads, not reserved physical CPUs. The
-    # kernel shares CPU across guests; unlike RAM, their counts need not sum
-    # to less than the host allocation.
+    # kernel shares CPU across guests. The common parent slice bounds actual
+    # resident RAM; virtual guest RAM need not sum to less than host capacity.
     fits = caps["memory_total"] >= budget + reserve
     add(
         "ci-shape",
@@ -278,7 +278,8 @@ def doctor(config=None, *, probe=True):
     except (FleetError, ValueError):
         committed = 0
     additional = max(0, budget - committed)
-    needed = (min(2 * GIB, additional) if overcommit else additional) + reserve
+    # The shared ceiling is available capacity, not an advance reservation.
+    needed = (min(2 * GIB, additional) if overcommit or config.get("ci_memory_budget_gib") is None else additional) + reserve
     add(
         "available-memory-headroom",
         "ok" if caps["memory_available"] >= needed else "blocked",
@@ -288,7 +289,7 @@ def doctor(config=None, *, probe=True):
     )
     if overcommit:
         add("ci-memory-overcommit", "warning",
-            f"Explicit physical budget: {ci_memory / GIB:g} GiB of virtual guest RAM shares {budget / GIB:g} GiB; simultaneous memory peaks may OOM CI guests",
+            f"{ci_memory / GIB:g} GiB of virtual guest RAM shares {budget / GIB:g} GiB of physical capacity; simultaneous memory peaks may OOM CI guests",
             "Observe CI completions and memory.events; adjust slots or the aggregate budget if useful throughput falls",
             roles=("ci",))
     try:
