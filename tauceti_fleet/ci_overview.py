@@ -24,8 +24,8 @@ INTERVAL = 300
 # fixed cohort boundary: a rolling window could hide genuinely delayed new work.
 QUEUED_RUNS_CREATED_SINCE = "2026-10-08T00:00:00Z"
 # Zero jobs; both cancel and force-cancel return 409 "has not yet queued".
-# PR #25086 received a replacement build. Do not generalize to other old runs.
-CONFIRMED_ORPHAN_RUN_IDS = (41474083442,)
+# PRs #25086 and #27094 received replacement builds. Do not generalize by age.
+CONFIRMED_ORPHAN_RUN_IDS = (41474083442, 41645104351)
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
     "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
