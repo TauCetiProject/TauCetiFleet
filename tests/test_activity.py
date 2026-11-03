@@ -138,9 +138,10 @@ class ActivityTests(unittest.TestCase):
         ):
             value = activity.cached("m")
             activity.display(activity.combine_status([value, value]))
-        self.assertIn("2 in 1h; 4 in 24h; 10 all time", output.getvalue())
+        self.assertIn("Round reporting gaps: 2 in 1h; 4 in 24h (by start time)", output.getvalue())
         self.assertIn("worker-one, round affected", output.getvalue())
-        self.assertIn("Check worker logs", output.getvalue())
+        self.assertIn("See worker log", output.getvalue())
+        self.assertNotIn("10 all time", output.getvalue())
 
     def test_combined_status_warns_only_for_stale_unresolved_pr_evidence(self):
         now = 1_000_000
