@@ -276,7 +276,7 @@ def start(config):
                 if 0 < remaining <= 60:
                     atomic(path, dict(boot_id=boot, next_start_monotonic=now + remaining))
                     return {}
-            if not start_memory_ok():
+            if not start_memory_ok(config):
                 # Defer without consuming the pacing minute; the slot retries in 5s.
                 return {}
 
@@ -296,6 +296,7 @@ def start(config):
 # sees. Require the gate's two-worst-file headroom plus about 2 GiB of guest
 # boot overhead, so new guests cannot fill the shared slice the gate protects.
 START_MEMORY_BYTES = 20 * 1024**3
+STAGING_START_MEMORY_BYTES = 14 * 1024**3
 _start_memory_deferred = False
 
 
@@ -313,15 +314,16 @@ def start_memory_available():
         return None
 
 
-def start_memory_ok():
+def start_memory_ok(config=None):
     """Unmeasurable memory does not block CI; a measured shortfall defers the start."""
     global _start_memory_deferred
     available = start_memory_available()
-    deferred = available is not None and available < START_MEMORY_BYTES
+    required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
+    deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
         print(
             f"CI guest start deferred: {available / 1024**3:.1f} GiB available, "
-            f"{START_MEMORY_BYTES / 1024**3:.0f} GiB required",
+            f"{required / 1024**3:.0f} GiB required",
             flush=True,
         )
     elif _start_memory_deferred and not deferred:
@@ -468,6 +470,8 @@ def _start(config):
                 "--quiet",
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
+                "-p",
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") == ["staging"] else "100"),
                 "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",
