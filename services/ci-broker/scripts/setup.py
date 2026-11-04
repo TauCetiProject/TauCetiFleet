@@ -114,16 +114,11 @@ def main():
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
     parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
     parser.add_argument("--ci", choices=("pr", "staging", "both"), help="allowed CI job classes")
-    parser.add_argument("--max-jobs", type=int, help="one shared PR + staging build limit, 1–4096")
     parser.add_argument("--slot", type=int, default=0, help="slot to reconcile (default: 0)")
     args = parser.parse_args()
     limits = {}
     if args.ci:
         limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
-    if args.max_jobs is not None:
-        if not 1 <= args.max_jobs <= 4096:
-            raise SystemExit("Use --max-jobs between 1 and 4096")
-        limits["max_jobs"] = args.max_jobs
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
         if (DIRECTORY / "github-app.json").exists():
@@ -198,8 +193,8 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         if not re.fullmatch(r"[a-f0-9]{32}", args.machine_id or ""):
             raise SystemExit("Use --machine-id from the hosts command")
         if args.action == "capacity":
-            if not args.ci or args.max_jobs is None:
-                raise SystemExit("Specify both --ci pr|staging|both and --max-jobs N")
+            if not args.ci:
+                raise SystemExit("Specify --ci pr|staging|both")
             result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/capacity", token=admin(), data=limits)
             print(json.dumps(result))
         elif args.action == "revoke":

@@ -106,5 +106,6 @@ def for_slot(config, index):
 
 
 def authorize(config, policy):
-    if jobs(config) > policy.get("max_jobs", 1) or not set(kinds(config)) <= set(policy.get("kinds", ["staging"])):
-        raise FleetError("Requested CI capacity exceeds the enrollment policy; ask the operator to update this machine's CI policy")
+    jobs(config)  # Validate the locally chosen count, independently of broker policy.
+    if not set(kinds(config)) <= set(policy.get("kinds", ["staging"])):
+        raise FleetError("Requested CI job classes exceed the enrollment policy; ask the operator to update this machine's CI classes")

@@ -18,12 +18,14 @@ class Capacity(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def test_shared_capacity_and_classes_require_explicit_authorized_values(self):
+    def test_local_job_count_and_broker_authorized_classes(self):
         config = capacity.settings(store.host_config(), ci="both", maximum=2, vcpus=16, memory_gib=32)
         self.assertEqual(capacity.kinds(config), ["pr", "staging"])
         self.assertEqual(capacity.jobs(config), 2)
         capacity.authorize(config, dict(max_jobs=2, kinds=["pr", "staging"]))
-        for policy in ({}, dict(max_jobs=1, kinds=["pr", "staging"]), dict(max_jobs=2, kinds=["staging"])):
+        capacity.authorize(config, dict(max_jobs=1, kinds=["pr", "staging"]))
+        capacity.authorize(config, dict(kinds=["pr", "staging"]))
+        for policy in ({}, dict(kinds=["staging"])):
             with self.assertRaises(store.FleetError):
                 capacity.authorize(config, policy)
         self.assertEqual(capacity.jobs(capacity.settings(config, ci="both", maximum=24)), 24)
@@ -111,7 +113,7 @@ class Capacity(unittest.TestCase):
 
     def test_enabling_chris_starts_exactly_two_shared_slots_with_the_selected_shape(self):
         store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
-        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready", workers="blocked"))), patch.object(github, "capacity_policy", return_value=dict(max_jobs=2, kinds=["pr", "staging"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service"):
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready", workers="blocked"))), patch.object(github, "capacity_policy", return_value=dict(max_jobs=1, kinds=["pr", "staging"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service"):
             result = host.enable(ci="both", maximum=2, vcpus=16, memory_gib=32)
         self.assertEqual(result["ci_max_jobs"], 2)
         self.assertFalse(result["workers_enabled"])
@@ -149,7 +151,7 @@ class Capacity(unittest.TestCase):
         busy = dict(slot=0, unit="vm-0", directory=str(self.root / "guest"), runner_id=100,
                     started_at=0, phase="ready", busy=True, run_id=42)
         store.atomic(vm.slot_file(config, "vm.json"), busy)
-        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))), patch.object(github, "capacity_policy", return_value=dict(max_jobs=2, kinds=["pr", "staging"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service") as install, patch.object(vm, "retire") as retire, patch.object(host, "ci_service_state", return_value=(True, "healthy")):
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))), patch.object(github, "capacity_policy", return_value=dict(max_jobs=1, kinds=["pr", "staging"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service") as install, patch.object(vm, "retire") as retire, patch.object(host, "ci_service_state", return_value=(True, "healthy")):
             result = host.enable(ci="both", maximum=2, vcpus=16, memory_gib=32)
             start.assert_not_called()
             install.assert_called_once_with(restart=False)

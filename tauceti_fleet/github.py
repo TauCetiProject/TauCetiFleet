@@ -134,9 +134,9 @@ def capacity_policy(config):
         from .broker import request as broker_request
 
         return broker_request(config, "/v1/policy")
-    from .capacity import jobs, kinds
+    from .capacity import kinds
 
-    return dict(runner_group_id=runner_policy(config), max_jobs=jobs(config), kinds=kinds(config))
+    return dict(runner_group_id=runner_policy(config), kinds=kinds(config))
 
 
 def retire_runner(config, runner_id):

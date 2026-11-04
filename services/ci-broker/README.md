@@ -26,15 +26,20 @@ their current credentials and configuration.
 From this directory, an operator with the private local admin credential runs:
 
 ```sh
-python3 scripts/setup.py invite --name chris-server --ci both --max-jobs 2
+python3 scripts/setup.py invite --name chris-server --ci both
 ```
 
-The invitation authorizes two jobs total, shared across PR and staging builds.
-Omitting the capacity flags retains one staging slot. The host can request a
-subset of these classes and fewer slots, but cannot expand its policy. An operator
-can increase the policy's slot count live with `setup.py capacity` when its job
-classes are unchanged; existing registrations and active jobs are preserved.
-Reductions and class changes still require retiring registered slots first.
+The invitation authorizes PR and staging jobs. Omitting `--ci` authorizes staging
+only. The host chooses its own runner count with local `--max-jobs`; operators do
+not set another ceiling in the broker. Existing stored enrollment counts are
+ignored, including for older controllers: `/v1/policy` reports the protocol's
+4096-slot bound in its legacy `max_jobs` field. Invitations and host inventory no
+longer expose a per-host count. Old API callers' `max_jobs` values are ignored.
+Changing authorized job classes still requires retiring registered slots first.
+
+Rolling back to a broker that enforces enrollment counts requires restoring a
+`max_jobs` field on every host record before switching code. Otherwise that broker
+defaults hosts without the field to one slot. Reverting code alone is insufficient.
 
 The command saves a seven-day enrollment code in a private file under
 `~/.config/tauceti-ci-broker/invitations/`. Transfer that code privately to the
@@ -102,8 +107,8 @@ explicitly. Reverting broker code alone does not restore the old record format.
 python3 scripts/setup.py hosts
 python3 scripts/setup.py revoke --machine-id HEX_ID
 python3 scripts/setup.py reconcile --machine-id HEX_ID --slot 0
-# Increase the slot ceiling live, keeping the existing classes:
-python3 scripts/setup.py capacity --machine-id HEX_ID --ci both --max-jobs 2
+# Change authorized classes after retiring the host's registered slots:
+python3 scripts/setup.py capacity --machine-id HEX_ID --ci both
 ```
 
 Revocation immediately rejects future host requests and discards the stored JIT
@@ -113,7 +118,8 @@ or an upstream outage. It does not remotely terminate a VM or erase credentials
 already delivered to a host. Re-enrolling a revoked machine requires operator recovery;
 fresh invitations cannot silently undo revocation.
 
-Each host may have one registered runner per authorized slot. The service fixes its group, labels,
+Each host may have one registered runner per locally chosen slot (indices 0–4095).
+The service fixes its group, labels,
 and name prefix, rechecks trusted main-workflow restrictions before registration,
 and filters runner inventory/deletion and job results to that host. It proxies
 only specific read-only TauCeti CI metadata endpoints, not arbitrary GitHub APIs.
@@ -152,10 +158,14 @@ retirement can recover without requesting extra capacity.
 
 The service stores ownership for the latest 4096 issued runners per host, which
 bounds record size. A sufficiently old deferred result can therefore age out.
+Each host record shares the [2 MB SQLite key/value limit](https://developers.cloudflare.com/durable-objects/platform/limits/); very large hosts may require separate slot records.
 The service deliberately serializes decisions in one Durable Object; revisit
 sharding if fleet size makes this a throughput bottleneck.
 Authenticated host requests have a burst allowance of 32 and replenish one
-request per ten seconds per authorized slot. Readiness policy is cached for at most one minute;
+request per ten seconds per active slot, counting between one and 32 slots.
+Empty slot records do not increase this request allowance. This throttle does
+not limit how many runners a host can register.
+Readiness policy is cached for at most one minute;
 registration and reconciliation always verify a fresh policy.
 
 CI hosts require trusted operators. The build workflow supplies a separate CI
