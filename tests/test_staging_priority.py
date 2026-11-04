@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci_priority, github, lean_host, lean_pressure, store
+from tauceti_fleet import ci_priority, github, lean_host, lean_pressure, store, vm
 
 GIB=1024**3
 
@@ -83,6 +83,13 @@ class StagingPriority(unittest.TestCase):
         self.assertEqual(pr['permit'],0)
         budget=__import__('math').ceil((50*GIB-ci_priority.headroom(112*GIB,staging=True))/lean_pressure.WORST_FILE_RSS_BYTES)
         self.assertEqual(stage['starts'],budget)
+
+    def test_reserved_staging_can_boot_with_less_headroom_and_keeps_boot_margin(self):
+        with patch.object(vm,'start_memory_available',return_value=15*GIB):
+            self.assertTrue(vm.start_memory_ok(dict(ci_kinds=['staging'])))
+            self.assertFalse(vm.start_memory_ok(dict(ci_kinds=['pr','staging'])))
+        with patch.object(vm,'start_memory_available',return_value=13*GIB):
+            self.assertFalse(vm.start_memory_ok(dict(ci_kinds=['staging'])))
 
     def test_reserved_staging_needs_no_api_and_weight_is_applied_once(self):
         value=dict(ci_kinds=['staging'],unit='vm')

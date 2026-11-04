@@ -352,7 +352,9 @@ Staging compiler starts bypass CPU-utilization sleeps and use one measured
 worst-file RAM margin instead of the two-file margin for ordinary CI. On a
 112 GiB shared budget this allows roughly 91% use (about 10 GiB headroom),
 compared with 83% (about 19 GiB) for ordinary CI. Guest exhaustion checks and
-hard cgroup RAM caps still apply. Staging guests receive CPUWeight=10000 versus
+hard cgroup RAM caps still apply. The reserved staging guest can boot with
+14 GiB of free RAM instead of 20 GiB, retaining room for guest preparation.
+Staging guests receive CPUWeight=10000 versus
 100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
 
 The host serves staging compiler requests first and accounts for all grants in
