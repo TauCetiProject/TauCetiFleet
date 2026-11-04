@@ -329,6 +329,11 @@ worst-case file; a guest's old 60% utilization threshold no longer applies.
 invocations, current waiters and executing compilers, the fraction that waited,
 waiting share of elapsed time, approximate p50/p95 waits, maximum and oldest
 active waits, and wait causes (CPU, RAM, missing signal, or admission queue).
+Immediately below the current counts, `Last admission seen` reports how long ago
+the host observed a confirmed admission counter increase, separately for workers
+and CI. The timestamp survives observer restarts. Existing history seeds a baseline;
+if no new admission has been observed, the cell says `none in …` for the observation
+window. Replayed snapshots, archival, and permits do not count as new admissions.
 Waiting share is summed capacity-wait seconds divided by summed wait plus
 execution seconds, including live invocations. It is neither host CPU utilization
 nor a percentage of the report's wall-clock interval. The normal CPU sampling
