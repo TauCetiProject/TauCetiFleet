@@ -52,6 +52,29 @@ operation. Existing administrator resource allocations remain authoritative.
 Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
 in the account's PATH. Missing tools block worker activation with a remedy.
 
+An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
+--machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
+persistent user service on the SSH control host. It reads the host's existing
+telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
+adds at most one slot after three minutes with spare memory for both guest growth
+and compiler headroom. Guest launches still obey the host's minute spacing and
+startup memory gate. One general slot is retained alongside staging reservations, even when reducing
+capacity; an existing staging-only ceiling can recover a general slot when memory
+allows it. The configured maximum is an experimental ceiling, not a reservation; normal worker and CI admissions remain enabled.
+
+A recovery requires fresh telemetry, at least 90 seconds without CI admission,
+no observed executing Lean processes, very low CI CPU, low RAM, and another 30
+seconds of confirmation. Only a nonreserved guest individually using less than
+0.2 CPU cores is eligible. The operator verifies the current runner/job ownership
+and a `pull_request_target` event before recording a durable cancel/retire/full-run
+retry transaction. Staging is never selected. GitHub requests happen only during
+recovery, with exponential backoff up to five minutes on failures. An unavailable
+write API still allows the verified stalled PR guest's RAM to be released; its
+resubmission remains pending in durable state. Fresh cached capacity observations continue while a retry is pending; additional
+recovery and growth wait for its resubmission. Restarting the service resumes that
+transaction and verifies the increased run attempt before cleaning up registration.
+`status` reads a prepared autoscale summary and identifies stale controller reports.
+
 Directly administered hosts can set `ci_idle_pool: true` in their private
 `host.json`. This keeps the reserved staging slots and one general idle guest,
 grows the pool as jobs arrive, and counts running or assigned jobs anywhere in

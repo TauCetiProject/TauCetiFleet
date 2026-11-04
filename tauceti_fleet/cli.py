@@ -291,6 +291,12 @@ def main(argv=None, *, _status_results=None):
                         show_lean_statistics(value['lean_statistics'])
                     if "ci_max_jobs" in value:
                         print(f"CI capacity: {status.get('ci_jobs_busy', 'unknown')} / {value['ci_max_jobs']} shared jobs; accepts {', '.join(value['ci_kinds'])}")
+                    if value.get("ci_autoscale"):
+                        auto = value["ci_autoscale"]
+                        age = max(0, time.time() - auto.get("at", 0))
+                        message = auto.get("error") or auto.get("reason", "")
+                        print(f"CI autoscale: target {auto.get('target', '?')} / {auto.get('ceiling', '?')}; {message}"
+                              + (f" (stale {age:.0f}s)" if age > 90 else ""))
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
                     if value.get("ci_staging_slots"):

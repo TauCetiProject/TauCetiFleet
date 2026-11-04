@@ -586,6 +586,8 @@ def collect_ci_results(config):
                     kind = "pr"
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
                                    memory_overcommit=config.get("ci_memory_budget_gib") is not None)
+            if value.get("operator_recovery"):
+                decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
                     run_data, statuses = ci.cancellation_metadata(job, config, lambda path, **_: github.ci_read(config, path))
@@ -983,6 +985,10 @@ def rpc(payload):
     if expected is not None and expected != host_config()["machine_id"]:
         raise FleetError("Host identity differs from inventory; verify the SSH target before re-enrolling")
     action = payload.get("action")
+    if action == "ci-autoscale":
+        from .ci_autoscale import host_action
+
+        return host_action(payload)
     if action == "configure":
         return configure(payload)
     if action == "enroll":
@@ -1049,6 +1055,7 @@ def rpc(payload):
             max_workers=config["max_workers"],
             lean_host_pressure=pressure,
             lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
+            ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
