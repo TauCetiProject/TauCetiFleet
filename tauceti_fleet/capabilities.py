@@ -86,9 +86,9 @@ def worker_memory():
     return memory
 
 
-def memory_pressure(memory, caps, *, recovering=False):
+def memory_pressure(memory, caps, *, recovering=False, reserve=None):
     reasons = []
-    if caps["memory_available"] < max(4 * GIB, int(caps["memory_total"] * 0.1)):
+    if caps["memory_available"] < (reserve if reserve is not None else max(4 * GIB, int(caps["memory_total"] * 0.1))):
         reasons.append("host memory headroom low")
     if (memory.get("pinned", memory["working_set"]) + memory.get("swap", 0)) >= memory["maximum"] * (0.85 if recovering else 0.90):
         reasons.append("worker working set near hard memory limit")

@@ -183,7 +183,19 @@ def prepare(config=None):
     return dict(worker=executable("tauceti"), image=manifest, smoke=vm.smoke(config) if manifest else None)
 
 
-def worker_memory_limits(config, caps, pinned=0):
+def worker_headroom(caps, *, ci_busy=False):
+    reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+    if ci_busy:
+        from . import lean_pressure
+
+        total = capacity.shared_memory_bytes(caps)
+        # CI cannot start Lean below its two-file gate. Let workers yield
+        # before that gate closes, including a small admission cushion.
+        reserve = max(reserve, int(total * (1 - lean_pressure.memory_limit(total) / 100)) + GIB)
+    return reserve
+
+
+def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
     """Use presently spare RAM; retain a fixed host/swap emergency bound.
 
     Workers and CI share the parent slice's hard ceiling, without a fixed RAM
@@ -191,7 +203,7 @@ def worker_memory_limits(config, caps, pinned=0):
     processes grow, MemAvailable falls and the existing controller lowers high.
     Only high moves during work: lowering max could kill an active paid round.
     """
-    reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+    reserve = worker_headroom(caps, ci_busy=ci_busy)
     maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
@@ -199,13 +211,13 @@ def worker_memory_limits(config, caps, pinned=0):
     return high, maximum
 
 
-def refresh_worker_memory(config, caps, memory):
+def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
     """Adjust the running slice without restarting work or blocking on reclaim."""
     if not caps["memory_total"]:
         memory["allocation_error"] = "Host memory measurement unavailable; retaining the last worker limit"
         return
     cg = Path(memory["cgroup"])
-    high, _ = worker_memory_limits(config, caps, memory["pinned"])
+    high, _ = worker_memory_limits(config, caps, memory["pinned"], ci_busy=ci_busy)
     maximum = memory["maximum"]
     high = min(high, int(maximum * 0.95))
     # Ignore sub-256 MiB movement. Opening nonblocking prevents synchronous
@@ -836,7 +848,7 @@ def daemon():
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
-                reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+                reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
@@ -845,12 +857,12 @@ def daemon():
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
                     try:
-                        refresh_worker_memory(config, caps, memory)
+                        refresh_worker_memory(config, caps, memory, ci_busy=busy)
                     except (OSError, ValueError) as exc:
                         # Retain the last applied limit and admissions on a transient
                         # tuning error; status keeps the operation and failure visible.
                         memory["allocation_error"] = f"worker memory.high refresh failed: {exc}"
-                pressure = memory_pressure(memory, caps, recovering=memory_paused) if memory else []
+                pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
                     "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
