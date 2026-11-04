@@ -116,16 +116,20 @@ def capacity_available():
     return None
 
 
-def memory():
-    """Available host RAM, bounded by enclosing cgroups' reclaimable headroom."""
+def memory(relative=None):
+    """Available host RAM, bounded by enclosing cgroups' reclaimable headroom.
+
+    Measures this process's cgroup unless ``relative`` names another cgroup path.
+    """
     fields = {
         k: int(v.split()[0]) * 1024
         for k, v in (line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     }
     total, available = fields["MemTotal"], fields["MemAvailable"]
-    relative = next(
-        (line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::")), None
-    )
+    if relative is None:
+        relative = next(
+            (line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::")), None
+        )
     if relative is None:
         return total, available
     root = Path("/sys/fs/cgroup")

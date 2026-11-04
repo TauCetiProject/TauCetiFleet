@@ -30,6 +30,23 @@ class StartPacing(unittest.TestCase):
             self.assertTrue(vm.start(dict(self.config, ci_slot=2)))
             self.assertEqual(start.call_count, 2)
 
+    def test_low_memory_defers_start_without_consuming_the_pacing_minute(self):
+        gib = 1024**3
+        with (
+            patch.object(vm.time, "monotonic", return_value=100),
+            patch.object(vm, "_start", return_value={"started": True}) as start,
+            patch.object(vm, "start_memory_available", return_value=19 * gib) as memory,
+        ):
+            self.assertEqual(vm.start(dict(self.config, ci_slot=0)), {})
+            start.assert_not_called()
+            # Once memory recovers, the start proceeds at once rather than a minute later.
+            memory.return_value = 20 * gib
+            self.assertTrue(vm.start(dict(self.config, ci_slot=0)))
+            # Unmeasurable memory never blocks CI; pacing still applies.
+            memory.return_value = None
+            self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
+            start.assert_called_once()
+
     def test_adopting_existing_guest_does_not_wait_or_reset_the_gate(self):
         prior = dict(unit="existing.service")
         store.atomic(vm.slot_file(dict(ci_slot=0), "vm.json"), prior)

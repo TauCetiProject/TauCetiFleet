@@ -11,7 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import github, lean_runtime
+from . import github, lean_pressure, lean_runtime
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, event, host_config, locked, read, state_dir
 
@@ -276,6 +276,10 @@ def start(config):
                 if 0 < remaining <= 60:
                     atomic(path, dict(boot_id=boot, next_start_monotonic=now + remaining))
                     return {}
+            if not start_memory_ok():
+                # Defer without consuming the pacing minute; the slot retries in 5s.
+                return {}
+
             def reserve(*, starting=False):
                 atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + 60, starting=starting))
 
@@ -286,6 +290,44 @@ def start(config):
                 return _start(config)
             finally:
                 reserve()
+
+
+# A new guest's boot and job setup allocate memory the Lean compiler gate never
+# sees. Require the gate's two-worst-file headroom plus about 2 GiB of guest
+# boot overhead, so new guests cannot fill the shared slice the gate protects.
+START_MEMORY_BYTES = 20 * 1024**3
+_start_memory_deferred = False
+
+
+def start_memory_available():
+    """Available memory within the CI slice and its parents, or None if unmeasurable."""
+    result = run(
+        ["systemctl", "--user", "show", "tauceti-fleet-ci.slice", "-p", "ControlGroup", "--value"], check=False
+    )
+    relative = (result.stdout or "").strip() if result.returncode == 0 else ""
+    if not relative or not (Path("/sys/fs/cgroup") / relative.lstrip("/")).is_dir():
+        return None
+    try:
+        return lean_pressure.memory(relative)[1]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def start_memory_ok():
+    """Unmeasurable memory does not block CI; a measured shortfall defers the start."""
+    global _start_memory_deferred
+    available = start_memory_available()
+    deferred = available is not None and available < START_MEMORY_BYTES
+    if deferred and not _start_memory_deferred:
+        print(
+            f"CI guest start deferred: {available / 1024**3:.1f} GiB available, "
+            f"{START_MEMORY_BYTES / 1024**3:.0f} GiB required",
+            flush=True,
+        )
+    elif _start_memory_deferred and not deferred:
+        print("CI guest starts resumed: memory available", flush=True)
+    _start_memory_deferred = deferred
+    return not deferred
 
 
 def slot_file(config, name):
