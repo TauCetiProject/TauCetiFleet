@@ -45,6 +45,18 @@ class Publisher:
                 saved = {}
         except FleetError:
             saved = {}
+        now = time.time()
+
+        def timestamp(value):
+            return type(value) in (int, float) and math.isfinite(value) and 0 < value <= now + 5
+
+        since = saved.get("admission_seen_since")
+        self.admission_seen_since = since if timestamp(since) else now
+        admissions = saved.get("last_admission_seen", {})
+        admissions = admissions if isinstance(admissions, dict) else {}
+        self.last_admission_seen = {
+            k: admissions.get(k) if timestamp(admissions.get(k)) else None for k in ("workers", "ci")
+        }
         self.statistics = None
         self.remote_statistics = (
             {p: v for p, v in saved.get("sources", {}).items() if isinstance(p, str) and lean_statistics.valid(v)}
@@ -219,6 +231,7 @@ class Publisher:
                 if self.statistics
                 else dict(self.last_workers, waiting_now=0, running_now=0, oldest_wait=0.0)
             )
+            self.observe_admissions("workers", self.last_workers, workers)
             self.last_workers = workers
             if time.time() - getattr(self, "legacy_at", 0) >= 5:
                 previous_stats = self.legacy
@@ -255,6 +268,8 @@ class Publisher:
             value = dict(
                 version=1,
                 restart_loss_accounting=2,
+                admission_seen_since=self.admission_seen_since,
+                last_admission_seen=self.last_admission_seen,
                 at=time.time(),
                 workers=workers,
                 ci=lean_statistics.merge([self.archived_statistics, *ci_rows]),
@@ -273,6 +288,17 @@ class Publisher:
                 state_dir() / "lean-statistics-report.json",
                 {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived", "archived_keys")},
             )
+
+    def observe_admissions(self, kind, prior, sample):
+        """Track confirmed counter increases, not permits or merged totals.
+
+        Guest clocks are independent, so report the host observation time. A
+        first snapshot from an older collector seeds a baseline, not activity.
+        """
+        same_session = prior.get("since") == sample["since"]
+        previous = prior.get("admitted", 0) if same_session else 0
+        if sample["admitted"] > previous and (same_session or sample["since"] >= self.admission_seen_since):
+            self.last_admission_seen[kind] = time.time()
 
     def archive_statistics(self, path):
         previous = self.remote_statistics.pop(path, None)
@@ -297,6 +323,7 @@ class Publisher:
             if f"{path}@{float(sample['since']):.6f}" in self.archived_keys:
                 return
             prior = self.remote_statistics.get(path, {})
+            self.observe_admissions("ci", prior, sample)
             if prior.get("since") != sample["since"]:
                 self.archive_statistics(path)
             self.remote_statistics[path] = sample

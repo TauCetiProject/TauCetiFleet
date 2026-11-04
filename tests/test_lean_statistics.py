@@ -326,6 +326,65 @@ p.exec_lean(Path(sys.argv[3]),[])
             trace.assert_not_called()
             wait.assert_called_once()
 
+    def test_last_admission_tracks_source_deltas_and_ignores_replays_and_archives(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)), patch.object(lean_host.time, "time", return_value=1000) as clock:
+            publisher = self.publisher()
+            row = stats.empty()
+            row.update(since=900, observed=10, admitted=5)
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            self.assertIsNone(publisher.last_admission_seen["ci"])
+            row.update(admitted=6)
+            clock.return_value = 1010
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            self.assertEqual(publisher.last_admission_seen["ci"], 1010)
+            clock.return_value = 1020
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            publisher.archive_statistics("guest")
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            self.assertEqual(publisher.last_admission_seen["ci"], 1010)
+
+    def test_new_collectors_and_worker_admissions_are_observed_without_guest_changes(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)), patch.object(lean_host.time, "time", return_value=1000) as clock:
+            publisher = self.publisher()
+            row = stats.empty()
+            row.update(since=1001, observed=1, admitted=1)
+            clock.return_value = 1002
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            self.assertEqual(publisher.last_admission_seen["ci"], 1002)
+            publisher.observe_admissions("workers", dict(row, admitted=0), row)
+            self.assertEqual(publisher.last_admission_seen["workers"], 1002)
+
+    def test_last_admission_persists_across_observer_restart_without_fake_activity(self):
+        with patch.dict(os.environ, TAUCETI_FLEET_STATE=str(self.root)), patch.object(lean_host.time, "time", return_value=1000):
+            row = stats.empty()
+            row.update(since=800, observed=10, admitted=5)
+            store.atomic(self.root / "lean-statistics.json", dict(admission_seen_since=800,
+                last_admission_seen=dict(workers=950, ci=970), sources={"guest":row}, workers=row))
+            publisher = self.publisher()
+            publisher.observe_statistics("guest", json.dumps(row).encode())
+            publisher.observe_admissions("workers", publisher.last_workers, row)
+            self.assertEqual(publisher.last_admission_seen, dict(workers=950, ci=970))
+            self.assertEqual(publisher.admission_seen_since, 800)
+
+    def test_report_shows_last_admission_after_counts_and_marks_unknown_history(self):
+        row = stats.empty()
+        row.update(observed=1)
+        value = dict(at=1000, workers=row, ci=row, admission_seen_since=880,
+                     last_admission_seen=dict(workers=985, ci=None))
+        output = io.StringIO()
+        with patch.object(stats.time, "time", return_value=1000), contextlib.redirect_stdout(output):
+            stats.display(value)
+        lines = output.getvalue().splitlines()
+        position = next(i for i, line in enumerate(lines) if "Waiting / running now" in line)
+        self.assertIn("Last admission seen", lines[position + 1])
+        self.assertIn("15s ago", lines[position + 1])
+        self.assertIn("none in 2m", lines[position + 1])
+        output = io.StringIO()
+        with patch.object(stats.time, "time", return_value=1020), contextlib.redirect_stdout(output):
+            stats.display(value)
+        last = next(line for line in output.getvalue().splitlines() if "Last admission seen" in line)
+        self.assertEqual(last.count("unknown"), 2)
+
     def test_stale_reports_do_not_present_live_counts_as_current(self):
         row = stats.empty()
         row.update(observed=1, waiting_now=1, waited=1)

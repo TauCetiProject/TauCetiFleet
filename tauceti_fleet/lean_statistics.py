@@ -419,6 +419,19 @@ def display(value):
     line(
         "Waiting / running now", [f"{r['waiting_now']} / {r['running_now']}" if not stale else "unknown" for r in rows]
     )
+    def admission_age(kind):
+        if stale:
+            return "unknown"
+        seen = value.get("last_admission_seen", {})
+        at = seen.get(kind) if isinstance(seen, dict) else None
+        since = value.get("admission_seen_since")
+        if type(at) in (int, float) and math.isfinite(at) and at > 0:
+            return duration(max(0, time.time() - at)) + " ago"
+        if type(since) in (int, float) and math.isfinite(since) and since > 0:
+            return "none in " + duration(max(0, time.time() - since))
+        return "not recorded"
+
+    line("Last admission seen", [admission_age(k) for k in ("workers", "ci")])
     line(
         "Invocations with waits", [f"{100 * r['waited'] / r['observed']:.1f}%" if r["observed"] else "—" for r in rows]
     )
