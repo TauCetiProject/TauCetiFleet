@@ -1,12 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
-import {MAX_JOBS,capacity,validCapacity,slots,labels} from './capacity.mjs';
+import {MAX_JOBS,capacity,validKinds,slots,labels} from './capacity.mjs';
 import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'"};
 const ORG = 'TauCetiProject';
 const APP = 'tauceti-fleet';
+const REQUEST_BURST = 32;
 function json(value, status=200) {
   return Response.json(value, {status, headers: HEADERS});
 }
@@ -42,8 +43,8 @@ export class FleetRegistry extends DurableObject {
   }
   admit(id, maximum=1) {
     const now=Date.now();
-    const bucket=this.buckets.get(id) || {tokens:32,at:now};
-    bucket.tokens=Math.min(32,bucket.tokens+Math.max(0,now-bucket.at)*maximum/10000);
+    const bucket=this.buckets.get(id) || {tokens:REQUEST_BURST,at:now};
+    bucket.tokens=Math.min(REQUEST_BURST,bucket.tokens+Math.max(0,now-bucket.at)*maximum/10000);
     bucket.at=now;
     const allowed=bucket.tokens>=1;
     if (allowed) bucket.tokens--;
@@ -134,16 +135,16 @@ export class FleetRegistry extends DurableObject {
         const key='invite:'+input.hash;
         const prior=await this.ctx.storage.get(key);
         if (prior?.machine_id) return json({error:'cannot extend a redeemed invitation'},409);
-        const limits=capacity({...prior,...input});
-        if (!validCapacity(limits)) return json({error:'invalid CI classes or shared capacity'},400);
+        const kinds=input.kinds ?? prior?.kinds ?? ['staging'];
+        if (!validKinds(kinds)) return json({error:'invalid CI classes'},400);
         const expires=Date.now()+lifetime*1000;
-        await this.ctx.storage.put(key,{name:input.name,expires,...limits});
+        await this.ctx.storage.put(key,{name:input.name,expires,kinds});
         return json({expires_in:lifetime,expires_at:expires});
       }
       if (url.pathname==='/admin/hosts' && req.method==='GET') {
         const hosts=await this.ctx.storage.list({prefix:'host:',limit:1000});
         return json({hosts:Array.from(hosts.values(), h=>({machine_id:h.machine_id,name:h.name,revoked:!!h.revoked,
-          ...capacity(h),slots:Object.entries(slots(h)).map(([slot,s])=>({slot:Number(slot),runner_id:s.runner_id || null,
+          kinds:capacity(h).kinds,slots:Object.entries(slots(h)).map(([slot,s])=>({slot:Number(slot),runner_id:s.runner_id || null,
             registration_pending:!!s.pending,pending_since:s.pending?.at ?? null,
             registration_failure:s.pending?.failure ?? null,recovery_error:s.pending?.recovery_error ?? null,
             recovery_attempts:s.pending?.attempts ?? 0,last_recovery:s.last_recovery ?? null,
@@ -154,15 +155,15 @@ export class FleetRegistry extends DurableObject {
         const host=await this.ctx.storage.get('host:'+policy[1]);
         if (!host) return json({error:'not found'},404);
         const input=await req.json();
-        if (!validCapacity(input)) return json({error:'invalid CI classes or shared capacity'},400);
-        const previous=capacity(host);
-        const growing=input.max_jobs>=previous.max_jobs && input.kinds.length===previous.kinds.length &&
-          input.kinds.every(k=>previous.kinds.includes(k));
-        if (!growing && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
-          return json({error:'drain and retire all slots before changing classes or capacity'},409);
-        Object.assign(host,{kinds:input.kinds,max_jobs:input.max_jobs});
+        if (!validKinds(input.kinds)) return json({error:'invalid CI classes'},400);
+        const previous=capacity(host).kinds;
+        const unchanged=input.kinds.length===previous.length && input.kinds.every(k=>previous.includes(k));
+        if (!unchanged && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
+          return json({error:'retire all slots before changing classes'},409);
+        host.kinds=input.kinds;
+        delete host.max_jobs;
         await this.ctx.storage.put('host:'+host.machine_id,host);
-        return json(capacity(host));
+        return json({kinds:host.kinds});
       }
       const revoke=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})$/);
       if (revoke && req.method==='DELETE') {
@@ -225,7 +226,7 @@ export class FleetRegistry extends DurableObject {
       if (!invite.machine_id && old) return json({error:'host already enrolled'},409);
       await this.ctx.storage.transaction(async tx=>{
         await tx.put(key,{...invite,machine_id:input.machine_id});
-        await tx.put('host:'+input.machine_id,old || {machine_id:input.machine_id,hash,name:invite.name,created_at:Date.now(),issued:[],...capacity(invite)});
+        await tx.put('host:'+input.machine_id,old || {machine_id:input.machine_id,hash,name:invite.name,created_at:Date.now(),issued:[],kinds:capacity(invite).kinds});
       });
       return json({machine_id:input.machine_id,runner_group_id:3});
     }
@@ -234,7 +235,11 @@ export class FleetRegistry extends DurableObject {
       const token=(req.headers.get('Authorization') || '').replace(/^Bearer /,'');
       const host=/^[a-f0-9]{32}$/.test(id)?await this.ctx.storage.get('host:'+id):null;
       if (!host || host.revoked || host.hash!==await digest(token)) return json({error:'unauthorized'},401);
-      if (!this.admit(id,capacity(host).max_jobs)) return json({error:'host request limit reached; retry after ten seconds'},429);
+      // Scale request throughput with active slots, independently of runner count
+      // permissions. Bound the rate and exclude abandoned/empty slot records.
+      const active=Object.values(slots(host)).filter(s=>s.runner_id || s.pending).length;
+      if (!this.admit(id,Math.max(1,Math.min(REQUEST_BURST,active)))) return json({error:'host request limit reached; retry after ten seconds'},429);
+      delete host.max_jobs; // Discard obsolete enrollment ceilings on the next save.
       const save=()=>this.ctx.storage.put('host:'+id,host);
       if (url.pathname==='/v1/policy' && req.method==='GET') return json({...await this.github.policy(),...capacity(host)});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
@@ -256,9 +261,10 @@ export class FleetRegistry extends DurableObject {
           return json({error:'invalid runner name'},400);
         const index=input.slot ?? 0, kinds=input.kinds ?? ['staging'];
         const allowed=capacity(host);
-        if (!Number.isInteger(index) || index<0 || index>=allowed.max_jobs ||
-            !validCapacity({max_jobs:1,kinds}) || kinds.some(k=>!allowed.kinds.includes(k)))
-          return json({error:'slot or job class exceeds this machine policy'},403);
+        if (!Number.isInteger(index) || index<0 || index>=MAX_JOBS)
+          return json({error:'slot must be an integer between 0 and '+(MAX_JOBS-1)},400);
+        if (!validKinds(kinds) || kinds.some(k=>!allowed.kinds.includes(k)))
+          return json({error:'job class exceeds this machine policy'},403);
         const registrations=slots(host);
         const slot=registrations[String(index)] ||= {};
         if (Object.entries(registrations).some(([i,s])=>i!==String(index) &&

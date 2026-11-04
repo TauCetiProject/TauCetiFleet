@@ -1,12 +1,13 @@
 export const MAX_JOBS=4096;
 
 export function capacity(host) {
-  return {max_jobs:host.max_jobs ?? 1,kinds:host.kinds ?? ['staging']};
+  // Older controllers require max_jobs in /v1/policy. It is the protocol's
+  // slot-index bound, never a per-host permission; local --max-jobs is authoritative.
+  return {max_jobs:MAX_JOBS,kinds:host.kinds ?? ['staging']};
 }
-export function validCapacity(value) {
-  return Number.isInteger(value.max_jobs) && value.max_jobs>=1 && value.max_jobs<=MAX_JOBS &&
-    Array.isArray(value.kinds) && value.kinds.length>=1 && value.kinds.length<=2 &&
-    new Set(value.kinds).size===value.kinds.length && value.kinds.every(k=>['pr','staging'].includes(k));
+export function validKinds(kinds) {
+  return Array.isArray(kinds) && kinds.length>=1 && kinds.length<=2 &&
+    new Set(kinds).size===kinds.length && kinds.every(k=>['pr','staging'].includes(k));
 }
 export function slots(host) {
   if (!host.slots) {

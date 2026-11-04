@@ -204,10 +204,11 @@ Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
 slots independently. Enabling does not restart the controller. Changes to guest
 shape or job classes, and reductions in the slot count, still require retiring
-the current guests first. Enrollment also imposes an
-operator-controlled ceiling on classes and shared capacity. A host can request
-less capacity, but cannot exceed its enrollment. Legacy installations retain
-one staging slot. Each guest has its own registration intent, state, event
+the current guests first. Each host chooses its runner count with local
+`--max-jobs`; there is no separate broker or dispatcher ceiling for a machine.
+Enrollment authorizes job classes, and a host can select a subset of them.
+The slot format supports up to 4096 jobs per host. Each guest has its own
+registration intent, state, event
 socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;

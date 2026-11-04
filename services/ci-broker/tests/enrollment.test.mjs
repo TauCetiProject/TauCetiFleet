@@ -24,6 +24,9 @@ before(async()=>{
         async seed(host) { return this.serialize(()=>this.ctx.storage.put('host:'+host.machine_id,host)); }
         async alarmTime() { return this.ctx.storage.getAlarm(); }
         async fireRecovery() { return this.alarm(); }
+        async elapseAdmission(id,ms) {
+          return this.serialize(()=>{ this.buckets.set(id,{tokens:0,at:Date.now()-ms}); });
+        }
       }`,compatibilityDate:'2026-10-11',
     durableObjects:{REGISTRY:{className:'TestFleetRegistry',useSQLite:true}},
     bindings:{ADMIN_TOKEN:admin,GITHUB_APP_ID:'42',GITHUB_INSTALLATION_ID:'123',
@@ -115,7 +118,7 @@ test('one-time enrollment binds a durable credential to one machine',async()=>{
   await enroll(id2,token2,'invite-two');
   assert.equal((await hostRequest(id1,token2,'/v1/policy')).status,401);
   assert.equal((await hostRequest(id2,token1,'/v1/policy')).status,401);
-  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),{runner_group_id:3,max_jobs:1,kinds:['staging']});
+  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),{runner_group_id:3,max_jobs:4096,kinds:['staging']});
 });
 test('concurrent registration creates one runner and cannot change its group, labels, or machine',async()=>{
   const name='fleet-'+id1.slice(0,12)+'-'+'a'.repeat(16);
@@ -202,6 +205,25 @@ test('one host cannot issue unlimited authenticated requests or consume another 
   assert.equal(results[32],429);
   assert.equal((await hostRequest('6'.repeat(32),'f'.repeat(64),'/v1/policy')).status,200);
 });
+test('request refill scales with active slots and excludes empty records and excessive counts',async()=>{
+  const namespace=await mf.getDurableObjectNamespace('REGISTRY');
+  const registry=namespace.get(namespace.idFromName('fleet'));
+  const id='e'.repeat(32),token='n'.repeat(64);
+  const base={machine_id:id,name:'refill-host',hash:hash(token),issued:[],created_at:1};
+  const requestPolicy=()=>hostRequest(id,token,'/v1/policy');
+  const empty=Object.fromEntries(Array.from({length:128},(_,i)=>[i,{}]));
+  await registry.seed({...base,slots:empty,max_jobs:4096});
+  await registry.elapseAdmission(id,200);
+  assert.equal((await requestPolicy()).status,429);
+  const owned=Object.fromEntries(Array.from({length:128},(_,i)=>[i,{runner_id:1000+i}]));
+  await registry.seed({...base,slots:owned});
+  await registry.elapseAdmission(id,200);
+  assert.equal((await requestPolicy()).status,429);
+  await registry.seed({...base,slots:{0:{runner_id:1000},1:{pending:{name:'uncertain',at:Date.now()}}}});
+  await registry.elapseAdmission(id,5500);
+  assert.equal((await requestPolicy()).status,200);
+  await registry.seed({...base,slots:{}});
+});
 test('an ambiguous registration does not create additional runners on retry',async()=>{
   await enroll(id3,token3,'invite-three');
   failRegistration=true;
@@ -213,7 +235,7 @@ test('an ambiguous registration does not create additional runners on retry',asy
   assert.equal((await adminRequest('/admin/hosts/'+id3+'/reconcile','POST',{})).status,409);
   failRegistration=false;
 });
-test('a machine has one shared slot ceiling across explicitly authorized PR and staging classes',async()=>{
+test('hosts choose slot counts while registrations retain class and ownership checks',async()=>{
   const id='8'.repeat(32),token='h'.repeat(64);
   await enroll(id,token,'shared-two-slots',{max_jobs:2,kinds:['pr','staging']});
   const prefix='fleet-'+id.slice(0,12)+'-';
@@ -223,7 +245,7 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   const registered=[];
   for (const response of responses) { assert.equal(response.status,200); registered.push(await response.json()); }
   const policy=await (await hostRequest(id,token,'/v1/policy')).json();
-  assert.equal(policy.max_jobs,2);
+  assert.equal(policy.max_jobs,4096);
   const inventory=(await (await hostRequest(id,token,'/v1/runners')).json()).runners;
   assert.equal(inventory.length,2);
   const pr=inventory.find(r=>r.id===registered[0].runner_id).labels.map(l=>l.name);
@@ -233,18 +255,18 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   assert.ok(staging.includes('tauceti-fleet-staging')); assert.ok(!staging.includes('tauceti-fleet-pr'));
   assert.ok(pr.includes('fleet-'+id)); assert.ok(pr.includes('fleet-instance-'+'1'.repeat(16)));
   assert.ok(pr.includes('fleet-host-test-8'));
-  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[1],slot:2})).status,403);
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{...inputs[0],slot:1})).status,409);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['staging']})).status,409);
   runners.get(registered[1].runner_id).busy=true;
-  const grow=await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:24,kinds:['staging','pr']});
-  assert.equal(grow.status,200);
-  assert.equal((await grow.json()).max_jobs,24);
   for (const r of registered) assert.ok(runners.has(r.runner_id));
   assert.equal(runners.get(registered[1].runner_id).busy,true);
   const extra=await hostRequest(id,token,'/v1/runners','POST',{slot:23,kinds:['pr'],name:prefix+'3'.repeat(16)});
   assert.equal(extra.status,200);
-  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:23,kinds:['pr','staging']})).status,409);
+  // Old operator requests cannot reinstate a runner-count ceiling.
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:1,kinds:['pr','staging']})).status,200);
+  assert.equal((await (await hostRequest(id,token,'/v1/policy')).json()).max_jobs,4096);
+  const hosts=(await (await adminRequest('/admin/hosts')).json()).hosts;
+  assert.equal('max_jobs' in hosts.find(h=>h.machine_id===id),false);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:24,kinds:['pr']})).status,409);
   assert.equal((await hostRequest(id,token,'/v1/slots/23/cancel-registration','POST',{name:prefix+'3'.repeat(16)})).status,200);
   const revoked=await (await adminRequest('/admin/hosts/'+id,'DELETE')).json();
@@ -254,20 +276,34 @@ test('a machine has one shared slot ceiling across explicitly authorized PR and 
   await adminRequest('/admin/hosts/'+id,'DELETE');
   assert.ok(!runners.has(registered[1].runner_id));
 });
-test('staging-only enrollment refuses PR labels, extra slots, and invalid operator capacities',async()=>{
+test('staging-only enrollment permits extra slots but refuses PR labels and invalid classes',async()=>{
   const id='9'.repeat(32),token='i'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'3'.repeat(16);
   await enroll(id,token,'staging-only');
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,kinds:['pr']})).status,403);
-  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1})).status,403);
-  for (const input of [{max_jobs:0,kinds:['staging']},{max_jobs:2,kinds:['other']},{max_jobs:2,kinds:[]},
-    {max_jobs:2,kinds:['pr','pr']},{max_jobs:true,kinds:['pr']}])
-    assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',input)).status,400);
-  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{max_jobs:2,kinds:['pr','staging']})).status,200);
-  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1,kinds:['pr']})).status,200);
+  for (const slot of [-1,4096,1.5,'1'])
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot})).status,400);
+  for (const kinds of [['other'],[],['pr','pr'],null])
+    assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{kinds})).status,400);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/capacity','POST',{kinds:['pr','staging']})).status,200);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:4095,kinds:['pr']})).status,200);
+});
+test('persisted enrollment ceilings do not restrict existing hosts or older controllers',async()=>{
+  const namespace=await mf.getDurableObjectNamespace('REGISTRY');
+  const registry=namespace.get(namespace.idFromName('fleet'));
+  const id='d'.repeat(32),token='m'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await registry.seed({machine_id:id,name:'old-four-slot-host',hash:hash(token),issued:[],
+    max_jobs:4,kinds:['pr','staging'],created_at:1,slots:{}});
+  assert.equal((await (await hostRequest(id,token,'/v1/policy')).json()).max_jobs,4096);
+  const first=await (await hostRequest(id,token,'/v1/runners','POST',
+    {name:prefix+'8'.repeat(16),slot:0,kinds:['pr']})).json();
+  runners.get(first.runner_id).busy=true;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',
+    {name:prefix+'9'.repeat(16),slot:24,kinds:['staging']})).status,200);
+  assert.equal(runners.get(first.runner_id).busy,true);
 });
 test('an ambiguous registration pins only its own slot and legacy records retain ownership during migration',async()=>{
   const id='a'.repeat(32),token='j'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
-  await enroll(id,token,'independent-slots',{max_jobs:2,kinds:['staging']});
+  await enroll(id,token,'independent-slots',{kinds:['staging']});
   failRegistration=true;
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'4'.repeat(16),slot:0})).status,503);
   failRegistration=false;
@@ -280,9 +316,9 @@ test('an ambiguous registration pins only its own slot and legacy records retain
   const pending={pending:{name:'uncertain',at:1}};
   assert.deepEqual(slots(pending),{'0':{pending:{name:'uncertain',at:1}}});
 });
-test('draining cancels a definitively rejected intent even after its operator ceiling was lowered',async()=>{
+test('draining cancels a definitively rejected intent in any valid local slot',async()=>{
   const id='b'.repeat(32),token='k'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'6'.repeat(16);
-  await enroll(id,token,'cancel-unlaunched',{max_jobs:2,kinds:['staging']});
+  await enroll(id,token,'cancel-unlaunched',{kinds:['staging']});
   rejectRegistration=422;
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:1})).status,503);
   rejectRegistration=0;
