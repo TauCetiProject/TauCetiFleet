@@ -27,7 +27,7 @@ def host_action(payload):
         proposed = dict(config, ci_max_jobs=payload["maximum"])
         capacity.jobs(proposed)
         capacity.staging_slots(proposed)
-        update_host(ci_max_jobs=proposed["ci_max_jobs"])
+        update_host(ci_max_jobs=proposed["ci_max_jobs"], validate=capacity.staging_slots)
         return dict(maximum=proposed["ci_max_jobs"])
     if mode == "note":
         value = payload["value"]
@@ -39,6 +39,11 @@ def host_action(payload):
         runner = payload["runner_id"]
         if type(runner) is not int or runner <= 0:
             raise FleetError("Invalid retired runner ID")
+        owned = [read(path, {}) for path in [state_dir() / "ci-last-retired.json",
+                 *(state_dir() / "ci-slots").glob("*/ci-last-retired.json")]]
+        owned += read(state_dir() / "pending-ci.json", [])
+        if not any(v.get("runner_id") == runner for v in owned):
+            raise FleetError("Retired runner ownership cannot be verified")
         try:
             github.retire_runner(config, runner)
         except FleetError as error:
@@ -130,24 +135,29 @@ class Controller:
             self.value.setdefault("stall_since", now)
         else:
             self.value.pop("stall_since", None)
-        if low and general_idle and limit > self.minimum:
+        floor = max(self.minimum, snapshot["reserved"] + 1)
+        if limit < floor <= self.maximum and available >= headroom + 21 * GIB:
+            return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
+        if low and general_idle and limit > floor:
             self.value.pop("growth_since", None)
-            target = max(self.minimum, snapshot["reserved"], min(limit - 1, len(busy) + len(idle) - len(general_idle)))
+            target = max(floor, min(limit - 1, len(busy) + len(idle) - len(general_idle)))
             if target < limit:
                 return dict(kind="limit", target=target, reason="return idle guest RAM to active builds")
         if stalled and now - self.value["stall_since"] >= 30 and limit >= self.minimum:
             candidates = [v for v in busy_general if v.get("run_id") and cpu.get(v["instance"], 1) < .2]
             if candidates and now - self.value.get("last_recovery", {}).get("at", 0) >= 120:
                 self.value.pop("growth_since", None)
-                return dict(kind="recover", target=max(self.minimum, limit - 1),
-                            candidates=sorted(candidates, key=lambda v: v.get("job_started_at", v["started_at"]), reverse=True),
+                return dict(kind="recover", target=max(floor, limit - 1),
+                            candidates=sorted(candidates, key=lambda v: (v.get("memory_bytes") or 0,
+                                              v.get("job_started_at", v["started_at"])), reverse=True),
                             reason="no CI compiler admissions and idle PR guests under RAM pressure")
         # Charge unrealized preparation growth rather than assuming that a newly
         # booted 3-GiB guest will stay small. No physical memory is reserved.
         budget = max(20 * GIB, max((v.get("memory_bytes") or 0 for v in snapshot["vms"]), default=0) * 1.1)
         pending = sum(max(0, budget - (v.get("memory_bytes") or budget)) for v in snapshot["vms"])
         room = available - pending >= headroom + budget + GIB
-        growth = (room and len(busy) >= limit and not idle and limit < self.maximum
+        saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
+        growth = (room and saturated and limit < self.maximum
                   and all(v.get("memory_bytes") is not None for v in snapshot["vms"]))
         if growth and pressure.get("cpu_percent", 100) < 85:
             self.value.setdefault("growth_since", now)
@@ -180,9 +190,11 @@ class Operator:
         if account and account not in self.environments:
             token = subprocess.run(["gh", "auth", "token", "--hostname", "github.com", "--user", account],
                                    capture_output=True, text=True, timeout=10)
-            if token.returncode and method != "GET":
-                raise FleetError("CI recovery write account is unavailable")
-            self.environments[account] = dict(os.environ, GH_TOKEN=token.stdout.strip()) if token.returncode == 0 else None
+            if token.returncode or not token.stdout.strip():
+                raise FleetError("CI recovery GitHub account is unavailable: " + account)
+            self.environments[account] = dict(os.environ, GH_TOKEN=token.stdout.strip())
+        if not account:
+            raise FleetError("CI recovery requires an explicitly selected GitHub write account")
         result = subprocess.run(["gh", "api", "repos/" + REPO + "/" + path, "--method", method],
                                 capture_output=True, text=True, timeout=25,
                                 env=self.environments.get(account))
@@ -207,13 +219,14 @@ class Operator:
                     pending["retired"] = True
                     self.save()
                     raise
-            elif run.get("conclusion") != "cancelled":
+            elif run.get("conclusion") != "cancelled" and not pending.get("retired"):
                 self.controller.value.pop("pending")
                 return
             pending["phase"] = "retire"
             self.save()
         if pending["phase"] == "retire":
             self.host("retire", slot=pending["slot"], instance=pending["instance"], run_id=pending["run_id"])
+            pending["retired"] = True
             pending["phase"] = "rerun"
             self.save()
         if pending["phase"] == "rerun":
@@ -236,6 +249,7 @@ class Operator:
         if pending["phase"] == "cleanup":
             self.host("cleanup", runner_id=pending["runner_id"])
             self.controller.value["last_recovery"] = dict(at=time.time(), run_id=pending["run_id"])
+            self.controller.value.pop("stall_since", None)
             self.controller.value.pop("pending")
 
     def tick(self):
@@ -253,38 +267,39 @@ class Operator:
                 else:
                     value.pop("error", None)
                 self.save()
-            decision = dict(kind="hold", reason="recovering a PR run" if value.get("pending") else "PR run resubmitted")
-        else:
-            snapshot = self.host("snapshot")
-            if snapshot["machine_id"] != self.identity:
-                raise FleetError("CI autoscaler host identity changed")
-            decision = self.controller.decide(snapshot, now)
-            value["target"] = snapshot["maximum"]
-            if decision["kind"] == "limit":
+        snapshot = self.host("snapshot")
+        if snapshot["machine_id"] != self.identity:
+            raise FleetError("CI autoscaler host identity changed")
+        decision = self.controller.decide(snapshot, snapshot["at"])
+        if value.get("pending") and (decision["kind"] == "recover" or
+                decision["kind"] == "limit" and decision["target"] > snapshot["maximum"]):
+            decision = dict(kind="hold", reason="PR resubmission pending; capacity growth deferred")
+        value["target"] = snapshot["maximum"]
+        if decision["kind"] == "limit":
+            self.host("limit", maximum=decision["target"])
+            value["target"] = decision["target"]
+        elif decision["kind"] == "recover":
+            candidates = decision["candidates"] if now >= value.get("probe_retry_at", 0) else []
+            if candidates:
+                value["probe_retry_at"] = now + 60
+                self.save()
+            for guest in candidates:
+                run = self.api("actions/runs/" + str(guest["run_id"]))
+                if run.get("event") != "pull_request_target" or run["status"] != "in_progress":
+                    continue
+                jobs = self.api("actions/runs/" + str(guest["run_id"]) + "/jobs?per_page=100")
+                own = [job for job in jobs.get("jobs", []) if job.get("runner_id") == guest["runner_id"]
+                       and job.get("status") == "in_progress"]
+                if len(own) != 1:
+                    continue
+                value["pending"] = dict(phase="cancel", run_id=run["id"], attempt=run["run_attempt"],
+                                        slot=guest.get("slot", 0), instance=guest["instance"], runner_id=guest["runner_id"])
+                self.save()
                 self.host("limit", maximum=decision["target"])
                 value["target"] = decision["target"]
-            elif decision["kind"] == "recover":
-                candidates = decision["candidates"] if now >= value.get("probe_retry_at", 0) else []
-                if candidates:
-                    value["probe_retry_at"] = now + 60
-                    self.save()
-                for guest in candidates:
-                    run = self.api("actions/runs/" + str(guest["run_id"]))
-                    if run.get("event") != "pull_request_target" or run["status"] != "in_progress":
-                        continue
-                    jobs = self.api("actions/runs/" + str(guest["run_id"]) + "/jobs?per_page=100")
-                    own = [job for job in jobs.get("jobs", []) if job.get("runner_id") == guest["runner_id"]
-                           and job.get("status") == "in_progress"]
-                    if len(own) != 1:
-                        continue
-                    value["pending"] = dict(phase="cancel", run_id=run["id"], attempt=run["run_attempt"],
-                                            slot=guest.get("slot", 0), instance=guest["instance"], runner_id=guest["runner_id"])
-                    self.save()
-                    self.host("limit", maximum=decision["target"])
-                    value["target"] = decision["target"]
-                    break
-            value["last_decision"] = dict(at=now, **{k:v for k,v in decision.items() if k != "candidates"})
-            self.save()
+                break
+        value["last_decision"] = dict(at=now, **{k:v for k,v in decision.items() if k != "candidates"})
+        self.save()
         if now - self.last_note >= 60 or decision["kind"] != "hold":
             note = dict(target=value.get("target"), ceiling=self.controller.maximum,
                         reason=decision["reason"], pending_run=value.get("pending", {}).get("run_id"), error=value.get("error"))
@@ -299,14 +314,15 @@ def main():
     parser.add_argument("--machine-id", required=True)
     parser.add_argument("--minimum", type=int, default=1)
     parser.add_argument("--maximum", type=int, default=4)
-    parser.add_argument("--github-account")
+    parser.add_argument("--github-account", required=True)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     remote.validate_target(args.host)
     if not 1 <= args.minimum <= args.maximum <= capacity.MAX_JOBS:
         parser.error("invalid adaptive CI bounds")
-    operator = Operator(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum, github_account=args.github_account)
-    with locked(operator.path.with_suffix(".lock")):
+    path = state_dir() / ("ci-autoscale-" + args.host + ".json")
+    with locked(path.with_suffix(".lock")):
+        operator = Operator(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum, github_account=args.github_account)
         while True:
             try:
                 print(json.dumps(operator.tick()), flush=True)

@@ -82,6 +82,28 @@ class CapacityPolicy(unittest.TestCase):
         c.decide(s,1200)
         self.assertEqual(c.decide(advance(s,180),1380)['kind'],'hold')
 
+    def test_idle_staging_reservation_and_warm_spare_do_not_block_pr_growth(self):
+        for idle_spare in (False,True):
+            c=auto.Controller(growth_delay=30)
+            s=snapshot(available=80)
+            s['vms'][0].update(busy=False)
+            if idle_spare:s['vms'][2].update(busy=False)
+            c.decide(s,1000)
+            result=c.decide(advance(s),1030)
+            self.assertEqual((result['kind'],result['target']),('limit',4))
+
+    def test_reserved_only_pool_can_regain_a_general_slot(self):
+        c=auto.Controller(growth_delay=30)
+        s=snapshot(available=80,limit=1)
+        s['vms'][0].update(busy=False)
+        c.decide(s,1000)
+        result=c.decide(advance(s),1030)
+        self.assertEqual((result['kind'],result['target']),('limit',2))
+
+    def test_low_ram_never_trims_the_last_general_capacity(self):
+        s=snapshot(limit=2,idle=True)
+        self.assertEqual(auto.Controller().decide(s,1000)['kind'],'hold')
+
     def test_unrealized_preparation_memory_and_unknown_measurements_block_growth(self):
         for missing in (False,True):
             c = auto.Controller(growth_delay=1)
@@ -98,7 +120,7 @@ class RecoveryTransactions(unittest.TestCase):
         self.operator = auto.Operator('host','machine',root=Path(self.temp.name))
         self.pending = dict(phase='cancel',run_id=123,attempt=1,slot=2,instance='2'*16,runner_id=102)
         self.operator.controller.value['pending'] = self.pending
-        self.operator.host = Mock(return_value={})
+        self.operator.host = Mock(side_effect=lambda mode,**kw: snapshot() if mode=='snapshot' else {})
 
     def test_completed_rerun_after_a_crash_is_not_started_twice(self):
         for phase in ('cancel','rerun','verify'):
@@ -144,6 +166,20 @@ class RecoveryTransactions(unittest.TestCase):
         with patch.object(auto.time,'time',return_value=1045):op.tick()
         op.api.assert_called_once()
 
+    def test_retired_runner_failure_still_gets_its_promised_full_rerun(self):
+        self.pending.update(phase='cancel',retired=True)
+        self.operator.api=Mock(side_effect=[dict(run_attempt=1,status='completed',conclusion='failure'),{}])
+        self.operator.transaction()
+        self.operator.api.assert_any_call('actions/runs/123/rerun',method='POST')
+        self.assertEqual(self.pending['phase'],'verify')
+
+    def test_cleanup_clears_stall_confirmation_before_another_cancellation(self):
+        self.pending.update(phase='cleanup')
+        self.operator.controller.value['stall_since']=500
+        self.operator.api=Mock(return_value=dict(run_attempt=2,status='in_progress'))
+        self.operator.transaction()
+        self.assertNotIn('stall_since',self.operator.controller.value)
+
     def test_full_workflow_is_rerun_then_verified_before_cleanup(self):
         self.pending['phase']='rerun'
         self.operator.api = Mock(side_effect=[dict(run_attempt=1,status='completed',conclusion='cancelled'),{}])
@@ -154,6 +190,32 @@ class RecoveryTransactions(unittest.TestCase):
         self.operator.transaction()
         self.assertNotIn('pending',self.operator.controller.value)
 
+    def test_verified_pr_recovery_saves_identity_before_lowering_the_cap(self):
+        op=auto.Operator('host','machine',root=Path(self.temp.name)/'verified')
+        s=snapshot();op.controller.decide(s,1000)
+        def action(mode,**kwargs):
+            if mode=='snapshot':return advance(s)
+            if mode=='limit':
+                pending=store.read(op.path)['pending']
+                self.assertEqual(pending['run_id'],1002)
+                self.assertEqual(pending['instance'],'2'*16)
+            return {}
+        op.host=Mock(side_effect=action)
+        op.api=Mock(side_effect=[dict(event='pull_request_target',status='in_progress',id=1002,run_attempt=1),
+                                dict(jobs=[dict(runner_id=102,status='in_progress')])])
+        with patch.object(auto.time,'time',return_value=1030):op.tick()
+        self.assertEqual(op.controller.value['pending']['phase'],'cancel')
+        op.host.assert_any_call('limit',maximum=2)
+        self.assertTrue(all(c.kwargs.get('method','GET')=='GET' for c in op.api.call_args_list))
+
+    def test_missing_named_account_never_falls_back_to_ambient_credentials(self):
+        op=auto.Operator('host','machine',root=Path(self.temp.name)/'auth',github_account='kim-em')
+        for method in ('GET','POST'):
+            with patch.object(auto.subprocess,'run',return_value=Mock(returncode=1,stdout='',stderr='missing')) as request:
+                with self.assertRaises(store.FleetError):op.api('actions/runs/1',method=method)
+                request.assert_called_once()
+                self.assertEqual(request.call_args.args[0][:3],['gh','auth','token'])
+
     def test_staging_and_stale_runner_ownership_are_never_cancelled(self):
         for staging in (True,False):
             with self.subTest(staging=staging):
@@ -161,7 +223,7 @@ class RecoveryTransactions(unittest.TestCase):
                 s=snapshot()
                 op.controller.decide(s,1000)
                 op.host=Mock(return_value=advance(s))
-                op.api=Mock(side_effect=lambda path,**kw: dict(event='repository_dispatch' if staging else 'pull_request_target',status='in_progress',id=1002,run_attempt=1) if '/jobs?' not in path else dict(jobs=[dict(runner_id=999,status='in_progress')]))
+                op.api=Mock(side_effect=lambda path,**kw: dict(event='repository_dispatch' if staging else 'pull_request_target',status='in_progress',id=1002,run_attempt=1) if '/jobs?' not in path else dict(jobs=[dict(runner_id=102 if staging else 999,status='in_progress')]))
                 with patch.object(auto.time,'time',return_value=1030): op.tick()
                 self.assertNotIn('pending',op.controller.value)
                 self.assertTrue(op.api.called)
@@ -187,6 +249,15 @@ class HostActions(unittest.TestCase):
             with self.assertRaises(store.FleetError):auto.host_action(dict(mode='retire',slot=0,instance='a',run_id=1))
             result=auto.host_action(dict(mode='retire',slot=1,instance='a',run_id=1))
             self.assertFalse(result['retired']);retire.assert_not_called()
+
+    def test_runner_cleanup_requires_persisted_host_ownership(self):
+        from tauceti_fleet import github
+        with patch.object(github,'retire_runner') as retire:
+            with self.assertRaises(store.FleetError):auto.host_action(dict(mode='cleanup',runner_id=99))
+            retire.assert_not_called()
+            store.atomic(store.state_dir()/'ci-slots/9/ci-last-retired.json',dict(runner_id=99))
+            self.assertTrue(auto.host_action(dict(mode='cleanup',runner_id=99))['removed'])
+            retire.assert_called_once()
 
     def test_snapshot_is_cache_only_and_handles_no_worker_measurement(self):
         with patch.object(auto.remote,'call',side_effect=AssertionError('no remote calls')):

@@ -58,8 +58,9 @@ persistent user service on the SSH control host. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
 and compiler headroom. Guest launches still obey the host's minute spacing and
-startup memory gate. The configured maximum is an experimental ceiling, not a
-reservation; normal worker and CI admissions remain enabled.
+startup memory gate. One general slot is retained alongside staging reservations, even when reducing
+capacity; an existing staging-only ceiling can recover a general slot when memory
+allows it. The configured maximum is an experimental ceiling, not a reservation; normal worker and CI admissions remain enabled.
 
 A recovery requires fresh telemetry, at least 90 seconds without CI admission,
 no observed executing Lean processes, very low CI CPU, low RAM, and another 30
@@ -69,7 +70,8 @@ and a `pull_request_target` event before recording a durable cancel/retire/full-
 retry transaction. Staging is never selected. GitHub requests happen only during
 recovery, with exponential backoff up to five minutes on failures. An unavailable
 write API still allows the verified stalled PR guest's RAM to be released; its
-resubmission remains pending in durable state. Restarting the service resumes that
+resubmission remains pending in durable state. Fresh cached capacity observations continue while a retry is pending; additional
+recovery and growth wait for its resubmission. Restarting the service resumes that
 transaction and verifies the increased run attempt before cleaning up registration.
 `status` reads a prepared autoscale summary and identifies stale controller reports.
 

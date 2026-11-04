@@ -586,7 +586,7 @@ def collect_ci_results(config):
                     kind = "pr"
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
                                    memory_overcommit=config.get("ci_memory_budget_gib") is not None)
-            if value.get("operator_recovery") and job.get("conclusion") == "cancelled":
+            if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
                 try:
