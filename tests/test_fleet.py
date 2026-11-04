@@ -169,6 +169,7 @@ class Isolated(unittest.TestCase):
             self.assertEqual(Path(os.environ["GH_CONFIG_DIR"]), store.state_dir() / "gh")
             self.assertNotIn("fake-selected-token", str(launch.call_args))
             self.assertEqual(os.environ["TAUCETI_WORKER_SLICE"], "tauceti-fleet-workers.slice")
+            self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
 
