@@ -308,7 +308,20 @@ def write_workers(pool, value, config, *, stopped=False, workers=()):
     return ids
 
 
-def start_manager(pool):
+def manager_identity(value):
+    fields = (
+        "agent",
+        "billing",
+        "account",
+        "github_account",
+        "github_token_file",
+        "github_state_url",
+        "github_state_token_file",
+    )
+    return hashlib.sha256(json.dumps({k: value.get(k) for k in fields}, sort_keys=True).encode()).hexdigest()
+
+
+def start_manager(pool, *, restart=False):
     from .host import RUNNING_RELEASE, command, unit_argument, units
 
     unit = f"tauceti-fleet-pool-{name(pool)}.service"
@@ -326,7 +339,7 @@ def start_manager(pool):
         + "LimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=100\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "start", unit])
+    run(["systemctl", "--user", "restart" if restart else "start", unit])
 
 
 def launch(pool):
@@ -371,6 +384,7 @@ def launch(pool):
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state / "manager.json", dict(identity=manager_identity(value), pid=os.getpid()))
     os.execv(binary, [binary, "workers", "--config", str(directory / "workers.toml"), "manager"])
 
 
@@ -453,7 +467,7 @@ class Controller:
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subscription-usage")
         self.pending = {}
         self.next_probe = {}
-        self.started = set()
+        self.started = {}
 
     def step(self, config, *, capacity_open, reason):
         summaries, workers = [], []
@@ -539,11 +553,12 @@ class Controller:
             )
             if (
                 config["workers_enabled"]
-                and pool not in self.started
+                and self.started.get(pool) != manager_identity(value)
                 and (not current.get("stopped") or any(w.get("alive") for w in workers))
             ):
-                start_manager(pool)
-                self.started.add(pool)
+                manager = read(state / "manager.json", {})
+                start_manager(pool, restart=manager.get("identity") != manager_identity(value))
+                self.started[pool] = manager_identity(value)
             summaries.append(summary(pool, value, workers, admitted, current))
             all_workers.extend(dict(w, pool=pool, github_account=value["github_account"]) for w in workers)
         return summaries, all_workers

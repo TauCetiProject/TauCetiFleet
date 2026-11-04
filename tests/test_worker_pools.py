@@ -290,6 +290,27 @@ class Pools(unittest.TestCase):
         self.assertNotIn("SELECTED-GH-SECRET", str(launch.call_args))
         self.assertTrue(os.environ["GH_CONFIG_DIR"].endswith("/pools/gmail/gh"))
 
+    def test_changed_identity_restarts_manager_but_count_changes_preserve_it(self):
+        self.configure()
+        config = store.host_config()
+        value = config["worker_pools"]["gmail"]
+        _, state = pools.paths("gmail")
+        store.atomic(state / "manager.json", dict(identity=pools.manager_identity(value)))
+        controller = pools.Controller()
+        try:
+            with patch.object(pools, "start_manager") as start, patch.object(pools, "observe", return_value={}):
+                controller.step(config, capacity_open=True, reason="ready")
+                start.assert_called_once_with("gmail", restart=False)
+                start.reset_mock()
+                value["max_workers"] = 3
+                controller.step(config, capacity_open=True, reason="ready")
+                start.assert_not_called()
+                value["account"] = "other@example.com"
+                controller.step(config, capacity_open=True, reason="ready")
+                start.assert_called_once_with("gmail", restart=True)
+        finally:
+            controller.close()
+
     def test_cli_pool_policies_and_status_render(self):
         args = parser().parse_args(
             ["pool", "set", "host", "gmail", "--workers", "16", "--pacing", "exhaust", "--stop-on-exhaustion"]
