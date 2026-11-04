@@ -102,7 +102,7 @@ def cloud_seed(directory, commands, *, name):
     return directory / "seed.iso"
 
 
-def qemu_args(config, directory, disk, seed, *, small=False):
+def qemu_args(config, directory, disk, seed, *, small=False, prefill=None):
     from .capacity import guest_shape
 
     shape = dict(vcpus=2, memory_gib=2) if small else guest_shape(config)
@@ -126,6 +126,7 @@ def qemu_args(config, directory, disk, seed, *, small=False):
         f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report",
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
+        *(["-drive", f"file={prefill['path']},format=raw,media=cdrom,readonly=on"] if prefill and not small else []),
         "-netdev",
         "user,id=net0",
         "-device",
@@ -399,6 +400,9 @@ def _start(config):
         # Keep the request identity across lost replies and controller restarts.
         # The broker can replay the existing JIT config without registering twice.
         atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
+    from . import dependency_prefill
+
+    prefill = dependency_prefill.claim(config, instance)
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
@@ -439,6 +443,7 @@ def _start(config):
             + shlex.quote(hook.replace("KIND", "'ci_completed'"))
             + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
             "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
+            *(dependency_prefill.mount_commands() if prefill else []),
             *lean_runtime.ci_commands(),
             "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
         ]
@@ -456,6 +461,7 @@ def _start(config):
             phase="starting",
             pressure_protocol=2,
             lean_statistics_protocol=1,
+            dependency_prefill_sha256=prefill["sha256"] if prefill else None,
             **guest_shape(config),
         )
         # Record the prospective unit before launch: a controller/process crash
@@ -480,7 +486,7 @@ def _start(config):
                 "KillMode=control-group",
                 "-p",
                 "RemainAfterExit=yes",
-                *qemu_args(config, directory, disk, seed),
+                *qemu_args(config, directory, disk, seed, prefill=prefill),
             ],
             timeout=30,
         )
