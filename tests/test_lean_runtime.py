@@ -152,7 +152,9 @@ class LeanRuntime(unittest.TestCase):
         ):
             host.start_workers()
             text = (Path(directory) / "tauceti-fleet-workers.service").read_text()
-            self.assertIn("OOMScoreAdjust=500", text)
+            # Only the supervisor is protected; run_workers keeps workers at 500.
+            self.assertIn("OOMScoreAdjust=100", text)
+            self.assertEqual(host.WORKER_OOM_SCORE_ADJ, 500)
 
 
 if __name__ == "__main__":

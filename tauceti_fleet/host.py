@@ -301,6 +301,9 @@ def worker_config(config):
     return ids
 
 
+WORKER_OOM_SCORE_ADJ = 500
+
+
 def start_workers():
     root = RUNNING_RELEASE
     argv = " ".join(unit_argument(a) for a in [*command(), "run-workers"])
@@ -311,7 +314,7 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
-        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=500\n"
+        + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=100\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
@@ -328,6 +331,10 @@ def run_workers():
         TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
+        # The manager runs at the user manager's floor (100). Each worker
+        # wrapper raises itself before starting rounds, so workers stay the
+        # preferred victims ahead of CI guests (200) without the supervisor.
+        TAUCETI_WORKER_OOM_SCORE_ADJ=str(WORKER_OOM_SCORE_ADJ),
     )
     # Historical PRs can belong to workers no longer in workers.toml. Give the
     # manager the host's client context as well as each current worker's spec.
