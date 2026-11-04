@@ -8,7 +8,7 @@ import socket
 import time
 from pathlib import Path
 
-from . import lean_pressure, lean_statistics
+from . import ci_priority, lean_pressure, lean_statistics
 from .store import FleetError, atomic, read, state_dir
 
 
@@ -149,6 +149,8 @@ class Publisher:
             if isinstance(status.get("ci_vms"), list)
             else None
         )
+        staging_paths = {Path(v["directory"]) / "pressure.sock" for v in (status.get("ci_vms", []) if isinstance(status.get("ci_vms"), list) else [])
+                         if v.get("directory") and ci_priority.staging(v)}
         for path in list(self.remote_statistics):
             if Path(path) not in paths and (path not in owned if owned is not None else not status):
                 self.archive_statistics(path)
@@ -164,14 +166,11 @@ class Publisher:
         if ordered:
             self.turn = (self.turn + 1) % len(ordered)
             ordered = ordered[self.turn :] + ordered[: self.turn]
+        ordered.sort(key=lambda path: path not in staging_paths)
         now = time.monotonic()
         # A brief ramp allowance covers compilers which were just admitted but
         # have not allocated yet. It reserves no physical CPUs or guest RAM.
         self.recent = [at for at in self.recent if now - at < 0.25]
-        headroom = total * (1 - lean_pressure.memory_limit(total) / 100)
-        credits = max(0, math.ceil((available - headroom) / lean_pressure.WORST_FILE_RSS_BYTES) - len(self.recent))
-        if value["cpu_percent"] > lean_pressure.CPU_LIMIT_PERCENT:
-            credits = 0
         for path in ordered:
             try:
                 if path not in self.clients:
@@ -204,17 +203,22 @@ class Publisher:
                 except TimeoutError:
                     pass
                 request, waiting = self.pending.get(path, (0, 0))
+                staging = path in staging_paths
+                headroom = ci_priority.headroom(total, staging=staging)
+                credits = max(0, math.ceil((available - headroom) / lean_pressure.WORST_FILE_RSS_BYTES) - len(self.recent))
+                if not staging and value["cpu_percent"] > lean_pressure.CPU_LIMIT_PERCENT:
+                    credits = 0
                 unacknowledged = request != self.granted.get(path) or now - self.granted_at.get(path, 0) >= 2
                 permit = request if credits and request and unacknowledged else 0
-                remaining = sum(bool(self.pending.get(p, (0, 0))[0]) for p in ordered[ordered.index(path) :])
+                remaining = sum(bool(self.pending.get(p, (0, 0))[0]) for p in ordered[ordered.index(path) :]
+                                if (p in staging_paths) == staging)
                 starts = min(waiting, math.ceil(credits / max(1, remaining))) if permit else 0
-                frame = (json.dumps(dict(value, permit=permit, starts=starts), allow_nan=False) + "\n").encode()
+                frame = (json.dumps(dict(ci_priority.frame(value, staging=staging), permit=permit, starts=starts), allow_nan=False) + "\n").encode()
                 self.clients[path].sendall(frame)
                 if permit:
                     self.granted[path] = permit
                     self.granted_at[path] = now
                     self.recent.extend([now] * starts)
-                    credits -= starts
             except OSError:
                 # A slow or hostile guest cannot stall the other guests. Close
                 # after a partial frame too; the receiver discards that frame.
@@ -228,7 +232,10 @@ class Publisher:
         if time.time() - getattr(self, "reported_at", 0) >= 1:
             atomic(
                 state_dir() / "lean-host-pressure.json",
-                dict(value, guests=len(self.clients), waiting_guests=sum(bool(n) for n, _ in self.pending.values())),
+                dict(value, guests=len(self.clients), waiting_guests=sum(bool(n) for n, _ in self.pending.values()),
+                     staging_priority=dict(guests=sum(path in staging_paths for path in self.clients),
+                                           cpu_sleeps=False, headroom_gib=ci_priority.headroom(total, staging=True) / 1024**3,
+                                           normal_headroom_gib=ci_priority.headroom(total) / 1024**3)),
             )
             self.reported_at = time.time()
             workers = (

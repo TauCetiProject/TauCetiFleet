@@ -469,6 +469,8 @@ def _start(config):
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") == ["staging"] else "100"),
+                "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",
                 "MemorySwapMax=0",

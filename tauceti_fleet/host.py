@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, focus, github, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -671,7 +671,7 @@ class CISlot:
         self.client = None
         self.buffer = b""
 
-    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None):
+    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False):
         config = dict(capacity.for_slot(config, self.index),
                       ci_enabled=config["ci_enabled"] and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
@@ -769,6 +769,11 @@ class CISlot:
             value = vm.start(dict(config, ci_recover_instance=recovery["instance"],
                                   ci_kinds=recovery["ci_kinds"]) if recovery else config)
             self.next_vm = time.time() + (60 if value else 5)
+        if value and priority:
+            try:
+                ci_priority.classify(config, value, time.time())
+            finally:
+                atomic(path, value)
         return value
 
 
@@ -838,13 +843,15 @@ def daemon():
                     slot = slots.setdefault(index, CISlot(index))
                     try:
                         value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling,
-                                          admitted=index in admitted, reservations=reservations, recovery=recovery_slots.get(index))
+                                          admitted=index in admitted, reservations=reservations, recovery=recovery_slots.get(index), priority=True)
                     except (FleetError, OSError, ValueError, KeyError) as exc:
                         slot_errors[str(index)] = str(exc)
                         slot.next_vm = max(slot.next_vm, time.time() + 60)
                         value = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
                     if value:
                         values.append(value)
+                        if value.get("ci_priority_error"):
+                            slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
                     if not ids or len(ids) < config["max_workers"]:

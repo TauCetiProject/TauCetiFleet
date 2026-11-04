@@ -78,13 +78,15 @@ def pause(seconds, reason):
             _TRACE.event("prepare")
 
 
-def host_pressure():
+def host_pressure(*, include_priority=False):
     """None means host measurements are unavailable, never permission to start."""
     try:
         value = json.loads(HOST_PRESSURE.read_text())
         age = time.monotonic() - value["received_monotonic"]
         source_age = time.time() - value["at"]
-        cpu, total, available = (value[k] for k in ("cpu_percent", "memory_total", "memory_available"))
+        cpu = value.get("observed_cpu_percent", value["cpu_percent"])
+        total = value["memory_total"]
+        available = value.get("observed_memory_available", value["memory_available"])
         if (
             value.get("version") != 1
             or not 0 <= age <= MAX_SAMPLE_AGE
@@ -95,7 +97,8 @@ def host_pressure():
             or total <= 0
         ):
             return None
-        return cpu, total, available
+        result = (cpu, total, available)
+        return (*result, value.get("priority") == "staging") if include_priority else result
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
@@ -103,16 +106,16 @@ def host_pressure():
 def capacity_available():
     """CI uses the host's pressure, retaining only an absolute guest OOM guard."""
     if HOST_REQUIRED.exists():
-        sample = host_pressure()
+        sample = host_pressure(include_priority=True)
         if sample is None:
             return False
-        cpu, total, available = sample
+        cpu, total, available, staging = sample
         # A guest's percentage usage is unrelated to spare host capacity. This
         # guard only protects a genuinely exhausted guest/cgroup, e.g. an old
         # guest during rollout, rather than imposing a second utilization cap.
         if memory()[1] < WORST_FILE_RSS_BYTES:
             return False
-        return cpu <= CPU_LIMIT_PERCENT and 100 * (1 - available / total) <= memory_limit(total)
+        return (staging or cpu <= CPU_LIMIT_PERCENT) and 100 * (1 - available / total) <= memory_limit(total, staging=staging)
     return None
 
 
@@ -161,11 +164,11 @@ def memory(relative=None):
     return total, min(total, available)
 
 
-def memory_limit(total):
+def memory_limit(total, *, staging=False):
     if WORST_FILE_RSS_BYTES <= 0:
         raise ValueError("worst-file RSS measurement has not been installed")
     # Round down and leave an extra percentage point: strictly more than two files.
-    return max(MEMORY_FLOOR_PERCENT, math.floor(100 - 200 * WORST_FILE_RSS_BYTES / total) - 1)
+    return max(MEMORY_FLOOR_PERCENT, math.floor(100 - (100 if staging else 200) * WORST_FILE_RSS_BYTES / total) - 1)
 
 
 def cpu_sample():
@@ -208,12 +211,12 @@ def wait_for_capacity():
                     "tauceti-lean: waiting for fresh host capacity or guest RAM headroom", file=sys.stderr, flush=True
                 )
             waiting = True
-            sample = host_pressure()
+            sample = host_pressure(include_priority=True)
             reason = (
                 "signal"
                 if sample is None
                 else "cpu"
-                if sample[0] > CPU_LIMIT_PERCENT
+                if sample[0] > CPU_LIMIT_PERCENT and not sample[3]
                 else "ram"
                 if not host_ready
                 else "admission"

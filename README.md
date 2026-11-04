@@ -348,6 +348,23 @@ when the host needs RAM, allowing free-page reporting to return it to the host.
 The only guest-local admission check is enough absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
 
+Staging compiler starts bypass CPU-utilization sleeps and use one measured
+worst-file RAM margin instead of the two-file margin for ordinary CI. On a
+112 GiB shared budget this allows roughly 91% use (about 10 GiB headroom),
+compared with 83% (about 19 GiB) for ordinary CI. Guest exhaustion checks and
+hard cgroup RAM caps still apply. Staging guests receive CPUWeight=10000 versus
+100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
+
+The host serves staging compiler requests first and accounts for all grants in
+one shared ramp allowance. Reserved staging guests need no API classification;
+shared guests are classified once per job from trusted GitHub event/title data,
+with a two-minute retry backoff on read failures. Guest notices cannot assert
+staging priority. The active CPU/RAM policy is included in prepared status data.
+Existing guests receive compatible admission fields over the serial link, with
+actual CPU and RAM measurements preserved explicitly as `observed_*` fields.
+New wrappers use those measured fields and the explicit policy. Host reports
+always show the measured values. Live priority updates preserve running guests.
+
 `status` also shows compiler throttling statistics in Workers/CI columns: observed
 invocations, current waiters and executing compilers, the fraction that waited,
 waiting share of elapsed time, approximate p50/p95 waits, maximum and oldest

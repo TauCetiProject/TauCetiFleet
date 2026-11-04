@@ -285,6 +285,10 @@ def main(argv=None, *, _status_results=None):
                         health = "healthy" if pressure.get("healthy") else "STALE or unavailable; new CI compilers wait"
                         print(f"Lean host admission: {health}; {pressure.get('guests', 0)} guests connected; "
                               f"{pressure.get('waiting_guests', 0)} guests requesting starts")
+                        priority = pressure.get("staging_priority")
+                        if priority:
+                            print(f"Staging priority: CPU sleeps off; {priority['headroom_gib']:.1f} GiB RAM headroom "
+                                  f"vs {priority['normal_headroom_gib']:.1f} GiB for other CI; first compiler permits")
                     if value.get('lean_statistics'):
                         from .lean_statistics import display as show_lean_statistics
 
