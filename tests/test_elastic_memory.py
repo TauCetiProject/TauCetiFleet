@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host
-from tauceti_fleet.capabilities import GIB
+from tauceti_fleet import host, capacity, lean_pressure
+from tauceti_fleet.capabilities import GIB, memory_pressure
 
 
 class ElasticMemory(unittest.TestCase):
@@ -43,6 +43,27 @@ class ElasticMemory(unittest.TestCase):
             self.assertEqual(memory['high'], 13 * GIB)
             self.assertEqual((cg / 'memory.max').read_text(), str(46 * GIB))
             self.assertTrue(opened.call_args.args[1] & os.O_NONBLOCK)
+
+    def test_workers_yield_before_active_ci_loses_compiler_headroom(self):
+        caps = dict(memory_total=125 * GIB, memory_available=18 * GIB)
+        ci_total = capacity.shared_memory_bytes(caps)
+        ci_floor = ci_total * (1 - lean_pressure.memory_limit(ci_total) / 100)
+        active = host.worker_headroom(caps, ci_busy=True)
+        self.assertGreater(active, ci_floor)
+        self.assertGreater(active, host.worker_headroom(caps, ci_busy=False))
+        memory = dict(working_set=2 * GIB, maximum=100 * GIB)
+        self.assertEqual(memory_pressure(memory, caps), [])
+        self.assertEqual(memory_pressure(memory, caps, reserve=active), ["host memory headroom low"])
+        self.assertEqual(memory_pressure(memory, dict(caps, memory_available=30 * GIB), reserve=active), [])
+
+    def test_ci_priority_changes_only_the_opportunistic_worker_soft_budget(self):
+        caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
+        idle_high, maximum = host.worker_memory_limits(self.config, caps, 4 * GIB)
+        busy_high, busy_maximum = host.worker_memory_limits(self.config, caps, 4 * GIB, ci_busy=True)
+        self.assertLess(busy_high, idle_high)
+        self.assertEqual(busy_maximum, maximum)
+        self.assertGreaterEqual(busy_high, 5 * GIB)
+        self.assertEqual(host.worker_memory_limits(self.config, caps, 4 * GIB)[0], idle_high)
 
     def test_missing_host_measurement_retains_the_live_limit(self):
         memory = dict(high=40 * GIB)

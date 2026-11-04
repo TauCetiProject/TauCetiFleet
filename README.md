@@ -222,6 +222,12 @@ Destination selection belongs to the
 existing `pick-runner.yml` dispatcher and its shared selector/recovery scripts;
 Fleet advertises and enforces each machine's capacity.
 
+While CI builds are active, worker admission and the worker soft memory budget
+leave the compiler gate's headroom plus a 1 GiB cushion. This prevents worker
+preparation from consuming freed RAM before CI can resume. Existing rounds keep
+running and the hard worker memory limit remains unchanged; when CI finishes,
+workers return to the ordinary host headroom policy.
+
 Workers start one at a time, at most one per minute, up to eight by default.
 Memory pressure stops new admissions; an active CI build limits fresh worker
 rounds. Already-admitted paid sessions finish. A stale/missing controller policy
