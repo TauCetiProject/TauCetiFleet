@@ -12,8 +12,7 @@ from . import lean_pressure, lean_statistics
 from .store import FleetError, atomic, read, state_dir
 
 
-def worker_cpu():
-    """Low-priority workers yield to CI; their CPU use must not block CI starts."""
+def slice_cpu(name):
     try:
         relative = next(
             line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::")
@@ -21,11 +20,16 @@ def worker_cpu():
         group = Path("/sys/fs/cgroup") / relative.lstrip("/")
         parent = next(p for p in (group, *group.parents) if p.name == "tauceti-fleet.slice")
         stats = dict(
-            line.split() for line in (parent / "tauceti-fleet-workers.slice/cpu.stat").read_text().splitlines()
+            line.split() for line in (parent / ("tauceti-fleet-" + name + ".slice/cpu.stat")).read_text().splitlines()
         )
         return int(stats["usage_usec"])
     except (OSError, ValueError, StopIteration, KeyError):
         return None
+
+
+def worker_cpu():
+    """Low-priority workers yield to CI; their CPU use must not block CI starts."""
+    return slice_cpu("workers")
 
 
 class Publisher:
@@ -33,6 +37,7 @@ class Publisher:
         self.clients = {}
         self.previous = lean_pressure.cpu_sample()
         self.previous_worker = worker_cpu()
+        self.cpu_baseline = None
         self.pending = {}
         self.buffers = {}
         self.granted = {}
@@ -270,6 +275,7 @@ class Publisher:
                 restart_loss_accounting=2,
                 admission_seen_since=self.admission_seen_since,
                 last_admission_seen=self.last_admission_seen,
+                cpu_usage=self.cpu_usage(),
                 at=time.time(),
                 workers=workers,
                 ci=lean_statistics.merge([self.archived_statistics, *ci_rows]),
@@ -288,6 +294,20 @@ class Publisher:
                 state_dir() / "lean-statistics-report.json",
                 {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived", "archived_keys")},
             )
+
+    def cpu_usage(self):
+        now = time.monotonic()
+        counters = {name: slice_cpu(name) for name in ("workers", "ci")}
+        previous = self.cpu_baseline
+        self.cpu_baseline = (now, counters)
+        result = dict(at=time.time())
+        for name, value in counters.items():
+            before = previous[1].get(name) if previous else None
+            elapsed = now - previous[0] if previous else 0
+            result[name] = ((value - before) / 1e6 / elapsed
+                            if value is not None and before is not None and value >= before and 0 < elapsed <= 10
+                            else None)
+        return result
 
     def observe_admissions(self, kind, prior, sample):
         """Track confirmed counter increases, not permits or merged totals.

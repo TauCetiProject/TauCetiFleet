@@ -66,6 +66,12 @@ class CapacityPolicy(unittest.TestCase):
                 if kind == 'native': s['pressure']['cpu_percent'] = 20
                 self.assertNotEqual(c.decide(s,1030)['kind'], 'recover')
 
+    def test_native_ci_cpu_activity_is_reported_without_claiming_lean_admissions(self):
+        s=snapshot();s['pressure']['cpu_percent']=77
+        result=auto.Controller().decide(s,1000)
+        self.assertEqual(result['kind'],'hold')
+        self.assertEqual(result['reason'],'Lean waiting; other CI work is using CPU')
+
     def test_stale_observation_and_disabled_ci_never_authorize_mutations(self):
         c = auto.Controller()
         for s in (snapshot(now=900),dict(snapshot(),enabled=False)):

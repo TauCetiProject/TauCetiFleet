@@ -174,7 +174,17 @@ class Controller:
                 return dict(kind="limit", target=limit + 1, reason="sustained spare RAM for another guest and compiler headroom")
             return dict(kind="hold", reason="confirming sustained RAM headroom before increasing CI")
         self.value.pop("growth_since", None)
-        return dict(kind="hold", reason="CI progressing" if not stalled else "confirming a RAM admission stall")
+        if stalled:
+            reason = "confirming a RAM admission stall"
+        elif waiting and not ci.get("running_now") and pressure.get("cpu_percent", 0) >= 2:
+            reason = "Lean waiting; other CI work is using CPU"
+        elif ci.get("running_now"):
+            reason = "Lean compilers are running"
+        elif waiting:
+            reason = "Lean waiting; monitoring admission headroom"
+        else:
+            reason = "no observed Lean waiters; monitoring CI capacity"
+        return dict(kind="hold", reason=reason)
 
 
 class Operator:

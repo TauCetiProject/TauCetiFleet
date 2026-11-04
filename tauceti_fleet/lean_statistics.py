@@ -432,6 +432,12 @@ def display(value):
         return "not recorded"
 
     line("Last admission seen", [admission_age(k) for k in ("workers", "ci")])
+    usage = value.get("cpu_usage", {})
+    if isinstance(usage, dict) and usage:
+        cpu_fresh = not stale and 0 <= time.time() - usage.get("at", 0) <= 10
+        line("CPU active (cores)", [f"{usage[k]:.1f}" if cpu_fresh and type(usage.get(k)) in (int, float)
+                                    and math.isfinite(usage[k]) and usage[k] >= 0 else "unknown"
+                                    for k in ("workers", "ci")])
     line(
         "Invocations with waits", [f"{100 * r['waited'] / r['observed']:.1f}%" if r["observed"] else "—" for r in rows]
     )
@@ -456,4 +462,6 @@ def display(value):
         if causes:
             print(f"  {label} wait causes: {causes}")
     print("  Waiting share = wait / (wait + execution); probes excluded; active waits included.")
+    if usage:
+        print("  Compiler counts cover instrumented Lean; CPU includes all worker/guest processes.")
     print(f"  CI timing coverage: {value.get('telemetry_guests', 0)} / {value.get('connected_guests', 0)} guests")
