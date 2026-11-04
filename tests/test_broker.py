@@ -225,10 +225,12 @@ class Enrollment(unittest.TestCase):
                 raise store.FleetError("response lost after remote registration")
             return 7, "single-job-config"
 
-        with patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"):
+        with patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"):
             with self.assertRaisesRegex(store.FleetError, "response lost"):
                 vm.start(config)
             self.assertTrue((store.state_dir() / "ci-registration.json").exists())
+            self.assertEqual(vm.start(config), {})
+            clock.return_value = 160
             value = vm.start(config)
         self.assertEqual(names[0], names[1])
         self.assertEqual(value["runner_name"], names[0])

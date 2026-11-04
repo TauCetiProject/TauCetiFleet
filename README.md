@@ -211,7 +211,11 @@ one staging slot. Each guest has its own registration intent, state, event
 socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
-the controller starts the remaining slots independently after the role is enabled.
+the controller starts the remaining slots after the role is enabled, with at least
+one minute between CI guest startup attempts across the host. Deferred starts do
+not block the controller. The shared gate survives controller restarts and also
+covers enable, retries, and recovered placements; existing guests are adopted
+immediately without consuming another startup turn.
 A draining worker pool must finish before its memory reservation can shrink.
 Destination selection belongs to the
 existing `pick-runner.yml` dispatcher and its shared selector/recovery scripts;
