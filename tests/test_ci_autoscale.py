@@ -259,6 +259,19 @@ class HostActions(unittest.TestCase):
             self.assertTrue(auto.host_action(dict(mode='cleanup',runner_id=99))['removed'])
             retire.assert_called_once()
 
+    def test_recovery_ownership_survives_slot_reuse_and_collected_result(self):
+        from tauceti_fleet import github
+        value=dict(slot=1,instance='a'*16,runner_id=99,run_id=77,unit='vm.service')
+        store.atomic(vm.slot_file(dict(ci_slot=1),'vm.json'),value)
+        with patch.object(vm,'_retire') as retire:
+            self.assertTrue(auto.host_action(dict(mode='retire',slot=1,instance=value['instance'],run_id=77))['retired'])
+            retire.assert_called_once()
+        store.atomic(store.state_dir()/'pending-ci.json',[])
+        store.atomic(store.state_dir()/'ci-slots/1/ci-last-retired.json',dict(runner_id=100))
+        with patch.object(github,'retire_runner') as remove:
+            self.assertTrue(auto.host_action(dict(mode='cleanup',runner_id=99))['removed'])
+            remove.assert_called_once()
+
     def test_snapshot_is_cache_only_and_handles_no_worker_measurement(self):
         with patch.object(auto.remote,'call',side_effect=AssertionError('no remote calls')):
             result=auto.host_action({})
