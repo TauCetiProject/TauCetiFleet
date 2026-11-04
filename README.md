@@ -357,6 +357,11 @@ the host observed a confirmed admission counter increase, separately for workers
 and CI. The timestamp survives observer restarts. Existing history seeds a baseline;
 if no new admission has been observed, the cell says `none in …` for the observation
 window. Replayed snapshots, archival, and permits do not count as new admissions.
+`CPU active (cores)` shows the cached CPU-time rate for the complete worker and
+CI slices, including native compilation and artifact preparation. A zero Lean
+running count with high CPU usage therefore identifies activity outside the
+instrumented compiler stream. First samples, stale samples, and counter resets
+show unknown instead of inventing a rate.
 Waiting share is summed capacity-wait seconds divided by summed wait plus
 execution seconds, including live invocations. It is neither host CPU utilization
 nor a percentage of the report's wall-clock interval. The normal CPU sampling

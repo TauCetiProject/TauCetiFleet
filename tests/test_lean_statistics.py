@@ -385,6 +385,33 @@ p.exec_lean(Path(sys.argv[3]),[])
         last = next(line for line in output.getvalue().splitlines() if "Last admission seen" in line)
         self.assertEqual(last.count("unknown"), 2)
 
+    def test_cpu_report_counts_native_work_even_when_instrumented_lean_is_idle(self):
+        with patch.dict(os.environ,TAUCETI_FLEET_STATE=str(self.root)):
+            publisher=self.publisher()
+            with patch.object(lean_host.time,'monotonic',side_effect=[100,103,104]), patch.object(lean_host,'slice_cpu',side_effect=[10_000_000,20_000_000,37_000_000,242_000_000,36_000_000,None]):
+                self.assertIsNone(publisher.cpu_usage()['ci'])
+                usage=publisher.cpu_usage()
+                self.assertEqual(usage['workers'],9)
+                self.assertEqual(usage['ci'],74)
+                reset=publisher.cpu_usage()
+                self.assertIsNone(reset['workers'])
+                self.assertIsNone(reset['ci'])
+            row=stats.empty();row.update(observed=1,admitted=1,completed=1)
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output):
+                stats.display(dict(at=time.time(),workers=row,ci=row,cpu_usage=usage))
+            line=next(line for line in output.getvalue().splitlines() if 'CPU active (cores)' in line)
+            self.assertIn('9.0',line);self.assertIn('74.0',line)
+            self.assertIn('CPU includes all worker/guest processes',output.getvalue())
+
+    def test_stale_cpu_samples_are_not_reported_as_current_activity(self):
+        row=stats.empty();row.update(observed=1)
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            stats.display(dict(at=time.time(),workers=row,ci=row,cpu_usage=dict(at=time.time()-30,workers=10,ci=74)))
+        line=next(line for line in output.getvalue().splitlines() if 'CPU active (cores)' in line)
+        self.assertEqual(line.count('unknown'),2)
+
     def test_stale_reports_do_not_present_live_counts_as_current(self):
         row = stats.empty()
         row.update(observed=1, waiting_now=1, waited=1)
