@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci_priority, github, lean_host, lean_pressure, store, vm
+from tauceti_fleet import ci_priority, github, lean_host, lean_pressure, lean_guest, store, vm
 
 GIB=1024**3
 
@@ -100,18 +100,62 @@ class StagingPriority(unittest.TestCase):
         self.assertEqual(value['cpu_weight'],10000)
         self.assertEqual(value['ci_job_kind'],'staging')
 
+    def test_pr_only_guests_need_no_classification_api_read(self):
+        value=dict(ci_kinds=['pr'],unit='vm',busy=True,run_id=42)
+        with patch.object(github,'ci_read') as read,patch.object(ci_priority,'run'):
+            ci_priority.classify({},value,100)
+            read.assert_not_called()
+        self.assertEqual(value['ci_job_kind'],'pr')
+
     def test_shared_guests_are_classified_from_trusted_run_metadata_and_failures_back_off(self):
-        value=dict(ci_kinds=['pr','staging'],unit='vm',busy=True,run_id=42)
+        value=dict(ci_kinds=['pr','staging'],unit='vm',busy=True,run_id=42,runner_id=99)
         with patch.object(github,'ci_read',side_effect=store.FleetError('quota')) as read,patch.object(ci_priority,'run'):
             ci_priority.classify({},value,100);ci_priority.classify({},value,101)
             read.assert_called_once();self.assertFalse(ci_priority.staging(value))
-        with patch.object(github,'ci_read',return_value=dict(id=42,event='repository_dispatch',display_title='bors branch=main batch=1')) as read,patch.object(ci_priority,'run'):
+        with patch.object(github,'ci_read',side_effect=[dict(id=42,event='repository_dispatch',display_title='bors branch=main batch=1'),dict(jobs=[dict(runner_id=99,status='in_progress')])]) as read,patch.object(ci_priority,'run'):
             ci_priority.classify({},value,221);ci_priority.classify({},value,222)
-            read.assert_called_once();self.assertTrue(ci_priority.staging(value))
+            self.assertEqual(read.call_count,2);self.assertTrue(ci_priority.staging(value))
             self.assertNotIn('ci_priority_error',value)
 
+    def test_forged_staging_run_on_a_different_runner_stays_normal(self):
+        value=dict(ci_kinds=['pr','staging'],unit='vm',busy=True,run_id=42,runner_id=99)
+        with patch.object(github,'ci_read',side_effect=[dict(id=42,event='repository_dispatch',display_title='bors branch=main batch=1'),dict(jobs=[dict(runner_id=100,status='in_progress')])]),patch.object(ci_priority,'run'):
+            ci_priority.classify({},value,100)
+        self.assertFalse(ci_priority.staging(value))
+        self.assertEqual(value['cpu_weight'],100)
+        self.assertIn('not assigned',value['ci_priority_error'])
+
+    def test_controller_error_retains_durable_staging_priority(self):
+        value=dict(instance='a',directory=str(self.root/'vms/a'),ci_kinds=['staging'])
+        store.atomic(self.root/'vm.json',value)
+        self.assertEqual(ci_priority.receipts(dict(error='inventory unavailable')),[value])
+        self.assertTrue(ci_priority.staging(ci_priority.receipts({})[0]))
+        self.assertEqual(ci_priority.receipts(dict(ci_vms=[])),[])
+
+    def test_priority_update_cannot_resurrect_retired_or_replaced_receipts(self):
+        before=dict(instance='old',unit='vm',run_id=42)
+        after=dict(before,ci_job_kind='staging',cpu_weight=10000)
+        config=dict(ci_slot=1)
+        self.assertEqual(ci_priority.persist(config,before,after),{})
+        path=vm.slot_file(config,'vm.json')
+        self.assertFalse(path.exists())
+        current=dict(instance='new',unit='replacement',run_id=43)
+        store.atomic(path,current)
+        self.assertEqual(ci_priority.persist(config,before,after),{})
+        self.assertEqual(store.read(path),current)
+        store.atomic(path,dict(before,busy=True))
+        updated=ci_priority.persist(config,before,after)
+        self.assertTrue(updated['busy'])
+        self.assertEqual(updated['cpu_weight'],10000)
+
+    def test_staging_cache_reclaim_uses_measured_ram_even_with_legacy_admission_capacity(self):
+        frame=ci_priority.frame(dict(self.observation,memory_available=17*GIB),staging=True)
+        with patch.object(lean_guest.time,'monotonic',return_value=100),patch.object(Path,'write_text') as write:
+            self.assertEqual(lean_guest.reclaim(frame,0),100)
+            write.assert_called_once_with('1\n')
+
     def test_pr_cannot_gain_priority_from_title_alone(self):
-        value=dict(ci_kinds=['pr','staging'],unit='vm',busy=True,run_id=42)
+        value=dict(ci_kinds=['pr','staging'],unit='vm',busy=True,run_id=42,runner_id=99)
         with patch.object(github,'ci_read',return_value=dict(id=42,event='pull_request_target',display_title='bors branch=main batch=1')),patch.object(ci_priority,'run'):
             ci_priority.classify({},value,100)
         self.assertFalse(ci_priority.staging(value));self.assertEqual(value['cpu_weight'],100)

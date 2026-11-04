@@ -149,7 +149,7 @@ class Publisher:
             if isinstance(status.get("ci_vms"), list)
             else None
         )
-        staging_paths = {Path(v["directory"]) / "pressure.sock" for v in (status.get("ci_vms", []) if isinstance(status.get("ci_vms"), list) else [])
+        staging_paths = {Path(v["directory"]) / "pressure.sock" for v in ci_priority.receipts(status)
                          if v.get("directory") and ci_priority.staging(v)}
         for path in list(self.remote_statistics):
             if Path(path) not in paths and (path not in owned if owned is not None else not status):

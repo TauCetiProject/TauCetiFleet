@@ -732,7 +732,7 @@ class CISlot:
                 line, self.buffer = self.buffer.split(b"\n", 1)
                 try:
                     notice = json.loads(line)
-                    if notice.get("kind") == "ci_started" and str(notice.get("run_id", "")).isdigit():
+                    if notice.get("kind") == "ci_started" and not value.get("run_id") and str(notice.get("run_id", "")).isdigit():
                         value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
                         atomic(path, value)
                 except (ValueError, AttributeError):
@@ -770,10 +770,11 @@ class CISlot:
                                   ci_kinds=recovery["ci_kinds"]) if recovery else config)
             self.next_vm = time.time() + (60 if value else 5)
         if value and priority:
+            before = dict(value)
             try:
                 ci_priority.classify(config, value, time.time())
             finally:
-                atomic(path, value)
+                value = ci_priority.persist(config, before, value)
         return value
 
 
