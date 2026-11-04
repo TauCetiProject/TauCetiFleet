@@ -125,13 +125,18 @@ def event(kind, *, identity=None, at=None, **fields):
         db.execute("INSERT OR IGNORE INTO events VALUES (?,?,?,?)", (identity, at, kind, json.dumps(fields)))
 
 
-def import_worker_events():
-    path = state_dir() / "worker-events.jsonl"
+def import_worker_events(path=None, cursor_name="worker-log"):
+    if path is None:
+        from .pools import entries, paths
+
+        for pool in entries(host_config()):
+            import_worker_events(paths(pool)[1] / "worker-events.jsonl", "pool-log-" + pool)
+        path = state_dir() / "worker-events.jsonl"
     if not path.exists():
         return
     with database() as db:
         stat = path.stat()
-        name = "worker-log"
+        name = cursor_name
         prior = db.execute("SELECT value FROM cursors WHERE name=?", (name,)).fetchone()
         cursor = json.loads(prior[0]) if prior else {}
         offset = cursor.get("offset", 0) if cursor.get("inode") == stat.st_ino else 0

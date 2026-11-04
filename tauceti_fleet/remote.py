@@ -168,6 +168,55 @@ def profile(name):
     return result
 
 
+def pool_profile(profile_name):
+    """Select only this pool's secrets; transport uses the existing private stdin RPC."""
+    from . import pools
+
+    definitions = read(config_dir() / "profiles.json", {})
+    if profile_name not in definitions:
+        result = profile(profile_name)
+        result.update(agent="claude", billing="api")
+        return result
+    value = dict(definitions[profile_name])
+    settings = {k: v for k, v in value.items() if k in pools.FIELDS}
+    settings.setdefault("agent", "claude")
+    settings.setdefault("billing", "subscription" if settings["agent"] == "codex" else "api")
+    credentials = {}
+    sources = {k: value[k] for k in pools.SECRETS if value.get(k)}
+    if value.get("codex_home"):
+        sources["codex_auth_file"] = str(Path(value["codex_home"]).expanduser() / "auth.json")
+    for key, source in sources.items():
+        path = Path(source).expanduser()
+        if not path.is_file() or path.stat().st_mode & 0o077:
+            raise FleetError(f"Credential file {path} is missing or not private; use chmod 600")
+        secret = path.read_text().strip()
+        credentials[key] = json.dumps(pools.credential(secret, settings.get("account", ""))) if key == "codex_auth_file" else secret
+    if "github_token_file" not in credentials and settings.get("github_account"):
+        credentials["github_token_file"] = run(["gh", "auth", "token", "--user", settings["github_account"]]).stdout.strip()
+    return dict(settings, credentials=credentials)
+
+
+def install_pool_sync(target, pool, profile_name):
+    """Local native timer. Secrets travel only through the normal Fleet stdin RPC."""
+    import hashlib
+
+    from .host import unit_argument, units
+
+    identity = hashlib.sha256(json.dumps([target, pool, profile_name]).encode()).hexdigest()[:16]
+    unit = "tauceti-fleet-pool-sync-" + identity
+    command = [Path.home() / ".local/bin/tauceti-fleet", "pool", "sync", target, pool, "--profile", profile_name]
+    environment = "Environment=" + unit_argument("TAUCETI_FLEET_CONFIG=" + str(config_dir())) + "\n"
+    (units() / (unit + ".service")).write_text(
+        "[Unit]\nDescription=Sync TauCeti Fleet pool credentials\n[Service]\nType=oneshot\n"
+        + "ExecStart=" + " ".join(unit_argument(v) for v in command) + "\n" + environment + "TimeoutStartSec=120\n")
+    (units() / (unit + ".timer")).write_text(
+        "[Unit]\nDescription=Refresh TauCeti Fleet pool credentials\n[Timer]\nOnBootSec=30\nOnUnitActiveSec=60\n"
+        "[Install]\nWantedBy=timers.target\n")
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", "--now", unit + ".timer"])
+    return unit + ".timer"
+
+
 def inventory():
     return read(config_dir() / "inventory.json", {})
 
