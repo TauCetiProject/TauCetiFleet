@@ -56,11 +56,13 @@ Directly administered hosts can set `ci_idle_pool: true` in their private
 `host.json`. This keeps the reserved staging slots and one general idle guest,
 grows the pool as jobs arrive, and counts running or assigned jobs anywhere in
 the pool against `ci_max_jobs`. Reducing that limit preserves existing builds.
-Surplus idle runners first withdraw their routing labels. After 180 seconds,
-a fresh complete cached queue observation must confirm that no job targets the
-runner before GitHub deregistration and VM teardown. A queued assignment restores
-the labels; GitHub refusal to delete a busy runner leaves its VM running. Missing
-queue observations retain guests and block pool growth, with an error in status.
+A fresh complete cached queue observation must confirm that no job targets an
+idle runner before GitHub deregistration and VM teardown. GitHub refusal to delete
+a busy runner leaves its VM running. Retired identities are retained for 48 hours:
+if a picker races deletion and queues against an old instance label, the controller
+recreates that identity within the shared cap, preserving its original CI classes.
+This avoids changing GitHub's read-only JIT labels. Missing queue observations
+retain guests and block pool growth, with an error in status.
 The controller reads the existing capacity cache at most once per 30 seconds;
 foreground status performs no new requests. Broker-enrolled hosts retain their
 existing pool behavior.

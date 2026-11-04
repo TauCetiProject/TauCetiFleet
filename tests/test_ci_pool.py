@@ -34,24 +34,18 @@ class Pool(unittest.TestCase):
         inventory = [dict(id=i + 100, busy=True) for i in range(1, 8)]
         self.assertEqual(ci_pool.plan(self.config, values, inventory, dict(queued=[])), set(range(8)))
 
-    def test_withdrawal_waits_for_new_observation_then_restores_queued_assignment(self):
+    def test_idle_shutdown_preserves_queued_assignments_without_mutating_labels(self):
         value = dict(instance="a", runner_id=100)
         own = dict(labels=[dict(name=n) for n in ("self-hosted", "fleet-instance-a", "tauceti-fleet-pr")])
         observation = dict(observed_at=time.time(), queued=[])
-        with patch.object(github, "set_runner_labels") as labels:
-            self.assertFalse(ci_pool.withdraw(self.config, value, own, observation, self.root / "vm.json"))
-            self.assertEqual(labels.call_args.args[2], ["self-hosted", "fleet-instance-a"])
-            self.assertFalse(ci_pool.withdraw(self.config, value, own, observation, self.root / "vm.json"))
-            observation["observed_at"] = value["withdrawing_at"] + ci_pool.WITHDRAWAL_SECONDS + 1
-            self.assertTrue(ci_pool.withdraw(self.config, value, own, observation, self.root / "vm.json"))
-            observation["queued"] = [{"self-hosted", "fleet-instance-a", "tauceti-fleet-pr"}]
-            self.assertFalse(ci_pool.withdraw(self.config, value, own, observation, self.root / "vm.json"))
-            self.assertEqual(labels.call_args.args[2], value.get("routing_labels", [r["name"] for r in own["labels"]]))
-            self.assertNotIn("withdrawing_at", value)
-            self.assertNotIn("routing_withdrawn", value)
+        self.assertTrue(ci_pool.idle_ready(value, own, observation))
+        observation["queued"] = [{"self-hosted", "fleet-instance-a", "tauceti-fleet-pr"}]
+        self.assertFalse(ci_pool.idle_ready(value, own, observation))
+        self.assertFalse(ci_pool.idle_ready(value, dict(own, busy=True), dict(queued=[])))
 
     def test_idle_delete_rejection_never_stops_vm(self):
-        value = dict(slot=2, instance="a", runner_id=100, unit="vm", directory=str(self.root / "vms/a"))
+        value = dict(slot=2, instance="a", runner_id=100, unit="vm", directory=str(self.root / "vms/a"),
+                     ci_kinds=["pr", "staging"], routing_labels=["fleet-instance-a"])
         store.atomic(vm.slot_file(dict(ci_slot=2), "vm.json"), value)
         with patch.object(github, "retire_runner", side_effect=store.FleetError("busy")), patch.object(vm, "run") as stop:
             with self.assertRaises(store.FleetError):
@@ -70,17 +64,36 @@ class Pool(unittest.TestCase):
         self.assertEqual(ci_pool.plan(self.config, [], [], None), set())
         self.assertEqual(ci_pool.plan(self.config, [dict(slot=12)], [], None), {12})
 
-    def test_assigned_withdrawing_guest_can_restore_labels_while_admitted(self):
-        value = dict(slot=2, instance="a", runner_id=100, unit="vm", directory=str(self.root),
-                     started_at=time.time() - 300, withdrawing_at=time.time() - 200)
-        store.atomic(vm.slot_file(dict(ci_slot=2), "vm.json"), value)
-        inventory = [dict(id=100, status="online", busy=False)]
-        with patch.object(host, "ci_service_state", return_value=(True, "healthy")), patch.object(ci_pool, "withdraw", return_value=False) as withdraw:
-            host.CISlot(2).step(self.config, inventory=inventory, refresh=True, cooling=False,
-                                admitted=True, reservations=dict(queued=[{"fleet-instance-a"}]))
-            withdraw.assert_called_once()
+    def test_deleted_instance_is_resurrected_when_a_racing_picker_targets_it(self):
+        value = dict(instance="a" * 16, ci_kinds=["pr", "staging"],
+                     routing_labels=["self-hosted", "fleet-instance-" + "a" * 16])
+        ci_pool.remember(value)
+        queued = dict(queued=[set(value["routing_labels"])])
+        records = ci_pool.recoveries([], queued)
+        self.assertEqual(len(records), 1)
+        slots = ci_pool.recovery_slots(self.config, [], [], queued, records)
+        self.assertEqual(set(slots), {1})
+        self.assertEqual(slots[1]["instance"], value["instance"])
+        desired = ci_pool.plan(self.config, [], [], queued, slots, True)
+        self.assertEqual(desired, {0, 1})
+        self.assertEqual(ci_pool.recoveries([dict(instance=value["instance"])], queued), [])
+        self.assertEqual(ci_pool.recoveries([], dict(queued=[])), [])
 
-    def test_no_observation_never_withdraws(self):
-        with patch.object(github, "set_runner_labels") as labels:
-            self.assertFalse(ci_pool.withdraw(self.config, {}, {}, None, self.root / "vm.json"))
-            labels.assert_not_called()
+    def test_recovery_waits_for_global_capacity_and_does_not_steal_staging_slot(self):
+        record = dict(instance="a" * 16, ci_kinds=["pr", "staging"])
+        busy = [dict(slot=i, runner_id=i + 100, busy=True) for i in range(1, 8)]
+        self.assertEqual(ci_pool.recovery_slots(self.config, busy, [], dict(queued=[]), [record]), {})
+        busy.pop()
+        self.assertEqual(set(ci_pool.recovery_slots(self.config, busy, [], dict(queued=[]), [record])), {7})
+
+    def test_recovery_start_uses_original_instance_and_job_classes(self):
+        config = dict(self.config, ci_vcpus=16, ci_memory_gib=32)
+        recovery = dict(instance="a" * 16, ci_kinds=["pr"])
+        with patch.object(vm, "start", return_value={}) as start:
+            host.CISlot(2).step(config, inventory=[], refresh=False, cooling=False,
+                                admitted=True, reservations=dict(queued=[]), recovery=recovery)
+            self.assertEqual(start.call_args.args[0]["ci_recover_instance"], recovery["instance"])
+            self.assertEqual(start.call_args.args[0]["ci_kinds"], ["pr"])
+
+    def test_no_observation_never_retires(self):
+        self.assertFalse(ci_pool.idle_ready({}, {}, None))

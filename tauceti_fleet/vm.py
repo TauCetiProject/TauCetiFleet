@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -310,7 +311,9 @@ def _start(config):
             # mint another instance until cancellation is positively confirmed.
             _cancel_registration(config)
             intent = {}
-    instance = intent.get("instance") or secrets.token_hex(8)
+    instance = intent.get("instance") or config.get("ci_recover_instance") or secrets.token_hex(8)
+    if not re.fullmatch(r"[a-f0-9]{16}", instance):
+        raise FleetError("Invalid CI instance identity")
     if config.get("ci_broker_url"):
         # Keep the request identity across lost replies and controller restarts.
         # The broker can replay the existing JIT config without registering twice.
@@ -429,6 +432,9 @@ def retire_idle(config, value):
         current = read(slot_file(config, "vm.json"), {})
         if current.get("instance") != value.get("instance") or current.get("busy"):
             return False
+        from .ci_pool import remember
+
+        remember(value)
         # GitHub rejects deletion if a job started after our last observation.
         github.retire_runner(config, value["runner_id"])
         _retire(config, value, registration_removed=True)
