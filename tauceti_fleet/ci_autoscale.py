@@ -42,6 +42,7 @@ def host_action(payload):
         owned = [read(path, {}) for path in [state_dir() / "ci-last-retired.json",
                  *(state_dir() / "ci-slots").glob("*/ci-last-retired.json")]]
         owned += read(state_dir() / "pending-ci.json", [])
+        owned += read(state_dir() / "ci-autoscale-retired.json", [])
         if not any(v.get("runner_id") == runner for v in owned):
             raise FleetError("Retired runner ownership cannot be verified")
         try:
@@ -62,6 +63,13 @@ def host_action(payload):
             # The operator-side transaction verifies the GitHub event. Bind
             # queueing and retirement to that instance under the launch lock.
             value = dict(value, operator_recovery=True)
+            # A slot may finish another job before an API outage clears. Keep
+            # recovery ownership separate from its replaceable last-retired file.
+            ledger = state_dir() / "ci-autoscale-retired.json"
+            entries = [entry for entry in read(ledger, [])
+                       if entry["at"] > time.time() - 172800 and entry["runner_id"] != value["runner_id"]]
+            entries.append(dict(at=time.time(), runner_id=value["runner_id"], instance=value["instance"], run_id=value["run_id"]))
+            atomic(ledger, entries[-4096:])
             host.queue_ci_result(value, "healthy")
             vm._retire(slot_config, value)
         return dict(retired=True)
