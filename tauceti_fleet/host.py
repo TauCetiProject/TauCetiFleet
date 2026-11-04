@@ -650,7 +650,7 @@ class CISlot:
         self.client = None
         self.buffer = b""
 
-    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None):
+    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None):
         config = dict(capacity.for_slot(config, self.index),
                       ci_enabled=config["ci_enabled"] and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
@@ -734,7 +734,8 @@ class CISlot:
                          or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
                 if config.get("ci_idle_pool"):
-                    retired = (ci_pool.withdraw(config, value, own, reservations, path)
+                    value["routing_labels"] = ci_pool.labels(value, own)
+                    retired = (ci_pool.idle_ready(value, own, reservations)
                                and vm.retire_idle(config, value))
                 else:
                     vm.retire(config, value)
@@ -744,7 +745,8 @@ class CISlot:
                     self.close()
                     self.next_vm = time.time() + 5
         if config["ci_enabled"] and not cooling and not value and time.time() >= self.next_vm:
-            value = vm.start(config)
+            value = vm.start(dict(config, ci_recover_instance=recovery["instance"],
+                                  ci_kinds=recovery["ci_kinds"]) if recovery else config)
             self.next_vm = time.time() + 60
         return value
 
@@ -804,7 +806,9 @@ def daemon():
                             pool_error = str(exc)[:200]
                             event("ci_pool_observation_unavailable", reason=str(exc)[:200])
                 existing = [read(vm.slot_file({"ci_slot": index}, "vm.json"), {}) for index in indexes]
-                admitted = ci_pool.plan(config, existing, inventory, reservations)
+                recovery_records = ci_pool.recoveries(existing, reservations) if config.get("ci_idle_pool") else []
+                recovery_slots = ci_pool.recovery_slots(config, existing, inventory, reservations, recovery_records)
+                admitted = ci_pool.plan(config, existing, inventory, reservations, recovery_slots, bool(recovery_records))
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
                 values = []
@@ -813,7 +817,7 @@ def daemon():
                     slot = slots.setdefault(index, CISlot(index))
                     try:
                         value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling,
-                                          admitted=index in admitted, reservations=reservations)
+                                          admitted=index in admitted, reservations=reservations, recovery=recovery_slots.get(index))
                     except (FleetError, OSError, ValueError, KeyError) as exc:
                         slot_errors[str(index)] = str(exc)
                         slot.next_vm = max(slot.next_vm, time.time() + 60)

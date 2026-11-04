@@ -148,15 +148,6 @@ def retire_runner(config, runner_id):
                    token_file=config.get("ci_token_file") or config.get("github_token_file"))
 
 
-def set_runner_labels(config, runner_id, labels):
-    if config.get("ci_broker_url"):
-        raise FleetError("Idle CI pools require direct runner-label administration")
-    # GitHub manages the three built-in labels itself.
-    custom = [label for label in labels if label.lower() not in {"self-hosted", "linux", "x64"}]
-    return request(f"orgs/TauCetiProject/actions/runners/{int(runner_id)}/labels", method="PUT",
-                   data=dict(labels=custom), token_file=config.get("ci_token_file") or config.get("github_token_file"))
-
-
 def ci_read(config, path):
     if config.get("ci_broker_url"):
         import re

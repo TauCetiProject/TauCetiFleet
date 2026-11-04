@@ -3,15 +3,11 @@
 import time
 import urllib.parse
 
-from . import capacity, ci_overview, github
-from .store import FleetError, atomic
-
-# Pickers accept capacity observations up to 150s old. Allow outstanding
-# placements to appear before deleting a runner whose routing labels changed.
-WITHDRAWAL_SECONDS = 180
+from . import capacity, ci_overview
+from .store import FleetError, atomic, locked, read, state_dir
 
 
-def plan(config, values, inventory, observation=None):
+def plan(config, values, inventory, observation=None, recovery_slots=None, pending_recovery=False):
     live = {v.get("slot", 0): v for v in values if v}
     busy_ids = {r["id"] for r in inventory if r.get("busy")}
     if observation:
@@ -28,7 +24,7 @@ def plan(config, values, inventory, observation=None):
         # Unknown queued assignments must not cause additional admissions.
         return set(live)
     maximum = capacity.jobs(config)
-    desired = set(occupied)
+    desired = set(occupied) | set(recovery_slots or {})
     candidates = [i for i in range(maximum) if i not in occupied and not live.get(i, {}).get("withdrawing_at")]
     if config.get("ci_idle_pool"):
         reserved, _ = capacity.reservation(config)
@@ -39,7 +35,7 @@ def plan(config, values, inventory, observation=None):
         for i in candidates:
             if len(desired) >= maximum:
                 break
-            if i < reserved or not general:
+            if i < reserved or (not general and not pending_recovery):
                 desired.add(i)
                 general = general or i >= reserved
     else:
@@ -65,36 +61,57 @@ def reservations(config):
     return dict(observed_at=observed / 1000, queued=[set(v) for v in queued])
 
 
-def withdraw(config, value, own, observation, path):
-    """Withdraw routing, preserve queued assignments, then permit idle deletion."""
+def labels(value, own):
+    return value.get("routing_labels") or [r["name"] for r in own.get("labels", [])]
+
+
+def idle_ready(value, own, observation):
     if own.get("busy") or value.get("busy") or not observation:
         return False
-    original = value.get("routing_labels") or [r["name"] for r in own.get("labels", [])]
-    if not original:
-        return False
-    labels = {label.lower() for label in original}
-    assigned = any({label.lower() for label in queued} <= labels for queued in observation["queued"])
-    if assigned:
-        if value.get("withdrawing_at"):
-            github.set_runner_labels(config, value["runner_id"], original)
-            value.pop("withdrawing_at", None)
-            value.pop("routing_labels", None)
-            value.pop("routing_withdrawn", None)
-            atomic(path, value)
-        return False
-    if not value.get("withdrawing_at"):
-        # Persist the intent before mutation so a controller restart cannot
-        # forget that this guest has been withdrawn from future selection.
-        value.update(withdrawing_at=time.time(), routing_labels=original)
-        atomic(path, value)
-        github.set_runner_labels(config, value["runner_id"], [label for label in original
-                                 if label != "tauceti-fleet" and not label.startswith("tauceti-fleet-")])
-        value["routing_withdrawn"] = True
-        atomic(path, value)
-        return False
-    if not value.get("routing_withdrawn"):
-        github.set_runner_labels(config, value["runner_id"], [label for label in original
-                                 if label != "tauceti-fleet" and not label.startswith("tauceti-fleet-")])
-        value["routing_withdrawn"] = True
-        atomic(path, value)
-    return observation["observed_at"] > value["withdrawing_at"] + WITHDRAWAL_SECONDS
+    original = {label.lower() for label in labels(value, own)}
+    return bool(original) and not any({label.lower() for label in queued} <= original
+                                     for queued in observation["queued"])
+
+
+def remember(value):
+    # JIT labels are read-only. Retain enough identity to recreate a guest if
+    # a picker races deregistration and subsequently queues on its old label.
+    path = state_dir() / "ci-idle-retired.json"
+    with locked(path.with_suffix(".lock")):
+        records = [r for r in read(path, []) if r["at"] > time.time() - 172800
+                   and r["instance"] != value["instance"]]
+        records.append(dict(at=time.time(), instance=value["instance"],
+                            ci_kinds=value["ci_kinds"], labels=value["routing_labels"]))
+        atomic(path, records)
+
+
+def recoveries(values, observation):
+    if not observation:
+        return []
+    live = {value["instance"] for value in values if value}
+    result = []
+    for record in read(state_dir() / "ci-idle-retired.json", []):
+        if record["at"] <= time.time() - 172800 or record["instance"] in live:
+            continue
+        original = {label.lower() for label in record["labels"]}
+        if any({label.lower() for label in queued} <= original for queued in observation["queued"]):
+            result.append(record)
+    return result
+
+
+def recovery_slots(config, values, inventory, observation, records):
+    if not config["ci_enabled"] or not observation:
+        return {}
+    # Reuse the same planner without warm spares to count active assignments.
+    occupied = plan(config, values, inventory, observation, pending_recovery=True)
+    live_slots = {value.get("slot", 0) for value in values if value}
+    reserved, _ = capacity.reservation(config)
+    result = {}
+    for record in records:
+        if len(occupied | result.keys()) >= capacity.jobs(config):
+            break
+        candidates = [i for i in range(capacity.jobs(config)) if i not in live_slots and i not in result
+                      and (i >= reserved or record["ci_kinds"] == ["staging"])]
+        if candidates:
+            result[candidates[0]] = record
+    return result
