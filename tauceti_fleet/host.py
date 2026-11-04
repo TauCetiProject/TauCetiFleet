@@ -747,7 +747,7 @@ class CISlot:
         if config["ci_enabled"] and not cooling and not value and time.time() >= self.next_vm:
             value = vm.start(dict(config, ci_recover_instance=recovery["instance"],
                                   ci_kinds=recovery["ci_kinds"]) if recovery else config)
-            self.next_vm = time.time() + 60
+            self.next_vm = time.time() + (60 if value else 5)
         return value
 
 

@@ -248,7 +248,44 @@ def start(config):
 
     config = for_slot(config, config.get("ci_slot", 0))
     with locked(slot_file(config, "vm.lock")):
-        return _start(config)
+        prior = read(slot_file(config, "vm.json"), {})
+        if prior.get("unit"):
+            result = run(["systemctl", "--user", "is-active", prior["unit"]], check=False)
+            if result.returncode == 0:
+                return prior
+        # All callers, including enable and recovered placements, share this
+        # gate. A deferred start returns immediately; never sleep the daemon.
+        with locked(state_dir() / "ci-start.lock"):
+            path = state_dir() / "ci-start-pace.json"
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            pace = read(path, {})
+            now = time.monotonic()
+            if pace.get("boot_id") == boot:
+                if pace.get("starting"):
+                    # The previous caller died mid-start. Its guest may have
+                    # only just launched; give it a full minute to settle.
+                    atomic(path, dict(boot_id=boot, next_start_monotonic=now + 60))
+                    return {}
+                if now < pace.get("next_start_monotonic", 0):
+                    return {}
+            elif not pace:
+                # Adopt recent starts made before this gate was installed.
+                latest = max((read(slot_file({"ci_slot": i}, "vm.json"), {}).get("started_at", 0)
+                              for i in slots_in_use()), default=0)
+                remaining = 60 - (time.time() - latest)
+                if 0 < remaining <= 60:
+                    atomic(path, dict(boot_id=boot, next_start_monotonic=now + remaining))
+                    return {}
+            def reserve(*, starting=False):
+                atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + 60, starting=starting))
+
+            # Reserve before registration for crash safety, then measure the
+            # full minute from launch completion (or a failed attempt).
+            reserve(starting=True)
+            try:
+                return _start(config)
+            finally:
+                reserve()
 
 
 def slot_file(config, name):

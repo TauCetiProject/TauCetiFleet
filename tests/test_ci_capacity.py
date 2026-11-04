@@ -75,8 +75,10 @@ class Capacity(unittest.TestCase):
             registered.append((config["ci_slot"], name))
             return 100 + config["ci_slot"], "single-job"
 
-        with patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"), patch.object(github, "retire_runner"):
+        with patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"), patch.object(github, "retire_runner"):
             zero = vm.start(dict(config, ci_slot=0))
+            self.assertEqual(vm.start(dict(config, ci_slot=1)), {})
+            clock.return_value = 160
             one = vm.start(dict(config, ci_slot=1))
             self.assertNotEqual(zero["instance"], one["instance"])
             self.assertEqual(vm.start(dict(config, ci_slot=0)), zero)
