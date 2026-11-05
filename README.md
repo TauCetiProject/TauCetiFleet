@@ -123,7 +123,10 @@ identities and billing credentials. All pools share the host worker memory
 limits, yield CPU to CI, and appear in `tauceti-fleet status HOST` (including
 `--follow`). Status reports each pool's configured, alive, running and admitted
 worker counts, account, billing mode, quota usage and shutdown state. Status
-only reads prepared observations; it does not query the provider.
+only reads prepared observations; it does not query the provider. Backpressure
+reports cover every pool’s GitHub account and actual PR limits, including stopped
+pools. Missing cached surveys are shown as unknown; one unavailable pool does
+not hide the others.
 
 The existing pool retains its profile name (normally `ai-for-science`), worker
 IDs, service and settings. For example, keep forty science API workers and add

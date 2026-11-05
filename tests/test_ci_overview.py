@@ -2,7 +2,6 @@ import contextlib
 import datetime
 import hashlib
 import io
-import json
 import os
 import tempfile
 import threading
@@ -11,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci_overview as overview, cli, github, host, remote, store
+from tauceti_fleet import ci_overview as overview
+from tauceti_fleet import cli, github, host, remote, store
 
 
 class Overview(unittest.TestCase):
@@ -145,6 +145,83 @@ class Overview(unittest.TestCase):
         self.assertEqual(scopes["SymplecticGeometry"]["count"], 1)
         self.assertFalse(scopes["SymplecticGeometry"]["blocked"])
         self.assertEqual(data["machine_id"], self.config["machine_id"])
+
+    def named_pool(self, pool, account="kim-em", limit=64, *, alive=True):
+        self.config.setdefault("worker_pools", {})[pool] = dict(github_account=account, max_open_prs=limit)
+        # Migrated IDs need not start with the generated Fleet prefix.
+        store.atomic(store.state_dir() / "pools" / pool / "workers" / "migrated.json",
+                     dict(id="migrated", alive=alive, github_account=account, max_open_prs=limit,
+                          applied_spec=dict(github_account=account)))
+
+    def test_every_pool_uses_its_own_account_and_limit_without_network_reads(self):
+        self.worker(1)
+        self.named_pool("gmail", limit=32, alive=False)
+        self.named_pool("lean-fro", limit=64)
+        path = self.survey_cache("all", "auto", count=200)
+        data = store.read(path)
+        data["payload"]["author_counts"]["kim-em"] = 45
+        store.atomic(path, data)
+        with patch.object(overview, "fetch", side_effect=AssertionError("network")), patch.object(github, "request", side_effect=AssertionError("network")):
+            sources = {}
+            for name, target in overview.pressure_targets(self.config):
+                value, observed = overview.pressure(target)
+                sources[name] = dict(value=value, observed_at=observed)
+        combined = overview.combine([dict(sources=sources)])
+        self.assertEqual(len(combined["pressure_accounts"]), 3)
+        rows = [s["value"] for s in combined["pressure_accounts"].values()]
+        self.assertEqual({(r.get("pool"), r["account"], r["scopes"][0]["limit"], r["scopes"][0]["count"])
+                          for r in rows}, {(None, "science", 128, 200), ("gmail", "kim-em", 32, 45), ("lean-fro", "kim-em", 64, 45)})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(combined, section="overview")
+        self.assertIn("(pool gmail): all roadmaps: 45/32 blocked", out.getvalue())
+        self.assertIn("(pool lean-fro): all roadmaps: 45/64 open", out.getvalue())
+        self.assertIn("Backpressure science", out.getvalue())
+
+    def test_pool_credential_cache_namespace_is_not_inherited_from_legacy(self):
+        self.named_pool("personal")
+        secret = self.root / "legacy-token"
+        secret.write_text("legacy")
+        self.config["github_state_token_file"] = str(secret)
+        path = self.survey_cache("all", "auto")
+        value = store.read(path)
+        value["payload"]["author_counts"] = {"kim-em": 3}
+        store.atomic(path, value)
+        target = dict(overview.pressure_targets(self.config))["pressure:personal"]
+        self.assertNotIn("github_state_token_file", target)
+        data, _ = overview.pressure(target)
+        self.assertEqual(data["scopes"][0]["count"], 3)
+
+    def test_failed_pool_keeps_other_accounts_and_reports_unknown_without_reusing_wrong_identity(self):
+        self.worker(1)
+        self.named_pool("new-account")
+        self.survey_cache("all", "auto")
+        original = overview.pressure
+        def observe(config):
+            if config.get("_pressure_pool"):
+                raise store.FleetError("No complete cached survey")
+            return original(config)
+        self.snapshot({"pressure:new-account": dict(value=dict(account="old-account", pool="new-account", scopes=[]), observed_at=100)})
+        with patch.object(overview, "bors_history", side_effect=RuntimeError), patch.object(overview, "bors", side_effect=RuntimeError), patch.object(overview, "pools", side_effect=RuntimeError), patch.object(overview, "backlog", side_effect=RuntimeError), patch.object(overview, "pressure", side_effect=observe):
+            collected = overview.collect(self.config)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(overview.combine([collected]), section="overview")
+        self.assertIn("Backpressure science", out.getvalue())
+        self.assertIn("Backpressure kim-em", out.getvalue())
+        self.assertIn("(pool new-account): all roadmaps: unknown", out.getvalue())
+        self.assertNotIn("old-account", out.getvalue())
+        self.assertNotIn("0/64", out.getvalue())
+
+    def test_partial_scope_and_different_limits_remain_visible(self):
+        now = time.time()
+        rows = [dict(scope=scope, skip=skip, count=count, limit=limit, blocked=count >= limit, observed_at=now)
+                for scope, skip, count, limit in [("auto", "", 20, 32), ("any", "", 20, 64), ("PDE", "", 4, 3), ("auto", "PDE", 16, 32)]]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources={"pressure": dict(value=dict(account="science", scopes=rows), observed_at=now)}))
+        for text in ("20/32", "20/64", "PDE: 4/3 blocked", "all roadmaps (with exclusions): 16/32"):
+            self.assertIn(text, out.getvalue())
 
     def test_ci_only_hosts_never_publish_default_worker_pressure(self):
         self.survey_cache("all", "auto", count=200)
