@@ -15,7 +15,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import github, bors_history as history_jobs
+from . import bors_history as history_jobs
+from . import github
 from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
@@ -185,8 +186,8 @@ def worker_policies(config):
     account = config.get("github_account", "tauceti-ai-for-science")
     fallback_limit = config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8)
     policies = set()
-    prefix = "fleet-" + config["machine_id"][:8] + "-"
-    for path in (state_dir() / "workers").glob("*.json"):
+    prefix = config.get("_worker_prefix", "fleet-" + config["machine_id"][:8] + "-")
+    for path in Path(config.get("_workers_state_dir", state_dir() / "workers")).glob("*.json"):
         value = read(path, {})
         if not str(value.get("id", "")).startswith(prefix) or not value.get("alive"):
             continue
@@ -200,6 +201,10 @@ def worker_policies(config):
         limit = value.get("max_open_prs", spec.get("max_open_prs", fallback_limit))
         if type(limit) is int and limit > 0:
             policies.add((scope, tuple(sorted(set(skip))), limit))
+    if not policies and config.get("_pressure_pool") and type(fallback_limit) is int and fallback_limit > 0:
+        # Stopped/exhausted pools still have a configured authoring limit. Reuse
+        # a cached global survey if present; never invent a zero PR count.
+        policies.add(("auto", (), fallback_limit))
     if not policies:
         raise FleetError("No live Fleet worker policy available")
     focus = config.get("roadmap_focus") or {}
@@ -239,6 +244,24 @@ def pressure_row(path, identity, account, policies):
         return []
     return [dict(scope=scope, skip=skip, count=count, limit=limit, blocked=count >= limit,
                  observed_at=path.stat().st_mtime) for limit in limits]
+
+
+def pressure_targets(config):
+    """Independent cached observations for the original and every named pool."""
+    yield "pressure", config
+    for pool, settings in config.get("worker_pools", {}).items():
+        # Named managers have independent identity, policy and shared-read credentials.
+        selected = dict(machine_id=config["machine_id"], workers_enabled=config.get("workers_enabled", False),
+                        **{k: settings[k] for k in ("github_account", "max_open_prs", "github_state_url", "github_state_token_file") if k in settings})
+        selected.update(_pressure_pool=pool, _worker_prefix="", _workers_state_dir=state_dir() / "pools" / pool / "workers")
+        yield "pressure:" + pool, selected
+
+
+def pressure_identity(config):
+    identity = dict(account=config.get("github_account", "tauceti-ai-for-science"), machine_id=config["machine_id"])
+    if config.get("_pressure_pool"):
+        identity["pool"] = config["_pressure_pool"]
+    return identity
 
 
 def pressure(config):
@@ -291,7 +314,7 @@ def pressure(config):
     if not scopes:
         raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
     rows = list(scopes.values())
-    return dict(account=account, machine_id=config["machine_id"], scopes=rows), max(r["observed_at"] for r in rows)
+    return dict(**pressure_identity(config), scopes=rows), max(r["observed_at"] for r in rows)
 
 
 def cached(config=None):
@@ -328,7 +351,9 @@ def collect(config):
             return cached(config)
         atomic(attempt, dict(at=now, next_attempt_at=now + INTERVAL))
         value = cached(config)
-        sources = dict(value.get("sources", {}))
+        targets = dict(pressure_targets(config))
+        sources = {name: source for name, source in value.get("sources", {}).items()
+                   if not name.startswith("pressure:") or name in targets}
         def save():
             snapshot = dict(version=1, repository=REPOSITORY, sources=dict(sources), prepared_at=time.time(), next_attempt_at=now + INTERVAL)
             atomic(state_dir() / "ci-overview.json", snapshot)
@@ -336,7 +361,8 @@ def collect(config):
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         try:
-            futures = {executor.submit(fn, config): name for name, fn in (("bors", bors), ("bors_history", bors_history), ("pools", pools), ("backlog", backlog), ("pressure", pressure))}
+            futures = {executor.submit(fn, config): name for name, fn in (("bors", bors), ("bors_history", bors_history), ("pools", pools), ("backlog", backlog))}
+            futures.update({executor.submit(pressure, selected): name for name, selected in targets.items()})
             for future in concurrent.futures.as_completed(futures, timeout=40):
                 name = futures[future]
                 try:
@@ -344,12 +370,22 @@ def collect(config):
                     sources[name] = dict(value=data, observed_at=observed)
                 except Exception as error:
                     reason = str(error) if isinstance(error, FleetError) else type(error).__name__
-                    sources[name] = dict(sources.get(name, {}), error=reason[:200], failed_at=time.time())
+                    previous = sources.get(name, {})
+                    if name in targets:
+                        identity = pressure_identity(targets[name])
+                        if any(previous.get("value", {}).get(k) != v for k, v in identity.items()):
+                            previous = dict(value=dict(**identity, scopes=[]), observed_at=time.time())
+                    sources[name] = dict(previous, error=reason[:200], failed_at=time.time())
                 save()
         except concurrent.futures.TimeoutError:
             for future, name in futures.items():
                 if not future.done():
-                    sources[name] = dict(sources.get(name, {}), error="Background observation deadline", failed_at=time.time())
+                    previous = sources.get(name, {})
+                    if name in targets:
+                        identity = pressure_identity(targets[name])
+                        if any(previous.get("value", {}).get(k) != v for k, v in identity.items()):
+                            previous = dict(value=dict(**identity, scopes=[]), observed_at=time.time())
+                    sources[name] = dict(previous, error="Background observation deadline", failed_at=time.time())
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         return save()
@@ -402,8 +438,10 @@ def source_value(name, source):
         elif name == "backlog":
             if not all(integer(data.get(k)) for k in ("pr_builds", "all_workflows")):
                 return None
-        elif name == "pressure":
+        elif name == "pressure" or name.startswith("pressure:"):
             if not isinstance(data.get("account"), str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", data["account"]) or not isinstance(data.get("scopes"), list):
+                return None
+            if data.get("pool") is not None and (not isinstance(data["pool"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", data["pool"])):
                 return None
             if any(not isinstance(r, dict) or not integer(r.get("count")) or not integer(r.get("limit")) or r["limit"] == 0
                    or type(r.get("blocked")) is not bool or r["blocked"] != (r["count"] >= r["limit"])
@@ -441,10 +479,10 @@ def combine(values, pool_names=None):
                          source.get("observed_at", 0) > sources.get(name, {}).get("observed_at", -1))
             if preferred:
                 sources[name] = source
-            if name == "pressure" and isinstance(source.get("value"), dict):
+            if (name == "pressure" or name.startswith("pressure:")) and isinstance(source.get("value"), dict):
                 account = source["value"]["account"]
                 machine = source["value"].get("machine_id")
-                key = account + ("@" + machine if isinstance(machine, str) else "")
+                key = account + ("@" + machine if isinstance(machine, str) else "") + ("#" + source["value"]["pool"] if source["value"].get("pool") else "")
                 if source.get("observed_at", 0) > accounts.get(key, {}).get("observed_at", -1):
                     accounts[key] = source
     return dict(version=1, repository=REPOSITORY, sources=sources, pressure_accounts=accounts, pool_names=pool_names or {})
@@ -541,7 +579,7 @@ def display(value, *, section="all"):
         print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note}; excluding stuck runs through 2026-10-07)")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
-    pressures = pressures or [sources.get("pressure", {})]
+    pressures = pressures or [source for name, source in sources.items() if name == "pressure" or name.startswith("pressure:")]
     if not any(source_value("pressure", row) is not None for row in pressures):
         print("Backpressure: unknown (no prepared worker survey)")
     for observation in pressures:
@@ -550,10 +588,13 @@ def display(value, *, section="all"):
             continue
         age = max(0, int(time.time() - observation.get("observed_at", time.time())))
         note = f"{age}s old" + ("; stale" if age > 600 or observation.get("error") else "")
-        rows = sorted((r for r in data["scopes"] if r["scope"] in ("any", "auto") and not r["skip"]),
-                      key=lambda r: -r["observed_at"])
         parts = []
-        for row in rows[:1]:
+        # Collapse auto/any duplicates, preserving every distinct scope/limit.
+        selected = {}
+        for row in sorted(data["scopes"], key=lambda r: -r["observed_at"]):
+            key = ("all roadmaps" if row["scope"] in ("any", "auto") else row["scope"], row["skip"], row["limit"])
+            selected.setdefault(key, row)
+        for row in selected.values():
             scope = "all roadmaps" if row["scope"] in ("any", "auto") else row["scope"]
             if row["skip"]:
                 scope += " (with exclusions)"
@@ -563,4 +604,8 @@ def display(value, *, section="all"):
                 parts[-1] += f" (stale {scope_age}s)"
         machine = data.get("machine_id")
         label = " on " + pool_names.get("fleet-" + machine[:12], machine[:12]) if isinstance(machine, str) else ""
+        if data.get("pool"):
+            label += " (pool " + data["pool"] + ")"
+        if not parts and observation.get("error"):
+            note += "; " + observation["error"]
         print(f"Backpressure {data['account']}{label}: " + ("; ".join(parts) or "all roadmaps: unknown") + f" open non-draft roadmap PRs ({note})")

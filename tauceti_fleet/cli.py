@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, remote
+from . import activity, broker, host, pools, remote
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -64,8 +64,23 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    pool = sub.add_parser("pool", help="configure named worker identities, credentials and subscription policies")
+    pool.add_argument("operation", choices=("set", "sync", "stop", "resume"))
+    pool.add_argument("host")
+    pool.add_argument("pool")
+    pool.add_argument("--profile", help="local credential/profile definition in profiles.json")
+    pool.add_argument("--workers", dest="maximum", type=int)
+    pool.add_argument("--pacing", choices=("paced", "exhaust"))
+    pool.add_argument("--pace", help="worker pacing curve, e.g. 0:10,50:70,90:90")
+    exhaustion = pool.add_mutually_exclusive_group()
+    exhaustion.add_argument("--stop-on-exhaustion", dest="stop_on_exhaustion", action="store_true", default=None)
+    exhaustion.add_argument("--wait-on-exhaustion", dest="stop_on_exhaustion", action="store_false")
+    pool.add_argument("--json", action="store_true")
+    pool.add_argument("--install-timer", action="store_true", help="with sync, refresh this profile’s credentials from this machine every minute")
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
-        sub.add_parser(name, help=argparse.SUPPRESS)
+        internal = sub.add_parser(name, help=argparse.SUPPRESS)
+        if name == "run-workers":
+            internal.add_argument("--pool")
     return p
 
 
@@ -137,7 +152,7 @@ def main(argv=None, *, _status_results=None):
             ci_overview.collect(host.host_config())
             return 0
         if args.command == "run-workers":
-            host.run_workers()
+            host.run_workers(args.pool)
             return 0
         if args.command in ("add", "enroll"):
             value = remote.enroll(args.target, url=args.broker, token_file=args.token_file, replace_machine=args.replace_machine) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
@@ -190,6 +205,22 @@ def main(argv=None, *, _status_results=None):
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "pool":
+                if args.install_timer and args.operation != "sync":
+                    raise FleetError("--install-timer requires pool sync")
+                payload.update(operation=args.operation, pool=args.pool, settings={})
+                if args.operation in ("stop", "resume") and (args.profile or args.maximum is not None or args.pacing or args.pace or args.stop_on_exhaustion is not None):
+                    raise FleetError("stop/resume do not change pool settings or credentials")
+                if args.profile:
+                    profile = remote.pool_profile(args.profile)
+                    payload["credentials"] = profile.pop("credentials")
+                    if args.operation == "set":
+                        payload["settings"].update(profile, profile=args.profile)
+                if args.operation == "sync" and not args.profile:
+                    raise FleetError("Credential sync requires --profile")
+                for key, value in (("max_workers", args.maximum), ("pacing", args.pacing), ("pace", args.pace), ("stop_on_exhaustion", args.stop_on_exhaustion)):
+                    if value is not None:
+                        payload["settings"][key] = value
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -213,6 +244,8 @@ def main(argv=None, *, _status_results=None):
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
+                if args.command == "pool" and args.install_timer:
+                    results[name]["sync_timer"] = remote.install_pool_sync(args.host, args.pool, args.profile)
                 if args.command == "status":
                     atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:
@@ -270,6 +303,7 @@ def main(argv=None, *, _status_results=None):
                         if _status_results is not None:
                             print(value.get("error", "Live reports unavailable"))
                         print()
+                    pools.display(status.get("worker_pools"))
                     workers = status.get("workers")
                     if isinstance(workers, list):
                         running = sum(w.get("state") == "running" for w in workers)

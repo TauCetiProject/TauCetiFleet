@@ -116,6 +116,99 @@ Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
 
+## Named worker pools
+
+One host controller can run multiple worker pools with independent GitHub
+identities and billing credentials. All pools share the host worker memory
+limits, yield CPU to CI, and appear in `tauceti-fleet status HOST` (including
+`--follow`). Status reports each pool's configured, alive, running and admitted
+worker counts, account, billing mode, quota usage and shutdown state. Status
+only reads prepared observations; it does not query the provider. Backpressure
+reports cover every pool’s GitHub account and actual PR limits, including stopped
+pools. Missing cached surveys are shown as unknown; one unavailable pool does
+not hide the others.
+
+The existing pool retains its profile name (normally `ai-for-science`), worker
+IDs, service and settings. For example, keep forty science API workers and add
+sixteen personal subscription workers:
+
+```sh
+tauceti-fleet workers server --max 40
+tauceti-fleet pool set server gmail --profile gmail --workers 16 \
+  --pacing exhaust --stop-on-exhaustion
+tauceti-fleet status server --follow
+```
+
+Define the additional profile in `~/.config/tauceti-fleet/profiles.json`:
+
+```json
+{
+  "gmail": {
+    "agent": "codex",
+    "billing": "subscription",
+    "github_account": "your-github-login",
+    "account": "you@gmail.com",
+    "codex_auth_file": "/home/operator/.codex/accounts/gmail.auth.json"
+  },
+  "another-api-pool": {
+    "agent": "claude",
+    "billing": "api",
+    "github_account": "another-github-login",
+    "anthropic_api_key_file": "/home/operator/.config/secrets/another-api-key"
+  }
+}
+```
+
+`codex_home` may replace `codex_auth_file`. The subscription account is mandatory
+and must match the access credential. The selected stored `gh` login supplies
+GitHub authentication independently. A private `github_token_file` is also
+supported. Pool configuration contains credential paths, never credential
+values; credentials are transferred through SSH stdin into private files.
+Codex refresh tokens are excluded from the transfer. Keep the original local
+login responsible for renewal, and synchronize updated access credentials:
+
+```sh
+tauceti-fleet pool sync server gmail --profile gmail --install-timer
+```
+
+This installs a local user timer which repeats the native `pool sync` command
+every minute. That operator machine must be available for future credential
+renewals. Synchronization never clears an exhausted/stopped pool. It does not
+switch the local Codex or `gh` login.
+
+Subscription policies:
+
+- `--pacing paced` uses TauCetiWorker's normal quota pacing. Supply `--pace
+  '0:10,50:70,90:90'` for an explicit pacing curve.
+- `--pacing exhaust` skips soft pacing and works as quickly as host capacity
+  and provider hard limits permit.
+- `--stop-on-exhaustion` durably stops the pool when a current provider quota
+  window is exhausted. This applies to either session or weekly windows. HTTP
+  throttling, credential errors, unknown usage and soft pacing are not exhaustion.
+  New admissions close first; active sessions finish, then idle workers are
+  disabled. Resetting quota, refreshing credentials or restarting the controller
+  does not restart the pool.
+- `--wait-on-exhaustion` (the default) keeps workers available to resume after a
+  quota reset. It does not bypass provider limits.
+
+```sh
+tauceti-fleet pool stop server gmail       # finish active work, then retire workers
+tauceti-fleet pool resume server gmail     # explicitly clear the persistent stop
+tauceti-fleet pool set server gmail --workers 8
+```
+
+A count reduction closes excess admissions without interrupting active sessions.
+Stop the pool and let its workers finish before changing its identity, model or
+pacing settings. A host-wide drain closes every pool. A failure in one pool's
+credentials or configuration closes that pool's admissions without disabling
+other pools or CI. Pool managers and their worker scopes are managed by Fleet;
+there is no second capacity controller.
+
+Additional pools live under `pools/NAME` in Fleet's configuration and state
+directories. The host's legacy `max_workers` remains the original pool ceiling;
+status's maximum is the sum across all pools. For a subscription-only host, set
+the original ceiling to zero before enabling workers.
+
 ## Roles, resource priority, and activation
 
 For routine production updates, the operator prefers live updates with normal
