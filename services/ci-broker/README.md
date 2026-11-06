@@ -202,9 +202,9 @@ previously configured hosts.
 
 Temporary placement suspension uses authenticated `POST /admin/hosts/ID/suspend`;
 `POST /admin/hosts/ID/resume` restores it. Suspension retains the host credential,
-blocks new runner/JIT registrations and removes CI routing labels from registered
-runners, including busy runners. Acquired jobs continue; monitoring, inventory and
+blocks new runner/JIT registrations and retires idle registrations. GitHub JIT
+labels are read-only; busy one-job runners finish and deregister normally. Acquired jobs continue; monitoring, inventory and
 retirement remain available. No host reinstall or re-enrollment is required.
 Check `cleanup_pending` and retry a partial operation before treating exclusion
-as complete. Resume restores each owned slot's authorized CI classes; orphaned
-registrations require operator reconciliation rather than guessed permissions.
+as complete. Resume unblocks registration with the same credential and existing authorized
+CI classes; it does not restore a revoked credential.
