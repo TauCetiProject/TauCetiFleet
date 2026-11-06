@@ -324,8 +324,7 @@ Lean starts wait when recent CPU use exceeds 90%, or available RAM falls below
 slightly more than twice the fixed worst-file RSS measured on 2026-11-03.
 The memory-use threshold has a 60% floor for small machines. Retries sleep for
 independent random 1–5 second intervals. Local CPU checks reuse counters shared
-between invocations; spare capacity incurs no sampling sleep, including on a
-cold start. Both host workers and newly started CI
+between invocations. Both host workers and newly started CI
 guests receive `LAKE_OVERRIDE_LEAN=true` and the standalone wrapper. Workers use
 a scoped PATH alias and toolchain overlay. A CI-only Bash hook wraps the prepared
 watchdog entry point, so capacity waits do not spend the compiler's execution
@@ -386,8 +385,7 @@ instrumented compiler stream. First samples, stale samples, and counter resets
 show unknown instead of inventing a rate.
 Waiting share is summed capacity-wait seconds divided by summed wait plus
 execution seconds, including live invocations. It is neither host CPU utilization
-nor a percentage of the report's wall-clock interval. Historical CPU sampling
-delays are counted separately; new invocations have no sampling delay. Quantiles cover admitted invocations that waited;
+nor a percentage of the report's wall-clock interval. Quantiles cover admitted invocations that waited;
 active and abandoned waits still contribute elapsed waiting time. The timing
 start and CI guest coverage are explicit; pre-instrumentation worker processes
 have separate observed counts and lower bounds for their current waits.
