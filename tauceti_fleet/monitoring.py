@@ -350,6 +350,9 @@ def install_local(alias=None):
         args += ["--alias", alias]
     body = "[Unit]\nDescription=Publish prepared public TauCeti host observations\n\n[Service]\n"
     body += "ExecStart=" + " ".join(unit_argument(a) for a in args) + "\n"
+    # Fleet's installed launcher injects its retained release into sys.path.
+    # A new systemd Python process needs the same immutable package location.
+    body += "Environment=" + unit_argument("PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)) + "\n"
     for key in ("TAUCETI_FLEET_CONFIG", "TAUCETI_FLEET_STATE", "TAUCETI_FLEET_DATA"):
         if key in os.environ:
             body += "Environment=" + unit_argument(key + "=" + os.environ[key]) + "\n"
