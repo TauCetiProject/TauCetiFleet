@@ -17,6 +17,9 @@ class Monitoring(unittest.TestCase):
                 observed_at=100,
                 error=sentinel,
                 resources=dict(cpus=16, memory_total=1000, memory_available=200, cgroup=sentinel),
+                worker_memory=dict(working_set=123, charged=456, maximum="max", oom_kill=2, cgroup=sentinel),
+                worker_admission=dict(state="paused", reason=sentinel),
+                ci_cooldown=dict(until=140, private_diagnostic=sentinel),
                 ci_vms=[
                     dict(
                         slot=1,
@@ -38,6 +41,11 @@ class Monitoring(unittest.TestCase):
         self.assertIsNone(result["cpu_idle_fraction"])
         self.assertIsNone(result["ci_enabled"])
         self.assertTrue(result["controller_error"])
+        self.assertEqual(result["worker_memory"]["working_set"], 123)
+        self.assertIsNone(result["worker_memory"]["maximum"])
+        self.assertEqual(result["worker_memory"]["oom_kill"], 2)
+        self.assertEqual(result["worker_admission"], {"state": "paused", "reason": "unknown"})
+        self.assertEqual(result["ci_cooldown"]["until"], "1970-01-01T00:02:20Z")
         result = monitoring.project(entry, value, 130, False)
         self.assertFalse(result["connected"])
         self.assertEqual(result["observed_at"], "1970-01-01T00:01:40Z")
