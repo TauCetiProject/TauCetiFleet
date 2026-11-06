@@ -409,6 +409,14 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         ci_enabled=config["ci_enabled"] or bool(ci), workers_enabled=config["workers_enabled"] or workers, draining=False
     )
     install_service(restart=False)
+    # The usual enable command also provisions read-only telemetry. The broker
+    # supplies its approved alias; volunteers need no additional setup command.
+    if value.get("ci_broker_url"):
+        try:
+            from .monitoring import install_local
+            install_local()
+        except (FleetError, OSError, ValueError):
+            print("tauceti-fleet: monitoring setup unavailable; host work remains enabled", file=sys.stderr)
     return dict(ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 ci_kinds=capacity.kinds(value), ci_max_jobs=capacity.jobs(value),
                 ci_memory_budget_gib=capacity.memory_budget_gib(value))
