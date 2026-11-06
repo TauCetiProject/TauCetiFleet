@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import re
 import signal
 import socket
 import time
@@ -297,10 +298,17 @@ class Publisher:
                 legacy=getattr(self, "legacy", {}),
             )
             atomic(state_dir() / "lean-statistics.json", value)
-            atomic(
-                state_dir() / "lean-statistics-report.json",
-                {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived", "archived_keys")},
-            )
+            report = {k: v for k, v in value.items() if k not in ("sources", "source_times", "archived", "archived_keys")}
+            # Preserve VM identity without exposing the private serial-socket path.
+            report["instances"] = {
+                Path(path).parent.name: dict(
+                    observed_at=self.remote_statistics_times.get(path),
+                    **{key: stats[key] for key in ("waiting_now", "running_now", "completed", "oldest_wait", "wait_seconds", "run_seconds", "lost")},
+                )
+                for path, stats in self.remote_statistics.items()
+                if re.fullmatch(r"[a-f0-9]{16}", Path(path).parent.name) and lean_statistics.valid(stats)
+            }
+            atomic(state_dir() / "lean-statistics-report.json", report)
 
     def cpu_usage(self):
         now = time.monotonic()

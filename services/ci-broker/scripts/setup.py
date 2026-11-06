@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -106,9 +107,38 @@ def inspect():
     return value
 
 
+def monitoring_config():
+    """Operator-only opt-in; volunteers reuse their existing host enrollment."""
+    rows = json.loads((DIRECTORY / "operations-hosts.json").read_text())
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise SystemExit("operations-hosts.json must be an explicit public host allowlist")
+    seen = set()
+    aliases = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"machine_id", "alias"}
+                or not isinstance(row["machine_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", row["machine_id"])
+                or not isinstance(row["alias"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", row["alias"])
+                or row["machine_id"] in seen or row["alias"] in aliases):
+            raise SystemExit("Invalid or duplicate approved public host; private inventory fields are forbidden")
+        seen.add(row["machine_id"])
+        aliases.add(row["alias"])
+    token = (DIRECTORY / "operations-ingest-token").read_text().strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,128}", token):
+        raise SystemExit("operations-ingest-token must contain the CI reader's telemetry-only host grant")
+    return rows, token
+
+
+def activate_monitoring():
+    rows, token = monitoring_config()
+    command("npx", "--no-install", "wrangler", "secret", "put", "OPERATIONS_INGEST_TOKEN", input=token)
+    command("npx", "--no-install", "wrangler", "deploy", "--var",
+            "OPERATIONS_PUBLIC_HOSTS:" + json.dumps(rows, separators=(",", ":")))
+    print("Public host telemetry configured; enrolled volunteers use the usual reinstall and enable commands")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "collect", "inspect", "activate", "invite", "hosts", "capacity", "revoke", "reconcile"])
+    parser.add_argument("action", choices=["prepare", "collect", "inspect", "activate", "invite", "hosts", "capacity", "revoke", "reconcile", "monitoring"])
     parser.add_argument("--name", help="operator label for a new host invitation")
     parser.add_argument("--machine-id", help="machine identity to revoke")
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
@@ -168,6 +198,8 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
                   "GITHUB_PRIVATE_KEY": (DIRECTORY / "github-private-key.pem").read_text()}
         command("npx", "--no-install", "wrangler", "secret", "bulk", input=json.dumps(values))
         print("App authentication configured; no volunteer hosts have been enabled")
+    elif args.action == "monitoring":
+        activate_monitoring()
     elif args.action == "invite":
         import re
 

@@ -1,3 +1,4 @@
+import {telemetry} from './monitoring.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
 import {MAX_JOBS,capacity,validKinds,slots,labels} from './capacity.mjs';
@@ -59,7 +60,13 @@ export class FleetRegistry extends DurableObject {
     this.queue=result.catch(()=>{});
     return result;
   }
-  fetch(req) { return this.serialize(()=>this.handle(req)); }
+  fetch(req) {
+    // Monitoring has no authority to mutate runner policy/ownership. A slow
+    // downstream observer must not hold the global registration serial queue.
+    if (['/v1/monitoring','/v1/monitoring-policy'].includes(new URL(req.url).pathname) && ['POST','GET'].includes(req.method))
+      return telemetry(req, this.env, this.ctx.storage);
+    return this.serialize(()=>this.handle(req));
+  }
   alarm() { return this.serialize(()=>this.recovery.run()); }
   async handle(req) {
     const url = new URL(req.url);

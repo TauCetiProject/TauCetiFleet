@@ -64,6 +64,10 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
+    monitor.add_argument("arguments", nargs=argparse.REMAINDER)
+    install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
+    install_monitor.add_argument("--alias", required=True)
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
@@ -108,6 +112,15 @@ def print_isolation(status):
 
 
 def main(argv=None, *, _status_results=None):
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["monitoring"]:
+        from .monitoring import main as monitoring_main
+        return monitoring_main(raw[1:])
+    if raw[:1] == ["install-monitoring"]:
+        from .monitoring import install_local
+        args = parser().parse_args(raw)
+        print(json.dumps(install_local(args.alias)))
+        return 0
     args = parser().parse_args(argv)
     try:
         if args.command == "_watch-status":

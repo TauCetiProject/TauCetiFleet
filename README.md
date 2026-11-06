@@ -702,3 +702,55 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Public operations telemetry
+
+The existing Tau Ceti `/ci` page can display approved host observations alongside
+queue and GitHub jobs. `tauceti-fleet monitoring --help` runs an independent,
+read-only publisher. It consumes the existing prepared status stream, never
+resource probes, GitHub discovery or admission mutations.
+
+For an operator-controlled bridge, provide a private JSON registry containing
+`{alias, machine_id, target}` rows. Every permanent ID must be the full verified
+identity, and every alias must be approved for publication. Duplicate identities
+are rejected. Run `tauceti-fleet monitoring --registry FILE --state-file FILE
+--publish-url https://ci-data.taucetiproject.org/ingest/operations/hosts
+--token-file PRIVATE_GRANT`. One persistent identity-checked SSH stream serves
+each host. Viewer traffic opens no connections. Fact observation age and stream
+heartbeat age are distinct; disconnects retain the last facts.
+
+Enrolled volunteers need only the usual package reinstall and
+`tauceti-fleet enable ...` command. Enable automatically provisions the independent
+telemetry sidecar. The sidecar obtains its approved alias from its own enrollment
+broker; volunteers do not receive an extra token, registry file or install command.
+Telemetry setup or publication failure cannot prevent enable or interrupt work.
+
+The sidecar uses the existing host-bound enrollment credential only at that host's
+own broker. The broker forwards sanitized observations with a separate grant to
+CI; it never sends the host credential to CI. Monitoring/policy requests bypass
+the runner-registration serial queue and do not call GitHub. Worker-only/direct
+hosts can use the operator's bridge with a separate telemetry-only grant.
+
+The broker's `OPERATIONS_PUBLIC_HOSTS` variable is the approved public
+`[{machine_id,alias}]` registry. Its `OPERATIONS_INGEST_TOKEN` secret is the CI
+receiver's host telemetry grant. Keep public aliases/configuration separate from
+private SSH targets and credentials. Configure both readers before starting
+producers; empty/unconfigured public scopes fail closed.
+
+Public projections contain permanent host and VM/runner identities, coarse
+worker states, prepared CPU/memory/compiler pressure and source freshness. They
+exclude private paths, raw errors, process arguments, credentials, environment,
+prompts and model output. Unsupported metrics remain unknown. Slot absence and
+observer failure do not establish free capacity. Historical telemetry starts only
+at activation; the earlier period is unknown.
+
+
+The broker operator configures telemetry once with
+`python services/ci-broker/scripts/setup.py monitoring`, after deploying the CI
+reader. Its private setup directory contains `operations-hosts.json` with only
+approved `{machine_id, alias}` rows and `operations-ingest-token`, copied from the
+CI reader's telemetry-only host grant. The setup command validates these files,
+sets the forwarding secret and deploys the public policy. It never changes host
+admissions or enrollment credentials. Later ordinary broker deploys retain this
+explicit policy (`keep_vars`). Removing an alias disables new publication for
+that host; remove it from the CI reader's public scope to revoke public reads.
