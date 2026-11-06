@@ -85,9 +85,6 @@ class Pools(unittest.TestCase):
         self.assertEqual(pools.maximum(after), 2)
 
     def test_single_subscription_pool_switches_accounts_without_adding_workers(self):
-        store.update_host(subscription_pool=dict(name="subscription", max_workers=16))
-        with self.assertRaisesRegex(store.FleetError, "switch --profile"):
-            self.configure()
         request = dict(
             pool="subscription",
             settings={k: v for k, v in spec().items() if k in pools.FIELDS},
@@ -103,8 +100,8 @@ class Pools(unittest.TestCase):
         self.assertEqual(pools.write_workers("subscription", config["worker_pools"]["subscription"], config), ids)
         self.assertEqual(config["worker_pools"]["subscription"]["account"], "second@example.com")
         request["settings"]["max_workers"] = 17
-        with self.assertRaisesRegex(store.FleetError, "limited to 16"):
-            pools.configure(request)
+        pools.configure(request)
+        self.assertEqual(store.host_config()["worker_pools"]["subscription"]["max_workers"], 17)
 
     def test_account_switch_replaces_the_same_sync_timer(self):
         store.atomic(store.config_dir() / "profiles.json", {"qim": {}, "gmail": {}})

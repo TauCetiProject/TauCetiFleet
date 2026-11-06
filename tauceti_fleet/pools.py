@@ -179,20 +179,6 @@ def configure(payload):
                 if config.get(field):
                     value.setdefault(field, config[field])
         validate(value)
-        policy = config.get("subscription_pool")
-        if policy is not None and value["billing"] == "subscription" and operation != "stop":
-            if (
-                not isinstance(policy, dict)
-                or not isinstance(policy.get("name"), str)
-                or type(policy.get("max_workers")) is not int
-                or not 0 <= policy["max_workers"] <= 4096
-            ):
-                raise FleetError("Invalid single subscription pool policy")
-            selected = name(policy["name"])
-            if pool != selected:
-                raise FleetError(f"This host uses one subscription pool: switch --profile on {selected!r} instead")
-            if value["max_workers"] > policy["max_workers"]:
-                raise FleetError(f"Subscription pool is limited to {policy['max_workers']} workers")
         if existing and any(value.get(k) != existing.get(k) for k in FIELDS - {"max_workers", "stop_on_exhaustion"}):
             if any(w.get("alive") for w in statuses(pool)):
                 raise FleetError(
