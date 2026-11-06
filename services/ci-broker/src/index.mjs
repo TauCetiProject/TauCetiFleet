@@ -1,3 +1,4 @@
+import {suspendHost} from './suspension.mjs';
 import {telemetry} from './monitoring.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
@@ -151,11 +152,20 @@ export class FleetRegistry extends DurableObject {
       if (url.pathname==='/admin/hosts' && req.method==='GET') {
         const hosts=await this.ctx.storage.list({prefix:'host:',limit:1000});
         return json({hosts:Array.from(hosts.values(), h=>({machine_id:h.machine_id,name:h.name,revoked:!!h.revoked,
+          suspended:!!h.suspended,suspension_cleanup_pending:!!h.suspension_cleanup_pending,
           kinds:capacity(h).kinds,slots:Object.entries(slots(h)).map(([slot,s])=>({slot:Number(slot),runner_id:s.runner_id || null,
             registration_pending:!!s.pending,pending_since:s.pending?.at ?? null,
             registration_failure:s.pending?.failure ?? null,recovery_error:s.pending?.recovery_error ?? null,
             recovery_attempts:s.pending?.attempts ?? 0,last_recovery:s.last_recovery ?? null,
             kinds:s.kinds || ['staging']})),created_at:h.created_at}))});
+      }
+      const suspension=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/(suspend|resume)$/);
+      if (suspension && req.method==='POST') {
+        const host=await this.ctx.storage.get('host:'+suspension[1]);
+        if (!host) return json({error:'not found'},404);
+        if (host.revoked) return json({error:'revoked hosts require enrollment recovery'},409);
+        try { return json(await suspendHost(this.ctx.storage,this.github,host,suspension[2]==='suspend')); }
+        catch { return json({error:'runner inventory unavailable; suspension state retained',suspended:!!host.suspended,cleanup_pending:true},503); }
       }
       const policy=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/capacity$/);
       if (policy && req.method==='POST') {
@@ -263,6 +273,7 @@ export class FleetRegistry extends DurableObject {
         return json({runners});
       }
       if (url.pathname==='/v1/runners' && req.method==='POST') {
+        if (host.suspended) return json({error:'CI placement is suspended by the operator',code:'host_suspended'},409);
         const input=await req.json();
         if (!new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
           return json({error:'invalid runner name'},400);

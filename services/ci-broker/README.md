@@ -199,3 +199,12 @@ arguments, logs, public responses, or repository files. Request logging is disab
 For later code changes, `npm run deploy` preserves configured secrets. Run
 `npm test` first. The existing PAT/SSH deployment path remains available for
 previously configured hosts.
+
+Temporary placement suspension uses authenticated `POST /admin/hosts/ID/suspend`;
+`POST /admin/hosts/ID/resume` restores it. Suspension retains the host credential,
+blocks new runner/JIT registrations and removes CI routing labels from registered
+runners, including busy runners. Acquired jobs continue; monitoring, inventory and
+retirement remain available. No host reinstall or re-enrollment is required.
+Check `cleanup_pending` and retry a partial operation before treating exclusion
+as complete. Resume restores each owned slot's authorized CI classes; orphaned
+registrations require operator reconciliation rather than guessed permissions.
