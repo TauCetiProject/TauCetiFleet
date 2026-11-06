@@ -327,6 +327,7 @@ def run(entries, source, args):
                         headers={
                             "Authorization": "Bearer " + args.token_file.read_text().strip(),
                             "Content-Type": "application/json",
+                            "User-Agent": "TauCetiFleet/monitoring",
                         },
                         method="POST",
                     )
