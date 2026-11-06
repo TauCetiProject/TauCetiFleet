@@ -52,6 +52,10 @@ def project(entry, value, transport_at=None, connected=False):
     slots = state.get("ci_vms") or []
     instances = (value.get("lean_statistics") or {}).get("instances") or {}
     summary = (value.get("activity") or {}).get("summary") or {}
+    pool_source = ((value.get("ci_overview") or {}).get("sources") or {}).get("pools") or {}
+    pool_counts = (pool_source.get("value") or {}).get("counts") or {}
+    capacity_observed = stamp(pool_source.get("observed_at"))
+
     rounds = (summary.get("rounds") or {}).get("24h")
 
     def round_count(key):
@@ -92,6 +96,13 @@ def project(entry, value, transport_at=None, connected=False):
         "ci_enabled": value.get("ci_enabled") if type(value.get("ci_enabled")) is bool else None,
         "workers_enabled": value.get("workers_enabled") if type(value.get("workers_enabled")) is bool else None,
         "ci_max_jobs": number(value.get("ci_max_jobs")),
+        "capacity_context": {
+            "observed_at": capacity_observed,
+            "scope": "organization_all_workflow_jobs",
+            "coverage": "observed" if capacity_observed and pool_counts else "unavailable",
+            "observer_error": bool(pool_source.get("error")),
+            "running_jobs": {k: number(pool_counts.get(k)) for k in ("github", "namespace", "self-hosted")},
+        },
         "worker_limit": number(state.get("active_worker_limit")),
         "admission": {
             "ci_kinds": value.get("ci_kinds")
@@ -158,6 +169,8 @@ def registry(path):
             raise ValueError("invalid private registry")
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,60}", entry["alias"]) or entry["machine_id"] in seen:
             raise ValueError("duplicate or invalid public alias/identity")
+        if entry["target"] is not None and (not isinstance(entry["target"], str) or not entry["target"]):
+            raise ValueError("bridge targets must be explicit or null for unobserved hosts")
         seen.add(entry["machine_id"])
     return entries
 
@@ -243,6 +256,8 @@ def run(entries, source, args):
             }
 
     for entry in entries:
+        if entry["target"] is None:
+            continue  # Explicitly unbridged hosts make no SSH or discovery calls.
         thread = threading.Thread(
             target=status_follow.receive,
             args=(entry, lambda frame, e=entry: accept(e, frame), stop, processes, process_lock),

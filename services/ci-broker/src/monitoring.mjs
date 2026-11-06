@@ -22,7 +22,7 @@ export async function telemetry(request, env, storage) {
     // Same allowlist as the CI receiver. Unknown private fields never leave the broker.
     exact(value,'schema source observed_at hosts'); exact(value.source,'id epoch sequence');
     const h=value.hosts[0];
-    exact(h,'machine_id alias observed_at transport_at connected coverage source_revision controller_error ci_enabled workers_enabled ci_max_jobs worker_limit resources cpu_idle_fraction memory_pressure compiler slots workers slots_truncated workers_truncated admission activity');
+    exact(h,'machine_id alias observed_at transport_at connected coverage source_revision controller_error ci_enabled workers_enabled ci_max_jobs worker_limit resources cpu_idle_fraction memory_pressure compiler slots workers slots_truncated workers_truncated admission activity capacity_context');
     exact(h.resources,'cpus memory_total memory_available'); exact(h.compiler,'observed_at waiting_guests guests healthy');
     if (!Array.isArray(h.slots) || h.slots.length>128 || !Array.isArray(h.workers) || h.workers.length>128) throw new Error('limit');
     h.slots.forEach(s=>exact(s,'slot instance_id runner_id runner_name phase busy started_at vcpus memory_gib compiler'));
@@ -34,7 +34,15 @@ export async function telemetry(request, env, storage) {
       primitive(slot.compiler.observed_at);
       for (const key of ['waiting_now','running_now','completed','oldest_wait','wait_seconds','run_seconds','lost']) numeric(slot.compiler[key]);
     }
-    for (const [key,scalar] of Object.entries(h)) if (!['resources','compiler','slots','workers','admission','activity'].includes(key)) primitive(scalar);
+    for (const [key,scalar] of Object.entries(h)) if (!['resources','compiler','slots','workers','admission','activity','capacity_context'].includes(key)) primitive(scalar);
+    if (h.capacity_context !== undefined) {
+      const c=h.capacity_context;
+      exact(c,'observed_at scope coverage observer_error running_jobs');
+      primitive(c.observed_at);
+      if (c.scope !== 'organization_all_workflow_jobs' || !['observed','unavailable'].includes(c.coverage) || typeof c.observer_error !== 'boolean') throw new Error('capacity scope');
+      exact(c.running_jobs,'github namespace self-hosted');
+      Object.values(c.running_jobs).forEach(numeric);
+    }
     if (h.admission !== undefined) {
       exact(h.admission,'ci_kinds staging_slots memory_budget_gib reservation_error');
       const a=h.admission;

@@ -57,6 +57,11 @@ class Monitoring(unittest.TestCase):
             entry = dict(alias="yael", machine_id="a" * 32, target="server")
             path.write_text(json.dumps([entry]))
             self.assertEqual(monitoring.registry(path), [entry])
+            unbridged = dict(entry, target=None)
+            path.write_text(json.dumps([unbridged]))
+            self.assertEqual(monitoring.registry(path), [unbridged])
+            self.assertEqual(monitoring.project(unbridged, {})["coverage"], "unavailable")
+            path.write_text(json.dumps([entry]))
             path.write_text(json.dumps([entry, entry]))
             with self.assertRaises(ValueError):
                 monitoring.registry(path)
@@ -99,6 +104,13 @@ class HostAdmission(unittest.TestCase):
         value = monitoring.project(
             dict(machine_id="a" * 32, alias="yael", target="private"),
             dict(
+                ci_overview=dict(
+                    sources=dict(
+                        pools=dict(
+                            observed_at=90, value=dict(counts={"github": 3, "namespace": 4, "PRIVATE_LABEL": 999})
+                        )
+                    )
+                ),
                 ci_kinds=["pr", "staging"],
                 ci_staging_slots=2,
                 ci_memory_budget_gib=128,
@@ -118,6 +130,8 @@ class HostAdmission(unittest.TestCase):
         )
         self.assertEqual(value["admission"]["ci_kinds"], ["pr", "staging"])
         self.assertEqual(value["activity"]["finished_rounds"], 8)
+        self.assertEqual(value["capacity_context"]["running_jobs"], {"github": 3, "namespace": 4, "self-hosted": None})
+        self.assertNotIn("PRIVATE_LABEL", json.dumps(value))
         self.assertEqual(value["activity"]["unknown_rounds"], 3)
         self.assertEqual(value["activity"]["observed_at"], "1970-01-01T00:01:40Z")
         self.assertNotIn("SECRET", json.dumps(value))
