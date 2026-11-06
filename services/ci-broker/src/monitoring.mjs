@@ -22,7 +22,7 @@ export async function telemetry(request, env, storage) {
     // Same allowlist as the CI receiver. Unknown private fields never leave the broker.
     exact(value,'schema source observed_at hosts'); exact(value.source,'id epoch sequence');
     const h=value.hosts[0];
-    exact(h,'machine_id alias observed_at transport_at connected coverage source_revision controller_error ci_enabled workers_enabled ci_max_jobs worker_limit resources cpu_idle_fraction memory_pressure compiler slots workers slots_truncated workers_truncated');
+    exact(h,'machine_id alias observed_at transport_at connected coverage source_revision controller_error ci_enabled workers_enabled ci_max_jobs worker_limit resources cpu_idle_fraction memory_pressure compiler slots workers slots_truncated workers_truncated admission activity');
     exact(h.resources,'cpus memory_total memory_available'); exact(h.compiler,'observed_at waiting_guests guests healthy');
     if (!Array.isArray(h.slots) || h.slots.length>128 || !Array.isArray(h.workers) || h.workers.length>128) throw new Error('limit');
     h.slots.forEach(s=>exact(s,'slot instance_id runner_id runner_name phase busy started_at vcpus memory_gib compiler'));
@@ -34,7 +34,20 @@ export async function telemetry(request, env, storage) {
       primitive(slot.compiler.observed_at);
       for (const key of ['waiting_now','running_now','completed','oldest_wait','wait_seconds','run_seconds','lost']) numeric(slot.compiler[key]);
     }
-    for (const [key,scalar] of Object.entries(h)) if (!['resources','compiler','slots','workers'].includes(key)) primitive(scalar);
+    for (const [key,scalar] of Object.entries(h)) if (!['resources','compiler','slots','workers','admission','activity'].includes(key)) primitive(scalar);
+    if (h.admission !== undefined) {
+      exact(h.admission,'ci_kinds staging_slots memory_budget_gib reservation_error');
+      const a=h.admission;
+      if (a.ci_kinds !== null && !['["pr"]','["staging"]','["pr","staging"]'].includes(JSON.stringify(a.ci_kinds))) throw new Error('classes');
+      numeric(a.staging_slots);numeric(a.memory_budget_gib);
+      if (typeof a.reservation_error !== 'boolean') throw new Error('flag');
+    }
+    if (h.activity !== undefined) {
+      exact(h.activity,'observed_at window_hours finished_rounds failed_rounds unknown_rounds');
+      primitive(h.activity.observed_at);
+      if (h.activity.window_hours !== 24) throw new Error('window');
+      for (const k of ['finished_rounds','failed_rounds','unknown_rounds']) numeric(h.activity[k]);
+    }
     if (!/^[a-f0-9-]{36}$/.test(value.source.id) || !Number.isSafeInteger(value.source.epoch) || !Number.isSafeInteger(value.source.sequence)) throw new Error('source');
     for (const key of ['cpus','memory_total','memory_available']) numeric(h.resources[key]);
     for (const key of ['ci_max_jobs','worker_limit','cpu_idle_fraction']) numeric(h[key]);

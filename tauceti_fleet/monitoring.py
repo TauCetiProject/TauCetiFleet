@@ -51,6 +51,14 @@ def project(entry, value, transport_at=None, connected=False):
     workers = state.get("workers") or []
     slots = state.get("ci_vms") or []
     instances = (value.get("lean_statistics") or {}).get("instances") or {}
+    summary = (value.get("activity") or {}).get("summary") or {}
+    rounds = (summary.get("rounds") or {}).get("24h")
+
+    def round_count(key):
+        if not isinstance(rounds, dict):
+            return None
+        values = [number(row.get(key)) for row in rounds.values() if isinstance(row, dict)]
+        return sum(values) if len(values) == len(rounds) and all(v is not None for v in values) else None
 
     def compiler(instance):
         row = instances.get(instance)
@@ -85,6 +93,21 @@ def project(entry, value, transport_at=None, connected=False):
         "workers_enabled": value.get("workers_enabled") if type(value.get("workers_enabled")) is bool else None,
         "ci_max_jobs": number(value.get("ci_max_jobs")),
         "worker_limit": number(state.get("active_worker_limit")),
+        "admission": {
+            "ci_kinds": value.get("ci_kinds")
+            if value.get("ci_kinds") in (["pr"], ["staging"], ["pr", "staging"])
+            else None,
+            "staging_slots": number(value.get("ci_staging_slots")),
+            "memory_budget_gib": number(value.get("ci_memory_budget_gib")),
+            "reservation_error": bool(value.get("ci_staging_reservation_error")),
+        },
+        "activity": {
+            "observed_at": stamp(summary.get("prepared_at")),
+            "window_hours": 24,
+            "finished_rounds": round_count("finished"),
+            "failed_rounds": round_count("failed"),
+            "unknown_rounds": round_count("unknown"),
+        },
         "resources": {k: number(resources.get(k)) for k in ("cpus", "memory_total", "memory_available")},
         "cpu_idle_fraction": number(state.get("cpu_idle_fraction")),
         "memory_pressure": bool(state.get("memory_pressure")) if "memory_pressure" in state else None,

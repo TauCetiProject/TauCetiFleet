@@ -94,6 +94,35 @@ class SlotEvidence(unittest.TestCase):
         self.assertNotIn("SECRET", json.dumps(value))
 
 
+class HostAdmission(unittest.TestCase):
+    def test_admission_and_activity_are_numeric_allowlists_with_independent_time(self):
+        value = monitoring.project(
+            dict(machine_id="a" * 32, alias="yael", target="private"),
+            dict(
+                ci_kinds=["pr", "staging"],
+                ci_staging_slots=2,
+                ci_memory_budget_gib=128,
+                activity=dict(
+                    summary=dict(
+                        prepared_at=100,
+                        private_path="SECRET",
+                        rounds={
+                            "24h": {
+                                "fix": dict(finished=3, failed=1, unknown=2),
+                                "review": dict(finished=5, failed=0, unknown=1),
+                            }
+                        },
+                    )
+                ),
+            ),
+        )
+        self.assertEqual(value["admission"]["ci_kinds"], ["pr", "staging"])
+        self.assertEqual(value["activity"]["finished_rounds"], 8)
+        self.assertEqual(value["activity"]["unknown_rounds"], 3)
+        self.assertEqual(value["activity"]["observed_at"], "1970-01-01T00:01:40Z")
+        self.assertNotIn("SECRET", json.dumps(value))
+
+
 class UsualEnable(unittest.TestCase):
     def test_install_uses_broker_policy_without_extra_volunteer_arguments(self):
         from unittest.mock import patch

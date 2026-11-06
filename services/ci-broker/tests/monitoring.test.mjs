@@ -12,7 +12,10 @@ test('host telemetry keeps enrollment credential at broker and never reads GitHu
  t.mock.method(globalThis,'fetch',async (url,options)=>{forwarded={url,options};return Response.json({accepted:true});});
  const env={OPERATIONS_PUBLIC_HOSTS:JSON.stringify([{machine_id:id,alias}]),OPERATIONS_INGEST_TOKEN:'telemetry-only'};
  const storage={get:async()=>({machine_id:id,hash,revoked:false})};
- assert.equal((await telemetry(request(),env,storage)).status,200);
+ const detailed=structuredClone(frame);
+ detailed.hosts[0].admission={ci_kinds:['pr','staging'],staging_slots:1,memory_budget_gib:64,reservation_error:false};
+ detailed.hosts[0].activity={observed_at:null,window_hours:24,finished_rounds:8,failed_rounds:1,unknown_rounds:2};
+ assert.equal((await telemetry(request(detailed),env,storage)).status,200);
  assert.equal(forwarded.url,'https://ci-data.taucetiproject.org/ingest/operations/host');
  assert.equal(forwarded.options.headers.Authorization,'Bearer telemetry-only');
  assert.ok(!JSON.stringify(forwarded).includes(token));
