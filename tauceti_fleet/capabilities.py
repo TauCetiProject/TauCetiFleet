@@ -330,7 +330,7 @@ def doctor(config=None, *, probe=True):
         roles=("ci",),
     )
     worker = executable("tauceti")
-    for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
+    for name in ("gh", "git", "uvx", "jq", "lake") + (("claude",) if config.get("max_workers", 8) > 0 else ()):
         path = executable(name)
         add(
             "worker-tool-" + name,
@@ -429,7 +429,7 @@ def doctor(config=None, *, probe=True):
                 "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    credential_names = ["anthropic_api_key_file", "github_token_file"] if config.get("max_workers", 8) > 0 else ([] if not config.get("ci_allowed") else ["github_token_file"])
     if config.get("ci_broker_url"):
         credential_names.append("ci_broker_token_file")
     for name in credential_names:
@@ -469,6 +469,18 @@ def doctor(config=None, *, probe=True):
                 "Check network access and refresh the profile's GitHub credential",
                 roles=("workers",),
             )
+    from . import pools
+
+    for pool, value in pools.entries(config).items():
+        tool = value["agent"]
+        add("pool-" + pool + "-tool", "ok" if executable(tool) else "blocked", tool,
+            "Install this pool’s agent CLI in the host PATH", roles=("workers",))
+        for field in ("github_token_file", "codex_auth_file" if value["billing"] == "subscription" else "anthropic_api_key_file"):
+            path = Path(value.get(field, "/nonexistent"))
+            private = path.is_file() and path.stat().st_size > 0 and not path.stat().st_mode & 0o077
+            add("pool-" + pool + "-" + field, "ok" if private else "blocked",
+                "private credential present" if private else "credential missing or not private",
+                "Run pool sync with the pool’s profile", roles=("workers",))
     readiness = {}
     for role in ("workers", "ci"):
         relevant = [c for c in checks if role in c["roles"]]

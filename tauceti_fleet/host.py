@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, pools, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -296,7 +296,9 @@ def worker_config(config):
 
     prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    old = tomllib.loads(prior.read_text()).get("workers", []) if prior.exists() else []
+    environments = {w["id"]: w["env"] for w in old if "env" in w}
+    old_count = len(old) if preserve else 0
     count = max(1, config["max_workers"], old_count)
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
@@ -305,6 +307,8 @@ def worker_config(config):
         for key, value in fields.items():
             if value is not None:
                 lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+        if wid in environments:
+            lines.append(pools.environment_line(environments[wid]))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -332,7 +336,9 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
-def run_workers():
+def run_workers(pool=None):
+    if pool is not None:
+        return pools.launch(pool)
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
     os.environ.update(
@@ -809,6 +815,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        pool_controller = pools.Controller()
         while not stopping:
             config = host_config()
             try:
@@ -854,12 +861,12 @@ def daemon():
                         if value.get("ci_priority_error"):
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
-                if config["workers_enabled"]:
+                if config["workers_enabled"] and (config["max_workers"] > 0 or ids):
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
-                maximum = config["max_workers"]
+                maximum = config["max_workers"] + pools.maximum(config)
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
                 if lease_expired:
@@ -887,13 +894,20 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                roadmap_focus = focus.policy(config, ids[:target])
+                legacy_target = min(config["max_workers"], target)
+                roadmap_focus = focus.policy(config, ids[:legacy_target])
+                pool_summaries, pool_workers = pool_controller.step(config, capacity_open=target > 0, reason=reason)
+                legacy_workers = worker_statuses()
+                legacy = pools.summary(pools.legacy_name(config), dict(config, agent="claude", billing="api"),
+                                       legacy_workers, ids[:legacy_target], {})
+                pool_summaries.insert(0, legacy)
+                total_admitted = legacy_target + sum(p["admitted"] for p in pool_summaries[1:])
                 atomic(
                     state_dir() / "admission.json",
                     dict(
                         version=1,
                         expires_at=time.time() + 15,
-                        workers=ids[:target],
+                        workers=ids[:legacy_target],
                         reason=reason,
                         roadmap_focus=roadmap_focus,
                     ),
@@ -911,7 +925,8 @@ def daemon():
                         workers_enabled=config["workers_enabled"],
                         ci_busy=busy,
                         ci_cooldown=circuit if cooling else None,
-                        active_worker_limit=target,
+                        active_worker_limit=total_admitted,
+                        worker_pools=pool_summaries,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
                         scaling_reason=reason,
@@ -920,7 +935,7 @@ def daemon():
                         memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,
-                        workers=worker_statuses(),
+                        workers=[dict(w, pool=pools.legacy_name(config)) for w in legacy_workers] + pool_workers,
                         worker_isolation=worker_isolation(),
                         error=None,
                         ci_vm=next((v for v in values if v.get("slot", 0) == 0), None),
@@ -936,6 +951,7 @@ def daemon():
                 )
                 error = None
             except (FleetError, OSError, ValueError, KeyError) as exc:
+                pool_controller.close_admissions(config, "controller error; run doctor")
                 message = str(exc)
                 if message != error:
                     print("tauceti-fleet: " + message, file=sys.stderr, flush=True)
@@ -955,7 +971,9 @@ def daemon():
                 if stopping:
                     break
                 time.sleep(0.5)
+        pool_controller.close()
         if not handover:
+            pool_controller.close_admissions(config, "controller stopped")
             atomic(
                 state_dir() / "admission.json",
                 dict(version=1, expires_at=time.time() + 15, workers=[], reason="controller stopped"),
@@ -1028,6 +1046,8 @@ def rpc(payload):
                       maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
                       memory_gib=payload.get("memory_gib"), disk_gib=payload.get("disk_gib"),
                       memory_budget_gib=payload.get("memory_budget_gib"))
+    if action == "pool":
+        return pools.configure(payload)
     if action == "focus":
         return focus.configure(payload)
     if action == "workers":
@@ -1060,7 +1080,7 @@ def rpc(payload):
             ci_staging_reservation_error=capacity.reservation(config)[1],
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
-            max_workers=config["max_workers"],
+            max_workers=config["max_workers"] + pools.maximum(config),
             lean_host_pressure=pressure,
             lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
             ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
