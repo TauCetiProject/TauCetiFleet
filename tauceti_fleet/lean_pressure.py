@@ -115,7 +115,9 @@ def capacity_available():
         # guest during rollout, rather than imposing a second utilization cap.
         if memory()[1] < WORST_FILE_RSS_BYTES:
             return False
-        return (staging or cpu <= CPU_LIMIT_PERCENT) and 100 * (1 - available / total) <= memory_limit(total, staging=staging)
+        return (staging or cpu <= CPU_LIMIT_PERCENT) and 100 * (1 - available / total) <= memory_limit(
+            total, staging=staging
+        )
     return None
 
 
@@ -183,8 +185,44 @@ def cpu_percent(before, after):
     return max(0, min(100, 100 * (1 - (after[1] - before[1]) / elapsed)))
 
 
+def cpu_usage():
+    """Reuse recent CPU counters across invocations; never sleep to sample."""
+    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "lean-throttle"
+    base.mkdir(parents=True, exist_ok=True)
+    with (base / "cpu.json").open("a+") as cache:
+        fcntl.flock(cache, fcntl.LOCK_EX)
+        now = time.monotonic()
+        current = cpu_sample()
+        percent = 0
+        cache.seek(0)
+        try:
+            saved = json.loads(cache.read(4096))
+            age = now - saved["at"]
+            previous = saved["sample"]
+            valid = (
+                0 <= age <= 10
+                and len(previous) == 2
+                and all(type(x) is int and x >= 0 for x in previous)
+                and current[0] >= previous[0]
+                and current[1] >= previous[1]
+                and type(saved["percent"]) in (int, float)
+                and 0 <= saved["percent"] <= 100
+            )
+            if valid and age < 0.25:
+                return saved["percent"]
+            if valid and current[0] > previous[0]:
+                percent = cpu_percent(previous, current)
+        except (ValueError, TypeError, KeyError):
+            pass
+        # A missing/stale baseline permits startup immediately. Later calls
+        # measure the elapsed interval, including any genuine pressure wait.
+        cache.seek(0)
+        cache.truncate()
+        json.dump(dict(at=now, sample=current, percent=percent), cache)
+        return percent
+
+
 def wait_for_capacity():
-    before = None
     waiting = False
     # Successful compiler output is a build failure under `lake build --iofail`.
     debug = os.environ.get("TAUCETI_LEAN_PRESSURE_DEBUG") == "1"
@@ -222,11 +260,7 @@ def wait_for_capacity():
             )
             pause(random.uniform(1, 5), reason)
             continue
-        if before is None:
-            before = cpu_sample()
-            pause(random.uniform(0.2, 0.5), "probe")
-        after = cpu_sample()
-        cpu = cpu_percent(before, after)
+        cpu = cpu_usage()
         total, available = memory()
         used = 100 * (1 - available / total)
         limit = memory_limit(total)
@@ -242,7 +276,6 @@ def wait_for_capacity():
                 flush=True,
             )
         waiting = True
-        before = after
         pause(
             random.uniform(1, 5),
             "cpu+ram" if cpu > CPU_LIMIT_PERCENT and used > limit else "cpu" if cpu > CPU_LIMIT_PERCENT else "ram",
