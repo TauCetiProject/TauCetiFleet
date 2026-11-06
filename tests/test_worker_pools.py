@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import os
@@ -82,6 +83,48 @@ class Pools(unittest.TestCase):
         self.assertEqual((directory / "codex/auth.json").stat().st_mode & 0o077, 0)
         self.assertNotIn("SECRET", json.dumps(result))
         self.assertEqual(pools.maximum(after), 2)
+
+    def test_single_subscription_pool_switches_accounts_without_adding_workers(self):
+        store.update_host(subscription_pool=dict(name="subscription", max_workers=16))
+        with self.assertRaisesRegex(store.FleetError, "switch --profile"):
+            self.configure()
+        request = dict(
+            pool="subscription",
+            settings={k: v for k, v in spec().items() if k in pools.FIELDS},
+            credentials={"github_token_file": "GH", "codex_auth_file": json.dumps(auth())},
+        )
+        pools.configure(request)
+        ids = pools.write_workers("subscription", store.host_config()["worker_pools"]["subscription"], self.config)
+        request["settings"].update(account="second@example.com", profile="second")
+        request["credentials"]["codex_auth_file"] = json.dumps(auth(account="account-two", email="second@example.com"))
+        pools.configure(request)
+        config = store.host_config()
+        self.assertEqual(list(config["worker_pools"]), ["subscription"])
+        self.assertEqual(pools.write_workers("subscription", config["worker_pools"]["subscription"], config), ids)
+        self.assertEqual(config["worker_pools"]["subscription"]["account"], "second@example.com")
+        request["settings"]["max_workers"] = 17
+        with self.assertRaisesRegex(store.FleetError, "limited to 16"):
+            pools.configure(request)
+
+    def test_account_switch_replaces_the_same_sync_timer(self):
+        store.atomic(store.config_dir() / "profiles.json", {"qim": {}, "gmail": {}})
+        units = self.root / "units"
+        units.mkdir()
+        legacy = (
+            "tauceti-fleet-pool-sync-"
+            + hashlib.sha256(json.dumps(["host", "subscription", "qim"]).encode()).hexdigest()[:16]
+        )
+        (units / (legacy + ".timer")).touch()
+        with patch.object(host, "units", return_value=units), patch.object(remote, "run") as run:
+            first = remote.install_pool_sync("host", "subscription", "qim")
+            second = remote.install_pool_sync("host", "subscription", "gmail")
+        self.assertEqual(first, second)
+        service = (units / first.replace(".timer", ".service")).read_text()
+        self.assertIn('"gmail"', service)
+        self.assertNotIn('"qim"', service)
+        self.assertIn(
+            ["systemctl", "--user", "disable", "--now", legacy + ".timer"], [c.args[0] for c in run.call_args_list]
+        )
 
     def test_wrong_account_and_invalid_policy_rejected_before_secret_write(self):
         with self.assertRaises(store.FleetError):

@@ -202,8 +202,17 @@ def install_pool_sync(target, pool, profile_name):
 
     from .host import unit_argument, units
 
-    identity = hashlib.sha256(json.dumps([target, pool, profile_name]).encode()).hexdigest()[:16]
+    # Account changes replace this pool's credential sync; they never add a
+    # second account-specific background refresher.
+    identity = hashlib.sha256(json.dumps([target, pool]).encode()).hexdigest()[:16]
     unit = "tauceti-fleet-pool-sync-" + identity
+    for previous in set(read(config_dir() / "profiles.json", {})) | {profile_name}:
+        legacy = (
+            "tauceti-fleet-pool-sync-" + hashlib.sha256(json.dumps([target, pool, previous]).encode()).hexdigest()[:16]
+        )
+        if (units() / (legacy + ".timer")).exists():
+            run(["systemctl", "--user", "disable", "--now", legacy + ".timer"], check=False)
+            run(["systemctl", "--user", "stop", legacy + ".service"], check=False)
     command = [Path.home() / ".local/bin/tauceti-fleet", "pool", "sync", target, pool, "--profile", profile_name]
     environment = "Environment=" + unit_argument("TAUCETI_FLEET_CONFIG=" + str(config_dir())) + "\n"
     (units() / (unit + ".service")).write_text(
