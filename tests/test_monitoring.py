@@ -141,6 +141,7 @@ class UsualEnable(unittest.TestCase):
                 result = monitoring.install_local()
             unit = (path / "tauceti-fleet-monitoring.service").read_text()
             self.assertIn("--local-broker", unit)
+            self.assertIn("PYTHONPATH=" + str(Path(monitoring.__file__).resolve().parent.parent), unit)
             self.assertNotIn("--alias", unit)
             self.assertNotIn("--token-file", unit)
             self.assertFalse(result["admissions_changed"])
@@ -148,6 +149,23 @@ class UsualEnable(unittest.TestCase):
             self.assertEqual(
                 run.call_args.args[0], ["systemctl", "--user", "restart", "tauceti-fleet-monitoring.service"]
             )
+
+    def test_retained_release_launches_without_a_site_package_install(self):
+        import os
+        import subprocess
+        import sys
+
+        release = Path(monitoring.__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-S", "-m", "tauceti_fleet.monitoring", "--help"],
+                cwd=directory,
+                env=dict(os.environ, PYTHONPATH=str(release)),
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--local-broker", result.stdout)
 
     def test_telemetry_install_failure_cannot_fail_normal_enable(self):
         from contextlib import ExitStack
