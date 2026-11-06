@@ -719,6 +719,13 @@ are rejected. Run `tauceti-fleet monitoring --registry FILE --state-file FILE
 each host. Viewer traffic opens no connections. Fact observation age and stream
 heartbeat age are distinct; disconnects retain the last facts.
 
+An operator bridge registry may set a host's `target` to `null` when no bridge
+connection is configured. It publishes that host as unobserved and opens no SSH
+connection; a broker-enrolled host can independently start pushing later. The
+bridge also forwards only numeric cloud-pool counts from the already-prepared
+shared capacity cache, preserving its observation time and scope. It performs
+no new capacity discovery.
+
 Enrolled volunteers need only the usual package reinstall and
 `tauceti-fleet enable ...` command. Enable automatically provisions the independent
 telemetry sidecar. The sidecar obtains its approved alias from its own enrollment

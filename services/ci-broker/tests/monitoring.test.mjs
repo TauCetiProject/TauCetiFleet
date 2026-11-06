@@ -13,6 +13,7 @@ test('host telemetry keeps enrollment credential at broker and never reads GitHu
  const env={OPERATIONS_PUBLIC_HOSTS:JSON.stringify([{machine_id:id,alias}]),OPERATIONS_INGEST_TOKEN:'telemetry-only'};
  const storage={get:async()=>({machine_id:id,hash,revoked:false})};
  const detailed=structuredClone(frame);
+ detailed.hosts[0].capacity_context={observed_at:null,scope:'organization_all_workflow_jobs',coverage:'unavailable',observer_error:false,running_jobs:{github:null,namespace:null,'self-hosted':null}};
  detailed.hosts[0].admission={ci_kinds:['pr','staging'],staging_slots:1,memory_budget_gib:64,reservation_error:false};
  detailed.hosts[0].activity={observed_at:null,window_hours:24,finished_rounds:8,failed_rounds:1,unknown_rounds:2};
  assert.equal((await telemetry(request(detailed),env,storage)).status,200);
