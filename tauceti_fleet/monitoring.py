@@ -55,6 +55,15 @@ def project(entry, value, transport_at=None, connected=False):
     pool_source = ((value.get("ci_overview") or {}).get("sources") or {}).get("pools") or {}
     pool_counts = (pool_source.get("value") or {}).get("counts") or {}
     capacity_observed = stamp(pool_source.get("observed_at"))
+    memory = state.get("worker_memory") or {}
+    admission = state.get("worker_admission") or {}
+    cooldown = state.get("ci_cooldown") or {}
+    reasons = {
+        "all configured workers allowed; CI has CPU priority": "at_ceiling",
+        "host memory headroom below reserve": "memory_reserve",
+        "configured worker ceiling is zero": "zero_ceiling",
+        "workers disabled or host draining": "disabled_or_draining",
+    }
 
     rounds = (summary.get("rounds") or {}).get("24h")
 
@@ -104,6 +113,17 @@ def project(entry, value, transport_at=None, connected=False):
             "running_jobs": {k: number(pool_counts.get(k)) for k in ("github", "namespace", "self-hosted")},
         },
         "worker_limit": number(state.get("active_worker_limit")),
+        "worker_memory": {
+            k: number(memory.get(k))
+            for k in ("working_set", "charged", "maximum", "high", "swap", "oom_kill", "stall_some", "stall_full")
+        },
+        "worker_admission": {
+            "state": admission.get("state") if admission.get("state") in ("at_ceiling", "paused") else "unknown",
+            "reason": reasons.get(admission.get("reason"), "unknown")
+            if isinstance(admission.get("reason"), str)
+            else "unknown",
+        },
+        "ci_cooldown": {"until": stamp(cooldown["until"])} if number(cooldown.get("until")) else None,
         "admission": {
             "ci_kinds": value.get("ci_kinds")
             if value.get("ci_kinds") in (["pr"], ["staging"], ["pr", "staging"])
