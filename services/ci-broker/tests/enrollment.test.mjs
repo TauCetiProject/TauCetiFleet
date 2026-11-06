@@ -12,7 +12,7 @@ const id1='1'.repeat(32), id2='2'.repeat(32), id3='3'.repeat(32);
 const token1='a'.repeat(64), token2='b'.repeat(64), token3='c'.repeat(64);
 const runners=new Map();
 const upstream=[];
-let nextId=100,failRegistration=false,rejectRegistration=0,trustedPolicy=true;
+let nextId=100,failRegistration=false,rejectRegistration=0,trustedPolicy=true,failLabelUpdate=false;
 const hash=value=>createHash('sha256').update(value).digest('hex');
 before(async()=>{
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
@@ -63,6 +63,19 @@ before(async()=>{
         const runner={id:nextId++,name:input.name,status:'online',busy:false,labels:input.labels.map(name=>({name}))};
         runners.set(runner.id,runner);
         return respond({runner,encoded_jit_config:'single-job-'+runner.id});
+      }
+      const label=url.pathname.match(/^\/orgs\/TauCetiProject\/actions\/runners\/(\d+)\/labels(?:\/(.+))?$/);
+      if (label) {
+        if (failLabelUpdate) return respond({error:'try later'},429);
+        const runner=runners.get(Number(label[1]));
+        if (!runner) return respond({error:'missing'},404);
+        if (req.method==='DELETE') {
+          runner.labels=runner.labels.filter(l=>l.name!==label[2]);
+          return new Response(null,{status:204});
+        }
+        const {labels}=await req.json();
+        runner.labels=[...new Set([...runner.labels.map(l=>l.name),...labels])].map(name=>({name}));
+        return respond({labels:runner.labels});
       }
       const runner=url.pathname.match(/^\/orgs\/TauCetiProject\/actions\/runners\/(\d+)$/);
       if (runner) {
@@ -348,4 +361,46 @@ test('stuck persisted state fails health, wakes recovery, and permits an unchang
   assert.equal(recovered.registration_pending,false);
   assert.equal(recovered.last_recovery.failure.status,502);
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name})).status,200);
+});
+
+test('temporary suspension removes placement labels, preserves acquired jobs and resumes the same credential',async()=>{
+  const id='f'.repeat(32),token='9'.repeat(64),ns=await mf.getDurableObjectNamespace('REGISTRY');
+  const names=[90001,90002].map((n,i)=>'fleet-'+id.slice(0,12)+'-'+String(i+1).repeat(16));
+  const host={machine_id:id,name:'suspended-host',hash:hash(token),issued:[90001,90002],kinds:['pr','staging'],slots:{}};
+  for(let i=0;i<2;i++) {
+    const labels=['self-hosted','linux','x64','fleet-'+id,'fleet-instance-'+String(i+1).repeat(16),'tauceti-fleet-pr','tauceti-fleet-staging','tauceti-fleet'];
+    runners.set(90001+i,{id:90001+i,name:names[i],busy:i===0,status:'online',labels:labels.map(name=>({name}))});
+    host.slots[String(i)]={runner_id:90001+i,runner_name:names[i],kinds:['pr','staging'],jit:'existing-jit'};
+  }
+  await ns.get(ns.idFromName('fleet')).seed(host);
+  const start=upstream.length;
+  assert.equal((await request('/admin/hosts/'+id+'/suspend',{method:'POST'})).status,404);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/suspend','POST')).status,200);
+  const listing=await (await adminRequest('/admin/hosts')).json();
+  assert.equal(listing.hosts.find(h=>h.machine_id===id).suspended,true);
+  for(const n of [90001,90002])assert.ok(!runners.get(n).labels.some(l=>l.name.startsWith('tauceti-fleet')));
+  assert.equal(runners.get(90001).busy,true);
+  assert.ok(upstream.slice(start).every(r=>!r.path.includes('/actions/runs/') && !(r.method==='DELETE' && !r.path.includes('/labels/'))));
+  const rejected=await hostRequest(id,token,'/v1/runners','POST',{name:names[0],kinds:['pr','staging']});
+  assert.equal(rejected.status,409);assert.equal((await rejected.json()).code,'host_suspended');
+  assert.equal((await hostRequest(id,token,'/v1/policy')).status,200);
+  assert.equal((await hostRequest(id,token,'/v1/runners')).status,200);
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/suspend','POST')).status,200);
+  const resumed=await (await adminRequest('/admin/hosts/'+id+'/resume','POST')).json();
+  assert.equal(resumed.suspended,false);assert.equal(resumed.cleanup_pending,false);
+  for(const n of [90001,90002])assert.ok(runners.get(n).labels.some(l=>l.name==='tauceti-fleet-pr'));
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:names[0],kinds:['pr','staging']})).status,200);
+});
+
+test('failed label cleanup stays visibly suspended and is safely retryable without revocation',async()=>{
+ const id='f'.repeat(32);failLabelUpdate=true;
+ try {
+  const value=await (await adminRequest('/admin/hosts/'+id+'/suspend','POST')).json();
+  assert.equal(value.suspended,true);assert.equal(value.cleanup_pending,true);assert.equal(value.pending_runners.length,2);
+ }finally{failLabelUpdate=false;}
+ const value=await (await adminRequest('/admin/hosts/'+id+'/suspend','POST')).json();
+ assert.equal(value.suspended,true);assert.equal(value.cleanup_pending,false);
+ assert.equal((await hostRequest(id,'9'.repeat(64),'/v1/policy')).status,200);
+ const revoked='5'.repeat(32);
+ assert.equal((await adminRequest('/admin/hosts/'+revoked+'/resume','POST')).status,409);
 });
