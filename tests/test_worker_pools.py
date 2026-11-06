@@ -140,6 +140,30 @@ class Pools(unittest.TestCase):
         self.assertEqual(pools.write_workers("gmail", value, self.config), ids)
         self.assertTrue(all(w.get("enabled", True) for w in tomllib.loads(path.read_text())["workers"]))
 
+    def test_reconciliation_preserves_worker_data_roots_in_both_manager_types(self):
+        env = {"TAUCETI_LEGACY_DATA_ROOT": '/persistent/worker data/"original"', "CUSTOM": "a\\b"}
+        for kind in ["original", "subscription"]:
+            if kind == "original":
+                config = dict(self.config, workers_enabled=True, max_workers=2)
+                ids = host.worker_config(config)
+                path = store.config_dir() / "workers.toml"
+            else:
+                ids = pools.write_workers("subscription", spec(), self.config)
+                path = pools.paths("subscription")[0] / "workers.toml"
+            text = path.read_text()
+            text = text.replace(
+                "id = " + json.dumps(ids[0]), "id = " + json.dumps(ids[0]) + "\n" + pools.environment_line(env)
+            )
+            path.write_text(text)
+            for _ in range(2):
+                if kind == "original":
+                    host.worker_config(config)
+                else:
+                    pools.write_workers("subscription", spec(), self.config)
+                workers = tomllib.loads(path.read_text())["workers"]
+                self.assertEqual(workers[0]["env"], env)
+                self.assertNotIn("env", workers[1])
+
     def test_exhaustion_latches_across_reset_and_restarts_but_not_outages_or_soft_pacing(self):
         now = time.time()
         reading = dict(

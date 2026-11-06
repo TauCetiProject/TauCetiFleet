@@ -296,7 +296,9 @@ def worker_config(config):
 
     prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    old = tomllib.loads(prior.read_text()).get("workers", []) if prior.exists() else []
+    environments = {w["id"]: w["env"] for w in old if "env" in w}
+    old_count = len(old) if preserve else 0
     count = max(1, config["max_workers"], old_count)
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
@@ -305,6 +307,8 @@ def worker_config(config):
         for key, value in fields.items():
             if value is not None:
                 lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+        if wid in environments:
+            lines.append(pools.environment_line(environments[wid]))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")

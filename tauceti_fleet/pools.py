@@ -267,6 +267,13 @@ def definition(value):
     return fields
 
 
+def environment_line(value):
+    """Keep operator-owned worker state paths across controller reconciliation."""
+    if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
+        raise FleetError("Worker environment must contain string names and values")
+    return "env = { " + ", ".join(json.dumps(k) + " = " + json.dumps(v) for k, v in value.items()) + " }"
+
+
 def write_workers(pool, value, config, *, stopped=False, workers=()):
     directory, _ = paths(pool)
     path = directory / "workers.toml"
@@ -275,6 +282,7 @@ def write_workers(pool, value, config, *, stopped=False, workers=()):
     with locked(path.with_suffix(".toml.lock")):
         previous = path.read_text() if path.exists() else ""
         old = tomllib.loads(previous).get("workers", []) if previous else []
+        environments = {w["id"]: w["env"] for w in old if "env" in w}
         ids = [w["id"] for w in old]
         if len(ids) != len(set(ids)) or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", w) for w in ids):
             raise FleetError("Invalid or duplicate worker IDs in pool configuration")
@@ -299,6 +307,8 @@ def write_workers(pool, value, config, *, stopped=False, workers=()):
                 lines.append("enabled = false")
             for k, v in fields.items():
                 lines.append(k + " = " + json.dumps(v))
+            if wid in environments:
+                lines.append(environment_line(environments[wid]))
         text = "\n".join(lines) + "\n"
         if text != previous:
             fd, temporary = tempfile.mkstemp(dir=directory)
