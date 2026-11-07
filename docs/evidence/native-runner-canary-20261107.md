@@ -98,7 +98,29 @@ Useful existing VM jobs observed after deployment:
 These are different workloads under varying shared-host load; they establish
 continuity and provide context, not a controlled speed comparison.
 
-Observation remains in progress. There have been **zero native production jobs**
-in this observation period so far. Native admission, actual GitHub job
-conclusions, footprint, Actions scratch and resource release must be recorded
-before claiming the ten-job threshold or expanding.
+## Checkpoint at 04:20 UTC
+
+The running release is healthy, `ci_native_slot=next-general`, CI and workers
+remain enabled, total CI ceiling is four and staging reservation is zero. No
+unregistered validation unit remains running on either machine.
+
+At 04:18:55 UTC, the deployed `next-general` selection considered slot 1 with
+38,164,692,992 bytes (35.54 GiB) available and selected VM before registration.
+This confirms the new selection and ordinary fallback path live. It does not
+establish native Actions workflow compatibility.
+
+There have been **zero native production jobs** in this observation period. The
+remaining production validation is blocked on a normal startup with at least
+52 GiB available. Existing VM capacity continues through fallback. The startup
+estimate has not been lowered, and no healthy job was interrupted or capacity
+ceiling reduced to create headroom. Separately initiated operator memory-recovery
+cancellations are ordinary VM results, not native failures or rollout actions.
+
+A four-hour read-only observation records startup decisions, job identities and
+conclusions, per-unit resource counters and ancestor OOM counters. Independently,
+the backend durably records every native instance's samples, progress, result,
+runner diagnostics and archived receipt. Native admission, actual GitHub job
+conclusions, Actions scratch and resource release must be reviewed before
+claiming the ten-job threshold or expanding. Actual Actions scratch has not yet
+been measured by a production native job. Two-native concurrent execution has
+not been tested and expansion remains disabled.
