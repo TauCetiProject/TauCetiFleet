@@ -102,6 +102,10 @@ finally:
     bridge.unlink(missing_ok=True)
     assert not directory.exists()
     print(json.dumps(dict(result=terminal, evidence=str(root / "native-results" / identity), released=True)), flush=True)
+if args.stock_runner:
+    console = root / "native-results" / identity / "runner-console.log"
+    if not console.is_file() or "The input is not a valid Base-64 string" not in console.read_text(errors="replace"):
+        raise SystemExit("Stock listener did not reach the intentional invalid-JIT error")
 failed = bool(terminal.get("infrastructure_error")) or (not terminal.get("cancelled") and terminal.get("exit_code") != 0)
 if args.cancel_phase and not terminal.get("cancelled"):
     raise SystemExit("Requested cancellation phase was not reached")

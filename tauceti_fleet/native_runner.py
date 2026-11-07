@@ -275,8 +275,11 @@ def argv(directory, *, offline=False):
 
 
 def properties():
+    # .NET's W^X mapper uses a memfd with a large logical size. RLIMIT_FSIZE
+    # applies to that RAM-backed file and kills the stock Actions listener.
+    # Bound allocated RAM with the cgroup and workspace with its tmpfs quota.
     return ["-p", f"MemoryMax={MEMORY_GIB}G", "-p", "OOMPolicy=kill", "-p", "OOMScoreAdjust=1000",
-            "-p", "LimitFSIZE=4G", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
+            "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
 
 

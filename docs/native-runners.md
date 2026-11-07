@@ -63,9 +63,12 @@ mount and PID namespaces with subordinate UID/GID mappings and
 `vm.max_map_count >= 1048576`; hosts without these should continue using VMs.
 
 Each native job gets a private OS clone and a systemd cgroup with 54 GiB
-`MemoryMax`, zero swap and normal PR CPU priority. A 4 GiB hard per-file limit and monitored 24 GiB OS-disk budget bound ordinary
-trusted setup writes; the monitor also stops a job below 8 GiB free disk. This is
-not a filesystem quota. A private 32 GiB tmpfs is
+`MemoryMax`, zero swap and normal PR CPU priority. A monitored 24 GiB OS-disk
+budget bounds ordinary trusted setup writes; the monitor also stops a job below
+8 GiB free disk. This is not a filesystem quota. `LimitFSIZE` is unlimited because
+[.NET's W^X mapper uses a large logical RAM-backed file](https://github.com/dotnet/runtime/discussions/81752);
+a per-file limit kills the stock Actions listener during startup. The cgroup
+continues to bound actual memory allocation. A private 32 GiB tmpfs is
 mounted at the actual Actions runner `_work` before checkout or restoration.
 This includes `_actions`, `_temp`, checkout, downloaded caches and generated
 outputs. Toolchains live on the disposable OS disk. The trusted workflow retains
@@ -117,6 +120,7 @@ namespace harness does not register with GitHub or post statuses:
 ```sh
 python3 -m unittest discover -s tests
 python3 tests/integration/native_runner.py tests/integration/native-smoke.sh
+python3 tests/integration/native_runner.py tests/integration/native-listener-smoke.sh
 python3 tests/integration/native_runner.py SCRIPT --cancel-after 5
 ```
 
