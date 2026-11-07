@@ -222,6 +222,27 @@ class Images(unittest.TestCase):
         ):
             vm.prepare_image(self.config)
 
+    def test_reuse_recovers_abandoned_scratch_before_resource_checks(self):
+        value = self.publish(b"complete")
+        staging = store.data_dir() / "images/prepare-prefill"
+        staging.mkdir()
+        unit = "tauceti-fleet-prefill-" + "a" * 16 + ".scope"
+        store.atomic(staging / "build.json", dict(unit=unit))
+        (staging / "scratch.qcow2").write_bytes(b"abandoned scratch")
+        with (
+            patch.object(
+                ci_images, "trusted_main", return_value=("a" * 40, value["payload"]["config_sha256"], "f" * 64)
+            ),
+            patch.object(ci_images, "run") as stop,
+            patch.object(ci_images, "builder_resources") as resources,
+            patch.object(vm, "digest") as digest,
+        ):
+            self.assertTrue(ci_images.prepare(self.config)["reused"])
+            resources.assert_not_called()
+            digest.assert_not_called()
+            stop.assert_called_once_with(["systemctl", "--user", "stop", unit], check=False)
+        self.assertFalse((staging / "scratch.qcow2").exists())
+
     def test_owner_backs_off_same_failure_and_retries_changed_configuration(self):
         class InlineThread:
             def __init__(self, *, target, **kwargs):
@@ -356,7 +377,9 @@ class Images(unittest.TestCase):
     def test_actual_private_overlays_isolate_writes_and_survive_pointer_turnover(self):
         image = self.directory / "real.qcow2"
         subprocess.run(["qemu-img", "create", "-f", "qcow2", str(image), "64M"], check=True, capture_output=True)
-        value = ci_images.publish(image, self.payload, base=self.base, seconds=0, validation=self.validation)
+        value = ci_images.publish(
+            image, self.payload, base=self.base, seconds=0, validation=self.validation, consumer="f" * 64
+        )
         parent = Path(ci_images.select(self.config)["path"])
         before = vm.digest(parent)
         disks = []

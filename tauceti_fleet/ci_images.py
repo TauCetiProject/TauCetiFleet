@@ -427,6 +427,18 @@ def prepare(config=None, *, trusted=None, cancelled=None, scope_started=None):
             raise FleetError("Image preparation already in progress; ordinary work remains enabled")
         base = read(images / "prepared.json")
         validate_base(base)
+        staging = images / "prepare-prefill"
+        # Recover only this owner's abandoned, unregistered build before even a
+        # reuse/resource decision. A failed refresh must not pin scratch forever.
+        previous = read(staging / "build.json", {})
+        if (
+            isinstance(previous, dict)
+            and isinstance(previous.get("unit"), str)
+            and re.fullmatch(r"tauceti-fleet-prefill-[a-f0-9]{16}\.scope", previous["unit"])
+        ):
+            run(["systemctl", "--user", "stop", previous["unit"]], check=False)
+        with discard_build_disks(staging):
+            pass
         try:
             prior = current()
         except (FleetError, OSError, ValueError, TypeError, KeyError):
@@ -446,16 +458,6 @@ def prepare(config=None, *, trusted=None, cancelled=None, scope_started=None):
         base_info = json.loads(run([executable("qemu-img"), "info", "--output=json", images / "prepared.qcow2"]).stdout)
         if not isinstance(base_info, dict) or type(base_info.get("virtual-size")) is not int:
             raise FleetError("Ordinary base has no supported disk size")
-        staging = images / "prepare-prefill"
-        # A killed previous builder cannot publish an incomplete image. Recover
-        # only this image owner's unregistered scope, never a production VM.
-        previous = read(staging / "build.json", {})
-        if (
-            isinstance(previous, dict)
-            and previous.get("unit")
-            and re.fullmatch(r"tauceti-fleet-prefill-[a-f0-9]{16}\.scope", previous["unit"])
-        ):
-            run(["systemctl", "--user", "stop", previous["unit"]], check=False)
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(mode=0o700)

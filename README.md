@@ -56,11 +56,13 @@ base, captures trusted main's exact configuration, and uses stock Lean/Lake to
 build the Mathlib cache executable at the consumer's path and UID. It checks
 hydration and executable reuse after fresh official toolchain installation before
 publishing a complete immutable image. It reuses an existing image when the
-trusted configuration, base and producer code are unchanged. A temporary scratch
+trusted configuration, validation consumer, base and producer code are unchanged. A temporary scratch
 disk holds toolchains and validation outputs; the final image retains the
 ordinary base's disk size. Building does not enable selection or change worker/CI
-admissions. The builder has its own memory limit and yields to useful work on
-memory exhaustion.
+admissions. The optional builder requires 10 GiB plus normal CI start headroom and 64 GiB
+free disk before construction. Its scratch disk is limited to 48 GiB, removed on
+every exit, and measured in the validation receipt. Ordinary admission thresholds
+remain unchanged.
 
 Selection is opt-in for subsequent PR-only guests; mixed/staging slots and missing
 or incompatible images use the ordinary base. The workflow still attests its
@@ -71,7 +73,9 @@ through restarts; retirement preserves every recoverable overlay. Disabling
 selection affects subsequent guests and leaves useful running work intact.
 While enabled, the existing host controller refreshes trusted-main prefill in a
 background thread at most once every fifteen minutes. Construction failure keeps
-the previous version and the ordinary path available. A stale base/producer or a
+the previous version and the ordinary path available. Repeated failures back off
+up to six hours for the same configuration; changed inputs retry promptly. Disabling
+the feature also cancels background construction. A stale base/producer or a
 guest disk smaller than the image selects the ordinary base.
 
 Image manifests retain validation, producer time and physical image size. Guest
