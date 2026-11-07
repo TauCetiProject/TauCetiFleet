@@ -1,0 +1,12 @@
+{
+  "label": "disk-1b",
+  "backend": "disk",
+  "identity": "9f2f74cc3365dc1c",
+  "unit": "tauceti-disk-matched-disk-1b-9f2f74cc3365dc1c.service",
+  "room": {
+    "total": 134688063488,
+    "available": 53015203840,
+    "free_disk": 77780262912,
+    "at": 1794047258.088269
+  }
+}

@@ -1,0 +1,23 @@
+--- a/native_runner.py
++++ b/native_runner.py
+@@ -550,7 +550,8 @@
+         (root / "dev" / name).symlink_to("/proc/self/fd/" + str(fd))
+     run([mount, "-t", "proc", "proc", root / "proc"])
+     run([mount, "-t", "tmpfs", "-o", "mode=755,size=32M", "tmpfs", root / "run"])
+-    run([mount, "-t", "tmpfs", "-o", f"size={WORKSPACE_GIB}G,mode=755", "tmpfs", root / "opt/actions-runner/_work"])
++    if not (directory / "control/disk-workspace").is_file():
++        run([mount, "-t", "tmpfs", "-o", f"size={WORKSPACE_GIB}G,mode=755", "tmpfs", root / "opt/actions-runner/_work"])
+     resolver = root / "etc/resolv.conf"
+     resolver.unlink(missing_ok=True)
+     resolver.write_text(Path("/etc/resolv.conf").read_text())
+--- a/native_inside.py
++++ b/native_inside.py
+@@ -98,7 +98,7 @@
+                 allocated = int(usage.stdout.split()[0])
+                 layout = {Path(row.split(maxsplit=1)[1]).name: int(row.split(maxsplit=1)[0])
+                           for row in usage.stdout.splitlines()[1:]}
+-                if allocated > 24 * 1024**3:
++                if allocated > (56 if (LINK / "disk-workspace").is_file() else 24) * 1024**3:
+                     atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='native disk budget', disk_bytes=allocated))
+             except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+                 pass

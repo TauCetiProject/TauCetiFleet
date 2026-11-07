@@ -1,0 +1,50 @@
+{
+  "at": 1794048566.7830055,
+  "nodes": {
+    "node2": {
+      "MemTotal": 33812979712,
+      "MemFree": 6875037696,
+      "Active(file)": 471715840,
+      "Inactive(file)": 629174272,
+      "FilePages": 4101230592,
+      "AnonPages": 7891542016,
+      "Shmem": 2997424128,
+      "SReclaimable": 1238396928,
+      "SUnreclaim": 917176320
+    },
+    "node0": {
+      "MemTotal": 33307914240,
+      "MemFree": 786776064,
+      "Active(file)": 2566266880,
+      "Inactive(file)": 2713837568,
+      "FilePages": 5830782976,
+      "AnonPages": 10578759680,
+      "Shmem": 548524032,
+      "SReclaimable": 946966528,
+      "SUnreclaim": 1063653376
+    },
+    "node3": {
+      "MemTotal": 33754193920,
+      "MemFree": 521687040,
+      "Active(file)": 56520704,
+      "Inactive(file)": 15022940160,
+      "FilePages": 17691324416,
+      "AnonPages": 8013479936,
+      "Shmem": 2611052544,
+      "SReclaimable": 909225984,
+      "SUnreclaim": 841351168
+    },
+    "node1": {
+      "MemTotal": 33812975616,
+      "MemFree": 7757811712,
+      "Active(file)": 299151360,
+      "Inactive(file)": 10414333952,
+      "FilePages": 12123058176,
+      "AnonPages": 6576984064,
+      "Shmem": 1408413696,
+      "SReclaimable": 929857536,
+      "SUnreclaim": 1027780608
+    }
+  },
+  "unit_memory_numa_stat": "anon N0=45420544 N1=137388032 N2=523182080 N3=171941888\nfile N0=4962091008 N1=7470960640 N2=375521280 N3=10602434560\nkernel_stack N0=81920 N1=0 N2=294912 N3=81920\npagetables N0=286720 N1=22548480 N2=565874688 N3=970752\nsec_pagetables N0=0 N1=0 N2=0 N3=0\nvmalloc N0=0 N1=0 N2=0 N3=0\nshmem N0=0 N1=0 N2=0 N3=0\nfile_mapped N0=4127911936 N1=3450339328 N2=274518016 N3=7950106624\nfile_dirty N0=4096 N1=0 N2=1622016 N3=2940928\nfile_writeback N0=0 N1=0 N2=0 N3=0\nswapcached N0=0 N1=0 N2=0 N3=0\nanon_thp N0=23068672 N1=123731968 N2=0 N3=130023424\nfile_thp N0=0 N1=0 N2=0 N3=98566144\nshmem_thp N0=0 N1=0 N2=0 N3=0\ninactive_anon N0=655360 N1=0 N2=421015552 N3=0\nactive_anon N0=44765184 N1=139489280 N2=102121472 N3=173211648\ninactive_file N0=2400620544 N1=7465713664 N2=123064320 N3=10592288768\nactive_file N0=2561470464 N1=5246976 N2=252346368 N3=10145792\nunevictable N0=0 N1=0 N2=0 N3=0\nslab_reclaimable N0=333704184 N1=202992048 N2=267354784 N3=385481704\nslab_unreclaimable N0=14118784 N1=19206168 N2=28925344 N3=12149368\nhugetlb N0=0 N1=0 N2=0 N3=0\nworkingset_refault_anon N0=0 N1=0 N2=0 N3=0\nworkingset_refault_file N0=651166 N1=134206 N2=35265 N3=0\nworkingset_activate_anon N0=0 N1=0 N2=0 N3=0\nworkingset_activate_file N0=0 N1=0 N2=5 N3=0\nworkingset_restore_anon N0=0 N1=0 N2=0 N3=0\nworkingset_restore_file N0=0 N1=0 N2=7 N3=0\nworkingset_nodereclaim N0=19332 N1=148864 N2=301068 N3=0\npgdemote_kswapd N0=0 N1=0 N2=0 N3=0\npgdemote_direct N0=0 N1=0 N2=0 N3=0\npgdemote_khugepaged N0=0 N1=0 N2=0 N3=0\npgdemote_proactive N0=0 N1=0 N2=0 N3=0\npgsteal_kswapd N0=2231122 N1=6266825 N2=6730242 N3=0\npgsteal_direct N0=67105 N1=0 N2=0 N3=70183\npgsteal_khugepaged N0=0 N1=0 N2=0 N3=0\npgsteal_proactive N0=0 N1=0 N2=0 N3=0\npgscan_kswapd N0=2596500 N1=6267781 N2=6995970 N3=0\npgscan_direct N0=72230 N1=0 N2=0 N3=71063\npgscan_khugepaged N0=0 N1=0 N2=0 N3=0\npgscan_proactive N0=0 N1=0 N2=0 N3=0\npgrefill N0=492017 N1=657 N2=3743 N3=0\npgpromote_success N0=0 N1=0 N2=0 N3=0\n"
+}

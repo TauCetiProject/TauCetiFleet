@@ -1,0 +1,56 @@
+{
+  "at": 1794048705.163375,
+  "units": [
+    {
+      "label": "disk-1",
+      "unit": "tauceti-disk-matched-disk-1-3fbae1b2b49cc33d.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "disk-1b",
+      "unit": "tauceti-disk-matched-disk-1b-9f2f74cc3365dc1c.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "disk-2",
+      "unit": "tauceti-disk-matched-disk-2-376d6edbcc956197.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "tmpfs-1",
+      "unit": "tauceti-disk-matched-tmpfs-1-cc742fb5d85ddddb.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "tmpfs-2",
+      "unit": "tauceti-disk-matched-tmpfs-2-04e3c0c22a956263.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    }
+  ],
+  "config_unchanged": true,
+  "ci_slice_shmem": 0,
+  "remaining_instances": [],
+  "archive_hardlinks": 2,
+  "input_staging_removed": true,
+  "production_mutations": false
+}

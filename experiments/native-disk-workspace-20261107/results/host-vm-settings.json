@@ -1,0 +1,11 @@
+{
+  "min_free_kbytes": "135168",
+  "watermark_scale_factor": "10",
+  "watermark_boost_factor": "15000",
+  "vfs_cache_pressure": "100",
+  "swappiness": "100",
+  "dirty_ratio": "20",
+  "dirty_background_ratio": "10",
+  "page-cluster": "0",
+  "at": 1794048536.6176517
+}

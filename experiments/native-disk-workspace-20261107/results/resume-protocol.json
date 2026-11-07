@@ -1,0 +1,25 @@
+{
+  "order": [
+    [
+      "disk-1b",
+      "disk"
+    ],
+    [
+      "tmpfs-1",
+      "tmpfs"
+    ],
+    [
+      "tmpfs-2",
+      "tmpfs"
+    ],
+    [
+      "disk-2",
+      "disk"
+    ]
+  ],
+  "cache": "No explicit cache purge before any timed body; same toolchain advice",
+  "post_body_probe": "32G swappiness=0 reclaim request in only the own experimental cgroup",
+  "stall_stop_seconds": 600,
+  "offline": true,
+  "production_mutations": false
+}

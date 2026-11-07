@@ -1,0 +1,39 @@
+{
+  "at": 1794047641.219495,
+  "request": "32G swappiness=0",
+  "scope": "only this experimental unit",
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "BlockingIOError: [Errno 11] write could not complete without blocking\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])\n                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^\n  File \"/nix/store/wsr7l3ljqdynwajfhqm5sa3kw3rdbzhn-python3-3.14.8-env/lib/python3.14/pathlib/__init__.py\", line 809, in write_text\n    with self.open(mode='w', encoding=encoding, errors=errors, newline=newline) as f:\n         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nBlockingIOError: [Errno 11] write could not complete without blocking\n",
+  "ended_at": 1794047647.4487784,
+  "before": {
+    "at": 1794047641.2190206,
+    "memory.current": "23839330304\n",
+    "memory.peak": "25120264192\n",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory.stat": "anon 34725888\nfile 22592942080\nkernel 1208127488\nkernel_stack 131072\npagetables 696320\nsec_pagetables 0\npercpu 20384\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nzswap_incomp 0\nfile_mapped 13402112\nfile_dirty 266821632\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 94371840\nshmem_thp 0\ninactive_anon 16269312\nactive_anon 18354176\ninactive_file 10746044416\nactive_file 11846897664\nunevictable 0\nslab_reclaimable 1206703368\nslab_unreclaimable 499728\nslab 1207203096\nhugetlb 0\nworkingset_refault_anon 0\nworkingset_refault_file 495267\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 429237\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgsteal_kswapd 15477876\npgsteal_direct 86143\npgsteal_khugepaged 125\npgsteal_proactive 0\npgscan_kswapd 16462446\npgscan_direct 111922\npgscan_khugepaged 125\npgscan_proactive 0\npgrefill 1227744\npgpromote_success 0\npgscan 16574493\npgsteal 15564144\npswpin 0\npswpout 0\npgfault 4198614\npgmajfault 81603\npgactivate 976781\npgdeactivate 7\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 667\nthp_collapse_alloc 8\nthp_swpout 0\nthp_swpout_fallback 0\nnuma_pages_migrated 164437\nnuma_pte_updates 3485656\nnuma_hint_faults 607029\n",
+    "cpu.stat": "usage_usec 403277454\nuser_usec 324134286\nsystem_usec 79143167\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "io.stat": "252:0 \n259:0 rbytes=29275721728 wbytes=15220015104 rios=635907 wios=449741 dbytes=0 dios=0\n259:1 rbytes=29263732736 wbytes=15148843008 rios=633521 wios=447875 dbytes=0 dios=0\n9:127 rbytes=58539454464 wbytes=30368858112 rios=1269428 wios=915875 dbytes=0 dios=0\n",
+    "memory.pressure": "some avg10=0.66 avg60=1.08 avg300=0.40 total=1972866\nfull avg10=0.66 avg60=1.08 avg300=0.40 total=1972866\n",
+    "host": {
+      "memory_total": 134688063488,
+      "memory_available": 50673623040
+    },
+    "host_loadavg": "2.82 5.91 10.57 3/17106 2316828"
+  },
+  "after": {
+    "at": 1794047647.4487836,
+    "memory.current": "54927360\n",
+    "memory.peak": "25120264192\n",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory.stat": "anon 34746368\nfile 15208448\nkernel 2248704\nkernel_stack 131072\npagetables 675840\nsec_pagetables 0\npercpu 14112\nsock 0\nvmalloc 0\nshmem 0\nzswap 0\nzswapped 0\nzswap_incomp 0\nfile_mapped 6475776\nfile_dirty 20480\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 25067520\nactive_anon 9674752\ninactive_file 0\nactive_file 15200256\nunevictable 0\nslab_reclaimable 922416\nslab_unreclaimable 448168\nslab 1370584\nhugetlb 0\nworkingset_refault_anon 0\nworkingset_refault_file 498111\nworkingset_activate_anon 0\nworkingset_activate_file 167\nworkingset_restore_anon 0\nworkingset_restore_file 167\nworkingset_nodereclaim 704329\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgsteal_kswapd 15477876\npgsteal_direct 86143\npgsteal_khugepaged 125\npgsteal_proactive 5518111\npgscan_kswapd 16462446\npgscan_direct 111922\npgscan_khugepaged 125\npgscan_proactive 5524606\npgrefill 3970045\npgpromote_success 0\npgscan 22099099\npgsteal 21082255\npswpin 0\npswpout 0\npgfault 4199565\npgmajfault 81666\npgactivate 983171\npgdeactivate 7\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 667\nthp_collapse_alloc 8\nthp_swpout 0\nthp_swpout_fallback 0\nnuma_pages_migrated 164437\nnuma_pte_updates 3485656\nnuma_hint_faults 607029\n",
+    "cpu.stat": "usage_usec 403314361\nuser_usec 324151757\nsystem_usec 79162604\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "io.stat": "252:0 \n259:0 rbytes=29288280064 wbytes=15350239232 rios=636083 wios=450804 dbytes=0 dios=0\n259:1 rbytes=29275590656 wbytes=15285473280 rios=633694 wios=448968 dbytes=0 dios=0\n9:127 rbytes=58563870720 wbytes=30635712512 rios=1269777 wios=918031 dbytes=0 dios=0\n",
+    "memory.pressure": "some avg10=0.36 avg60=0.98 avg300=0.39 total=1973636\nfull avg10=0.36 avg60=0.98 avg300=0.39 total=1973636\n",
+    "host": {
+      "memory_total": 134688063488,
+      "memory_available": 50213994496
+    },
+    "host_loadavg": "2.83 5.86 10.53 3/17047 2318383"
+  }
+}

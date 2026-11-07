@@ -12,6 +12,12 @@ optimistic impression from the earlier [different-PR production trial](../../doc
 That trial established real Actions compatibility; its 5m25s versus 11m08s pair
 was not a controlled backend comparison.
 
+A [disk-backed native workspace follow-up](../native-disk-workspace-20261107/README.md)
+subsequently removed the persistent tmpfs memory floor: completed bodies averaged
+about 1.9 GiB after clean-file discount, versus 27 GiB with tmpfs. For the
+continually memory-constrained fleet, that report recommends disk-backed native
+workspaces and records their additional I/O/runtime cost.
+
 ## Primary comparison
 
 All four primary attempts used byte-identical restored inputs and no explicit
