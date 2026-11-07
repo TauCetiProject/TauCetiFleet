@@ -125,6 +125,8 @@ def choose(config, available):
     """Choose before registration. A native deferral immediately falls back to VM."""
     if not selected(config):
         return False
+    from . import vm
+    intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
     reason = None
     cooldown = read(state_dir() / "native-backoff.json", {})
     if cooldown.get("until", 0) > time.time():
@@ -133,6 +135,10 @@ def choose(config, available):
         reason = "native image not prepared"
     elif config.get("ci_recover_instance"):
         reason = "preserve recovery runner classes on VM"
+    elif intent and intent.get("ci_kinds") != ["pr"]:
+        reason = "preserve existing registration classes on VM"
+    elif config.get("ci_idle_pool") and "staging" in config.get("ci_kinds", []) and not config.get("ci_staging_slots", 0):
+        reason = "preserve mixed-class idle-pool spare on VM"
     elif not mapping_ok():
         reason = "native host mapping limit is too small"
     elif any(is_native(v) for v in instances()):
