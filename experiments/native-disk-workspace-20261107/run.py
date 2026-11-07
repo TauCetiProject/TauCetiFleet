@@ -18,12 +18,12 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 ROOT = m.NORMAL_STATE / 'native-disk-workspace-20261107'
 CONFIG = m.CONFIG_PATH
-ORDER = [('disk-1', 'disk'), ('tmpfs-1', 'tmpfs'), ('tmpfs-2', 'tmpfs'), ('disk-2', 'disk')]
+ORDER = [('disk-1b', 'disk'), ('tmpfs-1', 'tmpfs'), ('tmpfs-2', 'tmpfs'), ('disk-2', 'disk')]
 EXPECTED = REPO / 'experiments/native-vm-matched-20261107/results/vm-2/input-identity.json'
 
 
 def observe(stop):
-    with (ROOT / 'observations.jsonl').open('w', buffering=1) as stream:
+    with (ROOT / 'observations.jsonl').open('a', buffering=1) as stream:
         while not stop.is_set():
             row = dict(at=time.time(), cpu=Path('/proc/stat').read_text().splitlines()[0],
                        memory_pressure=Path('/proc/pressure/memory').read_text(),
@@ -37,6 +37,8 @@ def observe(stop):
 
 def runtime():
     destination = ROOT / 'runtime/tauceti_fleet'
+    if destination.exists():
+        shutil.rmtree(destination)
     shutil.copytree(REPO / 'tauceti_fleet', destination, ignore=shutil.ignore_patterns('__pycache__'))
     patches = {
         'native_runner.py': (
@@ -116,7 +118,7 @@ def run(label, backend):
                     break
                 if not probed and (telemetry / 'probe-ready').exists():
                     reclaim(group, evidence)
-                    (telemetry / 'reclaim-done').touch()
+                    (directory / 'control/reclaim-done').touch()
                     probed = True
                 progress = m.data(directory / 'control/native-progress.json', {})
                 pressure = m.data(m.NORMAL_STATE / 'lean-host-pressure.json', {})
@@ -162,6 +164,15 @@ def run(label, backend):
             assert m.data(evidence / 'body-result.json')['exit_code'] == 0
         print(json.dumps(dict(completed=label, censored=censored, body=m.data(evidence / 'body-result.json'), memory_peak=props.get('MemoryPeak'))), flush=True)
     finally:
+        # Archive before cleanup even if a host-side diagnostic fails.
+        if telemetry and telemetry.exists():
+            for path in telemetry.iterdir():
+                if path.is_file():
+                    shutil.copyfile(path, evidence / path.name)
+        for name in ('native-result.json', 'native-progress.json', 'runner-console.log', 'native-samples.jsonl'):
+            for path in (directory / name, directory / 'control' / name):
+                if path.is_file():
+                    shutil.copyfile(path, evidence / name)
         subprocess.run(['systemctl', '--user', 'stop', unit], check=False)
         props = m.systemd(unit)
         assert props['MainPID'] == '0'
@@ -176,12 +187,19 @@ def run(label, backend):
 
 
 def main():
-    ROOT.mkdir(mode=0o700, exist_ok=False)
+    resume = sys.argv[1:] == ['--resume-after-probe-signal-fix']
+    assert not sys.argv[1:] or resume
+    if resume:
+        previous = m.data(ROOT / 'all-done.json')
+        assert previous and previous['config_unchanged'] and not previous['remaining_instances']
+        (ROOT / 'all-done.json').rename(ROOT / 'first-attempt-final.json')
+    else:
+        ROOT.mkdir(mode=0o700, exist_ok=False)
     before = CONFIG.read_bytes()
     config = json.loads(before)
     assert not config['ci_enabled'] and not config['workers_enabled']
     m.ROOT, m.INPUT, m.SOURCE = ROOT, ROOT / 'input', SOURCE
-    m.INPUT.mkdir()
+    m.INPUT.mkdir(exist_ok=False)
     os.link(m.ARCHIVE, m.INPUT / 'frozen-input.tar.gz')
     for name in ('input-identity.py', 'cold-toolchain.py'):
         shutil.copyfile(REPO / 'experiments/native-vm-matched-20261107' / name, m.INPUT / name)
@@ -192,11 +210,11 @@ def main():
     image = m.store.data_dir() / 'images/prepared.qcow2'
     image_hash = m.digest(image)
     assert image_hash == m.native_runner.image()['vm_sha256']
-    m.save(ROOT / 'inputs.json', dict(at=time.time(), archive_sha256=archive_hash, archive_bytes=m.ARCHIVE.stat().st_size,
+    m.save(ROOT / ('resume-inputs.json' if resume else 'inputs.json'), dict(at=time.time(), archive_sha256=archive_hash, archive_bytes=m.ARCHIVE.stat().st_size,
                                     image_sha256=image_hash, native_image=m.native_runner.image(),
                                     config_sha256=m.hashlib.sha256(before).hexdigest(), memory_max_gib=54, start_gib=40,
                                     script_sha256=m.digest(SOURCE / 'job.sh'), source_revision=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()))
-    m.save(ROOT / 'protocol.json', dict(order=ORDER, cache='No explicit cache purge before any timed body; same toolchain advice',
+    m.save(ROOT / ('resume-protocol.json' if resume else 'protocol.json'), dict(order=ORDER, cache='No explicit cache purge before any timed body; same toolchain advice',
                                       post_body_probe='32G swappiness=0 reclaim request in only the own experimental cgroup',
                                       stall_stop_seconds=600, offline=True, production_mutations=False))
     runtime()

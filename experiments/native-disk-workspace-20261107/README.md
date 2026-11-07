@@ -27,3 +27,11 @@ result, including failures and stalls; do not select only favorable runs.
 
 Results pending. The VM passes from the preceding experiment are historical
 references, not contemporaneous controls for this workspace comparison.
+
+The initial disk-1 attempt completed its timed body, then hit a host-side
+permission error creating the probe release marker in the runner-owned telemetry
+directory. Its cleanup ran before copying the full logs. Retain its counters and
+probe as an incomplete diagnostic; primary order is now disk-1b, tmpfs-1,
+tmpfs-2, disk-2. The signalling fix places the release marker in host-owned
+control, and diagnostics are archived in `finally` before deleting any instance.
+The computational command and storage conditions are unchanged.

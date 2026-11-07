@@ -75,7 +75,7 @@ cp "$RUNNER_TEMP/ci-host-resources.json" /fleet-link/telemetry/ci-host-resources
 
 touch /fleet-link/telemetry/probe-ready
 for attempt in $(seq 1 120); do
-  if [ -f /fleet-link/telemetry/reclaim-done ]; then break; fi
+  if [ -f /fleet-link/reclaim-done ]; then break; fi
   sleep 1
 done
 exit "$status"
