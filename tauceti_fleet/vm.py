@@ -102,10 +102,10 @@ def cloud_seed(directory, commands, *, name):
     return directory / "seed.iso"
 
 
-def qemu_args(config, directory, disk, seed, *, small=False, prefill=None):
+def qemu_args(config, directory, disk, seed, *, small=False, prefill=None, shape=None, discard=False, events=True):
     from .capacity import guest_shape
 
-    shape = dict(vcpus=2, memory_gib=2) if small else guest_shape(config)
+    shape = shape or (dict(vcpus=2, memory_gib=2) if small else guest_shape(config))
     return [
         executable("qemu-system-x86_64"),
         "-enable-kvm",
@@ -123,7 +123,7 @@ def qemu_args(config, directory, disk, seed, *, small=False, prefill=None):
         "-serial",
         "file:" + str(directory / "console.log"),
         "-drive",
-        f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report",
+        f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
         *(["-drive", f"file={prefill['path']},format=raw,media=cdrom,readonly=on"] if prefill and not small else []),
@@ -133,12 +133,10 @@ def qemu_args(config, directory, disk, seed, *, small=False, prefill=None):
         "virtio-net-pci,netdev=net0",
         "-device",
         "virtio-balloon-pci,free-page-reporting=on",
-        "-chardev",
-        f"socket,id=events,path={directory / 'events.sock'},server=on,wait=off",
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtserialport,chardev=events,name=org.tauceti.events",
+        *([
+            "-chardev", f"socket,id=events,path={directory / 'events.sock'},server=on,wait=off",
+            "-device", "virtio-serial", "-device", "virtserialport,chardev=events,name=org.tauceti.events",
+        ] if events else []),
         *([] if small else [
             "-chardev", f"socket,id=pressure,path={directory / 'pressure.sock'},server=on,wait=off",
             "-device", "virtserialport,chardev=pressure,name=org.tauceti.pressure",
@@ -165,7 +163,11 @@ def prepare_image(config=None):
     prepare_tools()
     root = data_dir() / "images"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with locked(root / "prepare.lock"):
+    from .ci_images import try_lock
+
+    with try_lock(root / "prepare.lock") as acquired:
+        if not acquired:
+            raise FleetError("Image preparation already in progress; retry after it finishes")
         if (root / "prepared.json").exists():
             manifest = read(root / "prepared.json")
             if digest(root / "prepared.qcow2") != manifest["sha256"]:
@@ -417,9 +419,11 @@ def _start(config):
         # Keep the request identity across lost replies and controller restarts.
         # The broker can replay the existing JIT config without registering twice.
         atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
-    from . import dependency_prefill
+    from . import ci_images, dependency_prefill
 
     prefill = dependency_prefill.claim(config, instance) if config.get("_ci_backend") != "native-tmpfs" else None
+    # Explicit one-use media and native runners do not use VM prefill images.
+    image = None if prefill or config.get("_ci_backend") == "native-tmpfs" else ci_images.select(config)
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
@@ -441,7 +445,7 @@ def _start(config):
                     "-F",
                     "qcow2",
                     "-b",
-                    root / "prepared.qcow2",
+                    image["path"] if image else root / "prepared.qcow2",
                     disk,
                     str(config["ci_disk_gib"]) + "G",
                 ]
@@ -465,7 +469,7 @@ def _start(config):
                 + shlex.quote(hook.replace("KIND", "'ci_completed'"))
                 + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
                 "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
-                *(dependency_prefill.mount_commands() if prefill else []),
+                *(dependency_prefill.mount_commands() if prefill else ci_images.mount_commands() if image else []),
                 *lean_runtime.ci_commands(),
                 "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
             ]
@@ -484,6 +488,9 @@ def _start(config):
             pressure_protocol=2,
             lean_statistics_protocol=1,
             dependency_prefill_sha256=prefill["sha256"] if prefill else None,
+            image_sha256=image["sha256"] if image else None,
+            image_producer_seconds=image["producer_seconds"] if image else None,
+            dependency_prefill_payload_sha256=image["payload"]["payload_sha256"] if image else None,
             **(runtime_fields if native else guest_shape(config)),
         )
         # Record the prospective unit before launch: a controller/process crash
@@ -515,7 +522,8 @@ def _start(config):
         )
         value["phase"] = "ready"
         atomic(slot_file(config, "vm.json"), value)
-        event("ci_vm_started", runner_id=runner_id)
+        event("ci_vm_started", runner_id=runner_id, image_sha256=value["image_sha256"],
+              dependency_prefill_payload_sha256=value["dependency_prefill_payload_sha256"])
         registration.unlink(missing_ok=True)
         return value
     except Exception:
@@ -593,7 +601,17 @@ def _retire(config, value, *, registration_removed=False):
         slot_file(config, "vm.json").unlink(missing_ok=True)
     retired_at = time.time()
     atomic(slot_file(config, "ci-last-retired.json"), dict(at=retired_at, runner_id=value["runner_id"]))
-    event("ci_vm_retired", at=retired_at, runner_id=value["runner_id"])
+    event("ci_vm_retired", at=retired_at, runner_id=value["runner_id"], image_sha256=value.get("image_sha256"))
+    # The image owner retains every running/recoverable overlay. Cleanup uses a
+    # nonblocking start lock and can never stop or delay another admission.
+    from . import ci_images
+
+    try:
+        ci_images.retire_unused()
+    except (FleetError, OSError, ValueError, TypeError, KeyError) as error:
+        from .dependency_prefill import record
+
+        record("ci_prefill_retirement_deferred", reason=(str(error) or type(error).__name__)[:160])
     return True
 
 
