@@ -1,0 +1,12 @@
+{
+  "label": "vm-1",
+  "backend": "vm",
+  "identity": "92e4b8a0fed68503",
+  "unit": "tauceti-matched-vm-1-92e4b8a0fed68503.service",
+  "room": {
+    "total": 134688063488,
+    "available": 45054697472,
+    "free_disk": 57831260160,
+    "at": 1794032583.4296212
+  }
+}

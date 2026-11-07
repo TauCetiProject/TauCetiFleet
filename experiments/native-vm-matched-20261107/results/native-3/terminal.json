@@ -1,0 +1,9 @@
+{
+  "ended_at": 1794036711.8234808,
+  "exit_code": 143,
+  "infrastructure_error": {},
+  "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+  "memory_peak_bytes": 31901581312,
+  "requested_stop": true,
+  "started_at": 1794035804.386824
+}

@@ -1,0 +1,10 @@
+{
+  "ActiveState": "active",
+  "SubState": "running",
+  "MainPID": "1905150",
+  "Result": "success",
+  "ControlGroup": "/user.slice/user-1003.slice/user@1003.service/tauceti.slice/tauceti-fleet.slice/tauceti-fleet-ci.slice/tauceti-matched-vm-3-ccdc8b49e567f092.service",
+  "MemoryCurrent": "31653625856",
+  "MemoryPeak": "42447237120",
+  "CPUUsageNSec": "1401636560000"
+}

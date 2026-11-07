@@ -1,0 +1,15 @@
+{
+  "at": 1794036708.6856165,
+  "classification": "censored_host_ram_gate_stall",
+  "phase": "lint-style",
+  "phase_started_at": 1794036107.6441455,
+  "phase_seconds": 601.0414712429047,
+  "timing": {
+    "waiting_now": 1,
+    "running_now": 0,
+    "oldest_wait": 588.8650868450059
+  },
+  "instance": "ce9e826699cf7f8e",
+  "unit": "tauceti-matched-native-3-ce9e826699cf7f8e.service",
+  "infrastructure_timeout_policy": "ten minutes with no phase progress and a confirmed compiler waiter; stop only this unregistered instance"
+}
