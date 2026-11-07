@@ -34,6 +34,15 @@ def parser():
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
             )
+    image = sub.add_parser("prepare-ci-prefill", help="build a trusted optional dependency image without draining")
+    image.add_argument("host")
+    image.add_argument("--json", action="store_true")
+    prefill = sub.add_parser("ci-prefill", help="inspect or select prefill for subsequent PR guests")
+    prefill.add_argument("host")
+    prefill.add_argument("--json", action="store_true")
+    selection = prefill.add_mutually_exclusive_group()
+    selection.add_argument("--enable", dest="enabled", action="store_const", const=True)
+    selection.add_argument("--disable", dest="enabled", action="store_const", const=False)
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
     budget.add_argument("--grant")
@@ -197,6 +206,8 @@ def main(argv=None, *, _status_results=None):
                 payload["smoke"] = args.smoke
             if args.command == "budget":
                 payload.update(grant=args.grant, grant_rate=args.grant_rate)
+            if args.command == "ci-prefill" and args.enabled is not None:
+                payload["enabled"] = args.enabled
             if args.command == "enable":
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
@@ -224,7 +235,7 @@ def main(argv=None, *, _status_results=None):
                 value = remote.call(
                     entry["target"],
                     payload,
-                    timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    timeout=10800 if action == "prepare-ci-prefill" else 1800 if action == "prepare" else 3 if action == "status" else 90,
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value

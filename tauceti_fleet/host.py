@@ -817,8 +817,11 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        from .ci_images import Owner
+        prefill_images = Owner()
         while not stopping:
             config = host_config()
+            prefill_images.step(config)
             try:
                 caps = resources()
                 if time.time() - last_results >= 60:
@@ -1031,6 +1034,18 @@ def rpc(payload):
         return result
     if action == "prepare":
         return prepare()
+    if action == "prepare-ci-prefill":
+        from .ci_images import prepare as prepare_prefill
+
+        return prepare_prefill()
+    if action == "ci-prefill":
+        from . import ci_images
+
+        if "enabled" in payload:
+            return ci_images.enable(payload["enabled"])
+        config = host_config()
+        return dict(enabled=config.get("ci_prefill_enabled", False),
+                    selected=ci_images.select(dict(config, ci_kinds=["pr"])))
     if action == "enable":
         return enable(ci=payload.get("ci"), workers=bool(payload.get("workers")),
                       maximum=payload.get("maximum"), vcpus=payload.get("vcpus"),
@@ -1061,6 +1076,7 @@ def rpc(payload):
             profile=config["profile"],
             ci_allowed=config["ci_allowed"],
             ci_enabled=config["ci_enabled"],
+            ci_prefill_enabled=config.get("ci_prefill_enabled", False),
             ci_kinds=capacity.kinds(config),
             ci_max_jobs=capacity.jobs(config),
             ci_memory_budget_gib=capacity.memory_budget_gib(config),

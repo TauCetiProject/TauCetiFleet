@@ -43,6 +43,41 @@ runner plus pinned GitHub CLI, boots a 2-vCPU/2-GiB guest to prepare the base im
 overlays. Smoke tests verify guest execution, the offline filesystem sandbox,
 and disk replacement without registering with GitHub or calling a model.
 
+Optional dependency prefill uses the same image owner and private qcow2 overlays:
+
+```bash
+tauceti-fleet prepare-ci-prefill HOST
+tauceti-fleet ci-prefill HOST --enable
+tauceti-fleet ci-prefill HOST --disable
+```
+
+Preparation builds an unregistered 4-vCPU/8-GiB guest from the verified ordinary
+base, captures trusted main's exact configuration, and uses stock Lean/Lake to
+build the Mathlib cache executable at the consumer's path and UID. It checks
+hydration and executable reuse after fresh official toolchain installation before
+publishing a complete immutable image. It reuses an existing image when the
+trusted configuration, base and producer code are unchanged. A temporary scratch
+disk holds toolchains and validation outputs; the final image retains the
+ordinary base's disk size. Building does not enable selection or change worker/CI
+admissions. The builder has its own memory limit and yields to useful work on
+memory exhaustion.
+
+Selection is opt-in for subsequent PR-only guests; mixed/staging slots and missing
+or incompatible images use the ordinary base. The workflow still attests its
+integrated configuration, restores Mathlib's compressed cache and runs native
+`lake exe cache get`. The image contains source/executable prefill, with no expanded
+Mathlib tree or toolchain snapshot. Each guest keeps its selected backing version
+through restarts; retirement preserves every recoverable overlay. Disabling
+selection affects subsequent guests and leaves useful running work intact.
+While enabled, the existing host controller refreshes trusted-main prefill in a
+background thread at most once every fifteen minutes. Construction failure keeps
+the previous version and the ordinary path available. A stale base/producer or a
+guest disk smaller than the image selects the ordinary base.
+
+Image manifests retain validation, producer time and physical image size. Guest
+receipts and start/retirement events record the selected image and payload hashes
+so setup gains can be compared with production and delivery cost per consumer.
+
 `doctor` reports evidence, the affected role, a next step, and an administrator
 request where necessary. For example, lack of `/dev/kvm` access blocks CI but
 does not require a workers-only host to obtain virtualization access. Missing
