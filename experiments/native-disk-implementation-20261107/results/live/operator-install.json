@@ -1,0 +1,13 @@
+{
+  "at": 1794052568.277253,
+  "operator_runtime": "/home/kim/.local/share/tauceti-fleet/autoscale-runtimes/dc59297f8295fb80",
+  "archive_sha256": "dc59297f8295fb80a282d87db8db851699a49477cdbbd9210061dee4121c59fe",
+  "pid": "1057534",
+  "minimum": 4,
+  "maximum": 4,
+  "identity": {
+    "module": "/home/kim/.local/share/tauceti-fleet/autoscale-runtimes/dc59297f8295fb80/tauceti_fleet/ci_autoscale.py",
+    "runtime": "native-disk"
+  },
+  "verification": "fresh service PID plus effective systemd environment and import resolution; proc environ is restricted"
+}

@@ -1,0 +1,29 @@
+{
+  "at": 1794054854.3484752,
+  "old_instance": "8f6e4f00e4be0ce6",
+  "unit": {
+    "ActiveState": "inactive",
+    "MainPID": "0",
+    "ControlGroup": ""
+  },
+  "root_removed": true,
+  "ownership_released": true,
+  "instances": [
+    {
+      "slot": 0,
+      "instance": "1e0dfaa9221d2512",
+      "runtime": null,
+      "run_id": null,
+      "phase": "ready",
+      "busy": false
+    },
+    {
+      "slot": 2,
+      "instance": "f2d63a0c8e87a046",
+      "runtime": null,
+      "run_id": 42372810448,
+      "phase": "ready",
+      "busy": true
+    }
+  ]
+}

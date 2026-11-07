@@ -1,0 +1,5 @@
+{
+  "at": 1794056184.6240048,
+  "reason": "keep a second disk-native placement while slot 2 executes; only verified idle VM eligible",
+  "action": "no verified idle VM; active jobs unchanged"
+}

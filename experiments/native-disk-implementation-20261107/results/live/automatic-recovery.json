@@ -1,0 +1,64 @@
+{
+  "automatic_decisions": [
+    {
+      "journal_at": 1794053225.927725,
+      "reason": "no CI compiler admissions and idle PR guests under RAM pressure",
+      "target": 4,
+      "candidates": [
+        {
+          "instance": "7b15016821b1a47b",
+          "slot": 0,
+          "run_id": 42368117729,
+          "runtime": null,
+          "memory_bytes": 25907736576,
+          "cpu_usec": 2583979020,
+          "busy": true
+        },
+        {
+          "instance": "62a1f126c834d844",
+          "slot": 2,
+          "run_id": 42367819020,
+          "runtime": null,
+          "memory_bytes": 23006760960,
+          "cpu_usec": 3111811160,
+          "busy": true
+        },
+        {
+          "instance": "cadc7aeb654d8d14",
+          "slot": 1,
+          "run_id": 42367495495,
+          "runtime": null,
+          "memory_bytes": 19976298496,
+          "cpu_usec": 3346195321,
+          "busy": true
+        },
+        {
+          "instance": "8f6e4f00e4be0ce6",
+          "slot": 3,
+          "run_id": 42370572248,
+          "runtime": "native-disk",
+          "memory_bytes": 812163072,
+          "cpu_usec": 260953042,
+          "busy": true
+        }
+      ]
+    }
+  ],
+  "verified_rerun": {
+    "id": 42368117729,
+    "run_attempt": 2,
+    "status": "queued",
+    "conclusion": null,
+    "updated_at": "2026-11-07T12:08:10Z",
+    "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42368117729"
+  },
+  "rerun_routing": {
+    "job_id": 128399301476,
+    "labels": [
+      "ubuntu-24.04"
+    ],
+    "fleet_instance": null,
+    "pick_job_log": "CI class=pr; pool=github; GitHub busy=20/12; Namespace builds queued/running=>=20/20; inventory=partial; cap reached; reason=capacity_namespace_target (approximate cap).",
+    "assessment": "The existing router selected GitHub-hosted capacity. The durable recovery is complete; the rerun remains queued outside Fleet."
+  }
+}

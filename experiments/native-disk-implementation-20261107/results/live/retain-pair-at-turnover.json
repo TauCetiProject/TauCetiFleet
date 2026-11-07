@@ -1,0 +1,14 @@
+{
+  "reason": "retain native slot 3 at turnover while slot 2 is already executing; keep two native placements for meaningful overlap",
+  "selection": {
+    "ci_native_slot": 3,
+    "next_instance_only": true,
+    "image": {
+      "prepared_at": 1794017257.593218,
+      "revision": 1,
+      "runner_version": "v2.338.2",
+      "sha256": "c58f3a69e9fa41e0d2f62dbbc4f852f0c5997f772c608ed060b0aad23e3ab721",
+      "vm_sha256": "2f469b19af5efa27572e0ade3dc524aeb7fc905d3e06cd43a9fbfe75e8b5e619"
+    }
+  }
+}

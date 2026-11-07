@@ -1,0 +1,6 @@
+{
+  "ended_at": 1794057054.1024847,
+  "clock_ticks_per_second": 100,
+  "method": "Read-only cgroup.procs and /proc PID stat sampling at 100 ms; CPU is a lower bound. A conservative completion allowance is maximum poll gap plus two clock ticks per captured process. No additional du was launched.",
+  "processes": []
+}

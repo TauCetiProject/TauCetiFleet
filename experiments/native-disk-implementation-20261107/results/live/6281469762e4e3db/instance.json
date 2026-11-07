@@ -1,0 +1,33 @@
+{
+  "busy": true,
+  "ci_job_kind": "pr",
+  "ci_kinds": [
+    "pr"
+  ],
+  "cpu_weight": 100,
+  "directory": "/home/kim/.local/state/tauceti-fleet/vms/6281469762e4e3db",
+  "disk_budget_gib": 56,
+  "host_health": "healthy",
+  "instance": "6281469762e4e3db",
+  "job_started_at": 1794057104.5582747,
+  "lean_statistics_protocol": 1,
+  "memory_gib": 54,
+  "memory_is_limit": true,
+  "memory_max_gib": 54,
+  "native_completed_at": 1794057560.840172,
+  "native_image_sha256": "c58f3a69e9fa41e0d2f62dbbc4f852f0c5997f772c608ed060b0aad23e3ab721",
+  "online_observed_at": 1794057077.3521328,
+  "phase": "cleanup",
+  "pressure_protocol": 2,
+  "result_queued": true,
+  "run_id": 42375807545,
+  "runner_id": 126136,
+  "runner_missing_since": 1794057581.837029,
+  "runner_name": "fleet-11e2756fc110-6281469762e4e3db",
+  "runtime": "native-disk",
+  "slot": 1,
+  "started_at": 1794057066.6653664,
+  "unit": "tauceti-fleet-vm-6281469762e4e3db.service",
+  "vcpus": 96,
+  "workspace_storage": "disk"
+}

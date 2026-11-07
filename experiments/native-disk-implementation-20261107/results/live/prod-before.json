@@ -1,0 +1,109 @@
+{
+  "at": 1794052273.6831813,
+  "config": {
+    "machine_id": "11e2756fc11042d798f759410573a935",
+    "ci_enabled": true,
+    "workers_enabled": true,
+    "ci_max_jobs": 4,
+    "ci_staging_slots": 0,
+    "ci_native_slot": null,
+    "ci_kinds": [
+      "pr"
+    ],
+    "draining": false
+  },
+  "controller": {
+    "controller_release": "/home/kim/.local/share/tauceti-fleet/releases/4d931ede1defc0c0aff9668831526b0b6c01f7f345fdf9864e37c3d46703dfaa",
+    "controller_pid": 1781395,
+    "observed_at": 1794052273.3438237,
+    "error": null
+  },
+  "current_release": "/home/kim/.local/share/tauceti-fleet/releases/4d931ede1defc0c0aff9668831526b0b6c01f7f345fdf9864e37c3d46703dfaa",
+  "worker": {
+    "revision": "11d86829246b7c2489e0ab07318296fd35ec6c4f"
+  },
+  "native_image": {
+    "prepared_at": 1794017257.593218,
+    "revision": 1,
+    "runner_version": "v2.338.2",
+    "sha256": "c58f3a69e9fa41e0d2f62dbbc4f852f0c5997f772c608ed060b0aad23e3ab721",
+    "vm_sha256": "2f469b19af5efa27572e0ade3dc524aeb7fc905d3e06cd43a9fbfe75e8b5e619"
+  },
+  "disk_free": 1765616873472,
+  "instances": [
+    {
+      "instance": "7b15016821b1a47b",
+      "slot": 0,
+      "runtime": null,
+      "unit": "tauceti-fleet-vm-7b15016821b1a47b.service",
+      "directory": "/home/kim/.local/state/tauceti-fleet/vms/7b15016821b1a47b",
+      "run_id": 42368117729,
+      "runner_id": 125938,
+      "phase": "ready",
+      "busy": true,
+      "started_at": 1794050628.9209774,
+      "receipt": "/home/kim/.local/state/tauceti-fleet/vm.json",
+      "service": {
+        "ActiveState": "active",
+        "MainPID": "3548902",
+        "ControlGroup": "/user.slice/user-1003.slice/user@1003.service/tauceti.slice/tauceti-fleet.slice/tauceti-fleet-ci.slice/tauceti-fleet-vm-7b15016821b1a47b.service"
+      }
+    },
+    {
+      "instance": "cadc7aeb654d8d14",
+      "slot": 1,
+      "runtime": null,
+      "unit": "tauceti-fleet-vm-cadc7aeb654d8d14.service",
+      "directory": "/home/kim/.local/state/tauceti-fleet/vms/cadc7aeb654d8d14",
+      "run_id": 42367495495,
+      "runner_id": 125921,
+      "phase": "ready",
+      "busy": true,
+      "started_at": 1794050164.697683,
+      "receipt": "/home/kim/.local/state/tauceti-fleet/ci-slots/1/vm.json",
+      "service": {
+        "ActiveState": "active",
+        "MainPID": "2093240",
+        "ControlGroup": "/user.slice/user-1003.slice/user@1003.service/tauceti.slice/tauceti-fleet.slice/tauceti-fleet-ci.slice/tauceti-fleet-vm-cadc7aeb654d8d14.service"
+      }
+    },
+    {
+      "instance": "62a1f126c834d844",
+      "slot": 2,
+      "runtime": null,
+      "unit": "tauceti-fleet-vm-62a1f126c834d844.service",
+      "directory": "/home/kim/.local/state/tauceti-fleet/vms/62a1f126c834d844",
+      "run_id": 42367819020,
+      "runner_id": 125928,
+      "phase": "ready",
+      "busy": true,
+      "started_at": 1794050381.4470503,
+      "receipt": "/home/kim/.local/state/tauceti-fleet/ci-slots/2/vm.json",
+      "service": {
+        "ActiveState": "active",
+        "MainPID": "2825913",
+        "ControlGroup": "/user.slice/user-1003.slice/user@1003.service/tauceti.slice/tauceti-fleet.slice/tauceti-fleet-ci.slice/tauceti-fleet-vm-62a1f126c834d844.service"
+      }
+    },
+    {
+      "instance": "15dc7c7530836b4b",
+      "slot": 3,
+      "runtime": null,
+      "unit": "tauceti-fleet-vm-15dc7c7530836b4b.service",
+      "directory": "/home/kim/.local/state/tauceti-fleet/vms/15dc7c7530836b4b",
+      "run_id": 42367407411,
+      "runner_id": 125918,
+      "phase": "ready",
+      "busy": true,
+      "started_at": 1794050044.6065934,
+      "receipt": "/home/kim/.local/state/tauceti-fleet/ci-slots/3/vm.json",
+      "service": {
+        "ActiveState": "active",
+        "MainPID": "2081581",
+        "ControlGroup": "/user.slice/user-1003.slice/user@1003.service/tauceti.slice/tauceti-fleet.slice/tauceti-fleet-ci.slice/tauceti-fleet-vm-15dc7c7530836b4b.service"
+      }
+    }
+  ],
+  "native_owned": [],
+  "native_pending": []
+}

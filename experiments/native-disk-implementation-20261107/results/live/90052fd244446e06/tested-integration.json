@@ -1,0 +1,9 @@
+{
+  "base_sha": "d7b47803c4bd7a123f9af4d01c6dbef39fcdb6ef",
+  "head_sha": "0cbf5d9895fe5df9f4fdb62071f47d63a30958b5",
+  "mode": "pr-integration",
+  "pin_resolution": "merged",
+  "schema": 1,
+  "tested_sha": "36679a6650da87e80b84d688be6ca5bbfa116afe",
+  "tested_tree": "0b0b92164fb3d201b53280c2a20c7ed54dc921de"
+}
