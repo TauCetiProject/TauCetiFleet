@@ -355,6 +355,14 @@ class Isolated(unittest.TestCase):
         known = report.bors_landings(dbpath)
         self.assertIn(("TauCetiProject/TauCeti", 42, "b" * 40), known)
 
+    def test_base_refresh_reports_busy_image_owner_without_waiting(self):
+        with (
+            store.locked(store.data_dir() / "images/prepare.lock"),
+            patch.object(vm, "prepare_tools"),
+            self.assertRaisesRegex(store.FleetError, "already in progress"),
+        ):
+            vm.prepare_image(store.host_config())
+
     def test_download_does_not_replace_good_file_with_wrong_image(self):
         target = self.root / "disk"
         target.write_bytes(b"original")

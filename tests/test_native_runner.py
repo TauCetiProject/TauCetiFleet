@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import ci_images, dependency_prefill, github, host, native_inside, store, vm
+from tauceti_fleet import github, host, native_inside, store, vm
 from tauceti_fleet import native_runner as native
 
 GIB = 1024**3
@@ -152,7 +152,7 @@ class NativeRunner(unittest.TestCase):
                     native.configure("next-general")
 
     def test_lost_native_registration_reply_reuses_the_common_intent(self):
-        config = dict(store.host_config(), **self.config, ci_broker_url="https://broker.invalid", _ci_backend=native.RUNTIME, ci_prefill_enabled=True)
+        config = dict(store.host_config(), **self.config, ci_broker_url="https://broker.invalid", _ci_backend=native.RUNTIME)
         store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
         names = []
         def register(config, name):
@@ -163,9 +163,7 @@ class NativeRunner(unittest.TestCase):
         with (patch.object(vm.shutil, "disk_usage", return_value=Mock(free=48 * GIB)),
               patch.object(github, "jit_config", side_effect=register),
               patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)),
-              patch.object(native, "stage", return_value=dict(runtime=native.RUNTIME)) as stage,
-              patch.object(ci_images, "select") as select_image,
-              patch.object(dependency_prefill, "claim") as claim_payload):
+              patch.object(native, "stage", return_value=dict(runtime=native.RUNTIME)) as stage):
             with self.assertRaises(store.FleetError):
                 vm._start(config)
             intent = store.read(vm.slot_file(config, "ci-registration.json"))
@@ -175,9 +173,6 @@ class NativeRunner(unittest.TestCase):
         self.assertEqual(value["instance"], intent["instance"])
         self.assertEqual(value["runtime"], native.RUNTIME)
         stage.assert_called_once()
-        select_image.assert_not_called()
-        claim_payload.assert_not_called()
-        self.assertIsNone(value["image_sha256"])
         self.assertIsNone(store.read(vm.slot_file(config, "ci-registration.json")))
 
     def test_disk_shortfall_is_rejected_before_jit_registration(self):
