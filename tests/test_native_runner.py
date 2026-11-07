@@ -160,7 +160,8 @@ class NativeRunner(unittest.TestCase):
             if len(names) == 1:
                 raise store.FleetError("lost JIT reply")
             return 7, "private-jit"
-        with (patch.object(github, "jit_config", side_effect=register),
+        with (patch.object(vm.shutil, "disk_usage", return_value=Mock(free=48 * GIB)),
+              patch.object(github, "jit_config", side_effect=register),
               patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)),
               patch.object(native, "stage", return_value=dict(runtime=native.RUNTIME)) as stage,
               patch.object(ci_images, "select") as select_image,
@@ -177,6 +178,16 @@ class NativeRunner(unittest.TestCase):
         select_image.assert_not_called()
         claim_payload.assert_not_called()
         self.assertIsNone(value["image_sha256"])
+        self.assertIsNone(store.read(vm.slot_file(config, "ci-registration.json")))
+
+    def test_disk_shortfall_is_rejected_before_jit_registration(self):
+        config = dict(store.host_config(), **self.config, _ci_backend=native.RUNTIME)
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        with (patch.object(vm.shutil, "disk_usage", return_value=Mock(free=47 * GIB)),
+              patch.object(github, "jit_config") as register):
+            with self.assertRaisesRegex(store.FleetError, "free space"):
+                vm._start(config)
+            register.assert_not_called()
         self.assertIsNone(store.read(vm.slot_file(config, "ci-registration.json")))
 
     def test_idle_expiry_never_retires_running_or_newly_online_work(self):

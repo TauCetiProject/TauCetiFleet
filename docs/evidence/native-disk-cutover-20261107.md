@@ -14,7 +14,7 @@ clean cache and adjusted memory remain distinct in status/autoscaling.
 
 ## Local validation
 
-- 436 unit tests pass, one optional test skipped. New tests cover disk scan
+- 437 unit tests pass, one optional test skipped. New tests cover disk scan
   scheduling/timeouts/errors, nonblocking low-space handling, monitored-budget
   failures and end-to-end native cgroup observation in the autoscaler.
 - Changed production modules, the new monitor tests and the validation harness
