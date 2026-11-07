@@ -34,6 +34,9 @@ class LiveUpdate(unittest.TestCase):
         self.old_worker.write_text("old worker stays in use")
         update.symlink(store.data_dir() / "bin/tauceti", self.old_worker)
         self.revision = "a" * 40
+        latest = patch.object(update, "latest_worker_revision", return_value=self.revision)
+        latest.start()
+        self.addCleanup(latest.stop)
         store.atomic(self.release / "release.json", dict(worker_revision=self.revision))
         store.atomic(store.data_dir() / "release.json", dict(worker_revision="b" * 40))
         store.atomic(store.data_dir() / "worker-runtime.json", dict(revision="b" * 40))
@@ -80,37 +83,94 @@ class LiveUpdate(unittest.TestCase):
         self.assertIn("running managers and workers retain", result["worker_runtime_scope"])
         self.assert_work_preserved()
 
-    def test_fleet_only_update_preserves_independent_worker_runtime(self):
-        worker_path = store.data_dir() / "worker-runtime.json"
-        original = worker_path.read_bytes()
+    def test_update_uses_main_instead_of_bundled_or_independently_selected_revision(self):
+        store.atomic(self.release / "release.json", dict(worker_revision="c" * 40))
+        staged = store.data_dir() / "worker-runtimes" / self.revision
         with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
-              patch.object(update, "stage_worker", side_effect=AssertionError("worker runtime must not be staged")),
+              patch.object(update, "stage_worker", return_value=staged) as stage,
               patch.object(update, "handover", return_value=dict(controller_release=str(self.release)))):
-            result=update.install(self.release, expected_machine_id=self.config["machine_id"], preserve_worker=True)
-        self.assertEqual(worker_path.read_bytes(), original)
-        self.assertEqual((store.data_dir() / "bin/tauceti").resolve(), self.old_worker)
-        self.assertTrue(result["worker_runtime_preserved"])
-        self.assertEqual(result["worker_revision"], "b"*40)
+            result = self.install()
+        stage.assert_called_once_with(self.revision)
+        self.assertEqual(result["worker_revision"], self.revision)
+        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json"), dict(revision=self.revision))
         self.assert_work_preserved()
 
-    def test_fleet_only_rollback_does_not_revert_a_parallel_worker_update(self):
-        newer=self.home / "independent-worker/bin/tauceti"
-        newer.parent.mkdir(parents=True)
-        newer.write_text("independent runtime")
-        def fail(release, **kwargs):
-            if kwargs.get("on_signal"):
-                kwargs["on_signal"]()
-                update.symlink(store.data_dir() / "bin/tauceti", newer)
-                store.atomic(store.data_dir() / "worker-runtime.json", dict(revision="c"*40))
-                raise store.FleetError("controller failed")
-            return {}
+    def test_main_resolution_failure_leaves_installed_release_and_worker_untouched(self):
         with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
-              patch.object(update, "stage_worker", side_effect=AssertionError("worker runtime must not be staged")),
-              patch.object(update, "handover", side_effect=fail)):
-            with self.assertRaises(store.FleetError):
-                update.install(self.release, expected_machine_id=self.config["machine_id"], preserve_worker=True)
-        self.assertEqual((store.data_dir() / "bin/tauceti").resolve(), newer)
-        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], "c"*40)
+              patch.object(update, "latest_worker_revision", side_effect=store.FleetError("main unavailable")),
+              patch.object(update, "stage_worker") as stage, patch.object(update, "handover") as handover):
+            with self.assertRaisesRegex(store.FleetError, "main unavailable"):
+                self.install()
+        stage.assert_not_called()
+        handover.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        self.assertEqual((store.data_dir() / "bin/tauceti").resolve(), self.old_worker)
+        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], "b" * 40)
+        self.assert_work_preserved()
+
+    def test_unchanged_fleet_still_updates_worker_when_main_advances(self):
+        update.symlink(store.data_dir() / "current", self.release)
+        store.atomic(store.state_dir() / "status.json", dict(controller_release=str(self.release), controller_pid=1, observed_at=time.time()))
+        staged = store.data_dir() / "worker-runtimes" / self.revision
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "stage_worker", return_value=staged),
+              patch.object(update, "handover", return_value=dict(controller_release=str(self.release))) as handover):
+            result = self.install()
+        self.assertNotIn("unchanged", result)
+        handover.assert_called_once()
+        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], self.revision)
+
+    def test_same_worker_and_fleet_are_unchanged_through_symlinked_data_directory(self):
+        actual_data = store.data_dir()
+        alias = self.home / "data-alias"
+        alias.symlink_to(actual_data, target_is_directory=True)
+        staged = actual_data / "worker-runtimes" / self.revision
+        binary = staged / "bin/tauceti"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("installed worker")
+        update.symlink(actual_data / "current", self.release)
+        update.symlink(actual_data / "bin/tauceti", binary)
+        store.atomic(actual_data / "worker-runtime.json", dict(revision=self.revision))
+        store.atomic(store.state_dir() / "status.json", dict(controller_release=str(self.release), controller_pid=1, observed_at=time.time()))
+        with (patch.dict(os.environ, {"TAUCETI_FLEET_DATA": str(alias)}),
+              patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "stage_worker", return_value=alias / "worker-runtimes" / self.revision),
+              patch.object(update, "handover") as handover):
+            result = self.install()
+        self.assertTrue(result["unchanged"])
+        self.assertEqual(result["worker_revision"], self.revision)
+        handover.assert_not_called()
+
+    def test_completed_alternate_runtime_is_reused_after_interrupted_install(self):
+        root = store.data_dir() / "worker-runtimes" / self.revision
+        root.mkdir(parents=True)
+        completed = root.with_name(self.revision + "-" + "c" * 32)
+        (completed / "bin").mkdir(parents=True)
+        (completed / "bin/tauceti").write_text("ready worker")
+        store.atomic(completed / "ready.json", dict(revision=self.revision))
+        with patch.object(update, "run", side_effect=AssertionError("must reuse completed installation")):
+            self.assertEqual(update.stage_worker(self.revision), completed)
+            self.assertEqual(update.stage_worker(self.revision), completed)
+
+    def test_unsupported_service_refuses_before_worker_lookup_or_install(self):
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="no")),
+              patch.object(update, "latest_worker_revision") as latest,
+              patch.object(update, "stage_worker") as stage):
+            with self.assertRaisesRegex(store.FleetError, "Restart=on-failure"):
+                self.install()
+        latest.assert_not_called()
+        stage.assert_not_called()
+        self.assert_work_preserved()
+
+    def test_prepare_selects_main_and_does_not_restore_manifest_pin(self):
+        config = store.update_host(workers_enabled=False, ci_enabled=False, ci_allowed=False)
+        staged = store.data_dir() / "worker-runtimes" / self.revision
+        with (patch.object(update, "stage_worker", return_value=staged) as stage,
+              patch.object(update.vm, "outstanding", return_value=False)):
+            result = host.prepare(config)
+        stage.assert_called_once_with(self.revision)
+        self.assertEqual(result["worker_revision"], self.revision)
+        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], self.revision)
 
     def test_failed_activation_restores_both_runtimes_and_recovers_old_controller(self):
         def fail_then_recover(release, **kwargs):
@@ -353,3 +413,21 @@ host.daemon()
         self.assertEqual(result["pid"], process.pid)
         self.assertEqual(result["admission"]["workers"], ["paid-session"])
         self.assertNotEqual(result["admission"].get("reason"), "controller stopped")
+
+class LatestWorker(unittest.TestCase):
+    def test_resolve_main_once_to_exact_commit(self):
+        revision = "d" * 40
+        with patch.object(update, "run", return_value=subprocess.CompletedProcess([], 0, revision + "\trefs/heads/main\n")) as run:
+            self.assertEqual(update.latest_worker_revision(), revision)
+        self.assertEqual(run.call_args.args[0][-1], "refs/heads/main")
+        self.assertEqual(run.call_count, 1)
+
+    def test_missing_ambiguous_or_malformed_head_is_not_selected(self):
+        for output in ("", "main refs/heads/main", "d" * 40 + " refs/heads/other", ("d" * 40 + " refs/heads/main\n") * 2):
+            with patch.object(update, "run", return_value=subprocess.CompletedProcess([], 0, output)):
+                with self.assertRaises(store.FleetError):
+                    update.latest_worker_revision()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -35,13 +35,24 @@ def write_binary(path, contents, mode=0o755):
         temporary.unlink(missing_ok=True)
 
 
+def latest_worker_revision():
+    """Resolve main once; installation and reporting use that exact commit."""
+    result = run(["git", "ls-remote", "--exit-code", "https://github.com/TauCetiProject/TauCetiWorker.git", "refs/heads/main"], timeout=60)
+    fields = result.stdout.split()
+    if len(fields) != 2 or fields[1] != "refs/heads/main" or not re.fullmatch(r"[a-f0-9]{40}", fields[0]):
+        raise FleetError("Cannot resolve TauCetiWorker main to one full commit")
+    return fields[0]
+
+
 def stage_worker(revision):
     """Never install into a virtualenv that an existing worker may be using."""
     if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
-        raise FleetError("Release must pin a full worker commit")
+        raise FleetError("Worker installation requires a full commit")
     root = data_dir() / "worker-runtimes" / revision
-    if read(root / "ready.json", {}).get("revision") == revision and (root / "bin/tauceti").is_file():
-        return root
+    candidates = [root, *sorted(root.parent.glob(revision + "-*"))]
+    for candidate in candidates:
+        if read(candidate / "ready.json", {}).get("revision") == revision and (candidate / "bin/tauceti").is_file():
+            return candidate
     if root.exists():
         # An interrupted install is retained for diagnosis. Use a distinct path:
         # moving a venv after installation would invalidate its shebangs.
@@ -122,9 +133,9 @@ def handover(release, *, rollback=False, on_signal=None):
     raise FleetError("Controller did not publish a healthy status after live handover")
 
 
-def install(release, *, expected_machine_id, preserve_worker=False):
+def install(release, *, expected_machine_id):
     """Runs from the staged release, including when the installed CLI is old."""
-    with locked(data_dir() / "update.lock"):
+    with locked(data_dir() / "update.lock"), locked(state_dir() / "worker-runtime-upgrade.lock"):
         config = host_config()
         if config["machine_id"] != expected_machine_id:
             raise FleetError("Host identity differs from inventory; refusing live update")
@@ -134,22 +145,24 @@ def install(release, *, expected_machine_id, preserve_worker=False):
         if not current.is_symlink():
             raise FleetError("Live update requires an installed Fleet release symlink")
         previous = current.resolve()
-        status = read(state_dir() / "status.json", {})
-        controller = service()
-        if (previous == release and status.get("controller_release") == str(release)
-                and not status.get("error") and status.get("observed_at", 0) > time.time() - 15
-                and controller.get("MainPID", "0") != "0"
-                and str(status.get("controller_pid")) == controller.get("MainPID")):
-            return dict(installed=True, release=release.name, unchanged=True)
-        # Fail before activation if the existing controller cannot be handed over.
-        if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
-            raise FleetError("Controller requires Restart=on-failure for live handover")
         worker_link = data_dir() / "bin/tauceti"
         if worker_link.exists() and not worker_link.is_symlink():
             raise FleetError("Preserve the existing non-symlink worker executable before updating")
         old_worker = os.readlink(worker_link) if worker_link.is_symlink() else None
         worker_metadata = read(data_dir() / "worker-runtime.json")
-        worker = stage_worker(metadata.get("worker_revision")) if not preserve_worker and (config["workers_enabled"] or old_worker) else None
+        controller = service()
+        if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
+            raise FleetError("Controller requires Restart=on-failure for live handover")
+        revision = latest_worker_revision() if config["workers_enabled"] or old_worker else None
+        worker = stage_worker(revision) if revision else None
+        status = read(state_dir() / "status.json", {})
+        if (previous == release and status.get("controller_release") == str(release)
+                and (not worker or (worker_link.resolve() == (worker / "bin/tauceti").resolve()
+                                    and (worker_metadata or {}).get("revision") == revision))
+                and not status.get("error") and status.get("observed_at", 0) > time.time() - 15
+                and controller.get("MainPID", "0") != "0"
+                and str(status.get("controller_pid")) == controller.get("MainPID")):
+            return dict(installed=True, release=release.name, worker_revision=revision, unchanged=True)
         # Existing qcow backing images remain untouched, even if a new release
         # would prepare a different image. Image maintenance is a separate task.
         old_metadata = read(data_dir() / "release.json")
@@ -163,7 +176,7 @@ def install(release, *, expected_machine_id, preserve_worker=False):
         try:
             if worker:
                 symlink(worker_link, worker / "bin/tauceti")
-                atomic(data_dir() / "worker-runtime.json", dict(revision=metadata["worker_revision"]))
+                atomic(data_dir() / "worker-runtime.json", dict(revision=revision))
             atomic(data_dir() / "release.json", metadata)
             symlink(current, release)
             launcher = "import os,sys; sys.path.insert(0,os.path.realpath(" + repr(str(current)) + ")); from tauceti_fleet.cli import main; raise SystemExit(main())"
@@ -172,13 +185,13 @@ def install(release, *, expected_machine_id, preserve_worker=False):
             result = handover(release, on_signal=did_signal)
         except BaseException as exc:
             symlink(current, previous)
-            if not preserve_worker:
+            if worker:
                 if old_worker:
                     symlink(worker_link, old_worker)
                 else:
                     worker_link.unlink(missing_ok=True)
             restore = [(data_dir() / "release.json", old_metadata)]
-            if not preserve_worker:
+            if worker:
                 restore.append((data_dir() / "worker-runtime.json", worker_metadata))
             for path, value in restore:
                 if value is None:
@@ -195,8 +208,7 @@ def install(release, *, expected_machine_id, preserve_worker=False):
                 raise FleetError("Live update failed before handover; previous release restored, controller left running") from exc
             raise FleetError("Live update failed; previous release restored and controller recovered") from exc
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
-                    worker_revision=read(data_dir() / "worker-runtime.json", {}).get("revision") if preserve_worker else metadata.get("worker_revision") if worker else None,
-                    worker_runtime_preserved=preserve_worker,
+                    worker_revision=revision,
                     active_processes_preserved=True,
                     worker_runtime_scope="future manager starts; running managers and workers retain their existing runtime",
                     image="preserved")

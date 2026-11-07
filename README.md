@@ -33,7 +33,7 @@ tauceti-fleet status
 `add local` installs on the current account. Hosts require Python 3.11+, Linux
 x86-64, systemd user services, and usable CPU/memory cgroup controls. The operator
 needs `gh` to reuse a selected stored GitHub credential. `prepare` installs the
-pinned worker revision using user-local uv, and fetches pinned QEMU/cloud-init
+latest Worker main revision using user-local uv, and fetches pinned QEMU/cloud-init
 tools through an existing Nix installation when necessary. Without Nix, provide
 `qemu-system-x86_64`, `qemu-img`, and `cloud-localds` in the user's PATH. No command
 automatically invokes host sudo or installs a privileged container daemon.
@@ -174,8 +174,12 @@ Enable is explicit and refuses missing required capabilities. A `--no-ci` host
 never registers a runner. Drain prevents new rounds/CI guests and lets active
 work finish. Update keeps admissions enabled, preserves configuration and
 credentials on the host, and leaves CI guests and worker processes running.
-It stages the release and a separate pinned worker virtualenv before switching
-the launcher. A healthy status from the new controller confirms the handover;
+It resolves TauCetiWorker `main` once and stages that exact commit in a separate
+worker virtualenv before switching the launcher. Fleet releases do not pin Worker.
+The installed commit is recorded in `worker-runtime.json` and returned in the
+update result. Repeating an update with unchanged Fleet code still checks Worker
+`main`; a lookup or installation failure leaves the selected runtimes unchanged.
+A healthy status from the new controller confirms the handover;
 failure restores the previous release and attempts to recover its controller.
 An interrupted SSH connection is not retried automatically: inspect `status`
 and the host's `current` release before repeating an update.
@@ -183,7 +187,9 @@ and the host's `current` release before repeating an update.
 Already running worker managers and workers retain their existing Python runtime;
 the staged worker version takes effect at a future manager start. The update
 result reports that scope explicitly. CI backing images are preserved, so image
-maintenance still uses `prepare` separately. Existing releases and worker runtimes
+maintenance still uses `prepare` separately. `prepare` also selects current Worker
+`main`, rather than restoring a revision recorded by an older Fleet release.
+Existing releases and worker runtimes
 are retained while processes may still reference them.
 
 An update deploys the version of Fleet running the command. To upgrade an older

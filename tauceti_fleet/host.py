@@ -171,16 +171,14 @@ def prepare(config=None):
     config = config or host_config()
     if config["ci_enabled"] or config["workers_enabled"] or vm.outstanding():
         raise FleetError("Drain this host and wait for its CI guest to exit before preparing runtimes")
-    worker_revision = read(data_dir() / "release.json", {}).get("worker_revision")
-    pinned = read(data_dir() / "worker-runtime.json", {}).get("revision") == worker_revision
-    if not pinned:
-        from .update import stage_worker, symlink
-
+    from .update import latest_worker_revision, stage_worker, symlink
+    with locked(state_dir() / "worker-runtime-upgrade.lock"):
+        worker_revision = latest_worker_revision()
         venv = stage_worker(worker_revision)
         symlink(data_dir() / "bin/tauceti", venv / "bin/tauceti")
         atomic(data_dir() / "worker-runtime.json", dict(revision=worker_revision))
     manifest = vm.prepare_image(config) if config["ci_allowed"] else None
-    return dict(worker=executable("tauceti"), image=manifest, smoke=vm.smoke(config) if manifest else None)
+    return dict(worker=executable("tauceti"), worker_revision=worker_revision, image=manifest, smoke=vm.smoke(config) if manifest else None)
 
 
 def worker_headroom(caps, *, ci_busy=False):
