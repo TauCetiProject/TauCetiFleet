@@ -163,7 +163,11 @@ def prepare_image(config=None):
     prepare_tools()
     root = data_dir() / "images"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with locked(root / "prepare.lock"):
+    from .ci_images import try_lock
+
+    with try_lock(root / "prepare.lock") as acquired:
+        if not acquired:
+            raise FleetError("Image preparation already in progress; retry after it finishes")
         if (root / "prepared.json").exists():
             manifest = read(root / "prepared.json")
             if digest(root / "prepared.qcow2") != manifest["sha256"]:

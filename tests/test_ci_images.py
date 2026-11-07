@@ -56,7 +56,9 @@ class Images(unittest.TestCase):
                 [], 0, json.dumps({"format": "qcow2", "virtual-size": 20 * 1024**3})
             ),
         ):
-            return ci_images.publish(image, self.payload, base=self.base, seconds=12, validation=self.validation)
+            return ci_images.publish(
+                image, self.payload, base=self.base, seconds=12, validation=self.validation, consumer="f" * 64
+            )
 
     def test_versioned_publication_and_future_selection_do_not_replace_readers(self):
         old = self.publish(b"first image")
@@ -132,7 +134,7 @@ class Images(unittest.TestCase):
     def test_prepare_rejects_a_stale_base_abi_without_building_or_claiming_new_provenance(self):
         store.atomic(store.data_dir() / "images/prepared.json", {**self.base, "image_revision": -1})
         with (
-            patch.object(ci_images, "trusted_main", return_value=("a" * 40, {})),
+            patch.object(ci_images, "trusted_main", return_value=("a" * 40, {}, "f" * 64)),
             patch.object(vm, "prepare_tools") as build,
             self.assertRaisesRegex(ValueError, "different image revision"),
         ):
@@ -164,15 +166,108 @@ class Images(unittest.TestCase):
         with patch.object(ci_images.threading, "Thread") as thread:
             owner.step(dict(ci_enabled=True), now=1)
             thread.assert_not_called()
-            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True), now=1)
+            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True, ci_kinds=["pr"]), now=1)
             thread.return_value.start.assert_called_once()
-            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True), now=2)
+            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True, ci_kinds=["pr"]), now=2)
             self.assertEqual(thread.call_count, 1)
         owner = ci_images.Owner()
         with patch.object(ci_images.threading, "Thread") as thread:
             thread.return_value.start.side_effect = RuntimeError("no thread available")
-            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True), now=1)
-            self.assertEqual(owner.next_refresh, 301)
+            owner.step(dict(ci_enabled=True, ci_prefill_enabled=True, ci_kinds=["pr"]), now=1)
+            self.assertEqual(owner.next_refresh, 901)
+
+    def test_publication_validates_written_manifest_before_switching_pointer(self):
+        old = self.publish(b"old complete")
+        with patch.object(ci_images, "manifest", side_effect=ValueError("unreadable metadata")):
+            with self.assertRaisesRegex(ValueError, "unreadable metadata"):
+                self.publish(b"new complete")
+        self.assertEqual(ci_images.current()["sha256"], old["sha256"])
+
+    def test_gc_does_no_subprocess_work_inside_an_admission(self):
+        self.publish(b"complete")
+        with store.locked(store.state_dir() / "ci-start.lock"), patch.object(ci_images, "run") as run:
+            self.assertEqual(ci_images.retire_unused(), [])
+            run.assert_not_called()
+
+    def test_failed_build_discards_disks_but_keeps_diagnostics(self):
+        staging = self.directory / "staging"
+        staging.mkdir()
+        for name in ("disk.qcow2", "scratch.qcow2", "complete.qcow2", "seed.iso", "console.log"):
+            (staging / name).write_text("owned")
+        with self.assertRaisesRegex(RuntimeError, "failure"):
+            with ci_images.discard_build_disks(staging):
+                raise RuntimeError("failure")
+        self.assertEqual([p.name for p in staging.iterdir()], ["console.log"])
+
+    def test_builder_preserves_ordinary_memory_and_disk_headroom(self):
+        gib = 1024**3
+        with patch.object(vm, "start_memory_available", return_value=29 * gib):
+            with self.assertRaisesRegex(store.FleetError, "ordinary CI"):
+                ci_images.builder_resources(self.directory)
+        with (
+            patch.object(vm, "start_memory_available", return_value=30 * gib),
+            patch.object(ci_images.shutil, "disk_usage") as usage,
+        ):
+            usage.return_value.free = 63 * gib
+            with self.assertRaisesRegex(store.FleetError, "64 GiB"):
+                ci_images.builder_resources(self.directory)
+            usage.return_value.free = 64 * gib
+            ci_images.builder_resources(self.directory)
+
+    def test_base_refresh_reports_busy_image_owner_without_waiting(self):
+        with (
+            store.locked(store.data_dir() / "images/prepare.lock"),
+            patch.object(vm, "prepare_tools"),
+            self.assertRaisesRegex(store.FleetError, "already in progress"),
+        ):
+            vm.prepare_image(self.config)
+
+    def test_owner_backs_off_same_failure_and_retries_changed_configuration(self):
+        class InlineThread:
+            def __init__(self, *, target, **kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+            def is_alive(self):
+                return False
+
+        owner = ci_images.Owner()
+        config = dict(ci_enabled=True, ci_prefill_enabled=True, ci_kinds=["pr"])
+        trusted = ("a" * 40, {"pin": "one"}, "f" * 64)
+        with (
+            patch.object(ci_images.threading, "Thread", InlineThread),
+            patch.object(ci_images, "trusted_main", return_value=trusted) as capture,
+            patch.object(ci_images, "prepare", side_effect=store.FleetError("bad pins")) as build,
+            patch.object(ci_images.time, "monotonic", return_value=100),
+        ):
+            owner.step(config, now=100)
+            self.assertEqual(owner.retry_after, 1000)
+            owner.step(config, now=1000)
+            self.assertEqual(build.call_count, 1)
+            capture.return_value = (trusted[0], {"pin": "two"}, trusted[2])
+            owner.step(config, now=1900)
+            self.assertEqual(build.call_count, 2)
+            self.assertEqual(owner.failures, 1)
+            with patch.object(ci_images.time, "monotonic", return_value=1001):
+                owner.step(config, now=2800)
+            self.assertEqual(owner.failures, 2)
+            self.assertEqual(owner.retry_after, 2801)
+
+    def test_disabling_owner_cancels_its_builder_without_changing_admissions(self):
+        owner = ci_images.Owner()
+        owner.unit = "tauceti-fleet-prefill-" + "a" * 16 + ".scope"
+        from unittest.mock import Mock
+
+        owner.thread = Mock()
+        owner.thread.is_alive.return_value = True
+        config = dict(ci_enabled=True, ci_prefill_enabled=False, ci_kinds=["pr"])
+        with patch.object(ci_images, "run") as stop:
+            owner.step(config)
+            self.assertTrue(owner.cancelled.is_set())
+            self.assertEqual(stop.call_args.args[0][-1], owner.unit)
+        self.assertTrue(config["ci_enabled"])
 
     def test_corrupt_pointer_and_incomplete_reference_observations_do_not_retire(self):
         old = self.publish(b"first")

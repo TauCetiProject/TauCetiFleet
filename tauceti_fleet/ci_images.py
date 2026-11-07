@@ -149,6 +149,7 @@ def manifest(digest):
         or value.get("kind") != "dependency-prefill-v1"
         or not identifier(value.get("base_sha256"))
         or not identifier(value.get("producer_sha256"))
+        or not identifier(value.get("consumer_sha256"))
         or type(value.get("virtual_size")) is not int
         or value["virtual_size"] <= 0
         or type(value.get("producer_seconds")) not in (int, float)
@@ -201,7 +202,7 @@ def enable(enabled):
     return dict(enabled=enabled, selected=select(dict(value, ci_kinds=["pr"])))
 
 
-def publish(image, payload, *, base, seconds, validation, producer=None):
+def publish(image, payload, *, base, seconds, validation, consumer, producer=None):
     """Called only with a fully validated guest produced by prepare()."""
     from . import vm
 
@@ -240,6 +241,7 @@ def publish(image, payload, *, base, seconds, validation, producer=None):
             ubuntu_sha256=base["ubuntu_sha256"],
             virtual_size=info["virtual-size"],
             producer_sha256=producer or producer_identity(),
+            consumer_sha256=consumer,
             base_sha256=base["sha256"],
             payload=payload,
             validation=validation,
@@ -250,15 +252,13 @@ def publish(image, payload, *, base, seconds, validation, producer=None):
             image_allocated_bytes=target.stat().st_blocks * 512,
         )
         metadata = directory / (digest + ".json")
-        if metadata.exists():
-            try:
-                value = manifest(digest)
-            except (FleetError, OSError, ValueError, TypeError, KeyError):
-                # The newly verified candidate has identical image bytes. Repair
-                # only its metadata; never replace the backing file itself.
-                immutable_atomic(metadata, value)
-        else:
-            immutable_atomic(metadata, value)
+        # Always validate the exact metadata that future selectors will read.
+        # Identical backing bytes may have newer validation/provenance; metadata
+        # is not a backing file and can be repaired atomically before publication.
+        immutable_atomic(metadata, value)
+        checked = manifest(digest)
+        if checked != value:
+            raise FleetError("Published image metadata did not round trip")
         sync_directory(directory)
         atomic(directory / "current.json", dict(sha256=digest))
         sync_directory(directory)
@@ -305,6 +305,11 @@ def retire_unused():
     directory = root()
     if not directory.exists():
         return []
+    # Retirement can be reached from _start while this process already holds
+    # admission. Avoid doing even the reference scan on that path.
+    with try_lock(state_dir() / "ci-start.lock") as free:
+        if not free:
+            return []
     with try_lock(directory / "publish.lock") as acquired:
         if not acquired:
             return []
@@ -371,17 +376,43 @@ def trusted_main():
     if len(value) != 2 or not prefill_guest.SHA.fullmatch(value[0]) or value[1] != "refs/heads/main":
         raise FleetError("Could not capture immutable trusted main")
     hashes = {}
-    for name in prefill_guest.CONFIG:
+    for name in (*prefill_guest.CONFIG, "scripts/dependency_prefill.py"):
         url = "https://raw.githubusercontent.com/TauCetiProject/TauCeti/" + value[0] + "/" + name
         with urllib.request.urlopen(url, timeout=30) as response:
             content = response.read(4 * 1024**2 + 1)
         if len(content) > 4 * 1024**2:
             raise FleetError("Trusted configuration exceeds supported size")
         hashes[name] = hashlib.sha256(content).hexdigest()
-    return value[0], hashes
+    consumer = hashes.pop("scripts/dependency_prefill.py")
+    return value[0], hashes, consumer
 
 
-def prepare(config=None):
+@contextlib.contextmanager
+def discard_build_disks(staging):
+    """Keep diagnostics, but release private disk allocations on every exit."""
+    try:
+        yield
+    finally:
+        for name in ("disk.qcow2", "scratch.qcow2", "complete.qcow2", "seed.iso"):
+            (staging / name).unlink(missing_ok=True)
+
+
+def builder_resources(images):
+    from . import vm
+
+    available = vm.start_memory_available()
+    if available is None:
+        from .capabilities import resources
+
+        available = resources()["memory_available"]
+    # This gates only optional construction; ordinary admissions are unchanged.
+    if available < 10 * 1024**3 + vm.START_MEMORY_BYTES:
+        raise FleetError("Optional builder needs 10 GiB plus ordinary CI start headroom")
+    if shutil.disk_usage(images).free < 64 * 1024**3:
+        raise FleetError("Optional builder needs 64 GiB free for private scratch and ordinary work")
+
+
+def prepare(config=None, *, trusted=None, cancelled=None, scope_started=None):
     """Build without registration, draining or modifying the ordinary base image."""
     from . import vm
 
@@ -389,13 +420,13 @@ def prepare(config=None):
     started = time.monotonic()
     producer = producer_identity()
     script = Path(prefill_guest.__file__).read_text()
-    revision, hashes = trusted_main()
+    revision, hashes, consumer = trusted or trusted_main()
     images = data_dir() / "images"
-    with locked(images / "prepare.lock"):
+    with try_lock(images / "prepare.lock") as acquired:
+        if not acquired:
+            raise FleetError("Image preparation already in progress; ordinary work remains enabled")
         base = read(images / "prepared.json")
         validate_base(base)
-        if vm.digest(images / "prepared.qcow2") != base["sha256"]:
-            raise FleetError("Prepare a verified ordinary base image before prefill construction")
         try:
             prior = current()
         except (FleetError, OSError, ValueError, TypeError, KeyError):
@@ -405,16 +436,13 @@ def prepare(config=None):
             and prior["base_sha256"] == base["sha256"]
             and prior["payload"]["config_sha256"] == hashes
             and prior["producer_sha256"] == producer
+            and prior["consumer_sha256"] == consumer
         ):
             return dict(prior, reused=True)
+        if vm.digest(images / "prepared.qcow2") != base["sha256"]:
+            raise FleetError("Prepare a verified ordinary base image before prefill construction")
         vm.prepare_tools()
-        available = vm.start_memory_available()
-        if available is None:
-            from .capabilities import resources
-
-            available = resources()["memory_available"]
-        if available < 10 * 1024**3:
-            raise FleetError("Optional image construction needs 10 GiB available; ordinary work remains enabled")
+        builder_resources(images)
         base_info = json.loads(run([executable("qemu-img"), "info", "--output=json", images / "prepared.qcow2"]).stdout)
         if not isinstance(base_info, dict) or type(base_info.get("virtual-size")) is not int:
             raise FleetError("Ordinary base has no supported disk size")
@@ -422,159 +450,207 @@ def prepare(config=None):
         # A killed previous builder cannot publish an incomplete image. Recover
         # only this image owner's unregistered scope, never a production VM.
         previous = read(staging / "build.json", {})
-        if previous.get("unit") and re.fullmatch(r"tauceti-fleet-prefill-[a-f0-9]{16}\.scope", previous["unit"]):
+        if (
+            isinstance(previous, dict)
+            and previous.get("unit")
+            and re.fullmatch(r"tauceti-fleet-prefill-[a-f0-9]{16}\.scope", previous["unit"])
+        ):
             run(["systemctl", "--user", "stop", previous["unit"]], check=False)
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(mode=0o700)
         unit = "tauceti-fleet-prefill-" + secrets.token_hex(8)
         atomic(staging / "build.json", dict(unit=unit + ".scope", revision=revision))
-        disk = staging / "disk.qcow2"
-        run(
-            [
-                executable("qemu-img"),
-                "create",
-                "-f",
-                "qcow2",
-                "-F",
-                "qcow2",
-                "-b",
-                images / "prepared.qcow2",
-                disk,
-                str(base_info["virtual-size"]),
-            ]
-        )
-        scratch = staging / "scratch.qcow2"
-        run([executable("qemu-img"), "create", "-f", "qcow2", scratch, "100G"])
-        commands = [
-            "trap 'sync; poweroff' EXIT",
-            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y zstd",
-            "curl --fail --location https://github.com/leanprover/elan/releases/download/"
-            + ELAN_VERSION
-            + "/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz; echo "
-            + shlex.quote(ELAN_SHA256 + "  /tmp/elan.tar.gz")
-            + " | sha256sum -c -; tar xzf /tmp/elan.tar.gz -C /tmp elan-init",
-            "mkdir -p /mnt/fleet-prefill-build; mkfs.ext4 -q /dev/disk/by-id/virtio-fleet-prefill-build; "
-            "mount /dev/disk/by-id/virtio-fleet-prefill-build /mnt/fleet-prefill-build; "
-            "mkdir -p /mnt/fleet-prefill-build/toolchains /mnt/fleet-prefill-build/work "
-            "/home/runner/.elan/toolchains /opt/actions-runner/_work; "
-            "mount --bind /mnt/fleet-prefill-build/toolchains /home/runner/.elan/toolchains; "
-            "mount --bind /mnt/fleet-prefill-build/work /opt/actions-runner/_work; "
-            "chown -R runner:runner /home/runner/.elan /opt/actions-runner/_work",
-            "su -s /bin/bash runner -c '/tmp/elan-init -y --default-toolchain none --no-modify-path'; "
-            "rm /tmp/elan.tar.gz /tmp/elan-init",
-            "printf %s " + shlex.quote(script) + " > /opt/prefill-guest.py; chmod 444 /opt/prefill-guest.py",
-            "install -d -o runner -g runner -m 700 /opt/.tauceti-prefill-build /opt/actions-runner/_work",
-            "su -s /bin/bash runner -c "
-            + shlex.quote(
-                "python3 /opt/prefill-guest.py --revision " + revision + " --output /opt/.tauceti-prefill-build/payload"
-            ),
-            "mv /opt/.tauceti-prefill-build/payload /opt/tauceti-dependency-prefill; "
-            "chown -R root:root /opt/tauceti-dependency-prefill; chmod 555 /opt/tauceti-dependency-prefill; "
-            "rm -rf /opt/.tauceti-prefill-build /opt/prefill-guest.py",
-            "umount /opt/actions-runner/_work; umount /home/runner/.elan/toolchains; "
-            "umount /mnt/fleet-prefill-build; rmdir /mnt/fleet-prefill-build; "
-            "rm -rf /home/runner/.elan /opt/actions-runner/_work",
-            "cloud-init clean --logs --seed; rm -f /etc/ssh/ssh_host_*; truncate -s 0 /etc/machine-id; "
-            "fstrim /; echo FLEET_CI_IMAGE_READY; sync; poweroff",
-        ]
-        seed = vm.cloud_seed(staging, commands, name=unit)
-        arguments = vm.qemu_args(
-            config, staging, disk, seed, small=True, shape=dict(vcpus=4, memory_gib=8), discard=True, events=False
-        )
-        # Explicit boot identity matters with the scratch device attached.
-        drive = arguments.index("-drive") + 1
-        arguments[drive] = arguments[drive].replace("if=virtio", "if=none,id=fleet-root")
-        arguments += [
-            "-device",
-            "virtio-blk-pci,drive=fleet-root,bootindex=1",
-            "-drive",
-            f"file={scratch},format=qcow2,if=none,id=scratch,discard=unmap",
-            "-device",
-            "virtio-blk-pci,drive=scratch,serial=fleet-prefill-build",
-        ]
-        # Kill the optional builder before useful CI on host memory exhaustion.
-        adjustment = "import os,sys;p='/proc/self/oom_score_adj';v=int(open(p).read());open(p,'w').write(str(max(v,500)));os.execv(sys.argv[1],sys.argv[1:])"
-        arguments = [
-            "-p",
-            "MemorySwapMax=0",
-            "-p",
-            "RuntimeMaxSec=3600",
-            "-p",
-            "CPUWeight=10",
-            "--",
-            sys.executable,
-            "-c",
-            adjustment,
-            *arguments,
-        ]
-        scope = vm.scope_args(unit, arguments)
-        scope[scope.index("MemoryMax=infinity")] = "MemoryMax=10G"
-        try:
-            result = run(scope, timeout=3600, check=False)
-        finally:
-            run(["systemctl", "--user", "stop", unit + ".scope"], check=False)
-        if not (staging / "console.log").exists():
-            # This scope has no registration or secret-bearing arguments.
-            raise FleetError("Image builder did not start its guest: " + result.stderr[-600:])
-        console = (staging / "console.log").read_text(errors="replace")
-        matches = re.findall(r"FLEET_PREFILL_READY (\{[^\r\n]+\})", console)
-        if result.returncode or "FLEET_CI_IMAGE_READY" not in console or len(matches) != 1:
-            raise FleetError(
-                f"Optional image build failed; previous image remains usable; inspect {staging / 'console.log'}"
+        with discard_build_disks(staging):
+            disk = staging / "disk.qcow2"
+            run(
+                [
+                    executable("qemu-img"),
+                    "create",
+                    "-f",
+                    "qcow2",
+                    "-F",
+                    "qcow2",
+                    "-b",
+                    images / "prepared.qcow2",
+                    disk,
+                    str(base_info["virtual-size"]),
+                ]
             )
-        proof = json.loads(matches[0])
-        payload = proof["manifest"]
-        if (
-            payload["producer_revision"] != revision
-            or payload["config_sha256"] != hashes
-            or proof.get("native_executable_reused") is not True
-        ):
-            raise FleetError("Image did not prove the captured configuration and native executable reuse")
-        replacement = staging / "complete.qcow2"
-        run([executable("qemu-img"), "convert", "-O", "qcow2", disk, replacement], timeout=600)
-        value = publish(
-            replacement, payload, base=base, seconds=time.monotonic() - started, validation=proof, producer=producer
-        )
-        shutil.copyfile(staging / "console.log", root() / (value["sha256"] + ".build.log"))
-        shutil.rmtree(staging)
+            scratch = staging / "scratch.qcow2"
+            run([executable("qemu-img"), "create", "-f", "qcow2", scratch, "48G"])
+            commands = [
+                "trap 'sync; poweroff' EXIT",
+                "export DEBIAN_FRONTEND=noninteractive; command -v zstd >/dev/null || { apt-get update; apt-get install -y zstd; }",
+                "curl --fail --location https://github.com/leanprover/elan/releases/download/"
+                + ELAN_VERSION
+                + "/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz; echo "
+                + shlex.quote(ELAN_SHA256 + "  /tmp/elan.tar.gz")
+                + " | sha256sum -c -; tar xzf /tmp/elan.tar.gz -C /tmp elan-init",
+                "mkdir -p /mnt/fleet-prefill-build; mkfs.ext4 -q /dev/disk/by-id/virtio-fleet-prefill-build; "
+                "mount /dev/disk/by-id/virtio-fleet-prefill-build /mnt/fleet-prefill-build; "
+                "mkdir -p /mnt/fleet-prefill-build/toolchains /mnt/fleet-prefill-build/work "
+                "/home/runner/.elan/toolchains /opt/actions-runner/_work; "
+                "mount --bind /mnt/fleet-prefill-build/toolchains /home/runner/.elan/toolchains; "
+                "mount --bind /mnt/fleet-prefill-build/work /opt/actions-runner/_work; "
+                "chown -R runner:runner /home/runner/.elan /opt/actions-runner/_work",
+                "su -s /bin/bash runner -c '/tmp/elan-init -y --default-toolchain none --no-modify-path'; "
+                "rm /tmp/elan.tar.gz /tmp/elan-init",
+                "printf %s " + shlex.quote(script) + " > /opt/prefill-guest.py; chmod 444 /opt/prefill-guest.py",
+                "install -d -o runner -g runner -m 700 /opt/.tauceti-prefill-build /opt/actions-runner/_work",
+                "su -s /bin/bash runner -c "
+                + shlex.quote(
+                    "python3 /opt/prefill-guest.py --revision "
+                    + revision
+                    + " --output /opt/.tauceti-prefill-build/payload"
+                ),
+                "mv /opt/.tauceti-prefill-build/payload /opt/tauceti-dependency-prefill; "
+                "chown -R root:root /opt/tauceti-dependency-prefill; chmod 555 /opt/tauceti-dependency-prefill; "
+                "rm -rf /opt/.tauceti-prefill-build /opt/prefill-guest.py",
+                "umount /opt/actions-runner/_work; umount /home/runner/.elan/toolchains; "
+                "umount /mnt/fleet-prefill-build; rmdir /mnt/fleet-prefill-build; "
+                "rm -rf /home/runner/.elan /home/runner/.cache /home/runner/.config /opt/actions-runner/_work",
+                "cloud-init clean --logs --seed; rm -f /etc/ssh/ssh_host_*; truncate -s 0 /etc/machine-id; "
+                "fstrim /; echo FLEET_CI_IMAGE_READY; sync; poweroff",
+            ]
+            seed = vm.cloud_seed(staging, commands, name=unit)
+            arguments = vm.qemu_args(
+                config, staging, disk, seed, small=True, shape=dict(vcpus=4, memory_gib=8), discard=True, events=False
+            )
+            # Explicit boot identity matters with the scratch device attached.
+            drive = arguments.index("-drive") + 1
+            arguments[drive] = arguments[drive].replace("if=virtio", "if=none,id=fleet-root")
+            arguments += [
+                "-device",
+                "virtio-blk-pci,drive=fleet-root,bootindex=1",
+                "-drive",
+                f"file={scratch},format=qcow2,if=none,id=scratch,discard=unmap",
+                "-device",
+                "virtio-blk-pci,drive=scratch,serial=fleet-prefill-build",
+            ]
+            # Kill the optional builder before useful CI on host memory exhaustion.
+            adjustment = "import os,sys;p='/proc/self/oom_score_adj';v=int(open(p).read());open(p,'w').write(str(max(v,500)));os.execv(sys.argv[1],sys.argv[1:])"
+            arguments = [
+                "-p",
+                "MemorySwapMax=0",
+                "-p",
+                "RuntimeMaxSec=3600",
+                "-p",
+                "CPUWeight=10",
+                "--",
+                sys.executable,
+                "-c",
+                adjustment,
+                *arguments,
+            ]
+            scope = vm.scope_args(unit, arguments)
+            scope[scope.index("MemoryMax=infinity")] = "MemoryMax=10G"
+            if scope_started is not None:
+                scope_started(unit + ".scope")
+            if cancelled is not None and cancelled.is_set():
+                raise FleetError("Optional construction cancelled before launch")
+            try:
+                result = run(scope, timeout=3600, check=False)
+            finally:
+                run(["systemctl", "--user", "stop", unit + ".scope"], check=False)
+            scratch_allocated = scratch.stat().st_blocks * 512
+            scratch.unlink()
+            if cancelled is not None and cancelled.is_set():
+                raise FleetError("Optional construction cancelled; previous image remains usable")
+            if not (staging / "console.log").exists():
+                # This scope has no registration or secret-bearing arguments.
+                raise FleetError("Image builder did not start its guest: " + result.stderr[-600:])
+            console = (staging / "console.log").read_text(errors="replace")
+            matches = re.findall(r"FLEET_PREFILL_READY (\{[^\r\n]+\})", console)
+            if result.returncode or "FLEET_CI_IMAGE_READY" not in console or len(matches) != 1:
+                raise FleetError(
+                    f"Optional image build failed; previous image remains usable; inspect {staging / 'console.log'}"
+                )
+            proof = json.loads(matches[0])
+            proof["builder_scratch_allocated_bytes"] = scratch_allocated
+            payload = proof["manifest"]
+            if (
+                payload["producer_revision"] != revision
+                or payload["config_sha256"] != hashes
+                or proof.get("native_executable_reused") is not True
+            ):
+                raise FleetError("Image did not prove the captured configuration and native executable reuse")
+            replacement = staging / "complete.qcow2"
+            run([executable("qemu-img"), "convert", "-O", "qcow2", disk, replacement], timeout=600)
+            value = publish(
+                replacement,
+                payload,
+                base=base,
+                seconds=time.monotonic() - started,
+                validation=proof,
+                producer=producer,
+                consumer=consumer,
+            )
+            shutil.copyfile(staging / "console.log", root() / (value["sha256"] + ".build.log"))
+            shutil.rmtree(staging)
     retire_unused()
     return dict(value, reused=False)
 
 
 class Owner:
-    """Refresh enabled prefill in the existing controller's background lane."""
+    """Refresh enabled PR images without blocking the controller or hot retrying."""
 
     def __init__(self):
         self.thread = None
         self.next_refresh = 0.0
+        self.failure_key = None
+        self.failures = 0
+        self.retry_after = 0.0
+        self.cancelled = threading.Event()
+        self.unit = None
 
     def step(self, config, *, now=None):
         now = time.monotonic() if now is None else now
-        if (
-            config.get("ci_prefill_enabled") is not True
-            or not config.get("ci_enabled")
-            or now < self.next_refresh
-            or self.thread is not None
-            and self.thread.is_alive()
-        ):
+        enabled = (
+            config.get("ci_prefill_enabled") is True and config.get("ci_enabled") and config.get("ci_kinds") == ["pr"]
+        )
+        if not enabled:
+            self.cancelled.set()
+            if self.unit is not None and self.thread is not None and self.thread.is_alive():
+                try:
+                    run(["systemctl", "--user", "--no-block", "stop", self.unit], timeout=2, check=False)
+                except (FleetError, OSError):
+                    pass  # RuntimeMaxSec and the next controller tick bound recovery.
+            return
+        if now < self.next_refresh or self.thread is not None and self.thread.is_alive():
             return
         self.next_refresh = now + 900
+        self.cancelled = threading.Event()
 
         def refresh():
+            key = None
             try:
-                prepare(dict(config))
+                trusted = trusted_main()
+                base = read(data_dir() / "images/prepared.json", {})
+                key = (json.dumps(base, sort_keys=True), producer_identity(), json.dumps(trusted[1:], sort_keys=True))
+                if key == self.failure_key and time.monotonic() < self.retry_after:
+                    return
+                prepare(
+                    dict(config),
+                    trusted=trusted,
+                    cancelled=self.cancelled,
+                    scope_started=lambda unit: setattr(self, "unit", unit),
+                )
+                self.failure_key, self.failures, self.retry_after = None, 0, 0.0
             except Exception as error:
-                self.next_refresh = time.monotonic() + 300
+                self.failures = self.failures + 1 if key == self.failure_key else 1
+                self.failure_key = key
+                self.retry_after = time.monotonic() + min(21600, 900 * 2 ** min(self.failures - 1, 5))
                 dependency_prefill.record(
                     "ci_prefill_refresh_deferred", reason=(str(error) or type(error).__name__)[:160]
                 )
+            finally:
+                self.unit = None
 
-        self.thread = threading.Thread(target=refresh, name="ci-prefill-images", daemon=True)
         try:
+            self.thread = threading.Thread(target=refresh, name="ci-prefill-images", daemon=True)
             self.thread.start()
         except (RuntimeError, OSError) as error:
-            self.next_refresh = now + 300
             dependency_prefill.record("ci_prefill_refresh_deferred", reason=(str(error) or type(error).__name__)[:160])
 
 
