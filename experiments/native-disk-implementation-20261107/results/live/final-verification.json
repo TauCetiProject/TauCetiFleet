@@ -1,0 +1,235 @@
+{
+  "at": 1794057758.3768628,
+  "config": {
+    "machine_id": "11e2756fc11042d798f759410573a935",
+    "ci_enabled": true,
+    "workers_enabled": true,
+    "ci_max_jobs": 4,
+    "ci_staging_slots": 0,
+    "ci_native_slot": "next-general",
+    "draining": false
+  },
+  "controller": {
+    "controller_pid": 1781395,
+    "controller_release": "/home/kim/.local/share/tauceti-fleet/releases/d8585dc9633def831c6d9a82b1a77327569c68bf2215617bf90daef206d718ec",
+    "observed_at": 1794057754.599371,
+    "error": null,
+    "ci_errors": {},
+    "ci_staging_reservation_error": null
+  },
+  "current_release": "/home/kim/.local/share/tauceti-fleet/releases/d8585dc9633def831c6d9a82b1a77327569c68bf2215617bf90daef206d718ec",
+  "worker": {
+    "revision": "11d86829246b7c2489e0ab07318296fd35ec6c4f"
+  },
+  "native": {
+    "ci_native_slot": "next-general",
+    "image": {
+      "prepared_at": 1794017257.593218,
+      "revision": 1,
+      "runner_version": "v2.338.2",
+      "sha256": "c58f3a69e9fa41e0d2f62dbbc4f852f0c5997f772c608ed060b0aad23e3ab721",
+      "vm_sha256": "2f469b19af5efa27572e0ade3dc524aeb7fc905d3e06cd43a9fbfe75e8b5e619"
+    },
+    "ready": true,
+    "choice": {
+      "at": 1794057671.905441,
+      "available_bytes": 68361056256,
+      "backend": "native-disk",
+      "reason": null,
+      "selection": "next-general",
+      "slot": 3,
+      "startup_required_bytes": 21474836480
+    },
+    "instances": [
+      {
+        "instance": "66035599b2bc8863",
+        "slot": 0,
+        "unit": "tauceti-fleet-vm-66035599b2bc8863.service",
+        "phase": "ready",
+        "run_id": 42376435956,
+        "memory_bytes": 4495634432,
+        "memory_working_bytes": 653504512,
+        "memory_clean_file_bytes": 3842129920,
+        "unit_inactive": false,
+        "memory_max_gib": 54,
+        "disk_budget_gib": 56,
+        "workspace_storage": "disk",
+        "progress": {
+          "at": 1794057758.274249,
+          "workspace_storage": "disk",
+          "host_disk_available": 1835898843136,
+          "host_disk_available_inodes": 301428509,
+          "phases": null,
+          "disk_allocated": 16473698304,
+          "disk_measured_at": 1794057732.2656283,
+          "disk_measurement_age": 26.008623600006104,
+          "disk_scan_running": false,
+          "disk_scan_error": null,
+          "disk_scan_failures": 0,
+          "disk_budget_bytes": 60129542144
+        }
+      },
+      {
+        "instance": "a8b10fbeb45f27ec",
+        "slot": 1,
+        "unit": "tauceti-fleet-vm-a8b10fbeb45f27ec.service",
+        "phase": "ready",
+        "run_id": 42376473707,
+        "memory_bytes": 8815243264,
+        "memory_working_bytes": 2203602944,
+        "memory_clean_file_bytes": 6611640320,
+        "unit_inactive": false,
+        "memory_max_gib": 54,
+        "disk_budget_gib": 56,
+        "workspace_storage": "disk",
+        "progress": {
+          "at": 1794057757.7971709,
+          "workspace_storage": "disk",
+          "host_disk_available": 1835901124608,
+          "host_disk_available_inodes": 301428500,
+          "phases": null,
+          "disk_allocated": 8519991296,
+          "disk_measured_at": 1794057735.7892122,
+          "disk_measurement_age": 22.007963180541992,
+          "disk_scan_running": false,
+          "disk_scan_error": null,
+          "disk_scan_failures": 0,
+          "disk_budget_bytes": 60129542144
+        }
+      },
+      {
+        "instance": "eea14cc687db6b5d",
+        "slot": 2,
+        "unit": "tauceti-fleet-vm-eea14cc687db6b5d.service",
+        "phase": "ready",
+        "run_id": 42376010233,
+        "memory_bytes": 8735137792,
+        "memory_working_bytes": 1666056192,
+        "memory_clean_file_bytes": 7069081600,
+        "unit_inactive": false,
+        "memory_max_gib": 54,
+        "disk_budget_gib": 56,
+        "workspace_storage": "disk",
+        "progress": {
+          "at": 1794057758.294928,
+          "workspace_storage": "disk",
+          "host_disk_available": 1835896410112,
+          "host_disk_available_inodes": 301428502,
+          "phases": "build\t1794057498.176634371\naudit-setup\t1794057741.702451907\naudit-import\t1794057744.008274751\n",
+          "disk_allocated": 34851827712,
+          "disk_measured_at": 1794057706.274052,
+          "disk_measurement_age": 52.02088189125061,
+          "disk_scan_running": false,
+          "disk_scan_error": null,
+          "disk_scan_failures": 0,
+          "disk_budget_bytes": 60129542144
+        }
+      },
+      {
+        "instance": "43d8275f2d078c7c",
+        "slot": 3,
+        "unit": "tauceti-fleet-vm-43d8275f2d078c7c.service",
+        "phase": "ready",
+        "run_id": 42376591798,
+        "memory_bytes": 1887686656,
+        "memory_working_bytes": 507187200,
+        "memory_clean_file_bytes": 1380499456,
+        "unit_inactive": false,
+        "memory_max_gib": 54,
+        "disk_budget_gib": 56,
+        "workspace_storage": "disk",
+        "progress": {
+          "at": 1794057757.269167,
+          "workspace_storage": "disk",
+          "host_disk_available": 1835908632576,
+          "host_disk_available_inodes": 301428496,
+          "phases": null,
+          "disk_allocated": 4507332608,
+          "disk_measured_at": 1794057739.263946,
+          "disk_measurement_age": 18.00522541999817,
+          "disk_scan_running": false,
+          "disk_scan_error": null,
+          "disk_scan_failures": 0,
+          "disk_budget_bytes": 60129542144
+        }
+      }
+    ]
+  },
+  "validated_cleanup": [
+    {
+      "instance": "8f6e4f00e4be0ce6",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    },
+    {
+      "instance": "9c5b517ec76b1b4a",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    },
+    {
+      "instance": "cd33b62eba94a4ab",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    },
+    {
+      "instance": "83d361a3cb468fc6",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    },
+    {
+      "instance": "90052fd244446e06",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    },
+    {
+      "instance": "6281469762e4e3db",
+      "MainPID": "0",
+      "ControlGroup": "",
+      "root_removed": true,
+      "ownership_released": true,
+      "archived": true
+    }
+  ],
+  "pending_other_instances": [],
+  "disk_free": 1835896369152,
+  "critical_source_hashes": {
+    "native_runner.py": "0592369a1b142b43a646f96b4751cbe5b3dbb44520477495ec34366f361a31ea",
+    "native_inside.py": "8c28301776a2003615fd1612c74362ce81ad6ffd58a4fc85101effdea096bdd9",
+    "capabilities.py": "9b858a0919ce0bee3edf5a26ff9c1f7d0dfde63e48a57548b265d3600dd20a17",
+    "ci_autoscale.py": "e52a1ef9e2f426a130e912dae90146c22346e4ecd9d3201ade3534b41756811c",
+    "lean_pressure.py": "2980e9822f63115c6a45223d50d15500e5a1d4eb0eb259de8986bcada6c306c1",
+    "lean_guest.py": "ffc34a1a2d8bb1d82af9441d188b13479b877e01684cc74bedd750bd67dd3b68",
+    "lean_runtime.py": "7ad1c6afdde9923ab58aab1a0a527a84026ebce57aa14ed519f7688866521cf3"
+  },
+  "local_archive_sha256": "d8585dc9633def831c6d9a82b1a77327569c68bf2215617bf90daef206d718ec",
+  "operator": {
+    "target": 4,
+    "pending": null,
+    "error": null,
+    "last_recovery": {
+      "at": 1794053276.9299161,
+      "run_id": 42368117729
+    },
+    "last_decision": {
+      "at": 1794057752.4999228,
+      "kind": "hold",
+      "reason": "no observed Lean waiters; monitoring CI capacity"
+    },
+    "unit_verification": "ActiveState=active\nMainPID=1132151\nExecStart={ path=/run/current-system/sw/bin/python ; argv[]=/run/current-system/sw/bin/python -m tauceti_fleet.ci_autoscale --host tauchonki --machine-id 11e2756fc11042d798f759410573a935 --minimum 4 --maximum 4 --github-account kim-em ; ignore_errors=no ; start_time=[Sat 2026-11-07 12:00:39 UTC] ; stop_time=[n/a] ; pid=1132151 ; code=(null) ; status=0/0 }\nEnvironment=PYTHONPATH=/home/kim/.local/share/tauceti-fleet/autoscale-runtimes/dc59297f8295fb80 PATH=/home/kim/.claude-patched:/home/kim/.local/bin:/home/kim/bin:/home/kim/.npm-global/bin:/run/wrappers/bin:/home/kim/.nix-profile/bin:/nix/profile/bin:/home/kim/.local/state/nix/profile/bin:/etc/profiles/per-user/kim/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin\n"
+  }
+}

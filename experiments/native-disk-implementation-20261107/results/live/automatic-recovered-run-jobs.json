@@ -1,0 +1,125 @@
+{
+  "total_count": 2,
+  "jobs": [
+    {
+      "id": 128399198542,
+      "run_id": 42368117729,
+      "workflow_name": "pr-build pr=30493 head=7b68b8ab250cc8b4d2c5679113d7f095901833b1",
+      "head_branch": "redteam/rt-20261106-old389a-s389",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42368117729",
+      "run_attempt": 2,
+      "node_id": "CR_kwDOSup8rs8AAAAd5TBJTg",
+      "head_sha": "7b68b8ab250cc8b4d2c5679113d7f095901833b1",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128399198542",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42368117729/job/128399198542",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-07T12:07:42Z",
+      "started_at": "2026-11-07T12:08:02Z",
+      "completed_at": "2026-11-07T12:08:10Z",
+      "name": "pick-runner / pick",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-07T12:08:03Z",
+          "completed_at": "2026-11-07T12:08:04Z"
+        },
+        {
+          "name": "Set up runner",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-07T12:08:04Z",
+          "completed_at": "2026-11-07T12:08:04Z"
+        },
+        {
+          "name": "Checkout workflow-pinned runner selector",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-07T12:08:04Z",
+          "completed_at": "2026-11-07T12:08:05Z"
+        },
+        {
+          "name": "Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-07T12:08:05Z",
+          "completed_at": "2026-11-07T12:08:06Z"
+        },
+        {
+          "name": "Select destination in configured preference order",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-07T12:08:06Z",
+          "completed_at": "2026-11-07T12:08:08Z"
+        },
+        {
+          "name": "Post Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-07T12:08:08Z",
+          "completed_at": "2026-11-07T12:08:08Z"
+        },
+        {
+          "name": "Post Checkout workflow-pinned runner selector",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-07T12:08:08Z",
+          "completed_at": "2026-11-07T12:08:08Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-07T12:08:08Z",
+          "completed_at": "2026-11-07T12:08:08Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128399198542",
+      "labels": [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+        "namespace-features:github.run-id=42368117729"
+      ],
+      "runner_id": 167751,
+      "runner_name": "nsc-runner-kofv5mqkick2s",
+      "runner_group_id": 1,
+      "runner_group_name": "Default"
+    },
+    {
+      "id": 128399301476,
+      "run_id": 42368117729,
+      "workflow_name": "pr-build pr=30493 head=7b68b8ab250cc8b4d2c5679113d7f095901833b1",
+      "head_branch": "redteam/rt-20261106-old389a-s389",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42368117729",
+      "run_attempt": 2,
+      "node_id": "CR_kwDOSup8rs8AAAAd5THbZA",
+      "head_sha": "7b68b8ab250cc8b4d2c5679113d7f095901833b1",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128399301476",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42368117729/job/128399301476",
+      "status": "queued",
+      "conclusion": null,
+      "created_at": "2026-11-07T12:08:10Z",
+      "started_at": "2026-11-07T12:08:10Z",
+      "completed_at": null,
+      "name": "sandboxed-build",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128399301476",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 0,
+      "runner_name": "",
+      "runner_group_id": 0,
+      "runner_group_name": ""
+    }
+  ]
+}

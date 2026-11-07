@@ -1,0 +1,680 @@
+{
+  "total_count": 4,
+  "jobs": [
+    {
+      "id": 128409717642,
+      "run_id": 42374671959,
+      "workflow_name": "pr-build pr=29854 head=bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "head_branch": "roadmap/stalk-codim-one-tauceti-codex-6",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42374671959",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOSup8rs8AAAAd5dDLig",
+      "head_sha": "bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128409717642",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959/job/128409717642",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-07T12:56:27Z",
+      "started_at": "2026-11-07T12:56:42Z",
+      "completed_at": "2026-11-07T12:56:50Z",
+      "name": "pick-runner / pick",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-07T12:56:43Z",
+          "completed_at": "2026-11-07T12:56:44Z"
+        },
+        {
+          "name": "Set up runner",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-07T12:56:44Z",
+          "completed_at": "2026-11-07T12:56:45Z"
+        },
+        {
+          "name": "Checkout workflow-pinned runner selector",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-07T12:56:45Z",
+          "completed_at": "2026-11-07T12:56:46Z"
+        },
+        {
+          "name": "Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-07T12:56:46Z",
+          "completed_at": "2026-11-07T12:56:47Z"
+        },
+        {
+          "name": "Select destination in configured preference order",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-07T12:56:47Z",
+          "completed_at": "2026-11-07T12:56:47Z"
+        },
+        {
+          "name": "Post Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-07T12:56:47Z",
+          "completed_at": "2026-11-07T12:56:47Z"
+        },
+        {
+          "name": "Post Checkout workflow-pinned runner selector",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-07T12:56:47Z",
+          "completed_at": "2026-11-07T12:56:47Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-07T12:56:47Z",
+          "completed_at": "2026-11-07T12:56:47Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128409717642",
+      "labels": [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+        "namespace-features:github.run-id=42374671959"
+      ],
+      "runner_id": 168292,
+      "runner_name": "nsc-runner-s6la52tl8drh8",
+      "runner_group_id": 1,
+      "runner_group_name": "Default"
+    },
+    {
+      "id": 128409795998,
+      "run_id": 42374671959,
+      "workflow_name": "pr-build pr=29854 head=bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "head_branch": "roadmap/stalk-codim-one-tauceti-codex-6",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42374671959",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOSup8rs8AAAAd5dH9ng",
+      "head_sha": "bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128409795998",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959/job/128409795998",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-07T12:56:50Z",
+      "started_at": "2026-11-07T12:56:53Z",
+      "completed_at": "2026-11-07T13:11:48Z",
+      "name": "sandboxed-build",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-07T12:56:54Z",
+          "completed_at": "2026-11-07T12:56:57Z"
+        },
+        {
+          "name": "Set up runner",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-07T12:56:57Z",
+          "completed_at": "2026-11-07T12:56:57Z"
+        },
+        {
+          "name": "Raise vm.max_map_count",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-07T12:56:57Z",
+          "completed_at": "2026-11-07T12:56:57Z"
+        },
+        {
+          "name": "Checkout workflow-pinned trusted build tooling",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-07T12:56:57Z",
+          "completed_at": "2026-11-07T12:56:58Z"
+        },
+        {
+          "name": "Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-07T12:56:58Z",
+          "completed_at": "2026-11-07T12:56:59Z"
+        },
+        {
+          "name": "Select CI API credentials",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-07T12:56:59Z",
+          "completed_at": "2026-11-07T12:57:01Z"
+        },
+        {
+          "name": "Resolve PR head",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-07T12:57:01Z",
+          "completed_at": "2026-11-07T12:57:02Z"
+        },
+        {
+          "name": "Fetch complete immutable source histories",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-07T12:57:02Z",
+          "completed_at": "2026-11-07T12:57:13Z"
+        },
+        {
+          "name": "Checkout the exact candidate head (untrusted contents, no credentials)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-07T12:57:13Z",
+          "completed_at": "2026-11-07T12:57:15Z"
+        },
+        {
+          "name": "Scope guard \u2014 allow TauCeti sources and validated pins",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-07T12:57:15Z",
+          "completed_at": "2026-11-07T12:57:15Z"
+        },
+        {
+          "name": "Diff size guard \u2014 additions, deletions, and changed files each \u2264 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-07T12:57:15Z",
+          "completed_at": "2026-11-07T12:57:16Z"
+        },
+        {
+          "name": "New-file length guard \u2014 newly added .lean files must be \u2264 1000 lines",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-11-07T12:57:16Z",
+          "completed_at": "2026-11-07T12:57:16Z"
+        },
+        {
+          "name": "Checkout current base policy input (trusted)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-07T12:57:16Z",
+          "completed_at": "2026-11-07T12:57:18Z"
+        },
+        {
+          "name": "Checkout the PR merge base (trusted historical configuration)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-11-07T12:57:18Z",
+          "completed_at": "2026-11-07T12:57:20Z"
+        },
+        {
+          "name": "Normalise the candidate's .lake before anything touches it",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-11-07T12:57:20Z",
+          "completed_at": "2026-11-07T12:57:20Z"
+        },
+        {
+          "name": "Attest exact-head Lake configuration before executing Lake",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-11-07T12:57:20Z",
+          "completed_at": "2026-11-07T12:57:20Z"
+        },
+        {
+          "name": "Validate the Lake-pin bump before building",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 17,
+          "started_at": "2026-11-07T12:57:20Z",
+          "completed_at": "2026-11-07T12:57:20Z"
+        },
+        {
+          "name": "Prepare and record the tested integration (frozen batches unchanged)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-07T12:57:20Z",
+          "completed_at": "2026-11-07T12:57:22Z"
+        },
+        {
+          "name": "Attest integrated Lake configuration before executing Lake",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-11-07T12:57:22Z",
+          "completed_at": "2026-11-07T12:57:22Z"
+        },
+        {
+          "name": "Candidate source shape guard (reject symlinks)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-11-07T12:57:22Z",
+          "completed_at": "2026-11-07T12:57:22Z"
+        },
+        {
+          "name": "Prepare inherited Mathlib shim obligations",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-11-07T12:57:22Z",
+          "completed_at": "2026-11-07T12:57:23Z"
+        },
+        {
+          "name": "Import-boundary guard (TauCeti/ and TauCeti.lean \u22ac roadmap/review)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-11-07T12:57:23Z",
+          "completed_at": "2026-11-07T12:57:23Z"
+        },
+        {
+          "name": "Reject option overrides and metaprogramming (allow local macros)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 23,
+          "started_at": "2026-11-07T12:57:23Z",
+          "completed_at": "2026-11-07T12:57:27Z"
+        },
+        {
+          "name": "Temporary Mathlib shims have machine-checkable expiry targets",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 24,
+          "started_at": "2026-11-07T12:57:27Z",
+          "completed_at": "2026-11-07T12:57:49Z"
+        },
+        {
+          "name": "Install elan (trusted, pinned + checksum)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-11-07T12:57:49Z",
+          "completed_at": "2026-11-07T12:57:49Z"
+        },
+        {
+          "name": "Restore or install the exact official Lean toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-11-07T12:57:49Z",
+          "completed_at": "2026-11-07T12:57:57Z"
+        },
+        {
+          "name": "Preflight exact-candidate import headers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-11-07T12:57:57Z",
+          "completed_at": "2026-11-07T12:58:08Z"
+        },
+        {
+          "name": "Install bubblewrap (pinned + checksum) and self-test (fail closed)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-11-07T12:58:08Z",
+          "completed_at": "2026-11-07T12:58:09Z"
+        },
+        {
+          "name": "Hydrate optional trusted local dependency prefill",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-11-07T12:58:09Z",
+          "completed_at": "2026-11-07T12:58:09Z"
+        },
+        {
+          "name": "Restore Mathlib's compressed download cache from main",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 30,
+          "started_at": "2026-11-07T12:58:09Z",
+          "completed_at": "2026-11-07T12:58:19Z"
+        },
+        {
+          "name": "Fetch Mathlib with the (bump-validated) config (network, no token; no PR code)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31,
+          "started_at": "2026-11-07T12:58:19Z",
+          "completed_at": "2026-11-07T12:59:21Z"
+        },
+        {
+          "name": "Require a complete Mathlib cache for a bump",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 32,
+          "started_at": "2026-11-07T12:59:21Z",
+          "completed_at": "2026-11-07T12:59:21Z"
+        },
+        {
+          "name": "Decide the environment-lint scope",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33,
+          "started_at": "2026-11-07T12:59:21Z",
+          "completed_at": "2026-11-07T12:59:22Z"
+        },
+        {
+          "name": "Decide the audit scope",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 34,
+          "started_at": "2026-11-07T12:59:22Z",
+          "completed_at": "2026-11-07T12:59:22Z"
+        },
+        {
+          "name": "Restore dot-notation parsing context",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 35,
+          "started_at": "2026-11-07T12:59:22Z",
+          "completed_at": "2026-11-07T12:59:23Z"
+        },
+        {
+          "name": "Dot-notation namespace lint (Mathlib type namespaces stay at root)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 36,
+          "started_at": "2026-11-07T12:59:23Z",
+          "completed_at": "2026-11-07T12:59:36Z"
+        },
+        {
+          "name": "Configure the Lake artifact cache (no-op unless the public endpoints are set)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 37,
+          "started_at": "2026-11-07T12:59:36Z",
+          "completed_at": "2026-11-07T12:59:36Z"
+        },
+        {
+          "name": "Fetch TauCeti's own oleans from the Lake cache (network, no token; no PR code)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 38,
+          "started_at": "2026-11-07T12:59:36Z",
+          "completed_at": "2026-11-07T13:00:07Z"
+        },
+        {
+          "name": "Fetch the repair worker's outputs for the staging candidates (network, no token; no PR code)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 39,
+          "started_at": "2026-11-07T13:00:07Z",
+          "completed_at": "2026-11-07T13:00:07Z"
+        },
+        {
+          "name": "Save verified Lake archive records before candidate code runs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 40,
+          "started_at": "2026-11-07T13:00:07Z",
+          "completed_at": "2026-11-07T13:00:07Z"
+        },
+        {
+          "name": "Prepare trusted read-only Lean watchdog toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 41,
+          "started_at": "2026-11-07T13:00:07Z",
+          "completed_at": "2026-11-07T13:00:07Z"
+        },
+        {
+          "name": "Build the trusted environment-lint driver (before any candidate code runs)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 42,
+          "started_at": "2026-11-07T13:00:07Z",
+          "completed_at": "2026-11-07T13:00:21Z"
+        },
+        {
+          "name": "Build exact candidate under bwrap with workflow-pinned audits, offline",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 43,
+          "started_at": "2026-11-07T13:00:21Z",
+          "completed_at": "2026-11-07T13:11:07Z"
+        },
+        {
+          "name": "Prepare merge-group cache artifact metadata",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 44,
+          "started_at": "2026-11-07T13:11:07Z",
+          "completed_at": "2026-11-07T13:11:07Z"
+        },
+        {
+          "name": "Hand the merge-group oleans to the isolated publisher",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 45,
+          "started_at": "2026-11-07T13:11:07Z",
+          "completed_at": "2026-11-07T13:11:07Z"
+        },
+        {
+          "name": "Migrate shims whose exact replacements exist in pinned Mathlib",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 46,
+          "started_at": "2026-11-07T13:11:07Z",
+          "completed_at": "2026-11-07T13:11:31Z"
+        },
+        {
+          "name": "Refresh CI reporting credentials after the build",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 47,
+          "started_at": "2026-11-07T13:11:31Z",
+          "completed_at": "2026-11-07T13:11:32Z"
+        },
+        {
+          "name": "Report build and bump-guard statuses to the PR head commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 48,
+          "started_at": "2026-11-07T13:11:32Z",
+          "completed_at": "2026-11-07T13:11:40Z"
+        },
+        {
+          "name": "Upload trusted tested H B T identity",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 49,
+          "started_at": "2026-11-07T13:11:40Z",
+          "completed_at": "2026-11-07T13:11:41Z"
+        },
+        {
+          "name": "Upload trusted host resource observations (statistics only)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 50,
+          "started_at": "2026-11-07T13:11:41Z",
+          "completed_at": "2026-11-07T13:11:42Z"
+        },
+        {
+          "name": "Summarise CI telemetry (statistics only)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 51,
+          "started_at": "2026-11-07T13:11:42Z",
+          "completed_at": "2026-11-07T13:11:42Z"
+        },
+        {
+          "name": "Upload CI telemetry",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 52,
+          "started_at": "2026-11-07T13:11:42Z",
+          "completed_at": "2026-11-07T13:11:43Z"
+        },
+        {
+          "name": "Prepare raw failure logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 53,
+          "started_at": "2026-11-07T13:11:43Z",
+          "completed_at": "2026-11-07T13:11:43Z"
+        },
+        {
+          "name": "Upload raw failure logs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 54,
+          "started_at": "2026-11-07T13:11:43Z",
+          "completed_at": "2026-11-07T13:11:43Z"
+        },
+        {
+          "name": "Retain unpublished CI statuses",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 55,
+          "started_at": "2026-11-07T13:11:43Z",
+          "completed_at": "2026-11-07T13:11:43Z"
+        },
+        {
+          "name": "GitHub API quota unavailable",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 56,
+          "started_at": "2026-11-07T13:11:43Z",
+          "completed_at": "2026-11-07T13:11:43Z"
+        },
+        {
+          "name": "Post Refresh CI reporting credentials after the build",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 108,
+          "started_at": "2026-11-07T13:11:43Z",
+          "completed_at": "2026-11-07T13:11:44Z"
+        },
+        {
+          "name": "Post Select CI API credentials",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 109,
+          "started_at": "2026-11-07T13:11:44Z",
+          "completed_at": "2026-11-07T13:11:45Z"
+        },
+        {
+          "name": "Post Prepare pinned shared tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 110,
+          "started_at": "2026-11-07T13:11:45Z",
+          "completed_at": "2026-11-07T13:11:45Z"
+        },
+        {
+          "name": "Post Checkout workflow-pinned trusted build tooling",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 111,
+          "started_at": "2026-11-07T13:11:45Z",
+          "completed_at": "2026-11-07T13:11:46Z"
+        },
+        {
+          "name": "Complete runner",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 112,
+          "started_at": "2026-11-07T13:11:46Z",
+          "completed_at": "2026-11-07T13:11:46Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 113,
+          "started_at": "2026-11-07T13:11:46Z",
+          "completed_at": "2026-11-07T13:11:46Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128409795998",
+      "labels": [
+        "fleet-11e2756fc11042d798f759410573a935",
+        "fleet-instance-83d361a3cb468fc6",
+        "linux",
+        "self-hosted",
+        "tauceti-fleet-pr",
+        "x64"
+      ],
+      "runner_id": 126107,
+      "runner_name": "fleet-11e2756fc110-83d361a3cb468fc6",
+      "runner_group_id": 3,
+      "runner_group_name": "taucetifleet"
+    },
+    {
+      "id": 128413135504,
+      "run_id": 42374671959,
+      "workflow_name": "pr-build pr=29854 head=bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "head_branch": "roadmap/stalk-codim-one-tauceti-codex-6",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42374671959",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOSup8rs8AAAAd5gTykA",
+      "head_sha": "bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128413135504",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959/job/128413135504",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-07T13:11:48Z",
+      "started_at": "2026-11-07T13:11:48Z",
+      "completed_at": "2026-11-07T13:11:48Z",
+      "name": "finalize-merge-group-build",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128413135504",
+      "labels": [
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+        "namespace-features:github.run-id=42374671959"
+      ],
+      "runner_id": null,
+      "runner_name": null,
+      "runner_group_id": null,
+      "runner_group_name": null
+    },
+    {
+      "id": 128413135968,
+      "run_id": 42374671959,
+      "workflow_name": "pr-build pr=29854 head=bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "head_branch": "roadmap/stalk-codim-one-tauceti-codex-6",
+      "run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/42374671959",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOSup8rs8AAAAd5gT0YA",
+      "head_sha": "bf5c805c607a4dac58550af4ea176b36b83ddc2a",
+      "url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/128413135968",
+      "html_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959/job/128413135968",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-07T13:11:48Z",
+      "started_at": "2026-11-07T13:11:48Z",
+      "completed_at": "2026-11-07T13:11:48Z",
+      "name": "publish-merge-group-cache",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/TauCetiProject/TauCeti/check-runs/128413135968",
+      "labels": [],
+      "runner_id": null,
+      "runner_name": null,
+      "runner_group_id": null,
+      "runner_group_name": null
+    }
+  ]
+}

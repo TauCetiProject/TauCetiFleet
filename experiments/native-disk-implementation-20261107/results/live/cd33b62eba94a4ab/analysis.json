@@ -1,0 +1,48 @@
+{
+  "unit_seconds": 483.14111709594727,
+  "computational_seconds": 158.0486581325531,
+  "setup_to_build_seconds": 284.8612310886383,
+  "exact_unit_peak_gib": 20.01593780517578,
+  "body_mean": {
+    "sampled_seconds": 158.0486581325531,
+    "charged_gib": 15.598346419784272,
+    "adjusted_gib": 1.6378445144521374,
+    "anon_gib": 0.4566852914350446,
+    "shmem_gib": 0.04856952338270964,
+    "file_dirty_gib": 0.025231611269396336,
+    "file_writeback_gib": 1.008093787394426e-05,
+    "kernel_gib": 1.097643620037233
+  },
+  "sampled_body_adjusted_peak_gib": 2.3971519470214844,
+  "sampled_shmem_peak_gib": 0.04903411865234375,
+  "body_sampled_cpu_seconds": 259.282152,
+  "body_sampled_md_read_gib": 53.99955368041992,
+  "body_sampled_md_write_gib": 1.0669784545898438,
+  "rebuilt_tauceti_modules": 1,
+  "phase_seconds": {
+    "build": 26.209694385528564,
+    "audit-setup": 2.889676570892334,
+    "audit-import": 63.9254469871521,
+    "audit-duplicates": 11.389931201934814,
+    "audit-axioms": 16.43177080154419,
+    "audit-module-system": 6.192658185958862,
+    "lint-env": 10.812504529953003,
+    "lint-style": 16.91314697265625,
+    "declaration-names": 3.2838284969329834
+  },
+  "sampled_disk_peak_gib": 31.649539947509766,
+  "disk_measurement_intervals": [
+    60.01832938194275,
+    60.02917170524597,
+    60.10591149330139,
+    62.02224135398865,
+    62.0269775390625,
+    60.023463010787964,
+    60.02674174308777
+  ],
+  "disk_scan_failures_max": 0,
+  "compiler_wait_seconds": 18.397532000148203,
+  "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 10\n",
+  "exit_code": 0,
+  "infrastructure_error": {}
+}

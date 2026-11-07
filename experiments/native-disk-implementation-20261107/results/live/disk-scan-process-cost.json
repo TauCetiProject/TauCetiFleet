@@ -1,0 +1,86 @@
+{
+  "ended_at": 1794057292.5341394,
+  "observed_seconds": 180.0300336010405,
+  "maximum_poll_gap_seconds": 0.11209869297454134,
+  "clock_ticks_per_second": 100,
+  "method": "Existing du processes only; 100ms recursive cgroup/proc sampling. CPU is a lower bound; allow maximum poll gap plus two ticks for each captured process. A scan entirely between polls may be missed. No extra scan was launched.",
+  "processes": [
+    {
+      "instance": "6281469762e4e3db",
+      "pid": 2784013,
+      "first_at": 1794057131.8176732,
+      "last_at": 1794057132.617826,
+      "cpu_seconds": 0.8
+    },
+    {
+      "instance": "90052fd244446e06",
+      "pid": 2784014,
+      "first_at": 1794057132.532373,
+      "last_at": 1794057133.6182568,
+      "cpu_seconds": 1.07
+    },
+    {
+      "instance": "3a890bf9ab05f1fa",
+      "pid": 2827467,
+      "first_at": 1794057154.645811,
+      "last_at": 1794057154.7458646,
+      "cpu_seconds": 0.12
+    },
+    {
+      "instance": "6281469762e4e3db",
+      "pid": 2830352,
+      "first_at": 1794057191.8730922,
+      "last_at": 1794057193.2747674,
+      "cpu_seconds": 1.46
+    },
+    {
+      "instance": "90052fd244446e06",
+      "pid": 2830451,
+      "first_at": 1794057192.5963457,
+      "last_at": 1794057194.9757154,
+      "cpu_seconds": 2.43
+    },
+    {
+      "instance": "3a890bf9ab05f1fa",
+      "pid": 2835491,
+      "first_at": 1794057214.6945863,
+      "last_at": 1794057214.9951189,
+      "cpu_seconds": 0.35
+    },
+    {
+      "instance": "eea14cc687db6b5d",
+      "pid": 2836430,
+      "first_at": 1794057220.1003537,
+      "last_at": 1794057220.3008115,
+      "cpu_seconds": 0.19
+    },
+    {
+      "instance": "6281469762e4e3db",
+      "pid": 2840990,
+      "first_at": 1794057251.869971,
+      "last_at": 1794057254.3787668,
+      "cpu_seconds": 2.46
+    },
+    {
+      "instance": "90052fd244446e06",
+      "pid": 2841080,
+      "first_at": 1794057252.5735667,
+      "last_at": 1794057256.882558,
+      "cpu_seconds": 4.2
+    },
+    {
+      "instance": "3a890bf9ab05f1fa",
+      "pid": 2843979,
+      "first_at": 1794057274.7206752,
+      "last_at": 1794057275.822274,
+      "cpu_seconds": 1.12
+    },
+    {
+      "instance": "eea14cc687db6b5d",
+      "pid": 2844518,
+      "first_at": 1794057280.125149,
+      "last_at": 1794057280.4255836,
+      "cpu_seconds": 0.3
+    }
+  ]
+}

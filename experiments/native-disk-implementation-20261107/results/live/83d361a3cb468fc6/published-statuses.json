@@ -1,0 +1,26 @@
+[
+  {
+    "context": "scope",
+    "state": "success",
+    "description": "changes are in scope (TauCeti/, the allowed root files, and the bibliography only)",
+    "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959",
+    "created_at": "2026-11-07T13:11:39Z",
+    "updated_at": "2026-11-07T13:11:39Z"
+  },
+  {
+    "context": "bump-guard",
+    "state": "success",
+    "description": "validated forward Lake pin bump (or no pin change)",
+    "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959",
+    "created_at": "2026-11-07T13:11:37Z",
+    "updated_at": "2026-11-07T13:11:37Z"
+  },
+  {
+    "context": "build",
+    "state": "success",
+    "description": "integration B=d7b47803c4bd T=3aa72e4fb85d passed sandboxed build and audits",
+    "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42374671959",
+    "created_at": "2026-11-07T13:11:35Z",
+    "updated_at": "2026-11-07T13:11:35Z"
+  }
+]

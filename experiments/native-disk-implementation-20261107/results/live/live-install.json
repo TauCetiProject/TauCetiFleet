@@ -1,0 +1,9 @@
+{
+  "installed": true,
+  "release": "dc59297f8295fb80a282d87db8db851699a49477cdbbd9210061dee4121c59fe",
+  "controller_release": "/home/kim/.local/share/tauceti-fleet/releases/dc59297f8295fb80a282d87db8db851699a49477cdbbd9210061dee4121c59fe",
+  "worker_revision": "11d86829246b7c2489e0ab07318296fd35ec6c4f",
+  "active_processes_preserved": true,
+  "worker_runtime_scope": "future manager starts; running managers and workers retain their existing runtime",
+  "image": "preserved"
+}

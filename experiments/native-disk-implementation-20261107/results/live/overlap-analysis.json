@@ -1,0 +1,67 @@
+[
+  {
+    "instances": [
+      "6281469762e4e3db",
+      "83d361a3cb468fc6"
+    ],
+    "unit_overlap_seconds": 42.101181507110596,
+    "computational_overlap_seconds": 0,
+    "computational_overlap_sampled_seconds": 0,
+    "computational_overlap_sampled_cpu_seconds": null,
+    "sampled_combined_raw_peak_gib": 21.282241821289062,
+    "sampled_combined_adjusted_peak_gib": 1.6482162475585938,
+    "sampled_host_available_min_gib": 46.56721496582031
+  },
+  {
+    "instances": [
+      "6281469762e4e3db",
+      "90052fd244446e06"
+    ],
+    "unit_overlap_seconds": 375.7124590873718,
+    "computational_overlap_seconds": 41.006693840026855,
+    "computational_overlap_sampled_seconds": 35.046987771987915,
+    "computational_overlap_sampled_cpu_seconds": 155.81962,
+    "sampled_combined_raw_peak_gib": 38.82006072998047,
+    "sampled_combined_adjusted_peak_gib": 6.463218688964844,
+    "sampled_host_available_min_gib": 44.246429443359375
+  },
+  {
+    "instances": [
+      "83d361a3cb468fc6",
+      "90052fd244446e06"
+    ],
+    "unit_overlap_seconds": 103.93571162223816,
+    "computational_overlap_seconds": 0,
+    "computational_overlap_sampled_seconds": 0,
+    "computational_overlap_sampled_cpu_seconds": null,
+    "sampled_combined_raw_peak_gib": 23.88040542602539,
+    "sampled_combined_adjusted_peak_gib": 3.550861358642578,
+    "sampled_host_available_min_gib": 46.56721496582031
+  },
+  {
+    "instances": [
+      "83d361a3cb468fc6",
+      "cd33b62eba94a4ab"
+    ],
+    "unit_overlap_seconds": 36.703152894973755,
+    "computational_overlap_seconds": 0,
+    "computational_overlap_sampled_seconds": 0,
+    "computational_overlap_sampled_cpu_seconds": null,
+    "sampled_combined_raw_peak_gib": 15.02077865600586,
+    "sampled_combined_adjusted_peak_gib": 1.8705673217773438,
+    "sampled_host_available_min_gib": 47.92922592163086
+  },
+  {
+    "instances": [
+      "9c5b517ec76b1b4a",
+      "cd33b62eba94a4ab"
+    ],
+    "unit_overlap_seconds": 128.85414242744446,
+    "computational_overlap_seconds": 0,
+    "computational_overlap_sampled_seconds": 0,
+    "computational_overlap_sampled_cpu_seconds": null,
+    "sampled_combined_raw_peak_gib": 19.265331268310547,
+    "sampled_combined_adjusted_peak_gib": 2.6072425842285156,
+    "sampled_host_available_min_gib": 24.260982513427734
+  }
+]

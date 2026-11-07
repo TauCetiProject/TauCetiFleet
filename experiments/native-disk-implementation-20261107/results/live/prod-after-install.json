@@ -1,0 +1,58 @@
+{
+  "config": {
+    "machine_id": "11e2756fc11042d798f759410573a935",
+    "ci_enabled": true,
+    "workers_enabled": true,
+    "ci_max_jobs": 4,
+    "ci_native_slot": null,
+    "draining": false
+  },
+  "controller": {
+    "controller_release": "/home/kim/.local/share/tauceti-fleet/releases/dc59297f8295fb80a282d87db8db851699a49477cdbbd9210061dee4121c59fe",
+    "controller_pid": 1781395,
+    "slot_errors": null,
+    "error": null
+  },
+  "instances": [
+    {
+      "slot": 0,
+      "instance": "7b15016821b1a47b",
+      "runtime": null,
+      "run_id": 42368117729,
+      "runner_id": 125938,
+      "started_at": 1794050628.9209774,
+      "job_started_at": 1794050761.895097,
+      "busy": true
+    },
+    {
+      "slot": 1,
+      "instance": "cadc7aeb654d8d14",
+      "runtime": null,
+      "run_id": 42367495495,
+      "runner_id": 125921,
+      "started_at": 1794050164.697683,
+      "job_started_at": 1794050230.9677734,
+      "busy": true
+    },
+    {
+      "slot": 2,
+      "instance": "62a1f126c834d844",
+      "runtime": null,
+      "run_id": 42367819020,
+      "runner_id": 125928,
+      "started_at": 1794050381.4470503,
+      "job_started_at": 1794050509.242124,
+      "busy": true
+    },
+    {
+      "slot": 3,
+      "instance": "15dc7c7530836b4b",
+      "runtime": null,
+      "run_id": 42367407411,
+      "runner_id": 125918,
+      "started_at": 1794050044.6065934,
+      "job_started_at": 1794050164.7261603,
+      "busy": true
+    }
+  ]
+}

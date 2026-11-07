@@ -126,3 +126,7 @@ explain the storage choice and experimental limits. Disk has extra I/O cost;
 removing the approximately 26 GiB persistent workspace floor is the reason to use
 it on the memory-constrained fleet. Do not promise a runner-count multiplier from
 a single-job benchmark.
+
+The [7 November production cutover](evidence/native-disk-cutover-20261107.md) records
+six successful real jobs, overlapping computation, four-slot turnover, exact
+revisions, resource measurements and cleanup.

@@ -1,0 +1,113 @@
+{
+  "checks": [
+    {
+      "instance": "8f6e4f00e4be0ce6",
+      "run_id": 42370572248,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    },
+    {
+      "instance": "9c5b517ec76b1b4a",
+      "run_id": 42373270617,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    },
+    {
+      "instance": "cd33b62eba94a4ab",
+      "run_id": 42374155492,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    },
+    {
+      "instance": "83d361a3cb468fc6",
+      "run_id": 42374671959,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    },
+    {
+      "instance": "90052fd244446e06",
+      "run_id": 42375689577,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    },
+    {
+      "instance": "6281469762e4e3db",
+      "run_id": 42375807545,
+      "github_success": true,
+      "published_checks": [
+        "scope",
+        "bump-guard",
+        "build"
+      ],
+      "no_oom_or_infrastructure_error": true,
+      "tested_identity_retained": true
+    }
+  ],
+  "unchanged_compiler_helpers": [
+    "lean_pressure.py",
+    "lean_guest.py",
+    "lean_runtime.py"
+  ],
+  "unchanged_controls": [
+    "CI enabled",
+    "workers enabled",
+    "total ceiling 4",
+    "staging reservation 0",
+    "not draining"
+  ],
+  "concurrent_computation": {
+    "instances": [
+      "6281469762e4e3db",
+      "90052fd244446e06"
+    ],
+    "unit_overlap_seconds": 375.7124590873718,
+    "computational_overlap_seconds": 41.006693840026855,
+    "computational_overlap_sampled_seconds": 35.046987771987915,
+    "computational_overlap_sampled_cpu_seconds": 155.81962,
+    "sampled_combined_raw_peak_gib": 38.82006072998047,
+    "sampled_combined_adjusted_peak_gib": 6.463218688964844,
+    "sampled_host_available_min_gib": 44.246429443359375
+  },
+  "expansion_verified_native_slots": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "cleanup_verified_count": 6,
+  "recovery_pending": false,
+  "retained_external_queue": "42368117729 attempt 2; existing router chose GitHub-hosted ubuntu-24.04; no Fleet ownership",
+  "local_tests": "407 passed; initial implementation 437 passed/1 optional skip before independent dependency-prefill deletion",
+  "monitoring_observer": "bounded observer exited; observer-done.json retained; scan sampler exited",
+  "temporary_observer_directory_removed": true
+}

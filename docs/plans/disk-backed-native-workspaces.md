@@ -1,8 +1,12 @@
 # Switch native CI runners to disk-backed workspaces
 
-Status: implementation plan, 7 November 2026. This document does not deploy a
-change. Implement in TauCetiFleet, then release one live general-PR canary before
-expanding. The production default remains VM until the rollout steps below.
+Status: implemented and deployed, 7 November 2026. [PR #144](https://github.com/TauCetiProject/TauCetiFleet/pull/144)
+ships the single disk-backed native implementation. The canary and initial pair
+completed successfully; all four general slots have now turned over to native.
+The expanded pair also completed with overlapping computation, correct result
+publication and cleanup. See the [cutover evidence](../evidence/native-disk-cutover-20261107.md)
+for exact revisions, job outcomes, memory, disk and cleanup. The sections below
+record the implementation and validation requirements.
 
 ## Decision and evidence
 
