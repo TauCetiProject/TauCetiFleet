@@ -300,7 +300,7 @@ class Isolated(unittest.TestCase):
             self.assertIn("release.json", zipped.namelist())
             self.assertTrue(all(n.startswith("tauceti_fleet/") or n == "release.json" for n in zipped.namelist()))
             manifest = json.loads(zipped.read("release.json"))
-            self.assertEqual(len(manifest["worker_revision"]), 40)
+            self.assertEqual(manifest, {"version": 1})
 
     def test_duplicate_hosts_cannot_double_count_reports(self):
         pr = dict(
