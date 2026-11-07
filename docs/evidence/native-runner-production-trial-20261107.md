@@ -1,5 +1,14 @@
 # Native runner production trial, 7 November 2026
 
+## Matched follow-up
+
+The later [matched-input replay comparison](../../experiments/native-vm-matched-20261107/README.md)
+qualifies the different-PR timings below. It confirms lower native CPU/disk-read
+cost, but does not establish a reliable elapsed-time or capacity win: native
+passes experienced RAM-gate waits, one was stopped after a ten-minute stall, and
+much of the raw peak-RAM difference is reclaimable host file cache. Keep those
+results separate from this successful Actions compatibility trial.
+
 ## Result
 
 The supported native backend completed a real GitHub Actions PR job successfully

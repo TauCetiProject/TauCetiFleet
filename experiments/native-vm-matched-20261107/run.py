@@ -96,7 +96,7 @@ def launch_native(directory, unit):
     return bridge, directory / 'control/telemetry'
 
 
-def launch_vm(directory, unit):
+def launch_vm(directory, unit, *, cold=False):
     image = store.data_dir() / 'images/prepared.qcow2'
     disk = directory / 'disk.qcow2'
     call([vm.executable('qemu-img'), 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', image, disk, '80G'], capture_output=True)
@@ -120,7 +120,8 @@ def launch_vm(directory, unit):
         'printf %s ' + shlex.quote(hook.replace('"$1"', 'ci_started')) + ' > /opt/hook-start.sh',
         'printf %s ' + shlex.quote(hook.replace('"$1"', 'ci_completed')) + ' > /opt/hook-complete.sh',
         'chmod 755 /opt/hook-start.sh /opt/hook-complete.sh',
-        'set +e; runuser -u runner -- env HOME=/home/runner MATCHED_BACKEND=vm bash -c '
+        'set +e; runuser -u runner -- env HOME=/home/runner MATCHED_BACKEND=vm MATCHED_COLD_VM='
+        + str(int(cold)) + ' bash -c '
         + shlex.quote('ulimit -n 65536; exec bash /fleet-link/job.sh')
         + ' > /fleet-link/runner-console.log 2>&1; code=$?; set -e',
         'python3 - "$code" <<\'FINAL\'\nimport json,sys,time\nfrom pathlib import Path\np=Path("/fleet-link/vm-result.json");p.write_text(json.dumps(dict(exit_code=int(sys.argv[1]),ended_at=time.time())))\nFINAL',
@@ -156,7 +157,8 @@ def run(label, backend):
     bridge = NORMAL_STATE / 'vms' / ('matched-' + backend + '-' + identity)
     telemetry = None
     try:
-        bridge, telemetry = (launch_native if backend == 'native' else launch_vm)(directory, unit)
+        bridge, telemetry = (launch_native(directory, unit) if backend == 'native'
+                             else launch_vm(directory, unit, cold=label == 'vm-1'))
         props = systemd(unit)
         group = Path('/sys/fs/cgroup') / props['ControlGroup'].lstrip('/')
         with (evidence / 'samples.jsonl').open('w', buffering=1) as samples:
@@ -215,6 +217,9 @@ def main():
     if sys.argv[1:] == ['--finish-warm-controls']:
         # Continue the sealed fixture; never rerun or overwrite completed passes.
         before = CONFIG_PATH.read_bytes()
+        assert hashlib.sha256(before).hexdigest() == data(ROOT / 'inputs.json')['config_sha256']
+        config = json.loads(before)
+        assert not config['ci_enabled'] and not config['workers_enabled']
         os.environ['TAUCETI_FLEET_STATE'] = str(ROOT / 'native-state')
         (ROOT / 'final.json').rename(ROOT / 'first-series-final.json')
         try:
@@ -225,12 +230,18 @@ def main():
             save(ROOT / 'final.json', dict(at=time.time(), config_unchanged=True,
                                           archive_unchanged=digest(ARCHIVE) == data(ROOT / 'inputs.json')['archive_sha256'],
                                           remaining_instances=[str(p) for p in (ROOT / 'vms').glob('*')]))
+        save(ROOT / 'all-done.json', dict(at=time.time(), continuation_exit_code=0))
         return
     ROOT.mkdir(parents=True, exist_ok=False, mode=0o700)
     before = CONFIG_PATH.read_bytes()
     config = json.loads(before)
     assert not config['ci_enabled'] and not config['workers_enabled']
     INPUT.mkdir()
+    save(ROOT / 'protocol.json', dict(primary_order=['native-2', 'vm-2', 'vm-3', 'native-3'],
+                                     diagnostic_order=['vm-1', 'native-1'],
+                                     primary_cache='No explicit guest purge; normal automatic reclaim remains enabled',
+                                     diagnostic_cache='vm-1 explicitly purges guest caches',
+                                     primary_script_sha256=digest(SOURCE / 'job.sh')))
     os.link(ARCHIVE, INPUT / 'frozen-input.tar.gz')
     for path in SOURCE.glob('*.py'):
         if path.name != 'run.py':

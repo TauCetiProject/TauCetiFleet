@@ -1,0 +1,27 @@
+{
+  "archive_sha256": "2d1f9d4bda40c094f9a97fb946c81bf7f3917970adfa4aaa44b31ab8256c8dff",
+  "archive_bytes": 10163710151,
+  "code_revision": "f05de8a957488123aebb2f781e004f6489b6b9aa",
+  "native_image": {
+    "prepared_at": 1794016486.141704,
+    "revision": 1,
+    "runner_version": "v2.338.0",
+    "sha256": "f2b7d4b43e89c622866f3c4419f1d84913ed96ee8e8ad0d7b6791b3d930959f2",
+    "vm_sha256": "9a62c95749f36af3c1445c3475fef3e4ae5da2ea2c87ca93877c4b273a6f6fe0"
+  },
+  "prepared_image": {
+    "gh_sha256": "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386",
+    "gh_version": "2.102.0",
+    "image_revision": 3,
+    "prepared_at": 1792052464.4910905,
+    "runner_sha256": "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32",
+    "runner_version": "v2.338.0",
+    "sha256": "9a62c95749f36af3c1445c3475fef3e4ae5da2ea2c87ca93877c4b273a6f6fe0",
+    "ubuntu_sha256": "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2",
+    "version": 1
+  },
+  "script_sha256": "431d9509ad90d12f3968a4601d7749f2459460bfdec2adc7a9b1e9833039766f",
+  "config_sha256": "35db67ac14ae7589e5c0d7a8f028d53bf79cf71a7c587bb15d0c1b926455c5ee",
+  "experimental_start_gib": 40,
+  "memory_max_gib": 54
+}

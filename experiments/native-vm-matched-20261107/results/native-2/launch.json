@@ -1,0 +1,12 @@
+{
+  "label": "native-2",
+  "backend": "native",
+  "identity": "4e813cda79afa8ec",
+  "unit": "tauceti-matched-native-2-4e813cda79afa8ec.service",
+  "room": {
+    "total": 134688063488,
+    "available": 47893938176,
+    "free_disk": 55854997504,
+    "at": 1794033767.997486
+  }
+}

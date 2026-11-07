@@ -1,4 +1,5 @@
 """Summarize completed matched passes, preserving every sample separately."""
+import gzip
 import json
 import re
 import sys
@@ -6,6 +7,21 @@ from pathlib import Path
 
 GIB = 1024**3
 root = Path(sys.argv[1])
+metadata = root if (root / 'inputs.json').exists() else root / 'results'
+
+
+def text(path):
+    if path.exists():
+        return path.read_text()
+    with gzip.open(str(path) + '.gz', 'rt') as stream:
+        return stream.read()
+
+
+observations_path = metadata / 'observations.jsonl'
+if not observations_path.exists() and not Path(str(observations_path) + '.gz').exists():
+    observations_path = Path('/tmp/tauceti-native-vm-matched-observations.jsonl')
+observations = ([json.loads(line) for line in text(observations_path).splitlines()]
+                if observations_path.exists() or Path(str(observations_path) + '.gz').exists() else [])
 
 
 def read(path):
@@ -31,8 +47,17 @@ def interval(samples, start, end):
     first, last = selected[0], selected[-1]
     area = sum((b['at'] - a['at']) * (int(a['memory.current']) + int(b['memory.current'])) / 2
                for a, b in zip(selected, selected[1:], strict=False)) / GIB
+    def without_clean_file(value):
+        st = fields(value['memory.stat'])
+        clean = max(0, st['file'] - st.get('shmem', 0) - st.get('file_dirty', 0) - st.get('file_writeback', 0))
+        return max(0, int(value['memory.current']) - clean)
+    adjusted_area = sum((b['at'] - a['at']) * (without_clean_file(a) + without_clean_file(b)) / 2
+                        for a, b in zip(selected, selected[1:], strict=False)) / GIB
     left, right = io(first.get('io.stat', '')), io(last.get('io.stat', ''))
     return dict(sampled_seconds=last['at'] - first['at'], memory_gib_seconds=area,
+                memory_peak_sampled_gib=max(int(s['memory.current']) for s in selected) / GIB,
+                charged_minus_clean_file_peak_gib=max(without_clean_file(s) for s in selected) / GIB,
+                charged_minus_clean_file_gib_seconds=adjusted_area,
                 cpu_seconds=(fields(last['cpu.stat'])['usage_usec'] - fields(first['cpu.stat'])['usage_usec']) / 1e6,
                 read_gib=(right.get('rbytes', 0) - left.get('rbytes', 0)) / GIB,
                 write_gib=(right.get('wbytes', 0) - left.get('wbytes', 0)) / GIB,
@@ -40,45 +65,73 @@ def interval(samples, start, end):
                 host_available_max_gib=max(s['host']['memory_available'] for s in selected) / GIB)
 
 
+def waits(start, end):
+    values = [v for v in observations if start <= v['at'] <= end and v.get('timing', {}).get('ci')]
+    if len(values) < 2:
+        return {}
+    a, b = values[0]['timing']['ci'], values[-1]['timing']['ci']
+    return dict(sampled_seconds=values[-1]['at'] - values[0]['at'],
+                aggregate_wait_seconds=b['wait_seconds'] - a['wait_seconds'],
+                reasons={k: b.get('reasons', {}).get(k, 0) - a.get('reasons', {}).get(k, 0)
+                         for k in ('ram', 'cpu', 'admission', 'signal')},
+                waiting_peak=max(v['timing']['ci'].get('waiting_now', 0) for v in values))
+
+
 output = {}
 for directory in sorted((root / 'results').iterdir()):
     if not (directory / 'terminal.json').exists():
         continue
-    body = read(directory / 'body-result.json')
-    samples = [json.loads(line) for line in (directory / 'samples.jsonl').read_text().splitlines()]
+    terminal = read(directory / 'terminal.json')
+    censored = (directory / 'censored.json').exists()
+    if (directory / 'body-result.json').exists():
+        body = read(directory / 'body-result.json')
+    else:
+        assert censored, directory
+        body = dict(started_at=read(directory / 'body-start.json')['at'],
+                    ended_at=read(directory / 'censored.json')['at'])
+    samples = [json.loads(line) for line in text(directory / 'samples.jsonl').splitlines()]
     unit = read(directory / 'unit.json')
     life = read(directory / 'lifetime.json')
-    terminal = read(directory / 'terminal.json')
     all_events = [fields(s['memory.events']) for s in samples if 'memory.events' in s]
     events = {key: max(v.get(key, 0) for v in all_events) for key in ('max', 'oom', 'oom_kill')}
     phases = []
-    for line in (directory / 'phases.tsv').read_text().splitlines():
+    if (directory / 'phases.tsv').exists() or (directory / 'phases.tsv.gz').exists():
+        phase_text = text(directory / 'phases.tsv')
+    else:
+        assert censored, directory
+        phase_text = read(directory / 'native-progress.json')['phases']
+    for line in phase_text.splitlines():
         name, at = line.split()
         phases.append((name, float(at)))
     phase_rows = {}
     for (name, start), (_, end) in zip(phases, phases[1:], strict=False):
         phase_rows[name] = dict(wall_seconds=end - start, **interval(samples, start, end))
-    metrics = dict(backend=read(directory / 'launch.json')['backend'], exit_code=terminal['exit_code'],
+    log = text(directory / 'runner-console.log')
+    modules = (read(directory / 'built-modules.json') if (directory / 'built-modules.json').exists()
+               else sorted(set(re.findall(r'Built (TauCeti\.[A-Za-z0-9_.]+)', log))))
+    metrics = dict(backend=read(directory / 'launch.json')['backend'], exit_code=terminal['exit_code'], censored=censored,
                    manifest=read(directory / 'input-identity.json')['manifest_sha256'],
                    tested_tree=read(directory / 'input-identity.json')['tested_tree'],
                    body_seconds=body['ended_at'] - body['started_at'],
                    setup_and_verification_seconds=body['started_at'] - life['started_at'],
                    lifetime_seconds=life['ended_at'] - life['started_at'],
                    memory_peak_gib=int(unit['MemoryPeak']) / GIB, memory_events=events,
-                   rebuilt_modules=read(directory / 'built-modules.json'),
+                   rebuilt_modules=modules,
                    body=interval(samples, body['started_at'], body['ended_at']), phases=phase_rows)
-    log = (directory / 'runner-console.log').read_text(errors='replace')
+    metrics['compiler_waits'] = waits(body['started_at'], body['ended_at'])
+    if censored:
+        metrics['censor'] = read(directory / 'censored.json')
     metrics['audits'] = re.findall(r'duplicate-declarations: checked [^\n]+', log)
     output[directory.name] = metrics
 
-(root / 'summary.json').write_text(json.dumps(output, indent=2))
+(metadata / 'summary.json').write_text(json.dumps(output, indent=2))
 for label, row in output.items():
-    print(label, json.dumps({key: row[key] for key in ('body_seconds', 'setup_and_verification_seconds',
+    print(label, json.dumps({key: row[key] for key in ('censored', 'body_seconds', 'setup_and_verification_seconds',
                                                      'memory_peak_gib', 'memory_events')}))
 if len(output) >= 4:
     rows = list(output.values())
     assert len({r['manifest'] for r in rows}) == 1
     assert len({r['tested_tree'] for r in rows}) == 1
     assert all(r['rebuilt_modules'] == rows[0]['rebuilt_modules'] for r in rows)
-    assert all(r['exit_code'] == 0 and not any(r['memory_events'].values()) for r in rows)
-    print('All completed passes match inputs and rebuild set, pass, and have no memory-limit/OOM events.')
+    assert all((r['exit_code'] == 0 or r['censored']) and not r['memory_events']['oom'] and not r['memory_events']['oom_kill'] for r in rows)
+    print('Input/rebuild identities match. Completed passes succeed; censored passes are explicitly marked. No OOM events.')

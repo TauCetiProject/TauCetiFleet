@@ -1,0 +1,803 @@
+{
+  "native-1": {
+    "backend": "native",
+    "exit_code": 0,
+    "censored": false,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 221.1636254787445,
+    "setup_and_verification_seconds": 190.55429220199585,
+    "lifetime_seconds": 415.08789348602295,
+    "memory_peak_gib": 30.547698974609375,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 218.5589907169342,
+      "memory_gib_seconds": 6306.958408558659,
+      "memory_peak_sampled_gib": 30.008113861083984,
+      "charged_minus_clean_file_peak_gib": 27.72058868408203,
+      "charged_minus_clean_file_gib_seconds": 5832.432403142092,
+      "cpu_seconds": 97.725125,
+      "read_gib": 2.169757843017578,
+      "write_gib": 0.000850677490234375,
+      "host_available_min_gib": 17.083553314208984,
+      "host_available_max_gib": 21.02718734741211
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 9.36712121963501,
+        "sampled_seconds": 6.015870094299316,
+        "memory_gib_seconds": 168.35996106117864,
+        "memory_peak_sampled_gib": 28.304183959960938,
+        "charged_minus_clean_file_peak_gib": 26.82143783569336,
+        "charged_minus_clean_file_gib_seconds": 159.8005518046225,
+        "cpu_seconds": 10.925016,
+        "read_gib": 0.36638641357421875,
+        "write_gib": 0.000118255615234375,
+        "host_available_min_gib": 20.371017456054688,
+        "host_available_max_gib": 21.02718734741211
+      },
+      "audit-setup": {
+        "wall_seconds": 0.5085604190826416
+      },
+      "audit-import": {
+        "wall_seconds": 3.8114757537841797,
+        "sampled_seconds": 2.005274534225464,
+        "memory_gib_seconds": 57.05123240445573,
+        "memory_peak_sampled_gib": 29.013317108154297,
+        "charged_minus_clean_file_peak_gib": 27.043277740478516,
+        "charged_minus_clean_file_gib_seconds": 53.553717202216376,
+        "cpu_seconds": 1.564151,
+        "read_gib": 0.4517555236816406,
+        "write_gib": 3.0517578125e-05,
+        "host_available_min_gib": 20.352813720703125,
+        "host_available_max_gib": 20.90731430053711
+      },
+      "audit-duplicates": {
+        "wall_seconds": 2.7876362800598145,
+        "sampled_seconds": 2.0058939456939697,
+        "memory_gib_seconds": 59.036508707366465,
+        "memory_peak_sampled_gib": 29.449352264404297,
+        "charged_minus_clean_file_peak_gib": 27.28868865966797,
+        "charged_minus_clean_file_gib_seconds": 54.70244283800548,
+        "cpu_seconds": 1.988,
+        "read_gib": 0.0,
+        "write_gib": 0.0,
+        "host_available_min_gib": 20.123165130615234,
+        "host_available_max_gib": 20.463592529296875
+      },
+      "audit-axioms": {
+        "wall_seconds": 3.6985554695129395,
+        "sampled_seconds": 2.005096435546875,
+        "memory_gib_seconds": 58.20919766096631,
+        "memory_peak_sampled_gib": 29.270835876464844,
+        "charged_minus_clean_file_peak_gib": 27.25253677368164,
+        "charged_minus_clean_file_gib_seconds": 54.17112860747147,
+        "cpu_seconds": 1.975669,
+        "read_gib": 0.000164031982421875,
+        "write_gib": 0.0,
+        "host_available_min_gib": 19.456546783447266,
+        "host_available_max_gib": 19.694778442382812
+      },
+      "audit-module-system": {
+        "wall_seconds": 2.735926866531372
+      },
+      "lint-env": {
+        "wall_seconds": 44.293493032455444,
+        "sampled_seconds": 42.110655546188354,
+        "memory_gib_seconds": 1254.7636936542162,
+        "memory_peak_sampled_gib": 30.008113861083984,
+        "charged_minus_clean_file_peak_gib": 27.72058868408203,
+        "charged_minus_clean_file_gib_seconds": 1157.7177243857495,
+        "cpu_seconds": 44.51396,
+        "read_gib": 0.033367156982421875,
+        "write_gib": 0.00041961669921875,
+        "host_available_min_gib": 17.083553314208984,
+        "host_available_max_gib": 19.398548126220703
+      },
+      "lint-style": {
+        "wall_seconds": 153.85383319854736,
+        "sampled_seconds": 152.38523030281067,
+        "memory_gib_seconds": 4361.625171090593,
+        "memory_peak_sampled_gib": 29.66720199584961,
+        "charged_minus_clean_file_peak_gib": 26.98920440673828,
+        "charged_minus_clean_file_gib_seconds": 4029.549557112386,
+        "cpu_seconds": 25.491163,
+        "read_gib": 0.5640716552734375,
+        "write_gib": 0.000209808349609375,
+        "host_available_min_gib": 17.749553680419922,
+        "host_available_max_gib": 19.140270233154297
+      },
+      "declaration-names": {
+        "wall_seconds": 0.0016431808471679688
+      }
+    },
+    "compiler_waits": {
+      "sampled_seconds": 110.01363635063171,
+      "aggregate_wait_seconds": 100.42673799884506,
+      "reasons": {
+        "ram": 99.70609299885109,
+        "cpu": 0.0,
+        "admission": 0.720644999993965,
+        "signal": 0.0
+      },
+      "waiting_peak": 1
+    },
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  },
+  "native-2": {
+    "backend": "native",
+    "exit_code": 0,
+    "censored": false,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 229.53592038154602,
+    "setup_and_verification_seconds": 188.4204912185669,
+    "lifetime_seconds": 421.1237244606018,
+    "memory_peak_gib": 29.73978042602539,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 228.59670615196228,
+      "memory_gib_seconds": 6470.99734508005,
+      "memory_peak_sampled_gib": 29.72988510131836,
+      "charged_minus_clean_file_peak_gib": 27.635910034179688,
+      "charged_minus_clean_file_gib_seconds": 6079.944309152755,
+      "cpu_seconds": 100.115755,
+      "read_gib": 5.768985748291016,
+      "write_gib": 0.0008544921875,
+      "host_available_min_gib": 17.469501495361328,
+      "host_available_max_gib": 19.50843048095703
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 13.808275699615479,
+        "sampled_seconds": 12.034124851226807,
+        "memory_gib_seconds": 323.98674078008344,
+        "memory_peak_sampled_gib": 27.49633026123047,
+        "charged_minus_clean_file_peak_gib": 26.810157775878906,
+        "charged_minus_clean_file_gib_seconds": 317.4904968468345,
+        "cpu_seconds": 12.282639,
+        "read_gib": 3.7308425903320312,
+        "write_gib": 0.0002288818359375,
+        "host_available_min_gib": 18.918689727783203,
+        "host_available_max_gib": 19.50843048095703
+      },
+      "audit-setup": {
+        "wall_seconds": 1.0204062461853027
+      },
+      "audit-import": {
+        "wall_seconds": 4.063849449157715,
+        "sampled_seconds": 2.0051229000091553,
+        "memory_gib_seconds": 56.83059873950242,
+        "memory_peak_sampled_gib": 28.734642028808594,
+        "charged_minus_clean_file_peak_gib": 27.12737274169922,
+        "charged_minus_clean_file_gib_seconds": 53.87084645222103,
+        "cpu_seconds": 1.76749,
+        "read_gib": 0.2623481750488281,
+        "write_gib": 0.0,
+        "host_available_min_gib": 18.604610443115234,
+        "host_available_max_gib": 19.24753189086914
+      },
+      "audit-duplicates": {
+        "wall_seconds": 2.751943826675415
+      },
+      "audit-axioms": {
+        "wall_seconds": 3.857736587524414,
+        "sampled_seconds": 2.0063259601593018,
+        "memory_gib_seconds": 57.86629072079086,
+        "memory_peak_sampled_gib": 28.866573333740234,
+        "charged_minus_clean_file_peak_gib": 27.253589630126953,
+        "charged_minus_clean_file_gib_seconds": 54.63356372968701,
+        "cpu_seconds": 2.001336,
+        "read_gib": 0.0006103515625,
+        "write_gib": 0.0,
+        "host_available_min_gib": 18.036544799804688,
+        "host_available_max_gib": 18.133899688720703
+      },
+      "audit-module-system": {
+        "wall_seconds": 130.32995128631592,
+        "sampled_seconds": 128.3303062915802,
+        "memory_gib_seconds": 3581.4686001461405,
+        "memory_peak_sampled_gib": 28.028305053710938,
+        "charged_minus_clean_file_peak_gib": 26.36261749267578,
+        "charged_minus_clean_file_gib_seconds": 3376.9438707909276,
+        "cpu_seconds": 3.637175,
+        "read_gib": 0.10119247436523438,
+        "write_gib": 0.000270843505859375,
+        "host_available_min_gib": 17.695648193359375,
+        "host_available_max_gib": 19.39588165283203
+      },
+      "lint-env": {
+        "wall_seconds": 44.18782591819763,
+        "sampled_seconds": 42.10906004905701,
+        "memory_gib_seconds": 1243.7554358245475,
+        "memory_peak_sampled_gib": 29.72988510131836,
+        "charged_minus_clean_file_peak_gib": 27.635910034179688,
+        "charged_minus_clean_file_gib_seconds": 1155.5899830267722,
+        "cpu_seconds": 42.578253,
+        "read_gib": 0.013916015625,
+        "write_gib": 9.1552734375e-05,
+        "host_available_min_gib": 17.469501495361328,
+        "host_available_max_gib": 19.193775177001953
+      },
+      "lint-style": {
+        "wall_seconds": 29.42231249809265,
+        "sampled_seconds": 28.073816061019897,
+        "memory_gib_seconds": 809.98058564654,
+        "memory_peak_sampled_gib": 29.60265350341797,
+        "charged_minus_clean_file_peak_gib": 26.940776824951172,
+        "charged_minus_clean_file_gib_seconds": 745.6651976485246,
+        "cpu_seconds": 22.679744,
+        "read_gib": 0.5649452209472656,
+        "write_gib": 0.00017547607421875,
+        "host_available_min_gib": 17.92486572265625,
+        "host_available_max_gib": 19.29387664794922
+      },
+      "declaration-names": {
+        "wall_seconds": 0.0016112327575683594
+      }
+    },
+    "compiler_waits": {
+      "sampled_seconds": 225.0295376777649,
+      "aggregate_wait_seconds": 136.35558499983745,
+      "reasons": {
+        "ram": 130.965799999831,
+        "cpu": 0.0,
+        "admission": 5.389785000006668,
+        "signal": 0.0
+      },
+      "waiting_peak": 1
+    },
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  },
+  "native-3": {
+    "backend": "native",
+    "exit_code": 143,
+    "censored": true,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 713.620082616806,
+    "setup_and_verification_seconds": 190.75595569610596,
+    "lifetime_seconds": 908.5096750259399,
+    "memory_peak_gib": 29.710662841796875,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 709.9641807079315,
+      "memory_gib_seconds": 19301.919856546298,
+      "memory_peak_sampled_gib": 29.303394317626953,
+      "charged_minus_clean_file_peak_gib": 27.65286636352539,
+      "charged_minus_clean_file_gib_seconds": 18790.58115092652,
+      "cpu_seconds": 111.445855,
+      "read_gib": 5.317596435546875,
+      "write_gib": 0.00341796875,
+      "host_available_min_gib": 11.356578826904297,
+      "host_available_max_gib": 20.04718017578125
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 10.007951259613037,
+        "sampled_seconds": 8.021266222000122,
+        "memory_gib_seconds": 221.01726947134648,
+        "memory_peak_sampled_gib": 27.82394790649414,
+        "charged_minus_clean_file_peak_gib": 26.80937957763672,
+        "charged_minus_clean_file_gib_seconds": 213.3624291906849,
+        "cpu_seconds": 14.110395,
+        "read_gib": 0.4849090576171875,
+        "write_gib": 2.288818359375e-05,
+        "host_available_min_gib": 19.211517333984375,
+        "host_available_max_gib": 20.04718017578125
+      },
+      "audit-setup": {
+        "wall_seconds": 0.5263271331787109
+      },
+      "audit-import": {
+        "wall_seconds": 4.008352279663086,
+        "sampled_seconds": 2.0053861141204834,
+        "memory_gib_seconds": 56.93075327254883,
+        "memory_peak_sampled_gib": 28.684101104736328,
+        "charged_minus_clean_file_peak_gib": 27.186222076416016,
+        "charged_minus_clean_file_gib_seconds": 54.01256855719021,
+        "cpu_seconds": 1.656799,
+        "read_gib": 0.424407958984375,
+        "write_gib": 0.0,
+        "host_available_min_gib": 19.34207534790039,
+        "host_available_max_gib": 19.850204467773438
+      },
+      "audit-duplicates": {
+        "wall_seconds": 2.992825508117676
+      },
+      "audit-axioms": {
+        "wall_seconds": 4.6220314502716064,
+        "sampled_seconds": 4.012397289276123,
+        "memory_gib_seconds": 115.11453521260364,
+        "memory_peak_sampled_gib": 28.749114990234375,
+        "charged_minus_clean_file_peak_gib": 27.29086685180664,
+        "charged_minus_clean_file_gib_seconds": 109.10579480512797,
+        "cpu_seconds": 3.910007,
+        "read_gib": 0.2868232727050781,
+        "write_gib": 3.0517578125e-05,
+        "host_available_min_gib": 18.358081817626953,
+        "host_available_max_gib": 19.690074920654297
+      },
+      "audit-module-system": {
+        "wall_seconds": 36.800124168395996,
+        "sampled_seconds": 34.1197509765625,
+        "memory_gib_seconds": 950.6606314353726,
+        "memory_peak_sampled_gib": 28.40570068359375,
+        "charged_minus_clean_file_peak_gib": 26.439525604248047,
+        "charged_minus_clean_file_gib_seconds": 898.8984909896626,
+        "cpu_seconds": 1.915919,
+        "read_gib": 1.5153541564941406,
+        "write_gib": 0.000263214111328125,
+        "host_available_min_gib": 16.41645050048828,
+        "host_available_max_gib": 19.598751068115234
+      },
+      "lint-env": {
+        "wall_seconds": 53.55392622947693,
+        "sampled_seconds": 52.17938184738159,
+        "memory_gib_seconds": 1504.830268847399,
+        "memory_peak_sampled_gib": 29.303394317626953,
+        "charged_minus_clean_file_peak_gib": 27.65286636352539,
+        "charged_minus_clean_file_gib_seconds": 1431.183966111987,
+        "cpu_seconds": 54.180901,
+        "read_gib": 0.9057044982910156,
+        "write_gib": 0.0010833740234375,
+        "host_available_min_gib": 13.900020599365234,
+        "host_available_max_gib": 19.597713470458984
+      }
+    },
+    "compiler_waits": {
+      "sampled_seconds": 710.0987792015076,
+      "aggregate_wait_seconds": 621.2955038009095,
+      "reasons": {
+        "ram": 603.9510348009062,
+        "cpu": 15.853625999996439,
+        "admission": 1.490843000006862,
+        "signal": 0.0
+      },
+      "waiting_peak": 1
+    },
+    "censor": {
+      "at": 1794036708.6856165,
+      "classification": "censored_host_ram_gate_stall",
+      "phase": "lint-style",
+      "phase_started_at": 1794036107.6441455,
+      "phase_seconds": 601.0414712429047,
+      "timing": {
+        "waiting_now": 1,
+        "running_now": 0,
+        "oldest_wait": 588.8650868450059
+      },
+      "instance": "ce9e826699cf7f8e",
+      "unit": "tauceti-matched-native-3-ce9e826699cf7f8e.service",
+      "infrastructure_timeout_policy": "ten minutes with no phase progress and a confirmed compiler waiter; stop only this unregistered instance"
+    },
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  },
+  "vm-1": {
+    "backend": "vm",
+    "exit_code": 0,
+    "censored": false,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 170.09929037094116,
+    "setup_and_verification_seconds": 579.9294741153717,
+    "lifetime_seconds": 750.3300857543945,
+    "memory_peak_gib": 38.76356506347656,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 166.50278854370117,
+      "memory_gib_seconds": 5902.350924309874,
+      "memory_peak_sampled_gib": 38.53105163574219,
+      "charged_minus_clean_file_peak_gib": 30.749847412109375,
+      "charged_minus_clean_file_gib_seconds": 4703.347861391701,
+      "cpu_seconds": 225.869199,
+      "read_gib": 26.270687103271484,
+      "write_gib": 0.28050994873046875,
+      "host_available_min_gib": 25.32241439819336,
+      "host_available_max_gib": 30.491943359375
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 16.282423734664917,
+        "sampled_seconds": 14.040916681289673,
+        "memory_gib_seconds": 489.77515599119624,
+        "memory_peak_sampled_gib": 35.293373107910156,
+        "charged_minus_clean_file_peak_gib": 30.749847412109375,
+        "charged_minus_clean_file_gib_seconds": 413.9711852004598,
+        "cpu_seconds": 46.961444,
+        "read_gib": 1.5346832275390625,
+        "write_gib": 0.0,
+        "host_available_min_gib": 25.32241439819336,
+        "host_available_max_gib": 27.27700424194336
+      },
+      "audit-setup": {
+        "wall_seconds": 0.629199743270874
+      },
+      "audit-import": {
+        "wall_seconds": 55.14778542518616,
+        "sampled_seconds": 54.15821552276611,
+        "memory_gib_seconds": 2001.2556544532517,
+        "memory_peak_sampled_gib": 38.53105163574219,
+        "charged_minus_clean_file_peak_gib": 28.227630615234375,
+        "charged_minus_clean_file_gib_seconds": 1511.105154343335,
+        "cpu_seconds": 65.454207,
+        "read_gib": 22.842926025390625,
+        "write_gib": 0.015720367431640625,
+        "host_available_min_gib": 27.479442596435547,
+        "host_available_max_gib": 28.86138916015625
+      },
+      "audit-duplicates": {
+        "wall_seconds": 4.175763845443726,
+        "sampled_seconds": 2.0080249309539795,
+        "memory_gib_seconds": 75.42776931021399,
+        "memory_peak_sampled_gib": 37.77394485473633,
+        "charged_minus_clean_file_peak_gib": 28.26287841796875,
+        "charged_minus_clean_file_gib_seconds": 56.73459793688335,
+        "cpu_seconds": 2.080951,
+        "read_gib": 0.00225067138671875,
+        "write_gib": 7.62939453125e-05,
+        "host_available_min_gib": 26.848896026611328,
+        "host_available_max_gib": 28.051856994628906
+      },
+      "audit-axioms": {
+        "wall_seconds": 4.479214668273926,
+        "sampled_seconds": 2.005721092224121,
+        "memory_gib_seconds": 72.01990463333277,
+        "memory_peak_sampled_gib": 36.43759536743164,
+        "charged_minus_clean_file_peak_gib": 28.26325225830078,
+        "charged_minus_clean_file_gib_seconds": 56.63177345092481,
+        "cpu_seconds": 2.0161,
+        "read_gib": 0.022617340087890625,
+        "write_gib": 3.814697265625e-05,
+        "host_available_min_gib": 27.535099029541016,
+        "host_available_max_gib": 27.811004638671875
+      },
+      "audit-module-system": {
+        "wall_seconds": 2.921532392501831
+      },
+      "lint-env": {
+        "wall_seconds": 60.70645070075989,
+        "sampled_seconds": 60.17511296272278,
+        "memory_gib_seconds": 2108.868706061383,
+        "memory_peak_sampled_gib": 35.657108306884766,
+        "charged_minus_clean_file_peak_gib": 28.60082244873047,
+        "charged_minus_clean_file_gib_seconds": 1710.269960577035,
+        "cpu_seconds": 68.420671,
+        "read_gib": 0.4903907775878906,
+        "write_gib": 0.009906768798828125,
+        "host_available_min_gib": 27.246456146240234,
+        "host_available_max_gib": 29.499759674072266
+      },
+      "lint-style": {
+        "wall_seconds": 25.582369565963745,
+        "sampled_seconds": 22.065140962600708,
+        "memory_gib_seconds": 727.6480157600326,
+        "memory_peak_sampled_gib": 33.335025787353516,
+        "charged_minus_clean_file_peak_gib": 28.11626434326172,
+        "charged_minus_clean_file_gib_seconds": 614.9549559313496,
+        "cpu_seconds": 27.481881,
+        "read_gib": 0.6776924133300781,
+        "write_gib": 0.2544746398925781,
+        "host_available_min_gib": 29.51461410522461,
+        "host_available_max_gib": 30.491943359375
+      },
+      "declaration-names": {
+        "wall_seconds": 0.0031003952026367188
+      }
+    },
+    "compiler_waits": {},
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  },
+  "vm-2": {
+    "backend": "vm",
+    "exit_code": 0,
+    "censored": false,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 206.96775341033936,
+    "setup_and_verification_seconds": 574.5966305732727,
+    "lifetime_seconds": 782.4881765842438,
+    "memory_peak_gib": 37.91843032836914,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 204.64404940605164,
+      "memory_gib_seconds": 6378.471011310226,
+      "memory_peak_sampled_gib": 37.82525634765625,
+      "charged_minus_clean_file_peak_gib": 27.980541229248047,
+      "charged_minus_clean_file_gib_seconds": 5608.8852072138725,
+      "cpu_seconds": 248.284005,
+      "read_gib": 26.360401153564453,
+      "write_gib": 0.290924072265625,
+      "host_available_min_gib": 21.764087677001953,
+      "host_available_max_gib": 25.20024871826172
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 15.310560941696167,
+        "sampled_seconds": 14.043391704559326,
+        "memory_gib_seconds": 399.54038480943836,
+        "memory_peak_sampled_gib": 28.77147674560547,
+        "charged_minus_clean_file_peak_gib": 27.26354217529297,
+        "charged_minus_clean_file_gib_seconds": 378.8727887395721,
+        "cpu_seconds": 34.872079,
+        "read_gib": 0.9534797668457031,
+        "write_gib": 0.012111663818359375,
+        "host_available_min_gib": 24.499149322509766,
+        "host_available_max_gib": 25.021812438964844
+      },
+      "audit-setup": {
+        "wall_seconds": 0.6952450275421143
+      },
+      "audit-import": {
+        "wall_seconds": 66.08789300918579,
+        "sampled_seconds": 64.19733238220215,
+        "memory_gib_seconds": 2173.2770587983136,
+        "memory_peak_sampled_gib": 37.82525634765625,
+        "charged_minus_clean_file_peak_gib": 27.56539535522461,
+        "charged_minus_clean_file_gib_seconds": 1747.6852242024443,
+        "cpu_seconds": 72.390187,
+        "read_gib": 22.25228500366211,
+        "write_gib": 0.013286590576171875,
+        "host_available_min_gib": 23.851341247558594,
+        "host_available_max_gib": 24.907886505126953
+      },
+      "audit-duplicates": {
+        "wall_seconds": 6.08452844619751,
+        "sampled_seconds": 4.0125813484191895,
+        "memory_gib_seconds": 144.78924819576514,
+        "memory_peak_sampled_gib": 36.63680648803711,
+        "charged_minus_clean_file_peak_gib": 27.627155303955078,
+        "charged_minus_clean_file_gib_seconds": 110.79376994284121,
+        "cpu_seconds": 3.584354,
+        "read_gib": 0.0,
+        "write_gib": 0.0,
+        "host_available_min_gib": 23.661800384521484,
+        "host_available_max_gib": 24.739147186279297
+      },
+      "audit-axioms": {
+        "wall_seconds": 6.289224624633789,
+        "sampled_seconds": 4.011988162994385,
+        "memory_gib_seconds": 137.57413189700947,
+        "memory_peak_sampled_gib": 34.37853240966797,
+        "charged_minus_clean_file_peak_gib": 27.649765014648438,
+        "charged_minus_clean_file_gib_seconds": 110.83425396030361,
+        "cpu_seconds": 3.539724,
+        "read_gib": 0.046337127685546875,
+        "write_gib": 3.814697265625e-05,
+        "host_available_min_gib": 23.424583435058594,
+        "host_available_max_gib": 24.433807373046875
+      },
+      "audit-module-system": {
+        "wall_seconds": 4.023332357406616,
+        "sampled_seconds": 2.007063150405884,
+        "memory_gib_seconds": 68.3849016740919,
+        "memory_peak_sampled_gib": 34.07856369018555,
+        "charged_minus_clean_file_peak_gib": 27.61843490600586,
+        "charged_minus_clean_file_gib_seconds": 54.92984796157907,
+        "cpu_seconds": 2.09973,
+        "read_gib": 0.5839576721191406,
+        "write_gib": 0.00020599365234375,
+        "host_available_min_gib": 24.60430145263672,
+        "host_available_max_gib": 24.74945068359375
+      },
+      "lint-env": {
+        "wall_seconds": 74.41003036499023,
+        "sampled_seconds": 72.2279806137085,
+        "memory_gib_seconds": 2146.623012910431,
+        "memory_peak_sampled_gib": 33.744598388671875,
+        "charged_minus_clean_file_peak_gib": 27.980541229248047,
+        "charged_minus_clean_file_gib_seconds": 2002.0729683584327,
+        "cpu_seconds": 77.787049,
+        "read_gib": 0.591156005859375,
+        "write_gib": 0.010211944580078125,
+        "host_available_min_gib": 21.764087677001953,
+        "host_available_max_gib": 24.46082305908203
+      },
+      "lint-style": {
+        "wall_seconds": 33.909502267837524,
+        "sampled_seconds": 32.10547423362732,
+        "memory_gib_seconds": 912.7298174908683,
+        "memory_peak_sampled_gib": 29.06943130493164,
+        "charged_minus_clean_file_peak_gib": 27.54507827758789,
+        "charged_minus_clean_file_gib_seconds": 873.1257459132735,
+        "cpu_seconds": 39.966515,
+        "read_gib": 1.5058135986328125,
+        "write_gib": 0.2546806335449219,
+        "host_available_min_gib": 23.149402618408203,
+        "host_available_max_gib": 25.20024871826172
+      },
+      "declaration-names": {
+        "wall_seconds": 0.004390716552734375
+      }
+    },
+    "compiler_waits": {
+      "sampled_seconds": 200.03464770317078,
+      "aggregate_wait_seconds": 0.28659799999968527,
+      "reasons": {
+        "ram": 0.0,
+        "cpu": 0.0,
+        "admission": 0.28659800000014,
+        "signal": 0.0
+      },
+      "waiting_peak": 0
+    },
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  },
+  "vm-3": {
+    "backend": "vm",
+    "exit_code": 0,
+    "censored": false,
+    "manifest": "f771851cc0aab6eed71882684b1c7a591b9e6326f5f29ee17c938dffc87ced8a",
+    "tested_tree": "fdcc264d54a81b592314cf22ec2e6ff9c29f74ec",
+    "body_seconds": 204.5826177597046,
+    "setup_and_verification_seconds": 610.6476726531982,
+    "lifetime_seconds": 816.6097140312195,
+    "memory_peak_gib": 39.53207015991211,
+    "memory_events": {
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "rebuilt_modules": [],
+    "body": {
+      "sampled_seconds": 202.65856099128723,
+      "memory_gib_seconds": 6707.935711698695,
+      "memory_peak_sampled_gib": 39.40024948120117,
+      "charged_minus_clean_file_peak_gib": 30.310688018798828,
+      "charged_minus_clean_file_gib_seconds": 6027.990614072491,
+      "cpu_seconds": 239.257704,
+      "read_gib": 31.712932586669922,
+      "write_gib": 0.2886314392089844,
+      "host_available_min_gib": 20.33319091796875,
+      "host_available_max_gib": 27.756366729736328
+    },
+    "phases": {
+      "build": {
+        "wall_seconds": 13.382622003555298,
+        "sampled_seconds": 12.03568959236145,
+        "memory_gib_seconds": 370.87558048979963,
+        "memory_peak_sampled_gib": 31.19788360595703,
+        "charged_minus_clean_file_peak_gib": 29.540332794189453,
+        "charged_minus_clean_file_gib_seconds": 351.81879641824617,
+        "cpu_seconds": 29.993537,
+        "read_gib": 0.8727912902832031,
+        "write_gib": 0.009883880615234375,
+        "host_available_min_gib": 24.71347427368164,
+        "host_available_max_gib": 25.16800308227539
+      },
+      "audit-setup": {
+        "wall_seconds": 0.5271124839782715
+      },
+      "audit-import": {
+        "wall_seconds": 65.74086904525757,
+        "sampled_seconds": 64.18333601951599,
+        "memory_gib_seconds": 2223.1091756724127,
+        "memory_peak_sampled_gib": 39.40024948120117,
+        "charged_minus_clean_file_peak_gib": 29.8922119140625,
+        "charged_minus_clean_file_gib_seconds": 1895.2157674776113,
+        "cpu_seconds": 71.714137,
+        "read_gib": 27.305145263671875,
+        "write_gib": 0.012180328369140625,
+        "host_available_min_gib": 23.847476959228516,
+        "host_available_max_gib": 25.083786010742188
+      },
+      "audit-duplicates": {
+        "wall_seconds": 3.8628156185150146,
+        "sampled_seconds": 2.0053539276123047,
+        "memory_gib_seconds": 77.21564641175428,
+        "memory_peak_sampled_gib": 38.71108627319336,
+        "charged_minus_clean_file_peak_gib": 29.95056915283203,
+        "charged_minus_clean_file_gib_seconds": 60.03973922696241,
+        "cpu_seconds": 2.080379,
+        "read_gib": 0.003963470458984375,
+        "write_gib": 0.0,
+        "host_available_min_gib": 24.209205627441406,
+        "host_available_max_gib": 24.241413116455078
+      },
+      "audit-axioms": {
+        "wall_seconds": 5.4420671463012695,
+        "sampled_seconds": 2.0056917667388916,
+        "memory_gib_seconds": 72.97660189546605,
+        "memory_peak_sampled_gib": 36.81758117675781,
+        "charged_minus_clean_file_peak_gib": 29.948902130126953,
+        "charged_minus_clean_file_gib_seconds": 60.031518158832114,
+        "cpu_seconds": 2.049609,
+        "read_gib": 0.04691314697265625,
+        "write_gib": 7.62939453125e-05,
+        "host_available_min_gib": 24.058032989501953,
+        "host_available_max_gib": 24.502567291259766
+      },
+      "audit-module-system": {
+        "wall_seconds": 3.666097640991211,
+        "sampled_seconds": 2.0063254833221436,
+        "memory_gib_seconds": 71.36309875545157,
+        "memory_peak_sampled_gib": 35.57883834838867,
+        "charged_minus_clean_file_peak_gib": 29.912036895751953,
+        "charged_minus_clean_file_gib_seconds": 59.546554661011214,
+        "cpu_seconds": 2.139978,
+        "read_gib": 0.5242958068847656,
+        "write_gib": 0.0,
+        "host_available_min_gib": 24.256633758544922,
+        "host_available_max_gib": 25.158935546875
+      },
+      "lint-env": {
+        "wall_seconds": 71.05410480499268,
+        "sampled_seconds": 68.24823451042175,
+        "memory_gib_seconds": 2287.203779565786,
+        "memory_peak_sampled_gib": 36.12110900878906,
+        "charged_minus_clean_file_peak_gib": 30.310688018798828,
+        "charged_minus_clean_file_gib_seconds": 2058.8136175466684,
+        "cpu_seconds": 67.618844,
+        "read_gib": 0.4252891540527344,
+        "write_gib": 0.010433197021484375,
+        "host_available_min_gib": 20.33319091796875,
+        "host_available_max_gib": 26.017440795898438
+      },
+      "lint-style": {
+        "wall_seconds": 40.757675647735596,
+        "sampled_seconds": 40.13867926597595,
+        "memory_gib_seconds": 1185.6703619988957,
+        "memory_peak_sampled_gib": 30.324050903320312,
+        "charged_minus_clean_file_peak_gib": 30.28818130493164,
+        "charged_minus_clean_file_gib_seconds": 1183.6265243488692,
+        "cpu_seconds": 46.201594,
+        "read_gib": 1.9175949096679688,
+        "write_gib": 0.25572967529296875,
+        "host_available_min_gib": 25.79544448852539,
+        "host_available_max_gib": 27.756366729736328
+      },
+      "declaration-names": {
+        "wall_seconds": 0.0034515857696533203
+      }
+    },
+    "compiler_waits": {
+      "sampled_seconds": 200.0348002910614,
+      "aggregate_wait_seconds": 0.2602129999995668,
+      "reasons": {
+        "ram": 0.0,
+        "cpu": 0.0,
+        "admission": 0.26021300000002157,
+        "signal": 0.0
+      },
+      "waiting_peak": 0
+    },
+    "audits": [
+      "duplicate-declarations: checked 26361 TauCeti modules and 9171 dependency modules; no duplicate declarations."
+    ]
+  }
+}

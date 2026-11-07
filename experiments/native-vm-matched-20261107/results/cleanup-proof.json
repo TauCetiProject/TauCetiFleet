@@ -1,0 +1,71 @@
+{
+  "at": 1794036882.8677475,
+  "units": [
+    {
+      "label": "vm-1",
+      "unit": "tauceti-matched-vm-1-92e4b8a0fed68503.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "native-1",
+      "unit": "tauceti-matched-native-1-67c65aae9281c874.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "native-2",
+      "unit": "tauceti-matched-native-2-4e813cda79afa8ec.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "vm-2",
+      "unit": "tauceti-matched-vm-2-919e3e9e17306f1f.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "vm-3",
+      "unit": "tauceti-matched-vm-3-ccdc8b49e567f092.service",
+      "properties": {
+        "ActiveState": "inactive",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    },
+    {
+      "label": "native-3",
+      "unit": "tauceti-matched-native-3-ce9e826699cf7f8e.service",
+      "properties": {
+        "ActiveState": "failed",
+        "MainPID": "0",
+        "ControlGroup": ""
+      }
+    }
+  ],
+  "all_namespaces_and_unit_groups_released": true,
+  "pressure_bridges_released": true,
+  "local_configuration_unchanged": true,
+  "ci_slice_shmem_bytes": 0,
+  "local_ci_enabled": false,
+  "local_workers_enabled": false,
+  "input_staging_removed": true,
+  "owned_setup_only_directories_removed": [
+    "native-vm-matched-20261107-setup-only-1794032577"
+  ],
+  "preexisting_fixture_retained": true,
+  "preexisting_fixture_links": 2
+}

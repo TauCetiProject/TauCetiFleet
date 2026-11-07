@@ -1,0 +1,20 @@
+{
+  "at": 1794033531.6668088,
+  "reason": "Use warm restored VM artifact cache for primary comparison; do not attribute a deliberately cold VM cache effect to the backend alone. Recorded before the first native timing result.",
+  "primary_order": [
+    "native-2",
+    "vm-2",
+    "vm-3",
+    "native-3"
+  ],
+  "diagnostic_order": [
+    "vm-1",
+    "native-1"
+  ],
+  "conditions": {
+    "vm-1": "explicit guest cache drop after input verification",
+    "native-1": "tmpfs artifacts; same per-file toolchain advice",
+    "primary": "warm artifact caches after full verification; identical per-file toolchain advice; no explicit guest cache drop"
+  },
+  "primary_script_sha256": "9e88d633083c29fc8ec00661cc376117504be32f8d38921c22856b43bd7ec129"
+}
