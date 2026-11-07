@@ -592,11 +592,6 @@ def collect_ci_results(config):
                     kind = "pr"
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
                                    memory_overcommit=config.get("ci_memory_budget_gib") is not None)
-            from . import native_runner
-            if native_runner.is_native(value) and value.get("host_health") in ("fault", "oom"):
-                # Native cleanup applies its own backend cooldown. Keep the
-                # general slot useful through ordinary VM replacement.
-                decision = dict(cooldown=False, reason="native_infrastructure_vm_fallback", evidence=decision)
             if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":

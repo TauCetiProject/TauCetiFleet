@@ -37,25 +37,32 @@ class CapacityPolicy(unittest.TestCase):
     def test_native_peak_does_not_inflate_vm_growth_forecast(self):
         c = auto.Controller(growth_delay=1)
         s = snapshot(available=50)
-        s['vms'][2].update(runtime='native-tmpfs', memory_bytes=31*GIB, expected_memory_bytes=32*GIB)
+        s['vms'][2].update(runtime='native-disk', memory_bytes=65*GIB, memory_working_bytes=20*GIB)
         c.decide(s,1000)
         self.assertEqual(c.decide(advance(s),1030)['kind'],'limit')
 
-    def test_native_workspace_population_growth_is_counted_once(self):
-        for current, available, expected in ((0,50,'hold'), (8,50,'hold'), (8,80,'limit'), (31,50,'limit')):
+    def test_native_growth_uses_working_memory_in_the_ordinary_forecast(self):
+        for current, available, expected in ((0,50,'hold'), (8,50,'hold'), (8,80,'limit'), (20,50,'limit')):
             with self.subTest(current=current, available=available):
                 c = auto.Controller(growth_delay=1)
                 s = snapshot(available=available)
-                s['vms'][2].update(runtime='native-tmpfs', memory_bytes=current*GIB, expected_memory_bytes=32*GIB)
+                s['vms'][2].update(runtime='native-disk', memory_bytes=40*GIB, memory_working_bytes=current*GIB)
                 c.decide(s,1000)
                 self.assertEqual(c.decide(advance(s),1030)['kind'],expected)
 
     def test_native_cleanup_does_not_hold_a_workspace_growth_forecast(self):
         c=auto.Controller(growth_delay=1)
         s=snapshot(available=50)
-        s['vms'][2].update(runtime='native-tmpfs', phase='cleanup', memory_bytes=None, expected_memory_bytes=32*GIB)
+        s['vms'][2].update(runtime='native-disk', phase='cleanup', memory_bytes=None, memory_working_bytes=None)
         c.decide(s,1000)
         self.assertEqual(c.decide(advance(s),1030)['kind'],'limit')
+
+    def test_unknown_native_working_memory_does_not_approve_growth(self):
+        c = auto.Controller(growth_delay=1)
+        s = snapshot(available=80)
+        s['vms'][2].update(runtime='native-disk', memory_bytes=30*GIB, memory_working_bytes=None)
+        c.decide(s,1000)
+        self.assertEqual(c.decide(advance(s),1030)['kind'], 'hold')
 
     def test_idle_general_guest_is_trimmed_without_cancelling_work(self):
         c = auto.Controller()
@@ -317,6 +324,20 @@ class HostActions(unittest.TestCase):
         self.assertEqual([v['cpu_usec'] for v in result['vms']],[12345,67890])
         self.assertEqual(store.host_config()['max_workers'],0)
         self.assertTrue(store.host_config()['ci_enabled'])
+
+    def test_snapshot_preserves_native_raw_charge_and_reports_reclaimable_cache(self):
+        store.atomic(store.state_dir()/'status.json',dict(ci_vms=[dict(unit='native.service',runtime='native-disk')]))
+        root=self.root/'cgroups'
+        group=root/'native'; group.mkdir(parents=True)
+        (group/'memory.current').write_text(str(30*GIB))
+        (group/'memory.stat').write_text(f'file {28*GIB}\nshmem 0\nfile_dirty {GIB}\nfile_writeback 0\n')
+        (group/'cpu.stat').write_text('usage_usec 123\n')
+        reply=Mock(returncode=0,stdout='Id=native.service\nControlGroup=/native\n')
+        with patch.object(auto,'CGROUP_ROOT',root),patch.object(vm,'run',return_value=reply):
+            value=auto.host_action({})['vms'][0]
+        self.assertEqual(value['memory_bytes'],30*GIB)
+        self.assertEqual(value['memory_clean_file_bytes'],27*GIB)
+        self.assertEqual(value['memory_working_bytes'],3*GIB)
 
     def test_missing_ci_unit_never_reads_root_or_loses_a_healthy_sibling(self):
         store.atomic(store.state_dir()/'status.json',dict(ci_vms=[dict(unit='good.service'),dict(unit='gone.service')]))

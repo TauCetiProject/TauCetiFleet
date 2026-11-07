@@ -12,6 +12,10 @@ from pathlib import Path
 
 LINK = Path("/fleet-link")
 WORK = Path("/opt/actions-runner/_work")
+DISK_BUDGET_GIB = 56
+DISK_SCAN_INTERVAL = 60
+DISK_SCAN_TIMEOUT = 10
+DISK_SCAN_FAILURES = 3
 
 
 def atomic(path, value):
@@ -60,49 +64,104 @@ def pressure():
         broker.run(int(os.environ['TAUCETI_NATIVE_PRESSURE_FD']), listener)
 
 
-def progress(stop):
+class DiskUsage:
+    """One bounded scan at a time; polling never blocks cheap resource checks."""
+    def __init__(self):
+        self.child = None
+        self.lock = threading.Lock()
+        self.next_scan = 0
+        self.started = None
+        self.allocated = None
+        self.measured_at = None
+        self.error = None
+        self.failures = 0
+
+    def failed(self, error):
+        self.allocated = None
+        self.error = error
+        self.failures += 1
+
+    def poll(self):
+        now = time.monotonic()
+        with self.lock:
+            if self.child is not None:
+                code = self.child.poll()
+                if code is not None or now - self.started >= DISK_SCAN_TIMEOUT:
+                    if code is None:
+                        self.child.kill()
+                    stdout, _ = self.child.communicate(timeout=1)
+                    self.child = None
+                    try:
+                        if code != 0:
+                            raise ValueError("disk usage scan timed out" if code is None else "disk usage scan failed")
+                        allocated = int(stdout.split()[0])
+                        if allocated < 0:
+                            raise ValueError("invalid disk usage")
+                        self.allocated, self.measured_at = allocated, time.time()
+                        self.error, self.failures = None, 0
+                    except (ValueError, IndexError) as error:
+                        self.failed(str(error))
+            if self.child is None and now >= self.next_scan:
+                self.next_scan = now + DISK_SCAN_INTERVAL
+                self.started = now
+                try:
+                    self.child = subprocess.Popen(
+                        ['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/'],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                except OSError as error:
+                    self.failed(str(error))
+
+    def snapshot(self):
+        return dict(disk_allocated=self.allocated, disk_measured_at=self.measured_at,
+                    disk_measurement_age=None if self.measured_at is None else max(0, time.time() - self.measured_at),
+                    disk_scan_running=self.child is not None, disk_scan_error=self.error,
+                    disk_scan_failures=self.failures, disk_budget_bytes=DISK_BUDGET_GIB * 1024**3)
+
+    def close(self):
+        with self.lock:
+            if self.child is not None:
+                self.child.kill()
+                self.child.communicate(timeout=1)
+                self.child = None
+
+
+def progress(stop, usage):
     try:
-        measure_progress(stop)
+        measure_progress(stop, usage)
     except Exception:
-        # A failed monitor (including disk-full writes) must fail closed rather
-        # than silently disabling resource bounds while useful work continues.
+        # A failed monitor cannot silently disable resource bounds.
         stop.set()
+    finally:
+        usage.close()
 
 
-def measure_progress(stop):
-    next_disk_check = 0
-    layout = {}
+def measure_progress(stop, usage):
     while not stop.wait(2):
-        fs = os.statvfs(WORK)
-        value = dict(at=time.time(), workspace_allocated=(fs.f_blocks-fs.f_bfree)*fs.f_frsize,
-                     workspace_available=fs.f_bavail*fs.f_frsize, actions_scratch=layout, phases=None)
+        disk = os.statvfs('/')
+        usage.poll()
+        value = dict(at=time.time(), workspace_storage="disk", host_disk_available=disk.f_bavail * disk.f_frsize,
+                     host_disk_available_inodes=disk.f_favail, phases=None, **usage.snapshot())
         for file in WORK.glob('*/*/pr/.lake/telemetry/phases.tsv'):
             try:
                 fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, 'rb') as stream:
-                    if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                        value['phases'] = stream.read(4096).decode(errors='replace')
+                with os.fdopen(fd, 'rb') as incoming:
+                    if stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
+                        value['phases'] = incoming.read(4096).decode(errors='replace')
             except OSError:
                 pass
         atomic(LINK / 'native-progress.json', value)
-        if value['workspace_available'] < 1024**2 or fs.f_favail == 0:
-            atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='workspace ENOSPC'))
-        disk = os.statvfs('/')
-        if disk.f_bavail * disk.f_frsize < 8 * 1024**3:
-            atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='host disk headroom'))
-        if time.monotonic() >= next_disk_check:
-            try:
-                paths = [str(WORK / name) for name in ('_actions', '_temp') if (WORK / name).exists()]
-                usage = subprocess.run(['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/', *paths],
-                                       capture_output=True, text=True, timeout=10)
-                allocated = int(usage.stdout.split()[0])
-                layout = {Path(row.split(maxsplit=1)[1]).name: int(row.split(maxsplit=1)[0])
-                          for row in usage.stdout.splitlines()[1:]}
-                if allocated > 24 * 1024**3:
-                    atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='native disk budget', disk_bytes=allocated))
-            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-                pass
-            next_disk_check = time.monotonic() + 10
+        reason = None
+        if value['host_disk_available'] < 8 * 1024**3:
+            reason = 'host disk headroom'
+        elif disk.f_favail == 0:
+            reason = 'host inode exhaustion'
+        elif usage.allocated is not None and usage.allocated > DISK_BUDGET_GIB * 1024**3:
+            reason = 'native disk budget'
+        elif usage.failures >= DISK_SCAN_FAILURES:
+            reason = 'disk usage monitor unavailable'
+        if reason:
+            atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason=reason, **usage.snapshot()))
+            stop.set()
 
 
 def boot():
@@ -131,7 +190,8 @@ def boot():
     pressure_fd = int(os.environ['TAUCETI_NATIVE_PRESSURE_FD'])
     receiver = subprocess.Popen([sys.executable, __file__, 'pressure-loop'], pass_fds=(pressure_fd,))
     stop = threading.Event()
-    sampler = threading.Thread(target=progress, args=(stop,), daemon=True)
+    usage = DiskUsage()
+    sampler = threading.Thread(target=progress, args=(stop, usage), daemon=True)
     sampler.start()
     try:
         jit = (LINK / 'jit').read_text()
@@ -145,13 +205,17 @@ def boot():
         while runner.poll() is None:
             # This bootstrap is namespace PID 1. Reap adopted children without
             # stealing the two Popen objects' own exit statuses.
-            children = Path(f'/proc/self/task/{os.getpid()}/children').read_text().split()
-            for child in children:
-                if int(child) not in (runner.pid, receiver.pid):
-                    try:
-                        os.waitpid(int(child), os.WNOHANG)
-                    except ChildProcessError:
-                        pass
+            with usage.lock:
+                children = Path(f'/proc/self/task/{os.getpid()}/children').read_text().split()
+                owned = {runner.pid, receiver.pid}
+                if usage.child is not None:
+                    owned.add(usage.child.pid)
+                for child in children:
+                    if int(child) not in owned:
+                        try:
+                            os.waitpid(int(child), os.WNOHANG)
+                        except ChildProcessError:
+                            pass
             if stop.is_set() or (LINK / 'native-resource-error.json').exists():
                 runner.terminate()
                 raise RuntimeError('Native resource bound reached; retire as infrastructure failure')

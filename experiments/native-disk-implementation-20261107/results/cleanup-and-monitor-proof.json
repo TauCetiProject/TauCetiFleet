@@ -1,0 +1,23 @@
+{
+  "at": 1794051946.4973302,
+  "archive_sha256": "2d1f9d4bda40c094f9a97fb946c81bf7f3917970adfa4aaa44b31ab8256c8dff",
+  "archive_hardlinks": 2,
+  "input_staging_removed": true,
+  "config_unchanged": true,
+  "remaining_instances": [],
+  "successful_disk_measurements": [
+    1794051404.398586,
+    1794051466.41434,
+    1794051528.4296284,
+    1794051586.4441767,
+    1794051646.4591005,
+    1794051706.474499
+  ],
+  "disk_measurement_intervals": [
+    62.015753984451294,
+    62.01528835296631,
+    58.01454830169678,
+    60.01492381095886,
+    60.01539850234985
+  ]
+}

@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import capacity, remote
+from . import capabilities, capacity, native_runner, remote
 from .store import FleetError, atomic, locked, read, state_dir
 
 GIB = 1024**3
@@ -101,8 +101,12 @@ def host_action(payload):
             group = groups[value["unit"]]
             value["memory_bytes"] = int((group / "memory.current").read_text())
             value["cpu_usec"] = int(dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())["usage_usec"])
+            if native_runner.is_native(value):
+                stats = {key: int(amount) for key, amount in (line.split() for line in (group / "memory.stat").read_text().splitlines())}
+                clean = capabilities.clean_file_bytes(stats)
+                value.update(memory_clean_file_bytes=clean, memory_working_bytes=max(0, value["memory_bytes"] - clean))
         except (OSError, ValueError, KeyError):
-            value["memory_bytes"] = value["cpu_usec"] = None
+            value["memory_bytes"] = value["cpu_usec"] = value["memory_working_bytes"] = None
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
                 enabled=config["ci_enabled"], maximum=capacity.jobs(config),
@@ -177,14 +181,15 @@ class Controller:
         # Charge unrealized preparation growth rather than assuming that a newly
         # booted 3-GiB guest will stay small. No physical memory is reserved.
         growing = [v for v in snapshot["vms"] if v.get("phase") != "cleanup"]
+        def footprint(value):
+            return value.get("memory_working_bytes") if native_runner.is_native(value) else value.get("memory_bytes")
         budget = max(20 * GIB, max((v.get("memory_bytes") or 0 for v in growing
-                                   if v.get("runtime") != "native-tmpfs"), default=0) * 1.1)
-        pending = sum(max(0, (v.get("expected_memory_bytes", budget) if v.get("runtime") == "native-tmpfs" else budget)
-                          - (v["memory_bytes"] if v.get("memory_bytes") is not None else budget)) for v in growing)
+                                   if not native_runner.is_native(v)), default=0) * 1.1)
+        pending = sum(max(0, budget - (footprint(v) if footprint(v) is not None else budget)) for v in growing)
         room = available - pending >= headroom + budget + GIB
         saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
         growth = (room and saturated and limit < self.maximum
-                  and all(v.get("memory_bytes") is not None for v in growing))
+                  and all(footprint(v) is not None for v in growing))
         if growth and pressure.get("cpu_percent", 100) < 85:
             self.value.setdefault("growth_since", now)
             if now - self.value["growth_since"] >= self.growth_delay:

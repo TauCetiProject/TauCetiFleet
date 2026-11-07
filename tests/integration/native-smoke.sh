@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euxo pipefail
-findmnt -n -o FSTYPE -T "$PWD" | grep -x tmpfs
+test "$(findmnt -n -o FSTYPE -T "$PWD")" != tmpfs
+test "$(stat -c %d "$PWD")" = "$(stat -c %d /)"
 test "$(id -u)" = 1000
 sudo -n id -u | grep -x 0
 sudo -n dpkg --audit
 mkdir -p _actions/offline _temp TauCeti/TauCeti
-# Hard links must share pages, scratch must use the same private quota.
+# Hard links inside the private workspace must share allocated disk blocks.
 dd if=/dev/zero of=_temp/population bs=1M count=64 status=none
 ln _temp/population _actions/offline/shared
 test "$(stat -c %i _temp/population)" = "$(stat -c %i _actions/offline/shared)"
