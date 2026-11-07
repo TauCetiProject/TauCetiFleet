@@ -16,6 +16,9 @@ class StagingReservations(unittest.TestCase):
                                              for key in ("config", "state", "data")})
         environment.start()
         self.addCleanup(environment.stop)
+        memory = patch.object(vm, "start_memory_available", return_value=100 * 1024**3)
+        memory.start()
+        self.addCleanup(memory.stop)
         self.config = store.update_host(ci_enabled=True, workers_enabled=True, max_workers=40,
                                         ci_max_jobs=2, ci_kinds=["pr", "staging"])
 

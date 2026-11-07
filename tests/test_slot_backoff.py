@@ -19,6 +19,18 @@ class SlotBackoff(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_native_infrastructure_failure_preserves_vm_replacement_capacity(self):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        job = dict(id=7, runner_id=12, status="completed", conclusion="failure", started_at=now, completed_at=now, steps=[])
+        receipt = dict(slot=1, run_id=42, runner_id=12, ci_kinds=["pr"], runtime="native-tmpfs", host_health="fault", started_at=time.time())
+        store.atomic(store.state_dir() / "pending-ci.json", [receipt])
+        with patch.object(github, "ci_read", return_value=dict(jobs=[job])):
+            host.collect_ci_results(store.host_config())
+        self.assertFalse(vm.slot_file({"ci_slot": 1}, "ci-slot-backoff.json").exists())
+        with store.database() as db:
+            value = db.execute("SELECT data FROM events WHERE kind='ci_result'").fetchone()[0]
+        self.assertIn("native_infrastructure_vm_fallback", value)
+
     def test_one_failed_setup_does_not_stop_other_slots(self):
         config = dict(store.host_config(), ci_enabled=True, ci_max_jobs=12, ci_kinds=["pr", "staging"])
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()

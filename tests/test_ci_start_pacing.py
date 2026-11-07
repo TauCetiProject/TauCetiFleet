@@ -17,8 +17,7 @@ class StartPacing(unittest.TestCase):
         environment = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": temporary.name})
         environment.start()
         self.addCleanup(environment.stop)
-        # Pacing tests must reach the pacing gate regardless of host load.
-        memory = patch.object(vm, "start_memory_available", return_value=None)
+        memory = patch.object(vm, "start_memory_available", return_value=100 * 1024**3)
         memory.start()
         self.addCleanup(memory.stop)
         self.config = dict(ci_kinds=["pr", "staging"])

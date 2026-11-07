@@ -136,6 +136,12 @@ def memory(relative=None):
     if relative is None:
         return total, available
     root = Path("/sys/fs/cgroup")
+    # Native offline sandboxes already expose /usr read-only. Their supervisor
+    # publishes the same cgroup counters there without exposing writable host
+    # cgroups. Preserve the existing one-file absolute OOM guard and policy.
+    native = Path("/usr/local/share/tauceti/native-memory")
+    if (native / "memory.max").is_file():
+        root = native
     group = root / relative.lstrip("/")
     while group.is_relative_to(root):
         # memory.high triggers reclaim/throttling; it is not a capacity cap.

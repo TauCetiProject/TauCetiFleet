@@ -88,7 +88,7 @@ class Overcommit(unittest.TestCase):
 
     def test_low_disk_space_prevents_new_registration(self):
         store.atomic(store.data_dir() / "images/prepared.json", {})
-        with patch.object(vm, "start_memory_available", return_value=None), patch.object(vm.shutil, "disk_usage", return_value=SimpleNamespace(free=GIB)), patch.object(github, "jit_config") as jit:
+        with patch.object(vm, "start_memory_available", return_value=100 * GIB), patch.object(vm.shutil, "disk_usage", return_value=SimpleNamespace(free=GIB)), patch.object(github, "jit_config") as jit:
             with self.assertRaisesRegex(store.FleetError, "free space"):
                 vm.start(self.config)
             jit.assert_not_called()
