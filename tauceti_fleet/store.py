@@ -61,6 +61,21 @@ def locked(path):
         yield
 
 
+@contextlib.contextmanager
+def try_lock(path):
+    """Take a nonblocking exclusive lock, reporting an existing owner's lock."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with path.open("a") as stream:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+
+
 def host_config():
     path = config_dir() / "host.json"
     with locked(path.with_suffix(".lock")):
