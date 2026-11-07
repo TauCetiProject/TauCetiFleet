@@ -1,0 +1,11 @@
+{
+  "classification": "post-body harness failure; primary retry is disk-1b",
+  "reason": "Host UID could not create release marker in sandbox runner-owned telemetry directory. Cleanup preceded evidence copy.",
+  "observed_body_result": {
+    "exit_code": 0,
+    "started_at": 1794047013.7748637,
+    "ended_at": 1794047161.8557243
+  },
+  "observed_body_source": "interactive tool read of raw body-result.json before cleanup; original file was not archived",
+  "limitation": "Missing consumed manifest and full audit logs; do not include this attempt in primary comparison."
+}

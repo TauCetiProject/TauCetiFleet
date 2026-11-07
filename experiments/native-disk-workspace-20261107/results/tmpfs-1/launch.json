@@ -1,0 +1,12 @@
+{
+  "label": "tmpfs-1",
+  "backend": "tmpfs",
+  "identity": "cc742fb5d85ddddb",
+  "unit": "tauceti-disk-matched-tmpfs-1-cc742fb5d85ddddb.service",
+  "room": {
+    "total": 134688063488,
+    "available": 50348679168,
+    "free_disk": 76404297728,
+    "at": 1794047663.4473433
+  }
+}

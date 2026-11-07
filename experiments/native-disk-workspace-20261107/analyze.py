@@ -152,3 +152,21 @@ if len(output) >= 4:
     assert all(r['rebuilt_modules'] == rows[0]['rebuilt_modules'] for r in rows)
     assert all((r['exit_code'] == 0 or r['censored']) and not r['memory_events']['oom'] and not r['memory_events']['oom_kill'] for r in rows)
     print('Input/rebuild identities match. Completed passes succeed; censored passes are explicitly marked. No OOM events.')
+
+# Preserve a conservative CPU lower bound for the optional final-pass observer.
+if (metadata / 'du-summary.json').exists():
+    body = read(root / 'results/disk-2/body-result.json')
+    seen = {}
+    for line in text(metadata / 'du-observations.jsonl').splitlines():
+        row = json.loads(line)
+        if not body['started_at'] <= row['at'] <= body['ended_at']:
+            continue
+        for process in row['du']:
+            key = str(process['pid']) + ':' + str(process['start_ticks'])
+            entry = seen.setdefault(key, dict(first=row['at'], first_ticks=process['cpu_ticks']))
+            entry.update(last=row['at'], last_ticks=process['cpu_ticks'])
+    du_meta = read(metadata / 'du-summary.json')
+    calculation = dict(body_start=body['started_at'], body_end=body['ended_at'], processes=seen,
+                       observed_du_cpu_seconds_lower_bound=sum(v['last_ticks'] - v['first_ticks'] for v in seen.values()) / du_meta['clock_ticks'],
+                       limitation='Only deltas between samples within final disk body; misses short processes and CPU before first/after last observations. No subtraction from cgroup CPU or wall time.')
+    (metadata / 'du-body-analysis.json').write_text(json.dumps(calculation, indent=2))

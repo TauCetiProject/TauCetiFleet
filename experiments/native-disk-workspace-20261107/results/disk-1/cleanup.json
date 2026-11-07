@@ -1,0 +1,14 @@
+{
+  "at": 1794047190.6184628,
+  "released": true,
+  "unit": {
+    "ActiveState": "failed",
+    "SubState": "failed",
+    "MainPID": "0",
+    "Result": "exit-code",
+    "ControlGroup": "",
+    "MemoryCurrent": "[not set]",
+    "MemoryPeak": "21467172864",
+    "CPUUsageNSec": "442163272000"
+  }
+}

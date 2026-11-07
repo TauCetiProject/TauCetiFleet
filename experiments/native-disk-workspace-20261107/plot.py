@@ -25,7 +25,7 @@ for label, row in summary.items():
     rows = [r for r in rows if start <= r['at'] <= end]
     minutes = [(r['at'] - start) / 60 for r in rows]
     color = '#2563eb' if label.startswith('disk') else '#d97706'
-    style = '-' if label.endswith('1') else '--'
+    style = '--' if label.endswith('2') else '-'
     title = label + (' (stopped)' if row['censored'] else '')
     charge = [int(r['memory.current']) / 1024**3 for r in rows]
     adjusted = []

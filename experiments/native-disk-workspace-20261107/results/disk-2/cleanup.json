@@ -1,0 +1,14 @@
+{
+  "at": 1794048648.7983248,
+  "released": true,
+  "unit": {
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "MainPID": "0",
+    "Result": "success",
+    "ControlGroup": "",
+    "MemoryCurrent": "[not set]",
+    "MemoryPeak": "[not set]",
+    "CPUUsageNSec": "[not set]"
+  }
+}

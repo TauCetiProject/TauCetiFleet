@@ -1,0 +1,18 @@
+{
+  "at": 1794047258.0803297,
+  "archive_sha256": "2d1f9d4bda40c094f9a97fb946c81bf7f3917970adfa4aaa44b31ab8256c8dff",
+  "archive_bytes": 10163710151,
+  "image_sha256": "9a62c95749f36af3c1445c3475fef3e4ae5da2ea2c87ca93877c4b273a6f6fe0",
+  "native_image": {
+    "prepared_at": 1794016486.141704,
+    "revision": 1,
+    "runner_version": "v2.338.0",
+    "sha256": "f2b7d4b43e89c622866f3c4419f1d84913ed96ee8e8ad0d7b6791b3d930959f2",
+    "vm_sha256": "9a62c95749f36af3c1445c3475fef3e4ae5da2ea2c87ca93877c4b273a6f6fe0"
+  },
+  "config_sha256": "35db67ac14ae7589e5c0d7a8f028d53bf79cf71a7c587bb15d0c1b926455c5ee",
+  "memory_max_gib": 54,
+  "start_gib": 40,
+  "script_sha256": "702b50b7d4bbcff5678f953a3d2d75fbd9fb432c60aa4a2bcd66fa3a3781ae50",
+  "source_revision": "276cbb416950421c265ef801e8d7088d413f5f35"
+}

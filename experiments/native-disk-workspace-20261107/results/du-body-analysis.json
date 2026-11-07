@@ -1,0 +1,62 @@
+{
+  "body_start": 1794048498.6939754,
+  "body_end": 1794048624.6261601,
+  "processes": {
+    "2775246:42959144": {
+      "first": 1794048503.3825917,
+      "first_ticks": 12,
+      "last": 1794048507.1428738,
+      "last_ticks": 384
+    },
+    "2778589:42960557": {
+      "first": 1794048517.4120266,
+      "first_ticks": 3,
+      "last": 1794048521.1698625,
+      "last_ticks": 377
+    },
+    "2781390:42961939": {
+      "first": 1794048531.4394803,
+      "first_ticks": 23,
+      "last": 1794048534.948476,
+      "last_ticks": 370
+    },
+    "2784074:42963325": {
+      "first": 1794048545.2186816,
+      "first_ticks": 16,
+      "last": 1794048548.9770508,
+      "last_ticks": 382
+    },
+    "2786959:42964741": {
+      "first": 1794048559.2465503,
+      "first_ticks": 2,
+      "last": 1794048563.0054746,
+      "last_ticks": 376
+    },
+    "2792335:42966124": {
+      "first": 1794048573.2771316,
+      "first_ticks": 22,
+      "last": 1794048576.7847068,
+      "last_ticks": 370
+    },
+    "2795895:42967508": {
+      "first": 1794048587.0547028,
+      "first_ticks": 16,
+      "last": 1794048590.5611491,
+      "last_ticks": 366
+    },
+    "2798217:42968890": {
+      "first": 1794048600.828538,
+      "first_ticks": 12,
+      "last": 1794048604.335817,
+      "last_ticks": 361
+    },
+    "2801029:42970271": {
+      "first": 1794048614.603631,
+      "first_ticks": 8,
+      "last": 1794048618.1110728,
+      "last_ticks": 358
+    }
+  },
+  "observed_du_cpu_seconds_lower_bound": 32.3,
+  "limitation": "Only deltas between samples within final disk body; misses short processes and CPU before first/after last observations. No subtraction from cgroup CPU or wall time."
+}

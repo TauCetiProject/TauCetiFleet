@@ -1,0 +1,20 @@
+{
+  "at": 1794047446.3573828,
+  "host": "chungus2",
+  "kernel": "7.3.1",
+  "cpus": 96,
+  "affinity_cpus": 96,
+  "root_storage": {
+    "filesystems": [
+      {
+        "target": "/",
+        "source": "/dev/md127",
+        "fstype": "xfs",
+        "options": "rw,relatime,inode64,logbufs=8,logbsize=32k,sunit=1024,swidth=2048,noquota"
+      }
+    ]
+  },
+  "source_revision": "276cbb416950421c265ef801e8d7088d413f5f35",
+  "unchanged_timed_command_verified": true,
+  "historical_vm_report": "../native-vm-matched-20261107/README.md"
+}
