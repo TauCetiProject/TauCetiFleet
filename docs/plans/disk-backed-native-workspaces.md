@@ -8,8 +8,8 @@ expanding. The production default remains VM until the rollout steps below.
 
 Use disk-backed native workspaces. The fleet is continually memory constrained;
 keeping approximately 26 GiB resident per job to save roughly half a minute
-when RAM is plentiful is the wrong tradeoff. Spare RAM should cache workspace files and be reclaimable when
-other work needs it. Do not retain tmpfs as a workspace fallback.
+when RAM is plentiful is the wrong tradeoff. Spare RAM should cache workspace
+files and be reclaimable when other work needs it.
 
 The [matched disk/tmpfs experiment](../../experiments/native-disk-workspace-20261107/README.md)
 used identical restored inputs and the unchanged compiler gate:
@@ -43,50 +43,53 @@ fleet throughput. The experiment also identified at least 32.3 CPU-seconds of
 - Deploy live with normal CI admissions enabled. Preserve current worker settings
   and unrelated work. Do not drain or wait for the whole fleet to become idle.
 
-## 1. Make disk the native launch mode and preserve old receipts
+## 1. Replace the native workspace implementation
 
 In [native_runner.py](../../tauceti_fleet/native_runner.py), create the actual
 `/opt/actions-runner/_work` as a private directory on the disposable root's host
-filesystem. Skip its tmpfs mount before the Listener starts, so `_actions`,
-`_temp`, checkouts, cache restoration and outputs all use disk from the outset.
+filesystem. Delete the workspace tmpfs mount. Before the Listener starts,
+`_actions`, `_temp`, checkouts, cache restoration and outputs all use disk.
 Keep the small system and sandbox tmpfs mounts unchanged. Reuse the verified
 native OS image and current materialization path; no image export is required
 solely to change workspace storage. Ordinary copies remain supported when
 reflinks are unavailable.
 
-Record new instances as `runtime: native-disk`, with explicit workspace storage
-and disk-budget metadata. Accept `native-tmpfs` as a legacy native runtime for
-status, event reconciliation, recovery and cleanup only. An existing receipt
-without a storage field keeps its old meaning; never infer its mode from the
-new default or remount an active job's workspace. Future native selection always
-chooses disk.
+Use one native runtime identifier, `native-disk`, and one workspace implementation.
+Delete `native-tmpfs`, its launch branches, quota-specific fields and tests that
+exist only to support that implementation. Add no storage-mode flag, dual-runtime
+reader, compatibility alias or receipt-version migration.
 
-Audit literal `native-tmpfs` comparisons in
+Replace the literal runtime comparisons in
 [vm.py](../../tauceti_fleet/vm.py),
-[ci_autoscale.py](../../tauceti_fleet/ci_autoscale.py), status and tests. In
-particular, new native receipts must continue to bypass VM image/media claims
-and use native launch/retirement. Centralize runtime classification so adding the
-new identifier cannot accidentally route a native instance through QEMU logic.
-Existing registrations must retain their original instance and runner classes.
+[ci_autoscale.py](../../tauceti_fleet/ci_autoscale.py), status and tests with the
+single current native classification. Native instances must bypass VM image/media
+claims and use native launch, event handling and retirement. VM remains a supported
+backend for staging and slots not yet switched; it is not a recovery version of
+the native workspace implementation.
+
+Perform the one-time handover in section 5 before installing this code. There
+must be no old native instance or owned receipt left for the new controller to
+interpret. Clean up that state operationally rather than shipping an old reader.
 
 ## 2. Replace tmpfs accounting with disk-aware accounting
 
-Remove the disk mode's inherited **52 GiB RAM startup requirement** and **32 GiB
+Delete the native **52 GiB RAM startup requirement** and **32 GiB
 persistent workspace-growth forecast**. They were justified by tmpfs population;
 leaving them in place would defeat the improvement before a native job starts.
 Use the existing ordinary PR startup memory requirement, currently 20 GiB, and
-the same host/ancestor measurement, startup lock and spacing. Missing native
-prerequisites or a native cooldown select the ordinary VM path before registration.
-Do not introduce another native wait or use tmpfs when disk cannot start.
+the same host/ancestor measurement, startup lock and spacing. A selected native
+slot launches disk-backed native. Surface startup failures explicitly and repair
+them through the existing retry/ownership path; do not silently switch its backend
+or introduce another wait in front of active compilers.
 
 Keep actual RAM usage, reclaimable cache, startup estimates and hard limits
 separate. Extend the existing per-instance observation to read `memory.stat`
 alongside `memory.current`. Use the existing clean-file discount for the disk
-mode's memory estimates; retain raw charge and peak for diagnostics. Keep legacy
-running tmpfs receipts' growth accounting until those instances retire.
+runner's memory estimates; retain raw charge and peak for diagnostics. Delete the
+old workspace-growth bookkeeping rather than retaining it behind a mode check.
 
-Remove the tmpfs-specific growth deduction for disk receipts. Retain the existing
-ordinary autoscaler growth rules for the first canary, charging anticipated
+Remove the tmpfs-specific growth deduction. Retain the existing ordinary
+autoscaler growth rules for the first canary, charging anticipated
 startup growth once. Do not let a disk-native clean-cache peak inflate the common
 VM footprint estimate, or count its workspace bytes as unreclaimable RAM. Audit
 both startup and autoscaler paths for leftover special cases. A 54 GiB cap is
@@ -117,8 +120,8 @@ entire 56 GiB budget through a new capacity ledger.
 These are **monitored disk budgets, not hard filesystem quotas**. Usage can
 overshoot between scans or grow faster than the free-space monitor can react.
 Retain that explicit limitation of the existing rootless canary model; do not
-make host quota administration a prerequisite. Hard quotas can be a later
-improvement. Report low space, observed budget exhaustion, inode exhaustion and
+make host quota administration a prerequisite. Report low space, observed budget
+exhaustion, inode exhaustion and
 ENOSPC as infrastructure failures and stop only the affected instance.
 
 Separate cheap space checks from the scanning task so a slow `du` cannot suspend
@@ -160,24 +163,34 @@ harness; no GitHub registration is needed for these checks.
   after simulated space/budget exhaustion. Check that repeated traversal CPU is
   substantially below the experiment's 32.3-second observation.
 - Cancel during population, compiler waiting and execution; test controller and
-  pressure-service restart, supervisor death, registration retry and mixed old/new
-  receipts. Descendants, private filesystems, pressure bridges and ownership must
+  pressure-service restart, supervisor death and registration retry. Descendants, private filesystems, pressure bridges and ownership must
   be released or retained explicitly for retry, never forgotten.
 
 Run the normal Fleet tests and existing namespace/Listener integration checks.
 Update [native-runners.md](../native-runners.md), command/status descriptions and
-fixtures to distinguish disk budgets from the former tmpfs quota. Keep legacy
-receipt coverage even after the new launch default changes.
+fixtures for the single disk-backed native implementation. Remove obsolete tmpfs
+fixtures and tests; keep the lifecycle, resource-bound and ownership tests.
 
 ## 5. Ship one live general-PR canary
 
-After local validation, merge and install a supported Fleet release through the
-live update path. Record installed Fleet/Worker and native-image identities and
-the relevant operator settings; do not overwrite unrelated concurrent changes.
-Keep staging on VMs and preserve the total CI ceiling. Select the next general
-slot using the existing `native-runner HOST --next-general` control. Existing
-healthy jobs finish normally. The first successful native selection must report
-`native-disk`; a silent VM fallback is useful capacity but is not canary evidence.
+After local validation, merge the implementation. Record Fleet/Worker and
+native-image identities and the relevant operator settings; do not overwrite
+unrelated concurrent changes. Complete the handover below, then install the
+supported release through the live update path.
+
+Before replacing the controller, inventory experimental native instances and
+receipts. If none remain, proceed directly. Otherwise disable only future native
+selection under the existing release while ordinary VM admissions continue. Let
+the specific healthy native job finish, or repair an actually failed instance,
+and verify deregistration, stopped descendants, removed filesystems/bridges and
+released ownership. Resolve abandoned receipts with that release's normal cleanup
+before installing the replacement. This is a one-time handover; leave no migration
+command, old schema reader or temporary cleanup branch in the shipped code.
+Never drain the fleet or wait for unrelated jobs to finish.
+
+Keep staging on VMs and preserve the total CI ceiling. Select one existing general
+PR slot using `native-runner HOST --slot N` for its next ordinary turnover. Existing
+healthy jobs continue. Verify the assigned job actually runs as `native-disk`.
 
 Verify actual assigned head/base/tested-tree identities, normal Actions setup,
 checks and result publication, phase progress, adjusted RAM, disk usage and
@@ -190,12 +203,12 @@ up with its memory benefit visible under normal fleet operation.
 
 ## 6. Expand under the existing runner controls
 
-Use the existing canary guidance of ten useful jobs across three PRs before
-broad expansion. This is rollout evidence, not a per-job admission condition.
-Before raising the native ceiling beyond one, validate two disk-native full jobs
-actually executing concurrently and completing under representative pressure.
-Use a controlled test scope or rollout count setting; keep existing total-slot,
-startup and compiler controls. A queued second job is not a concurrency pass.
+After useful canary completions confirm correctness and cleanup, validate two
+disk-native full jobs actually executing concurrently and completing under
+representative pressure. Use the existing total-slot, startup and compiler
+controls. A queued second job is not a concurrency pass. Adapt the initial
+one-native canary restriction for this test and remove that restriction when
+expanding; do not add another permanent capacity-control mechanism.
 
 Then replace general-slot VMs at normal turnover, one slot at a time. Record
 useful completions per unit time, compiler RAM-wait time, population overhead,
@@ -206,18 +219,15 @@ fix the existing observation/startup paths rather than adding another admission
 system. Removing the large workspace floor does not establish a fixed capacity
 multiplier or eliminate real compiler memory demand.
 
-## Rollback and completion
+## Finish the cutover and repair forward
 
-Disable future native selections with the existing `native-runner HOST --off`
-control and return those future starts to VM. Let healthy disk-native jobs finish;
-stop and repair only failed or unsafe instances through ordinary recovery. Keep
-a controller that understands both runtime identifiers until all new receipts
-are retired; selection rollback does not require a binary downgrade or a fleet
-drain. Never roll back to tmpfs workspaces.
+Correct failures in the disk-backed implementation and retry affected jobs through
+ordinary Fleet ownership and recovery. Keep unaffected jobs and admissions running.
+The plan includes no automatic backend reversion, retained tmpfs implementation,
+release-downgrade procedure or rollback switch added for this change.
 
-The switch is complete when new selected native jobs use disk, legacy receipts
-remain recoverable, real jobs publish correct outcomes and clean up, the workspace
-floor is gone, and expanded concurrency shows useful progress within measured
-RAM/disk capacity. The first canary and subsequent expansion are deployable
-milestones; hard quotas, shared artifacts and a redesigned memory scheduler are
-not prerequisites.
+The switch is complete when selected native jobs use disk, the old implementation
+and its special accounting are deleted, real jobs publish correct outcomes and
+clean up, and concurrent native jobs make useful progress within measured RAM and
+disk capacity. Keep the implementation focused on that result: one native code
+path, ordinary runner controls and the existing compiler gate.
