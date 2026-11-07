@@ -96,7 +96,8 @@ class LiveUpdate(unittest.TestCase):
         self.assert_work_preserved()
 
     def test_main_resolution_failure_leaves_installed_release_and_worker_untouched(self):
-        with (patch.object(update, "latest_worker_revision", side_effect=store.FleetError("main unavailable")),
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "latest_worker_revision", side_effect=store.FleetError("main unavailable")),
               patch.object(update, "stage_worker") as stage, patch.object(update, "handover") as handover):
             with self.assertRaisesRegex(store.FleetError, "main unavailable"):
                 self.install()
@@ -118,6 +119,48 @@ class LiveUpdate(unittest.TestCase):
         self.assertNotIn("unchanged", result)
         handover.assert_called_once()
         self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], self.revision)
+
+    def test_same_worker_and_fleet_are_unchanged_through_symlinked_data_directory(self):
+        actual_data = store.data_dir()
+        alias = self.home / "data-alias"
+        alias.symlink_to(actual_data, target_is_directory=True)
+        staged = actual_data / "worker-runtimes" / self.revision
+        binary = staged / "bin/tauceti"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("installed worker")
+        update.symlink(actual_data / "current", self.release)
+        update.symlink(actual_data / "bin/tauceti", binary)
+        store.atomic(actual_data / "worker-runtime.json", dict(revision=self.revision))
+        store.atomic(store.state_dir() / "status.json", dict(controller_release=str(self.release), controller_pid=1, observed_at=time.time()))
+        with (patch.dict(os.environ, {"TAUCETI_FLEET_DATA": str(alias)}),
+              patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "stage_worker", return_value=alias / "worker-runtimes" / self.revision),
+              patch.object(update, "handover") as handover):
+            result = self.install()
+        self.assertTrue(result["unchanged"])
+        self.assertEqual(result["worker_revision"], self.revision)
+        handover.assert_not_called()
+
+    def test_completed_alternate_runtime_is_reused_after_interrupted_install(self):
+        root = store.data_dir() / "worker-runtimes" / self.revision
+        root.mkdir(parents=True)
+        completed = root.with_name(self.revision + "-" + "c" * 32)
+        (completed / "bin").mkdir(parents=True)
+        (completed / "bin/tauceti").write_text("ready worker")
+        store.atomic(completed / "ready.json", dict(revision=self.revision))
+        with patch.object(update, "run", side_effect=AssertionError("must reuse completed installation")):
+            self.assertEqual(update.stage_worker(self.revision), completed)
+            self.assertEqual(update.stage_worker(self.revision), completed)
+
+    def test_unsupported_service_refuses_before_worker_lookup_or_install(self):
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="no")),
+              patch.object(update, "latest_worker_revision") as latest,
+              patch.object(update, "stage_worker") as stage):
+            with self.assertRaisesRegex(store.FleetError, "Restart=on-failure"):
+                self.install()
+        latest.assert_not_called()
+        stage.assert_not_called()
+        self.assert_work_preserved()
 
     def test_prepare_selects_main_and_does_not_restore_manifest_pin(self):
         config = store.update_host(workers_enabled=False, ci_enabled=False, ci_allowed=False)

@@ -49,8 +49,10 @@ def stage_worker(revision):
     if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
         raise FleetError("Worker installation requires a full commit")
     root = data_dir() / "worker-runtimes" / revision
-    if read(root / "ready.json", {}).get("revision") == revision and (root / "bin/tauceti").is_file():
-        return root
+    candidates = [root, *sorted(root.parent.glob(revision + "-*"))]
+    for candidate in candidates:
+        if read(candidate / "ready.json", {}).get("revision") == revision and (candidate / "bin/tauceti").is_file():
+            return candidate
     if root.exists():
         # An interrupted install is retained for diagnosis. Use a distinct path:
         # moving a venv after installation would invalidate its shebangs.
@@ -148,20 +150,19 @@ def install(release, *, expected_machine_id):
             raise FleetError("Preserve the existing non-symlink worker executable before updating")
         old_worker = os.readlink(worker_link) if worker_link.is_symlink() else None
         worker_metadata = read(data_dir() / "worker-runtime.json")
+        controller = service()
+        if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
+            raise FleetError("Controller requires Restart=on-failure for live handover")
         revision = latest_worker_revision() if config["workers_enabled"] or old_worker else None
         worker = stage_worker(revision) if revision else None
         status = read(state_dir() / "status.json", {})
-        controller = service()
         if (previous == release and status.get("controller_release") == str(release)
-                and (not worker or (worker_link.resolve() == worker / "bin/tauceti"
+                and (not worker or (worker_link.resolve() == (worker / "bin/tauceti").resolve()
                                     and (worker_metadata or {}).get("revision") == revision))
                 and not status.get("error") and status.get("observed_at", 0) > time.time() - 15
                 and controller.get("MainPID", "0") != "0"
                 and str(status.get("controller_pid")) == controller.get("MainPID")):
             return dict(installed=True, release=release.name, worker_revision=revision, unchanged=True)
-        # Fail before activation if the existing controller cannot be handed over.
-        if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
-            raise FleetError("Controller requires Restart=on-failure for live handover")
         # Existing qcow backing images remain untouched, even if a new release
         # would prepare a different image. Image maintenance is a separate task.
         old_metadata = read(data_dir() / "release.json")

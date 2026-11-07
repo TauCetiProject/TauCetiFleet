@@ -21,15 +21,13 @@ a native failure cooldown selects VM before registration, without a native wait.
 
 ## Prepare and activate
 
-Use the current supported Fleet release on the host. Preserve the host's current
-worker revision, admission settings, total CI ceiling and staging reservation
-when deploying a canary; a Fleet-only rollout must not accidentally replace an
-independently deployed worker runtime with an older release-manifest pin.
-`update --fleet-only` leaves the worker binary and revision untouched, including
-on rollback while another operator updates them independently.
+Use the current supported Fleet release on the host. Fleet updates select the
+latest Worker `main` commit and report the installed SHA. Deploy with normal
+worker and CI admissions enabled; retain the operator's total CI ceiling and
+staging reservation. Existing worker processes and healthy CI jobs keep running.
 
 ```sh
-tauceti-fleet update tauchonki --fleet-only --json
+tauceti-fleet update tauchonki --json
 tauceti-fleet native-runner tauchonki --prepare --json
 tauceti-fleet native-runner tauchonki --json
 tauceti-fleet native-runner tauchonki --slot 3 --json
