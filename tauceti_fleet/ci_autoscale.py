@@ -176,8 +176,10 @@ class Controller:
                             reason="no CI compiler admissions and idle PR guests under RAM pressure")
         # Charge unrealized preparation growth rather than assuming that a newly
         # booted 3-GiB guest will stay small. No physical memory is reserved.
-        budget = max(20 * GIB, max((v.get("memory_bytes") or 0 for v in snapshot["vms"]), default=0) * 1.1)
-        pending = sum(max(0, budget - (v.get("memory_bytes") or budget)) for v in snapshot["vms"])
+        budget = max(20 * GIB, max((v.get("memory_bytes") or 0 for v in snapshot["vms"]
+                                   if v.get("runtime") != "native-tmpfs"), default=0) * 1.1)
+        pending = sum(max(0, (v.get("expected_memory_bytes", budget) if v.get("runtime") == "native-tmpfs" else budget)
+                          - (v["memory_bytes"] if v.get("memory_bytes") is not None else budget)) for v in snapshot["vms"])
         room = available - pending >= headroom + budget + GIB
         saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
         growth = (room and saturated and limit < self.maximum

@@ -277,6 +277,12 @@ def start(config):
                 if 0 < remaining <= 60:
                     atomic(path, dict(boot_id=boot, next_start_monotonic=now + remaining))
                     return {}
+            from . import native_runner
+            available = start_memory_available()
+            native = native_runner.choose(config, available)
+            config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available)
+            if native:
+                config["ci_kinds"] = ["pr"]
             if not start_memory_ok(config):
                 # Defer without consuming the pacing minute; the slot retries in 5s.
                 return {}
@@ -318,7 +324,15 @@ def start_memory_available():
 def start_memory_ok(config=None):
     """Unmeasurable memory does not block CI; a measured shortfall defers the start."""
     global _start_memory_deferred
-    available = start_memory_available()
+    available = config["_ci_start_available"] if config and "_ci_start_available" in config else start_memory_available()
+    if config and "_ci_backend" in config:
+        from . import native_runner
+        if available is not None:
+            available -= native_runner.pending_growth()
+        if config["_ci_backend"] == native_runner.RUNTIME:
+            # Native selection already passed this same startup decision. No
+            # reservation or deduction is added to running compiler credits.
+            return available is not None and available >= native_runner.START_GIB * 1024**3
     required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
     deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
@@ -370,6 +384,7 @@ def _cancel_registration(config):
 
 
 def _start(config):
+    from . import native_runner
     from .capacity import disk_root, disk_startup_gib, guest_shape
 
     root = data_dir() / "images"
@@ -381,8 +396,10 @@ def _start(config):
         result = run(["systemctl", "--user", "is-active", prior["unit"]], check=False)
         if result.returncode == 0:
             return prior
-        _retire(config, prior)
-    if shutil.disk_usage(disk_root()).free < disk_startup_gib(config) * 1024**3:
+        if _retire(config, prior) is False:
+            return {}
+    startup_disk = 16 if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
+    if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
     registration = slot_file(config, "ci-registration.json")
     intent = read(registration, {}) if config.get("ci_broker_url") else {}
@@ -402,7 +419,7 @@ def _start(config):
         atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
     from . import dependency_prefill
 
-    prefill = dependency_prefill.claim(config, instance)
+    prefill = dependency_prefill.claim(config, instance) if config.get("_ci_backend") != "native-tmpfs" else None
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
@@ -410,44 +427,49 @@ def _start(config):
     unit = "tauceti-fleet-vm-" + instance
     try:
         directory.mkdir(parents=True, mode=0o700)
-        run(
-            [
-                executable("qemu-img"),
-                "create",
-                "-f",
-                "qcow2",
-                "-F",
-                "qcow2",
-                "-b",
-                root / "prepared.qcow2",
-                disk,
-                str(config["ci_disk_gib"]) + "G",
+        native = config.get("_ci_backend") == native_runner.RUNTIME
+        runtime_fields = {}
+        if native:
+            runtime_fields = native_runner.stage(config, directory, jit)
+        else:
+            run(
+                [
+                    executable("qemu-img"),
+                    "create",
+                    "-f",
+                    "qcow2",
+                    "-F",
+                    "qcow2",
+                    "-b",
+                    root / "prepared.qcow2",
+                    disk,
+                    str(config["ci_disk_gib"]) + "G",
+                ]
+            )
+            # Actions runs .sh hooks with bash, regardless of their shebang.
+            hook = "#!/bin/sh\nexec /usr/bin/python3 - <<'PY'\nimport json,os,time\nwith open('/dev/virtio-ports/org.tauceti.events','w') as f: print(json.dumps(dict(kind=KIND,run_id=os.environ.get('GITHUB_RUN_ID'),at=time.time())),file=f)\nPY\n"
+            commands = [
+                # Disposable, image-pinned guests must not run apt's periodic
+                # upgrades concurrently with the workflow's checksum-pinned dpkg.
+                # Stop timers, not a running package transaction; let it finish.
+                "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer",
+                "systemctl mask apt-daily.service apt-daily-upgrade.service",
+                "while systemctl is-active --quiet apt-daily.service || systemctl is-active --quiet apt-daily-upgrade.service; do sleep 1; done",
+                "printf %s "
+                + shlex.quote(jit)
+                + " > /opt/actions-runner/.jit; chmod 600 /opt/actions-runner/.jit; chown runner:runner /opt/actions-runner/.jit",
+                "printf %s "
+                + shlex.quote(hook.replace("KIND", "'ci_started'"))
+                + " > /opt/hook-start.sh; chmod 755 /opt/hook-start.sh",
+                "printf %s "
+                + shlex.quote(hook.replace("KIND", "'ci_completed'"))
+                + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
+                "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
+                *(dependency_prefill.mount_commands() if prefill else []),
+                *lean_runtime.ci_commands(),
+                "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
             ]
-        )
-        # Actions runs .sh hooks with bash, regardless of their shebang.
-        hook = "#!/bin/sh\nexec /usr/bin/python3 - <<'PY'\nimport json,os,time\nwith open('/dev/virtio-ports/org.tauceti.events','w') as f: print(json.dumps(dict(kind=KIND,run_id=os.environ.get('GITHUB_RUN_ID'),at=time.time())),file=f)\nPY\n"
-        commands = [
-            # Disposable, image-pinned guests must not run apt's periodic
-            # upgrades concurrently with the workflow's checksum-pinned dpkg.
-            # Stop timers, not a running package transaction; let it finish.
-            "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer",
-            "systemctl mask apt-daily.service apt-daily-upgrade.service",
-            "while systemctl is-active --quiet apt-daily.service || systemctl is-active --quiet apt-daily-upgrade.service; do sleep 1; done",
-            "printf %s "
-            + shlex.quote(jit)
-            + " > /opt/actions-runner/.jit; chmod 600 /opt/actions-runner/.jit; chown runner:runner /opt/actions-runner/.jit",
-            "printf %s "
-            + shlex.quote(hook.replace("KIND", "'ci_started'"))
-            + " > /opt/hook-start.sh; chmod 755 /opt/hook-start.sh",
-            "printf %s "
-            + shlex.quote(hook.replace("KIND", "'ci_completed'"))
-            + " > /opt/hook-complete.sh; chmod 755 /opt/hook-complete.sh",
-            "chmod 666 /dev/virtio-ports/org.tauceti.events; printf '%s\\n' ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh > /opt/actions-runner/.env; chown runner:runner /opt/actions-runner/.env",
-            *(dependency_prefill.mount_commands() if prefill else []),
-            *lean_runtime.ci_commands(),
-            "cd /opt/actions-runner; set +e; su -s /bin/bash runner -c './run.sh --jitconfig \"$(cat .jit)\"'; poweroff",
-        ]
-        seed = cloud_seed(directory, commands, name=name)
+            seed = cloud_seed(directory, commands, name=name)
         value = dict(
             slot=config.get("ci_slot", 0),
             ci_kinds=config.get("ci_kinds", ["staging"]),
@@ -462,7 +484,7 @@ def _start(config):
             pressure_protocol=2,
             lean_statistics_protocol=1,
             dependency_prefill_sha256=prefill["sha256"] if prefill else None,
-            **guest_shape(config),
+            **(runtime_fields if native else guest_shape(config)),
         )
         # Record the prospective unit before launch: a controller/process crash
         # can then recover either the existing guest or the unused registration.
@@ -486,7 +508,8 @@ def _start(config):
                 "KillMode=control-group",
                 "-p",
                 "RemainAfterExit=yes",
-                *qemu_args(config, directory, disk, seed, prefill=prefill),
+                *(native_runner.properties() if native else []),
+                *(native_runner.argv(directory) if native else qemu_args(config, directory, disk, seed, prefill=prefill)),
             ],
             timeout=30,
         )
@@ -502,6 +525,10 @@ def _start(config):
             registration.unlink(missing_ok=True)
         except FleetError:
             pass
+        if config.get("_ci_backend") == "native-tmpfs":
+            atomic(state_dir() / "native-backoff.json", dict(until=time.time() + 900, instance=instance))
+            if (directory / "rootfs").exists():
+                native_runner.cleanup(dict(directory=str(directory), unit=unit + ".service"))
         shutil.rmtree(directory, ignore_errors=True)
         if read(slot_file(config, "vm.json"), {}).get("instance") == instance:
             slot_file(config, "vm.json").unlink(missing_ok=True)
@@ -525,33 +552,49 @@ def retire_idle(config, value):
 
         remember(value)
         # GitHub rejects deletion if a job started after our last observation.
-        github.retire_runner(config, value["runner_id"])
-        _retire(config, value, registration_removed=True)
-        return True
+        from . import native_runner
+        marker = native_runner.request_stop(value)
+        try:
+            github.retire_runner(config, value["runner_id"])
+        except Exception:
+            if marker:
+                (Path(value["directory"]) / "native-stop.json").unlink(missing_ok=True)
+            raise
+        return _retire(config, value, registration_removed=True) is not False
 
 
 def _retire(config, value, *, registration_removed=False):
-    run(["systemctl", "--user", "stop", value["unit"]], check=False)
-    run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
-    try:
-        if not registration_removed:
-            github.retire_runner(config, value["runner_id"])
-    except FleetError:
-        if config.get("ci_broker_url"):
-            # Preserve local ownership for an idempotent retirement retry. The
-            # broker handles GitHub's already-deregistered (404) case itself.
-            raise
-    registration = slot_file(config, "ci-registration.json")
-    if read(registration, {}).get("instance") == value.get("instance"):
-        registration.unlink(missing_ok=True)
+    from . import native_runner
+    cleaning = native_runner.is_native(value) and value.get("phase") == "cleanup"
+    if not cleaning:
+        native_runner.request_stop(value)
+        run(["systemctl", "--user", "stop", value["unit"]], check=False)
+        run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
+        try:
+            if not registration_removed:
+                github.retire_runner(config, value["runner_id"])
+        except FleetError:
+            if config.get("ci_broker_url"):
+                # Preserve local ownership for an idempotent retirement retry. The
+                # broker handles GitHub's already-deregistered (404) case itself.
+                raise
+        registration = slot_file(config, "ci-registration.json")
+        if read(registration, {}).get("instance") == value.get("instance"):
+            registration.unlink(missing_ok=True)
     directory = Path(value["directory"])
     if directory.parent == state_dir() / "vms":
+        if native_runner.is_native(value):
+            value["phase"] = "cleanup"
+            atomic(slot_file(config, "vm.json"), value)
+            if not native_runner.cleanup(value, asynchronous=True):
+                return False
         shutil.rmtree(directory, ignore_errors=True)
     if read(slot_file(config, "vm.json"), {}).get("instance") == value.get("instance"):
         slot_file(config, "vm.json").unlink(missing_ok=True)
     retired_at = time.time()
     atomic(slot_file(config, "ci-last-retired.json"), dict(at=retired_at, runner_id=value["runner_id"]))
     event("ci_vm_retired", at=retired_at, runner_id=value["runner_id"])
+    return True
 
 
 def smoke(config=None):

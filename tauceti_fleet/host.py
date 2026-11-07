@@ -594,6 +594,11 @@ def collect_ci_results(config):
                     kind = "pr"
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
                                    memory_overcommit=config.get("ci_memory_budget_gib") is not None)
+            from . import native_runner
+            if native_runner.is_native(value) and value.get("host_health") in ("fault", "oom"):
+                # Native cleanup applies its own backend cooldown. Keep the
+                # general slot useful through ordinary VM replacement.
+                decision = dict(cooldown=False, reason="native_infrastructure_vm_fallback", evidence=decision)
             if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
@@ -685,6 +690,9 @@ class CISlot:
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
+        if value:
+            from . import native_runner
+            value = native_runner.reconcile_events(config, value)
         if not config["ci_enabled"] and not value:
             if time.time() >= self.next_cleanup:
                 self.next_cleanup = time.time() + 300
@@ -714,10 +722,10 @@ class CISlot:
                 # The daemon collects queued results on its existing schedule;
                 # reporting must not delay retiring this guest.
                 queue_ci_result(value, service_health)
-                vm.retire(config, value)
-                value = {}
-                self.close()
-                self.next_vm = time.time() + 5
+                if vm.retire(config, value) is not False:
+                    value = {}
+                    self.close()
+                    self.next_vm = time.time() + 5
         if value and self.client is None:
             try:
                 self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -758,14 +766,19 @@ class CISlot:
             if value and own.get("busy") and not value.get("busy"):
                 value["busy"] = True
                 atomic(path, value)
-            if (value and not value.get("busy")
+            if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
+                         or native_runner.idle_expired(value, own)
                          or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
                 if config.get("ci_idle_pool"):
                     value["routing_labels"] = ci_pool.labels(value, own)
                     retired = (ci_pool.idle_ready(value, own, reservations)
                                and vm.retire_idle(config, value))
+                elif native_runner.is_native(value):
+                    # GitHub rejects deregistration if a job won the idle race.
+                    value["routing_labels"] = ci_pool.labels(value, own)
+                    retired = vm.retire_idle(config, value)
                 else:
                     vm.retire(config, value)
                     retired = True
@@ -1005,6 +1018,13 @@ def rpc(payload):
         from .ci_autoscale import host_action
 
         return host_action(payload)
+    if action == "native-runner":
+        from . import native_runner
+        if payload.get("prepare"):
+            return native_runner.prepare()
+        if "slot" in payload:
+            return native_runner.configure(payload["slot"])
+        return native_runner.status()
     if action == "configure":
         return configure(payload)
     if action == "enroll":

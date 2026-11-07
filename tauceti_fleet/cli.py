@@ -49,6 +49,13 @@ def parser():
     enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
+    native = sub.add_parser("native-runner", help="prepare or select one rootless tmpfs PR canary at normal turnover")
+    native.add_argument("host")
+    selection = native.add_mutually_exclusive_group()
+    selection.add_argument("--prepare", action="store_true")
+    selection.add_argument("--slot", type=int)
+    selection.add_argument("--off", action="store_true")
+    native.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
@@ -201,6 +208,11 @@ def main(argv=None, *, _status_results=None):
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
                                memory_budget_gib=args.ci_memory_budget_gib)
+            if args.command == "native-runner":
+                if args.prepare:
+                    payload["prepare"] = True
+                if args.slot is not None or args.off:
+                    payload["slot"] = None if args.off else args.slot
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
@@ -224,7 +236,7 @@ def main(argv=None, *, _status_results=None):
                 value = remote.call(
                     entry["target"],
                     payload,
-                    timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    timeout=2100 if action == "prepare" or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
