@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, remote
+from . import activity, broker, host, pool_activity, remote
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -29,6 +29,7 @@ def parser():
         cmd.add_argument("--json", action="store_true")
         if name == "status":
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
+            cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -181,9 +182,10 @@ def main(argv=None, *, _status_results=None):
         if args.command == "status" and args.follow:
             from . import status_follow
 
-            command = ["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
+            command = (["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
+                       + (["--all-jobs"] if args.all_jobs else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
-                                     json_output=args.json)
+                                     json_output=args.json, refresh=pool_activity.refresh)
         results = {}
         for name, entry in selected.items():
             if _status_results is not None:
@@ -248,6 +250,7 @@ def main(argv=None, *, _status_results=None):
 
             pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
             overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
+            overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
             bors_printed = False
 
             def show_bors():
@@ -262,6 +265,8 @@ def main(argv=None, *, _status_results=None):
                 results["_ci"] = overview
             else:
                 ci_overview.display(overview, section="overview")
+                print()
+                pool_activity.display(overview["pool_activity"], all_jobs=args.all_jobs)
                 print()
         if args.json:
             if fleet is not None:

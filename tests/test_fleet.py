@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import activity, capabilities, host, remote, report, store, vm
+from tauceti_fleet import activity, capabilities, host, pool_activity, remote, report, store, vm
 from tauceti_fleet.cli import main
 
 
@@ -28,6 +28,9 @@ class Isolated(unittest.TestCase):
             },
         )
         self.environ.start()
+        public_activity = patch.object(pool_activity, "refresh", return_value={})
+        public_activity.start()
+        self.addCleanup(public_activity.stop)
 
     def tearDown(self):
         self.environ.stop()

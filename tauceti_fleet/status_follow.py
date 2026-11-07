@@ -198,10 +198,11 @@ def screen_view(screen, update, render, results):
         dirty = True
 
 
-def run(selected, render, *, json_output=False):
+def run(selected, render, *, json_output=False, refresh=None):
     pending, pending_lock = {}, threading.Lock()
     stop = threading.Event()
     processes, process_lock = set(), threading.Lock()
+    refreshed = threading.Event()
     results, groups = {}, {}
     for name, entry in selected.items():
         saved = read(config_dir() / "status-cache" / (entry["machine_id"] + ".json"), {})
@@ -235,10 +236,23 @@ def run(selected, render, *, json_output=False):
             value = apply_frame(entry, frame, previous)
             for alias in groups[entry["machine_id"]]:
                 results[alias] = value
-        return bool(updates)
+        public_update = refreshed.is_set()
+        refreshed.clear()
+        return bool(updates) or public_update
+
+    def refresh_public():
+        while not stop.is_set():
+            refresh()
+            refreshed.set()
+            if stop.wait(30):
+                return
 
     threads = []
     try:
+        if refresh is not None:
+            thread = threading.Thread(target=refresh_public, daemon=True)
+            thread.start()
+            threads.append(thread)
         for aliases in groups.values():
             name = aliases[0]
             thread = threading.Thread(target=receive,
