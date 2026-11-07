@@ -48,6 +48,25 @@ finishing successfully after the live update, with 1,198 seconds run time and
 3 seconds initial queue wait. Its slot was normally replaced. This validates
 continuity of existing VM work, not native production performance.
 
+At 03:59:26 UTC, slot 0 also chose VM with 34,546,229,248 bytes (32.17 GiB)
+available. Slots 0 and 1's previous jobs both completed successfully. Although
+available memory had briefly reached about 51 GiB during their retirement,
+slot 2's VM grew to approximately 40 GiB before the normal startup spacing
+allowed another launch. At approximately 04:00 UTC the selector was moved to
+slot 2, so its normal retirement could release that footprint. No job was
+interrupted and the threshold was unchanged.
+
+Useful existing VM jobs observed after deployment:
+
+| Run | PR | Conclusion | Runtime | Initial wait |
+| --- | --- | --- | --- | --- |
+| [42333818431](https://github.com/TauCetiProject/TauCeti/actions/runs/42333818431) | — | success | 1,198 s | 3 s |
+| [42334274044](https://github.com/TauCetiProject/TauCeti/actions/runs/42334274044) | 30004 | success | 1,622 s | 2 s |
+| [42334429132](https://github.com/TauCetiProject/TauCeti/actions/runs/42334429132) | 31387 | success | 1,513 s | 3 s |
+
+These are different workloads under varying shared-host load; they establish
+continuity and provide context, not a controlled speed comparison.
+
 Observation remains in progress. There have been **zero native production jobs**
 in this observation period so far. Native admission, actual GitHub job
 conclusions, footprint, Actions scratch and resource release must be recorded
