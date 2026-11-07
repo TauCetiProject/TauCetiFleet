@@ -76,17 +76,27 @@ def expected_bytes(value):
     return int(value.get("expected_memory_bytes", EXPECTED_GIB * 1024**3))
 
 
+def usage(value):
+    result = run(["systemctl", "--user", "show", value["unit"], "-p", "MemoryCurrent", "-p", "ActiveState",
+                  "-p", "SubState", "-p", "LoadState"], check=False)
+    raw = result.stdout.strip()
+    fields = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    inactive = (fields.get("ActiveState") in ("inactive", "failed") or fields.get("SubState") == "exited"
+                or fields.get("LoadState") == "not-found")
+    current = fields.get("MemoryCurrent", raw)
+    return (int(current) if current.isdigit() else None), inactive
+
+
 def pending_growth():
     """A startup forecast only; never deducted from running compiler credits."""
     total = 0
     for value in instances():
         if not is_native(value) or value.get("phase") == "cleanup":
             continue
-        result = run(["systemctl", "--user", "show", value["unit"], "-p", "MemoryCurrent", "--value"], check=False)
-        try:
-            current = int(result.stdout.strip())
-        except (ValueError, AttributeError):
-            current = 0
+        current, inactive = usage(value)
+        if inactive:
+            continue
+        current = current or 0
         total += max(0, expected_bytes(value) - current)
     return total
 
@@ -96,16 +106,17 @@ def status():
     for value in instances():
         if not is_native(value):
             continue
-        result = run(["systemctl", "--user", "show", value["unit"], "-p", "MemoryCurrent", "--value"], check=False)
-        current = int(result.stdout.strip()) if result.stdout.strip().isdigit() else None
+        current, inactive = usage(value)
         active.append(dict(instance=value["instance"], slot=value["slot"], unit=value["unit"],
-                           run_id=value.get("run_id"), memory_bytes=current,
+                           phase=value.get("phase"), run_id=value.get("run_id"), memory_bytes=current,
                            expected_memory_bytes=expected_bytes(value),
-                           forecast_growth_bytes=max(0, expected_bytes(value) - (current or 0)),
+                           forecast_growth_bytes=0 if inactive or value.get("phase") == "cleanup" else max(0, expected_bytes(value) - (current or 0)),
+                           unit_inactive=inactive,
                            memory_max_gib=value.get("memory_max_gib"), workspace_gib=value.get("workspace_gib"),
                            progress=shared_json(Path(value["directory"]) / "control/native-progress.json", {})))
     return dict(ci_native_slot=host_config().get("ci_native_slot"), image=image(), ready=ready(),
-                choice=read(state_dir() / "native-choice.json", {}), instances=active)
+                choice=read(state_dir() / "native-choice.json", {}),
+                cooldown=read(state_dir() / "native-backoff.json", {}), instances=active)
 
 
 def choose(config, available):
@@ -256,7 +267,7 @@ def argv(directory, *, offline=False):
 
 def properties():
     return ["-p", f"MemoryMax={MEMORY_GIB}G", "-p", "OOMPolicy=kill", "-p", "OOMScoreAdjust=1000",
-            "-p", "LimitFSIZE=4G", "-p", "LimitCORE=0", "-p", "Delegate=yes",
+            "-p", "LimitFSIZE=4G", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
 
 
@@ -284,6 +295,7 @@ def cleanup(value, *, asynchronous=False):
     evidence = state_dir() / "native-results" / directory.name
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (evidence / "archived.json").exists():
+        atomic(evidence / "instance.json", value)
         result = read(directory / "native-result.json", {})
         stop = read(directory / "native-stop.json", {})
         requested = stop or result.get("requested_stop")
@@ -299,7 +311,7 @@ def cleanup(value, *, asynchronous=False):
         (evidence / "telemetry").mkdir(exist_ok=True)
         telemetry = directory / "control/telemetry"
         if not telemetry.is_symlink():
-            for name in ("phases.tsv", "lake-build.log", "ci-host-resources.json", "runner-diagnostic.log"):
+            for name in ("phases.tsv", "lake-build.log", "ci-host-resources.json", "runner-diagnostic.log", "artifact-mappings.json"):
                 copy_diagnostic(telemetry / name, evidence / "telemetry" / name)
         atomic(evidence / "archived.json", dict(at=time.time()))
         # Bounded small evidence; live roots and their ownership are separate.
@@ -343,7 +355,8 @@ def shared_json(path, default=None):
             raw = stream.read(512 * 1024 + 1)
             if len(raw) > 512 * 1024:
                 return default
-            return json.loads(raw)
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else default
     except (OSError, ValueError):
         return default
 
@@ -431,7 +444,10 @@ class PressureRelay:
             # Discard any interrupted JSON frame before a fresh publisher frame.
             self.to_guest += b"\n"
         if self.parent in readable:
-            data = self.parent.recv(65536)
+            try:
+                data = self.parent.recv(65536)
+            except ConnectionResetError:
+                data = b""
             if not data:
                 self.ended = True
                 self.drop()
@@ -456,6 +472,9 @@ class PressureRelay:
                 self.to_guest = self.to_guest[self.parent.send(self.to_guest):]
             except BlockingIOError:
                 pass
+            except (BrokenPipeError, ConnectionResetError):
+                self.ended = True
+                self.drop()
 
     def close(self):
         self.drop()
@@ -550,6 +569,7 @@ def serve(directory, *, offline=False):
     relay = PressureRelay(directory)
     previous_signal = signal.getsignal(signal.SIGTERM)
     started, offset, next_sample = time.time(), 0, 0
+    transport_ended = None
     code, failed = 75, {}
     requested_stop = False
     def stop(*_):
@@ -561,6 +581,9 @@ def serve(directory, *, offline=False):
     try:
         if not (directory / "rootfs").exists():
             materialize(directory)
+        if requested_stop:
+            code = 143
+            return code
         if offline:
             # Explicit unregistered integration mode; the production launch path
             # always runs the stock Actions runner and cannot select this mode.
@@ -568,13 +591,24 @@ def serve(directory, *, offline=False):
             run(["unshare", "--user", "--map-auto", "--map-root-user", "sh", "-c",
                  'cat > "$1"; chmod 755 "$1"', "sh", directory / "rootfs/opt/actions-runner/run.sh"], input=script)
         with (directory / "runner-console.log").open("ab", buffering=0) as log:
+            if requested_stop:
+                code = 143
+                return code
             publish_memory(directory)
             child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, pass_fds=(relay.child.fileno(),),
                                      env=dict(os.environ, TAUCETI_NATIVE_PRESSURE_FD=str(relay.child.fileno())))
             relay.child.close()
             with (directory / "native-samples.jsonl").open("a", buffering=1) as samples:
                 while True:
+                    if requested_stop:
+                        code = 143
+                        break
                     relay.poll()
+                    if relay.ended:
+                        transport_ended = transport_ended or time.monotonic()
+                        if time.monotonic() - transport_ended > 5 and child.poll() is None:
+                            failed = dict(reason="native pressure transport closed")
+                            break
                     publish_memory(directory)
                     try:
                         client, _ = listener.accept()
@@ -633,8 +667,16 @@ def serve(directory, *, offline=False):
         if not offline and not requested_stop and not failed and code == 0 and not any(
                 str(json.loads(line).get("run_id", "")).isdigit() for line in history):
             failed = dict(reason="native runner exited without a job")
+        try:
+            relative = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::"))
+            group = Path("/sys/fs/cgroup") / relative.lstrip("/")
+            peak = int((group / "memory.peak").read_text())
+            memory_events = (group / "memory.events").read_text()
+        except (OSError, ValueError, StopIteration):
+            peak, memory_events = None, None
         atomic(directory / "native-result.json", dict(started_at=started, ended_at=time.time(), exit_code=code,
-                                                     infrastructure_error=failed, requested_stop=requested_stop))
+                                                     infrastructure_error=failed, requested_stop=requested_stop,
+                                                     memory_peak_bytes=peak, memory_events=memory_events))
         if (directory / "rootfs").exists() and not requested_stop:
             try:
                 remove_root(directory / "rootfs")

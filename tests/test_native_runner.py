@@ -82,6 +82,12 @@ class NativeRunner(unittest.TestCase):
         with patch.object(vm, "start_memory_available", return_value=20 * GIB), patch.object(native, "pending_growth", side_effect=AssertionError):
             self.assertTrue(vm.start_memory_ok())
 
+    def test_dead_native_receipt_does_not_withhold_future_workspace_ram(self):
+        value = dict(runtime=native.RUNTIME, unit="native.service", phase="ready")
+        with (patch.object(native, "instances", return_value=[value]),
+              patch.object(native, "run", return_value=Mock(stdout="ActiveState=failed\nMemoryCurrent=[not set]\n"))):
+            self.assertEqual(native.pending_growth(), 0)
+
     def test_native_configuration_changes_only_next_backend(self):
         initial = dict(store.host_config(), ci_max_jobs=4, ci_staging_slots=1, ci_kinds=["pr", "staging"], workers_enabled=True)
         store.update_host(**initial)
@@ -232,11 +238,13 @@ class NativeRunner(unittest.TestCase):
         host.connect(str(self.root / "pressure.sock"))
         relay.poll()
         host.sendall(b'{"version":1}\n')
-        for _ in range(3):relay.poll()
+        for _ in range(3):
+            relay.poll()
         relay.child.settimeout(1)
         self.assertIn(b'{"version":1}', relay.child.recv(4096))
         relay.child.sendall(b'123:1\n')
-        for _ in range(3):relay.poll()
+        for _ in range(3):
+            relay.poll()
         host.settimeout(1)
         self.assertEqual(host.recv(4096), b'123:1\n')
         host.close()
@@ -246,9 +254,26 @@ class NativeRunner(unittest.TestCase):
         newer.connect(str(self.root / "pressure.sock"))
         relay.poll()
         relay.child.sendall(b'124:1\n')
-        for _ in range(3):relay.poll()
+        for _ in range(3):
+            relay.poll()
         newer.settimeout(1)
         self.assertEqual(newer.recv(4096), b'124:1\n')
+
+    def test_pressure_peer_shutdown_with_unread_data_is_a_normal_end(self):
+        import socket
+        relay = native.PressureRelay(self.root)
+        self.addCleanup(relay.close)
+        host = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(host.close)
+        host.connect(str(self.root / "pressure.sock"))
+        relay.poll()
+        host.sendall(b'{"version":1}\n')
+        for _ in range(3):
+            relay.poll()
+        relay.child.close()  # Peer exits with unread pressure data queued.
+        for _ in range(3):
+            relay.poll()
+        self.assertTrue(relay.ended)
 
     def test_optional_diagnostics_cannot_block_on_fifo_or_symlink(self):
         source = self.root / "fifo"

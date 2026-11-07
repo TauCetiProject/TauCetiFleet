@@ -29,6 +29,9 @@ parser.add_argument("--stock-runner", action="store_true", help="Exercise the st
 parser.add_argument("--memory-max-mib", type=int, help="Smaller test-only cgroup limit for local OOM recovery")
 parser.add_argument("--expect-infrastructure-failure", action="store_true")
 parser.add_argument("--cancel-phase", help="Cancel while this full-workflow phase is active")
+parser.add_argument("--cancel-phase-delay", type=float, default=0)
+parser.add_argument("--cancel-after-mapping", help="Require this mature observer record before phase cancellation")
+parser.add_argument("--without-pressure", action="store_true", help="Test cancellation while the existing gate waits for host telemetry")
 args = parser.parse_args()
 script = args.script.resolve().read_text()
 native.prerequisites()
@@ -41,7 +44,8 @@ directory.mkdir(parents=True, mode=0o700)
 unit = "tauceti-native-integration-" + identity + ".service"
 bridge = normal_state / "vms" / ("native-integration-" + identity)
 bridge.parent.mkdir(parents=True, exist_ok=True)
-bridge.symlink_to(directory, target_is_directory=True)
+if not args.without_pressure:
+    bridge.symlink_to(directory, target_is_directory=True)
 started, terminal = time.time(), {}
 try:
     native.stage({}, directory, "unregistered-offline-test")
@@ -57,6 +61,7 @@ try:
     print(json.dumps(dict(unit=unit, directory=str(directory), started_at=started)), flush=True)
     deadline = time.monotonic() + args.timeout
     launched = time.monotonic()
+    phase_seen = None
     while time.monotonic() < deadline:
         terminal = store.read(directory / "native-result.json", {})
         if terminal:
@@ -68,8 +73,14 @@ try:
             fields = lines[-1].split()
             if len(fields) == 2 and float(fields[1]) >= started:
                 phase = fields[0]
+        if args.cancel_phase and phase == args.cancel_phase:
+            phase_seen = phase_seen or time.monotonic()
+        else:
+            phase_seen = None
+        mapping = store.read(directory / "control/telemetry/artifact-mappings.json", {})
+        mapped = not args.cancel_after_mapping or args.cancel_after_mapping in mapping.get("processes", {})
         if ((args.cancel_after is not None and time.monotonic() - launched >= args.cancel_after)
-                or (args.cancel_phase and phase == args.cancel_phase)):
+                or (phase_seen and mapped and time.monotonic() - phase_seen >= args.cancel_phase_delay)):
             subprocess.run(["systemctl", "--user", "stop", unit], check=True)
             terminal = dict(cancelled=True, phase=phase, seconds=time.time() - started)
             break
@@ -88,9 +99,11 @@ finally:
     if fields and (Path("/sys/fs/cgroup") / fields.lstrip("/") / "cgroup.events").exists():
         assert "populated 0" in (Path("/sys/fs/cgroup") / fields.lstrip("/") / "cgroup.events").read_text()
     native.cleanup(dict(directory=str(directory), unit=unit))
-    bridge.unlink()
+    bridge.unlink(missing_ok=True)
     assert not directory.exists()
     print(json.dumps(dict(result=terminal, evidence=str(root / "native-results" / identity), released=True)), flush=True)
 failed = bool(terminal.get("infrastructure_error")) or (not terminal.get("cancelled") and terminal.get("exit_code") != 0)
+if args.cancel_phase and not terminal.get("cancelled"):
+    raise SystemExit("Requested cancellation phase was not reached")
 if failed != args.expect_infrastructure_failure:
     raise SystemExit(1)

@@ -73,12 +73,12 @@ with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         temporary=pathlib.Path(tempfile.mkdtemp(dir=release.parent))
         archive.extractall(temporary)
         temporary.rename(release)
-if len(sys.argv)>1 and sys.argv[1]=='live':
+if len(sys.argv)>1 and sys.argv[1] in ('live','fleet-only'):
     sys.path.insert(0,str(release))
     from tauceti_fleet.update import install
     from tauceti_fleet.store import FleetError
     try:
-        result=install(release,expected_machine_id=sys.argv[2])
+        result=install(release,expected_machine_id=sys.argv[2],preserve_worker=True) if sys.argv[1]=='fleet-only' else install(release,expected_machine_id=sys.argv[2])
     except FleetError as exc:
         result=dict(installed=False,error=str(exc))
     print(json.dumps(result))
@@ -182,9 +182,11 @@ def resolve(name):
     raise FleetError(f"Unknown fleet host {name!r}; use add or enroll first")
 
 
-def deploy(target, *, live=False, expected_machine_id=None):
+def deploy(target, *, live=False, expected_machine_id=None, fleet_only=False):
     """Install this release on the explicitly selected machine."""
-    args = ["live", expected_machine_id] if live else []
+    if fleet_only and not live:
+        raise FleetError("A Fleet-only update requires the live handover path")
+    args = ["fleet-only" if fleet_only else "live", expected_machine_id] if live else []
     if live:
         if not expected_machine_id:
             raise FleetError("Live update requires the installed host identity")

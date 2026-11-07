@@ -30,6 +30,8 @@ def parser():
         if name == "status":
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+        if name == "update":
+            cmd.add_argument("--fleet-only", action="store_true", help="preserve the independently deployed worker runtime")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -229,7 +231,10 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "update":
-                results[name] = remote.deploy(entry["target"], live=True, expected_machine_id=entry["machine_id"])
+                options = dict(live=True, expected_machine_id=entry["machine_id"])
+                if args.fleet_only:
+                    options["fleet_only"] = True
+                results[name] = remote.deploy(entry["target"], **options)
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:

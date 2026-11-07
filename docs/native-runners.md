@@ -25,8 +25,11 @@ Use the current supported Fleet release on the host. Preserve the host's current
 worker revision, admission settings, total CI ceiling and staging reservation
 when deploying a canary; a Fleet-only rollout must not accidentally replace an
 independently deployed worker runtime with an older release-manifest pin.
+`update --fleet-only` leaves the worker binary and revision untouched, including
+on rollback while another operator updates them independently.
 
 ```sh
+tauceti-fleet update tauchonki --fleet-only --json
 tauceti-fleet native-runner tauchonki --prepare --json
 tauceti-fleet native-runner tauchonki --json
 tauceti-fleet native-runner tauchonki --slot 3 --json

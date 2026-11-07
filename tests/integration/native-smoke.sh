@@ -64,3 +64,10 @@ view=Path('/usr/local/share/tauceti/native-memory')
 assert int(view.joinpath('memory.max').read_text())==54*1024**3
 print('existing pressure stream and absolute cgroup guard are present')
 PYFRAME
+# Match production's nested cgroup/user namespace and recursive read-only /usr.
+env -i /usr/bin/bwrap --tmpfs / --ro-bind /usr /usr --ro-bind /etc /etc \
+ --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+ --dev /dev --proc /proc --tmpfs /tmp --remount-ro / \
+ --unshare-user --unshare-cgroup --unshare-pid --unshare-ipc --unshare-uts \
+ --unshare-net --disable-userns --die-with-parent --new-session -- \
+ /usr/bin/python3 -c 'import runpy; g=runpy.run_path("/usr/local/bin/tauceti-lean",run_name="probe"); assert g["memory"]()[0]==54*1024**3; print("offline sandbox sees existing 54 GiB absolute OOM guard")'

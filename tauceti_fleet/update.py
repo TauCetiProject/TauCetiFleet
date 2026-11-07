@@ -122,7 +122,7 @@ def handover(release, *, rollback=False, on_signal=None):
     raise FleetError("Controller did not publish a healthy status after live handover")
 
 
-def install(release, *, expected_machine_id):
+def install(release, *, expected_machine_id, preserve_worker=False):
     """Runs from the staged release, including when the installed CLI is old."""
     with locked(data_dir() / "update.lock"):
         config = host_config()
@@ -149,7 +149,7 @@ def install(release, *, expected_machine_id):
             raise FleetError("Preserve the existing non-symlink worker executable before updating")
         old_worker = os.readlink(worker_link) if worker_link.is_symlink() else None
         worker_metadata = read(data_dir() / "worker-runtime.json")
-        worker = stage_worker(metadata.get("worker_revision")) if config["workers_enabled"] or old_worker else None
+        worker = stage_worker(metadata.get("worker_revision")) if not preserve_worker and (config["workers_enabled"] or old_worker) else None
         # Existing qcow backing images remain untouched, even if a new release
         # would prepare a different image. Image maintenance is a separate task.
         old_metadata = read(data_dir() / "release.json")
@@ -172,12 +172,15 @@ def install(release, *, expected_machine_id):
             result = handover(release, on_signal=did_signal)
         except BaseException as exc:
             symlink(current, previous)
-            if old_worker:
-                symlink(worker_link, old_worker)
-            else:
-                worker_link.unlink(missing_ok=True)
-            for path, value in ((data_dir() / "release.json", old_metadata),
-                                (data_dir() / "worker-runtime.json", worker_metadata)):
+            if not preserve_worker:
+                if old_worker:
+                    symlink(worker_link, old_worker)
+                else:
+                    worker_link.unlink(missing_ok=True)
+            restore = [(data_dir() / "release.json", old_metadata)]
+            if not preserve_worker:
+                restore.append((data_dir() / "worker-runtime.json", worker_metadata))
+            for path, value in restore:
                 if value is None:
                     path.unlink(missing_ok=True)
                 else:
@@ -192,7 +195,8 @@ def install(release, *, expected_machine_id):
                 raise FleetError("Live update failed before handover; previous release restored, controller left running") from exc
             raise FleetError("Live update failed; previous release restored and controller recovered") from exc
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
-                    worker_revision=metadata.get("worker_revision") if worker else None,
+                    worker_revision=read(data_dir() / "worker-runtime.json", {}).get("revision") if preserve_worker else metadata.get("worker_revision") if worker else None,
+                    worker_runtime_preserved=preserve_worker,
                     active_processes_preserved=True,
                     worker_runtime_scope="future manager starts; running managers and workers retain their existing runtime",
                     image="preserved")

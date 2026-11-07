@@ -80,6 +80,38 @@ class LiveUpdate(unittest.TestCase):
         self.assertIn("running managers and workers retain", result["worker_runtime_scope"])
         self.assert_work_preserved()
 
+    def test_fleet_only_update_preserves_independent_worker_runtime(self):
+        worker_path = store.data_dir() / "worker-runtime.json"
+        original = worker_path.read_bytes()
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "stage_worker", side_effect=AssertionError("worker runtime must not be staged")),
+              patch.object(update, "handover", return_value=dict(controller_release=str(self.release)))):
+            result=update.install(self.release, expected_machine_id=self.config["machine_id"], preserve_worker=True)
+        self.assertEqual(worker_path.read_bytes(), original)
+        self.assertEqual((store.data_dir() / "bin/tauceti").resolve(), self.old_worker)
+        self.assertTrue(result["worker_runtime_preserved"])
+        self.assertEqual(result["worker_revision"], "b"*40)
+        self.assert_work_preserved()
+
+    def test_fleet_only_rollback_does_not_revert_a_parallel_worker_update(self):
+        newer=self.home / "independent-worker/bin/tauceti"
+        newer.parent.mkdir(parents=True)
+        newer.write_text("independent runtime")
+        def fail(release, **kwargs):
+            if kwargs.get("on_signal"):
+                kwargs["on_signal"]()
+                update.symlink(store.data_dir() / "bin/tauceti", newer)
+                store.atomic(store.data_dir() / "worker-runtime.json", dict(revision="c"*40))
+                raise store.FleetError("controller failed")
+            return {}
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update, "stage_worker", side_effect=AssertionError("worker runtime must not be staged")),
+              patch.object(update, "handover", side_effect=fail)):
+            with self.assertRaises(store.FleetError):
+                update.install(self.release, expected_machine_id=self.config["machine_id"], preserve_worker=True)
+        self.assertEqual((store.data_dir() / "bin/tauceti").resolve(), newer)
+        self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], "c"*40)
+
     def test_failed_activation_restores_both_runtimes_and_recovers_old_controller(self):
         def fail_then_recover(release, **kwargs):
             if "on_signal" in kwargs:

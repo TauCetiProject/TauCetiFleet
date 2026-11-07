@@ -71,10 +71,11 @@ def progress(stop):
 
 def measure_progress(stop):
     next_disk_check = 0
+    layout = {}
     while not stop.wait(2):
         fs = os.statvfs(WORK)
         value = dict(at=time.time(), workspace_allocated=(fs.f_blocks-fs.f_bfree)*fs.f_frsize,
-                     workspace_available=fs.f_bavail*fs.f_frsize, phases=None)
+                     workspace_available=fs.f_bavail*fs.f_frsize, actions_scratch=layout, phases=None)
         for file in WORK.glob('*/*/pr/.lake/telemetry/phases.tsv'):
             try:
                 fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -91,9 +92,12 @@ def measure_progress(stop):
             atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='host disk headroom'))
         if time.monotonic() >= next_disk_check:
             try:
-                usage = subprocess.run(['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/'],
+                paths = [str(WORK / name) for name in ('_actions', '_temp') if (WORK / name).exists()]
+                usage = subprocess.run(['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/', *paths],
                                        capture_output=True, text=True, timeout=10)
                 allocated = int(usage.stdout.split()[0])
+                layout = {Path(row.split(maxsplit=1)[1]).name: int(row.split(maxsplit=1)[0])
+                          for row in usage.stdout.splitlines()[1:]}
                 if allocated > 24 * 1024**3:
                     atomic(LINK / 'native-resource-error.json', dict(at=time.time(), reason='native disk budget', disk_bytes=allocated))
             except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
