@@ -37,6 +37,16 @@ completions across three PRs and separate concurrent-job validation justify
 expansion. Offline tests and unregistered replays do not count as useful live
 canary jobs. See [offline validation](native-runner-validation-20261107.md).
 
+## Subsequent bounded production trial
+
+The startup-only checkpoint below was followed by an explicitly authorized
+bounded production trial. After one focused stock-listener repair, native
+[run 42344835665](https://github.com/TauCetiProject/TauCeti/actions/runs/42344835665)
+completed successfully in 5m25s with a 30.68 GiB memory peak and verified cleanup.
+See the [production trial report](native-runner-production-trial-20261107.md)
+for workload identity, Actions scratch, limitations and final settings. The
+checkpoint's zero-job statements describe its earlier observation period.
+
 ## Observation
 
 At 03:52:01 UTC, the first selected-slot turnover found 27,769,438,208 bytes

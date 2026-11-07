@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "host": "tauchonki",
+  "run_id": 42344835665,
+  "run_attempt": 1,
+  "pr": 31161,
+  "job_id": 128320276481,
+  "instance": "fc4ac1a10c8a0c4a",
+  "runner_id": 125334,
+  "runtime": "native-tmpfs",
+  "conclusion": "success",
+  "head": "199d0bc9ec5e1310b716912094474a60767b0ca5",
+  "base": "686d0d7f4390d0e8d6185114e99e90b74c599656",
+  "tested_commit": "4800bef9e34b03b5df27990c6081d810641742ff",
+  "tested_tree": "0aa6e4f98952fbbe10847ff435de644e8c626dce",
+  "fleet_release": "2b73f05677bf4f77b33decc4eb46df25183c8eca1cf009f0e361af00d770e7ff",
+  "metrics": {
+    "memory_peak_bytes": 32941740032,
+    "workspace_peak_bytes": 28196089856,
+    "scratch_peak_bytes": {
+      "_actions": 67219456,
+      "_temp": 453210112
+    },
+    "supervisor_seconds": 364.348361492157,
+    "sample_count": 73,
+    "cpu_seconds": 1001.892445,
+    "memory_gib_seconds": 5049.356994328233,
+    "workspace_quota_remaining_fraction": 0.17938578128814697,
+    "job_seconds": 325,
+    "build_step_seconds": 100
+  },
+  "result": {
+    "ended_at": 1794031360.4598608,
+    "exit_code": 0,
+    "infrastructure_error": {},
+    "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+    "memory_peak_bytes": 32941740032,
+    "requested_stop": false,
+    "started_at": 1794030996.1114993
+  },
+  "cleanup": {
+    "instance": "fc4ac1a10c8a0c4a",
+    "directory_released": true,
+    "slot_receipt_released": true,
+    "unit": {
+      "ActiveState": "inactive",
+      "SubState": "dead",
+      "MainPID": "0",
+      "ControlGroup": ""
+    },
+    "cgroup_events": null,
+    "host_mount_released": true,
+    "native_backoff": null
+  },
+  "required_statuses": [
+    {
+      "context": "build",
+      "state": "success",
+      "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42344835665"
+    },
+    {
+      "context": "bump-guard",
+      "state": "success",
+      "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42344835665"
+    },
+    {
+      "context": "scope",
+      "state": "success",
+      "target_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/42344835665"
+    }
+  ],
+  "workload": {
+    "changed_modules": 2,
+    "tau_ceti_modules_checked_for_duplicates": 27169,
+    "dependency_modules_checked_for_duplicates": 9203,
+    "comparison": "different workload from companion; no causal speedup factor"
+  },
+  "companion": {
+    "memory_peak_bytes": 37903515648,
+    "instance": "24a4f96cc008b443",
+    "run_id": 42344900084,
+    "job_seconds": 668,
+    "build_step_seconds": 273,
+    "conclusion": "success",
+    "workload": {
+      "identity": {
+        "base_sha": "686d0d7f4390d0e8d6185114e99e90b74c599656",
+        "head_sha": "4c45f18ec55415346e451df3b8adbed76a361afc",
+        "mode": "pr-integration",
+        "pin_resolution": "merged",
+        "schema": 1,
+        "tested_sha": "0dcfc781dc7c82b287c40308022c298d8b502e95",
+        "tested_tree": "a5fb217a6ba3df7cbf2ac7eb9b982a92825cd127"
+      },
+      "tau_ceti_build_tasks": 1,
+      "audit_scope_log": [
+        "2026-11-07T06:08:18.1009401Z duplicate-declarations: checked 27170 TauCeti modules and 9203 dependency modules; no duplicate declarations.",
+        "2026-11-07T06:08:22.4467744Z axioms: auditing the 1 changed module(s) only (AXIOMS_ONLY_MODULES)"
+      ]
+    }
+  },
+  "restoration": {
+    "at": 1794031837.3806748,
+    "limit": {
+      "maximum": 4
+    },
+    "autoscaler": "active",
+    "native_selection": null
+  }
+}
