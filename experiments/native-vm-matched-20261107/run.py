@@ -212,6 +212,20 @@ def run(label, backend):
 
 
 def main():
+    if sys.argv[1:] == ['--finish-warm-controls']:
+        # Continue the sealed fixture; never rerun or overwrite completed passes.
+        before = CONFIG_PATH.read_bytes()
+        os.environ['TAUCETI_FLEET_STATE'] = str(ROOT / 'native-state')
+        (ROOT / 'final.json').rename(ROOT / 'first-series-final.json')
+        try:
+            for label, backend in [('vm-3', 'vm'), ('native-3', 'native')]:
+                run(label, backend)
+        finally:
+            assert CONFIG_PATH.read_bytes() == before
+            save(ROOT / 'final.json', dict(at=time.time(), config_unchanged=True,
+                                          archive_unchanged=digest(ARCHIVE) == data(ROOT / 'inputs.json')['archive_sha256'],
+                                          remaining_instances=[str(p) for p in (ROOT / 'vms').glob('*')]))
+        return
     ROOT.mkdir(parents=True, exist_ok=False, mode=0o700)
     before = CONFIG_PATH.read_bytes()
     config = json.loads(before)

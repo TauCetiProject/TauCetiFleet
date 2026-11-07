@@ -24,7 +24,7 @@ rm -rf pr/.lake/telemetry
 mkdir -p pr/.lake/telemetry
 python3 /fleet-link/input/input-identity.py
 python3 /fleet-link/input/cold-toolchain.py
-if [ "${MATCHED_BACKEND:-native}" = vm ]; then
+if [ "${MATCHED_BACKEND:-native}" = vm ] && [ "${MATCHED_COLD_VM:-0}" = 1 ]; then
   sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
 fi
 python3 - <<'START'
