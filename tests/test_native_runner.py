@@ -48,6 +48,66 @@ class NativeRunner(unittest.TestCase):
             store.atomic(store.state_dir() / "native-backoff.json", dict(until=10**12))
             self.assertFalse(native.choose(self.config, 100 * GIB))
 
+    def test_next_general_selection_excludes_reserved_staging_and_invalid_slots(self):
+        config = dict(self.config, ci_native_slot="next-general")
+        for index in (1, 2, 3):
+            self.assertTrue(native.selected(dict(config, ci_slot=index)))
+        for index in (0, -1, 4, True, "1"):
+            self.assertFalse(native.selected(dict(config, ci_slot=index)))
+        self.assertFalse(native.selected(dict(config, ci_slot=2, ci_kinds=["staging"])))
+
+    def test_next_general_starts_one_native_across_slots_and_retains_cleanup_ownership(self):
+        config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"])
+
+        def launch(value):
+            if value["_ci_backend"] == native.RUNTIME:
+                store.atomic(vm.slot_file(value, "vm.json"), dict(runtime=native.RUNTIME, unit="native.service", phase="cleanup"))
+            return value
+
+        with (patch.object(native, "ready", return_value=True),
+              patch.object(native, "usage", return_value=(32 * GIB, False)),
+              patch.object(vm, "start_memory_available", return_value=80 * GIB),
+              patch.object(vm, "_start", side_effect=launch), patch.object(vm.time, "monotonic", return_value=100) as clock):
+            self.assertEqual(vm.start(config)["_ci_backend"], native.RUNTIME)
+            clock.return_value = 161
+            self.assertEqual(vm.start(dict(config, ci_slot=2))["_ci_backend"], "vm")
+            self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "one native instance is already owned")
+            clock.return_value = 222
+            reserved = vm.start(dict(config, ci_slot=0))
+            self.assertEqual((reserved["_ci_backend"], reserved["ci_kinds"]), ("vm", ["staging"]))
+            vm.slot_file(config, "vm.json").unlink()  # ordinary cleanup has released ownership
+            clock.return_value = 283
+            self.assertEqual(vm.start(dict(config, ci_slot=3))["_ci_backend"], native.RUNTIME)
+            choice = store.read(store.state_dir() / "native-choice.json")
+            self.assertEqual((choice["selection"], choice["slot"]), ("next-general", 3))
+
+    def test_next_general_insufficient_memory_keeps_existing_vm_start_path(self):
+        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
+              patch.object(vm, "start_memory_available", return_value=25 * GIB),
+              patch.object(vm, "_start", side_effect=lambda config: config)):
+            self.assertEqual(vm.start(dict(self.config, ci_native_slot="next-general", ci_slot=3))["_ci_backend"], "vm")
+
+    def test_next_general_keeps_mixed_idle_pool_spare_and_recoveries_on_vm(self):
+        config = dict(self.config, ci_native_slot="next-general", ci_staging_slots=0, ci_kinds=["pr", "staging"])
+        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
+              patch.object(vm, "start_memory_available", return_value=80 * GIB),
+              patch.object(vm, "_start", side_effect=lambda value: value)):
+            value = vm.start(dict(config, ci_idle_pool=True))
+            self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", ["pr", "staging"]))
+            self.assertFalse(native.choose(dict(config, ci_recover_instance="0123456789abcdef"), 80 * GIB))
+            self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "preserve recovery runner classes on VM")
+
+    def test_next_general_replays_existing_registration_classes_on_vm(self):
+        config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"], ci_broker_url="https://broker.invalid")
+        intent = dict(instance="0123456789abcdef", ci_kinds=["pr", "staging"])
+        store.atomic(vm.slot_file(config, "ci-registration.json"), intent)
+        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
+              patch.object(vm, "start_memory_available", return_value=80 * GIB),
+              patch.object(vm, "_start", side_effect=lambda value: value)):
+            value = vm.start(config)
+            self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", intent["ci_kinds"]))
+            self.assertEqual(store.read(vm.slot_file(config, "ci-registration.json")), intent)
+
     def test_unsuitable_host_mapping_limit_falls_back_to_vm(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(native, "mapping_ok", return_value=False)):
@@ -97,8 +157,18 @@ class NativeRunner(unittest.TestCase):
             self.assertEqual(after, dict(initial, ci_native_slot=3))
             with self.assertRaises(store.FleetError):
                 native.configure(0)
+            native.configure("next-general")
+            self.assertEqual(store.host_config(), dict(initial, ci_native_slot="next-general"))
             native.configure(None)
             self.assertEqual(store.host_config(), dict(initial, ci_native_slot=None))
+
+    def test_next_general_configuration_rejects_hosts_without_general_pr_slots(self):
+        with patch.object(native, "ready", return_value=True):
+            for change in (dict(ci_max_jobs=2, ci_staging_slots=2, ci_kinds=["pr", "staging"]),
+                           dict(ci_max_jobs=2, ci_staging_slots=0, ci_kinds=["staging"])):
+                store.update_host(**change)
+                with self.assertRaises(store.FleetError):
+                    native.configure("next-general")
 
     def test_lost_native_registration_reply_reuses_the_common_intent(self):
         config = dict(store.host_config(), **self.config, ci_broker_url="https://broker.invalid", _ci_backend=native.RUNTIME)

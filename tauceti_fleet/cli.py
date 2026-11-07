@@ -56,6 +56,7 @@ def parser():
     selection = native.add_mutually_exclusive_group()
     selection.add_argument("--prepare", action="store_true")
     selection.add_argument("--slot", type=int)
+    selection.add_argument("--next-general", action="store_true", help="allow one native canary in the next general slot whose normal start fits")
     selection.add_argument("--off", action="store_true")
     native.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
@@ -213,8 +214,8 @@ def main(argv=None, *, _status_results=None):
             if args.command == "native-runner":
                 if args.prepare:
                     payload["prepare"] = True
-                if args.slot is not None or args.off:
-                    payload["slot"] = None if args.off else args.slot
+                if args.slot is not None or args.off or args.next_general:
+                    payload["slot"] = None if args.off else "next-general" if args.next_general else args.slot
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":

@@ -33,6 +33,8 @@ tauceti-fleet update tauchonki --fleet-only --json
 tauceti-fleet native-runner tauchonki --prepare --json
 tauceti-fleet native-runner tauchonki --json
 tauceti-fleet native-runner tauchonki --slot 3 --json
+# Or allow the single canary to use the next suitable general-slot turnover:
+tauceti-fleet native-runner tauchonki --next-general --json
 ```
 
 Choose an existing general PR slot from the current host inventory; `3` is an
@@ -40,6 +42,18 @@ example. Selection affects its next instance at normal turnover. Healthy existin
 VMs keep running. No drain or global admissions change is needed. Online native
 runners that receive no job for five minutes enter the ordinary deregistration
 path, which checks GitHub ownership before stopping the unit.
+
+`--next-general` considers each general slot at its ordinary startup decision,
+so a brief memory window in a different slot can be used without moving the
+selection manually. The first suitable start becomes native; all other starts
+use VM while that native receipt is owned, including during cleanup. Reserved
+staging slots are excluded. The total ceiling, startup spacing, memory threshold
+and one-native limit are unchanged. Status reports the requested selection and
+last startup attempt; active native instances and archived receipts identify the
+actual slot. `--slot N` retains the fixed-slot behavior and `--off` disables both
+modes. A mixed PR/staging idle-pool host without reserved staging capacity keeps
+its general spare on VM. Recovery placements and existing non-PR registration
+intents also stay on the ordinary VM path, preserving their original classes.
 
 Preparation verifies the existing prepared VM image and exports its Ubuntu OS
 through a short-lived, unregistered 2-CPU/2-GiB guest with a 3-GiB scope cap. It

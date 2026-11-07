@@ -52,8 +52,10 @@ def selected(config):
     # Recovery may narrow ci_kinds to PR even on a mixed-class host. The
     # reservation count still describes the host's slots in that case.
     reserved = config.get("ci_staging_slots", 0)
-    return (type(slot) is int and slot == config.get("ci_slot", 0)
-            and type(reserved) is int and 0 <= reserved <= slot < capacity.jobs(config)
+    index = config.get("ci_slot", 0)
+    return ((slot == "next-general" or (type(slot) is int and slot == index))
+            and type(index) is int and type(reserved) is int
+            and 0 <= reserved <= index < capacity.jobs(config)
             and "pr" in config.get("ci_kinds", []))
 
 
@@ -123,6 +125,8 @@ def choose(config, available):
     """Choose before registration. A native deferral immediately falls back to VM."""
     if not selected(config):
         return False
+    from . import vm
+    intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
     reason = None
     cooldown = read(state_dir() / "native-backoff.json", {})
     if cooldown.get("until", 0) > time.time():
@@ -131,6 +135,10 @@ def choose(config, available):
         reason = "native image not prepared"
     elif config.get("ci_recover_instance"):
         reason = "preserve recovery runner classes on VM"
+    elif intent and intent.get("ci_kinds") != ["pr"]:
+        reason = "preserve existing registration classes on VM"
+    elif config.get("ci_idle_pool") and "staging" in config.get("ci_kinds", []) and not config.get("ci_staging_slots", 0):
+        reason = "preserve mixed-class idle-pool spare on VM"
     elif not mapping_ok():
         reason = "native host mapping limit is too small"
     elif any(is_native(v) for v in instances()):
@@ -138,7 +146,7 @@ def choose(config, available):
     elif available is None or available < START_GIB * 1024**3:
         reason = "native startup footprint does not fit"
     atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
-           backend="vm" if reason else RUNTIME, reason=reason, available_bytes=available,
+           selection=config.get("ci_native_slot"), backend="vm" if reason else RUNTIME, reason=reason, available_bytes=available,
            startup_required_bytes=START_GIB * 1024**3))
     return reason is None
 
@@ -146,7 +154,8 @@ def choose(config, available):
 def configure(slot):
     config = host_config()
     if slot is not None:
-        if type(slot) is not int or not capacity.staging_slots(config) <= slot < capacity.jobs(config):
+        general = range(capacity.staging_slots(config), capacity.jobs(config))
+        if not general or (slot != "next-general" and (type(slot) is not int or slot not in general)):
             raise FleetError("Choose an existing general PR slot, outside reserved staging slots")
         if "pr" not in capacity.kinds(config):
             raise FleetError("The native canary requires PR jobs on this host")
