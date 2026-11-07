@@ -278,6 +278,47 @@ class HostActions(unittest.TestCase):
             self.assertTrue(auto.host_action(dict(mode='cleanup',runner_id=99))['removed'])
             remove.assert_called_once()
 
+    def test_snapshot_reads_actual_ci_cgroups_when_workers_are_paused(self):
+        store.update_host(max_workers=0)
+        store.atomic(store.state_dir()/'status.json',dict(worker_memory=None,ci_vms=[
+            dict(slot=0,unit='first.service'),dict(slot=1,unit='second.service')]))
+        root=self.root/'cgroups'
+        for name,memory,cpu in [('first',17*GIB,12345),('second',3*GIB,67890)]:
+            group=root/'custom.slice'/name;group.mkdir(parents=True)
+            (group/'memory.current').write_text(str(memory))
+            (group/'cpu.stat').write_text('usage_usec '+str(cpu)+'\n')
+        reply=Mock(returncode=0,stdout='Id=first.service\nControlGroup=/custom.slice/first\n\nId=second.service\nControlGroup=/custom.slice/second\n')
+        with patch.object(auto,'CGROUP_ROOT',root,create=True),patch.object(vm,'run',return_value=reply),patch.object(auto.remote,'call',side_effect=AssertionError('no remote calls')):
+            result=auto.host_action({})
+        self.assertEqual([v['memory_bytes'] for v in result['vms']],[17*GIB,3*GIB])
+        self.assertEqual([v['cpu_usec'] for v in result['vms']],[12345,67890])
+        self.assertEqual(store.host_config()['max_workers'],0)
+        self.assertTrue(store.host_config()['ci_enabled'])
+
+    def test_missing_ci_unit_never_reads_root_or_loses_a_healthy_sibling(self):
+        store.atomic(store.state_dir()/'status.json',dict(ci_vms=[dict(unit='good.service'),dict(unit='gone.service')]))
+        root=self.root/'cgroups';root.mkdir()
+        # Root counters must never be attributed to a guest with no cgroup.
+        (root/'memory.current').write_text(str(99*GIB));(root/'cpu.stat').write_text('usage_usec 999\n')
+        good=root/'actual-ci'/ 'good';good.mkdir(parents=True)
+        (good/'memory.current').write_text(str(5*GIB));(good/'cpu.stat').write_text('usage_usec 123\n')
+        for missing in ['', '/', '/actual-ci/missing', '/actual-ci/../good']:
+            with self.subTest(missing=missing):
+                reply=Mock(returncode=1,stdout='Id=good.service\nControlGroup=/actual-ci/good\n\nId=gone.service\nControlGroup='+missing+'\n')
+                with patch.object(auto,'CGROUP_ROOT',root,create=True),patch.object(vm,'run',return_value=reply):
+                    result=auto.host_action({})
+                self.assertEqual(result['vms'][0]['memory_bytes'],5*GIB)
+                self.assertEqual(result['vms'][0]['cpu_usec'],123)
+                self.assertIsNone(result['vms'][1]['memory_bytes'])
+                self.assertIsNone(result['vms'][1]['cpu_usec'])
+
+    def test_snapshot_keeps_ci_measurements_unknown_when_systemd_is_unavailable(self):
+        store.atomic(store.state_dir()/'status.json',dict(worker_memory=None,ci_vms=[dict(unit='ci.service')]))
+        with patch.object(vm,'run',side_effect=store.FleetError('systemctl unavailable')):
+            result=auto.host_action({})
+        self.assertIsNone(result['vms'][0]['memory_bytes'])
+        self.assertIsNone(result['vms'][0]['cpu_usec'])
+
     def test_snapshot_is_cache_only_and_handles_no_worker_measurement(self):
         with patch.object(auto.remote,'call',side_effect=AssertionError('no remote calls')):
             result=auto.host_action({})
