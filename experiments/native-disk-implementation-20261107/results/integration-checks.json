@@ -1,0 +1,99 @@
+{
+  "smoke": {
+    "result": {
+      "ended_at": 1794051335.5281386,
+      "exit_code": 0,
+      "infrastructure_error": {},
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak_bytes": 372641792,
+      "requested_stop": false,
+      "started_at": 1794051329.2182035
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-e984367328f18884/native-results/e984367328f18884",
+    "released": true,
+    "unit": "tauceti-native-integration-e984367328f18884.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "listener": {
+    "result": {
+      "ended_at": 1794051339.5331256,
+      "exit_code": 0,
+      "infrastructure_error": {},
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak_bytes": 187228160,
+      "requested_stop": false,
+      "started_at": 1794051336.9136765
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-4279d544906eb0a0/native-results/4279d544906eb0a0",
+    "released": true,
+    "unit": "tauceti-native-integration-4279d544906eb0a0.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "cancel-population": {
+    "result": {
+      "cancelled": true,
+      "phase": "population",
+      "seconds": 5.464878559112549
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-1b875d5bc5a7155f/native-results/1b875d5bc5a7155f",
+    "released": true,
+    "unit": "tauceti-native-integration-1b875d5bc5a7155f.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "cancel-wait": {
+    "result": {
+      "cancelled": true,
+      "phase": "waiting",
+      "seconds": 10.24037480354309
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-3603f02dee83a2cb/native-results/3603f02dee83a2cb",
+    "released": true,
+    "unit": "tauceti-native-integration-3603f02dee83a2cb.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "cancel-execution": {
+    "result": {
+      "cancelled": true,
+      "phase": "execution",
+      "seconds": 5.274245262145996
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-4beb9ae4aa9b145d/native-results/4beb9ae4aa9b145d",
+    "released": true,
+    "unit": "tauceti-native-integration-4beb9ae4aa9b145d.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "stock-jit": {
+    "result": {
+      "ended_at": 1794051620.786545,
+      "exit_code": 0,
+      "infrastructure_error": {
+        "reason": "native runner exited without a job"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak_bytes": 240136192,
+      "requested_stop": false,
+      "started_at": 1794051618.013678
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-1922aa8db2c74188/native-results/1922aa8db2c74188",
+    "released": true,
+    "unit": "tauceti-native-integration-1922aa8db2c74188.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  },
+  "resource-error": {
+    "result": {
+      "ended_at": 1794051778.697927,
+      "exit_code": 1,
+      "infrastructure_error": {
+        "reason": "simulated disk budget exhaustion"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak_bytes": 110919680,
+      "requested_stop": false,
+      "started_at": 1794051775.7344298
+    },
+    "evidence": "/home/kim/.local/state/tauceti-fleet/native-integration-ccac60c29bc60ea3/native-results/ccac60c29bc60ea3",
+    "released": true,
+    "unit": "tauceti-native-integration-ccac60c29bc60ea3.service",
+    "cleanup_properties": "MainPID=0\nControlGroup=\n"
+  }
+}

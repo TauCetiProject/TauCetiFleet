@@ -36,18 +36,11 @@ class NativeRunner(unittest.TestCase):
                        dict(ci_kinds=["staging"]), dict(ci_native_slot=None), dict(ci_native_slot=True)):
             self.assertFalse(native.selected(dict(self.config, **change)))
 
-    def test_choose_falls_back_before_registration_and_has_no_wait(self):
-        with patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]) as instances:
-            self.assertTrue(native.choose(self.config, 52 * GIB))
-            for available in (None, 51 * GIB):
-                self.assertFalse(native.choose(self.config, available))
-                self.assertEqual(store.read(store.state_dir() / "native-choice.json")["backend"], "vm")
-            instances.return_value = [dict(runtime=native.RUNTIME)]
-            self.assertFalse(native.choose(self.config, 100 * GIB))
-            instances.return_value = []
-            store.atomic(store.state_dir() / "native-backoff.json", dict(until=10**12))
-            self.assertFalse(native.choose(self.config, 100 * GIB))
-
+    def test_selected_native_fault_is_explicit_before_registration(self):
+        with patch.object(native, "ready", return_value=False):
+            with self.assertRaisesRegex(store.FleetError, "image not prepared"):
+                native.choose(self.config, 25 * GIB)
+        self.assertEqual(store.read(store.state_dir() / "native-choice.json")["backend"], native.RUNTIME)
     def test_next_general_selection_excludes_reserved_staging_and_invalid_slots(self):
         config = dict(self.config, ci_native_slot="next-general")
         for index in (1, 2, 3):
@@ -56,7 +49,7 @@ class NativeRunner(unittest.TestCase):
             self.assertFalse(native.selected(dict(config, ci_slot=index)))
         self.assertFalse(native.selected(dict(config, ci_slot=2, ci_kinds=["staging"])))
 
-    def test_next_general_starts_one_native_across_slots_and_retains_cleanup_ownership(self):
+    def test_next_general_uses_total_slot_controls_for_concurrent_native_jobs(self):
         config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"])
 
         def launch(value):
@@ -65,13 +58,11 @@ class NativeRunner(unittest.TestCase):
             return value
 
         with (patch.object(native, "ready", return_value=True),
-              patch.object(native, "usage", return_value=(32 * GIB, False)),
               patch.object(vm, "start_memory_available", return_value=80 * GIB),
               patch.object(vm, "_start", side_effect=launch), patch.object(vm.time, "monotonic", return_value=100) as clock):
             self.assertEqual(vm.start(config)["_ci_backend"], native.RUNTIME)
             clock.return_value = 161
-            self.assertEqual(vm.start(dict(config, ci_slot=2))["_ci_backend"], "vm")
-            self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "one native instance is already owned")
+            self.assertEqual(vm.start(dict(config, ci_slot=2))["_ci_backend"], native.RUNTIME)
             clock.return_value = 222
             reserved = vm.start(dict(config, ci_slot=0))
             self.assertEqual((reserved["_ci_backend"], reserved["ci_kinds"]), ("vm", ["staging"]))
@@ -81,21 +72,20 @@ class NativeRunner(unittest.TestCase):
             choice = store.read(store.state_dir() / "native-choice.json")
             self.assertEqual((choice["selection"], choice["slot"]), ("next-general", 3))
 
-    def test_next_general_insufficient_memory_keeps_existing_vm_start_path(self):
+    def test_next_general_uses_ordinary_startup_headroom(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(vm, "start_memory_available", return_value=25 * GIB),
               patch.object(vm, "_start", side_effect=lambda config: config)):
-            self.assertEqual(vm.start(dict(self.config, ci_native_slot="next-general", ci_slot=3))["_ci_backend"], "vm")
+            self.assertEqual(vm.start(dict(self.config, ci_native_slot="next-general", ci_slot=3))["_ci_backend"], native.RUNTIME)
 
-    def test_next_general_keeps_mixed_idle_pool_spare_and_recoveries_on_vm(self):
+    def test_next_general_keeps_mixed_idle_pool_spare_on_vm_and_recovers_pr_on_native(self):
         config = dict(self.config, ci_native_slot="next-general", ci_staging_slots=0, ci_kinds=["pr", "staging"])
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(vm, "start_memory_available", return_value=80 * GIB),
               patch.object(vm, "_start", side_effect=lambda value: value)):
             value = vm.start(dict(config, ci_idle_pool=True))
             self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", ["pr", "staging"]))
-            self.assertFalse(native.choose(dict(config, ci_recover_instance="0123456789abcdef"), 80 * GIB))
-            self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "preserve recovery runner classes on VM")
+            self.assertTrue(native.choose(dict(config, ci_recover_instance="0123456789abcdef"), 80 * GIB))
 
     def test_next_general_replays_existing_registration_classes_on_vm(self):
         config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"], ci_broker_url="https://broker.invalid")
@@ -108,10 +98,11 @@ class NativeRunner(unittest.TestCase):
             self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", intent["ci_kinds"]))
             self.assertEqual(store.read(vm.slot_file(config, "ci-registration.json")), intent)
 
-    def test_unsuitable_host_mapping_limit_falls_back_to_vm(self):
+    def test_unsuitable_host_mapping_limit_is_an_explicit_native_fault(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(native, "mapping_ok", return_value=False)):
-            self.assertFalse(native.choose(self.config, 100 * GIB))
+            with self.assertRaisesRegex(store.FleetError, "mapping limit"):
+                native.choose(self.config, 100 * GIB)
             self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "native host mapping limit is too small")
 
     def test_same_locked_start_decision_uses_one_memory_snapshot(self):
@@ -126,27 +117,17 @@ class NativeRunner(unittest.TestCase):
             self.assertEqual(vm.start(dict(self.config, ci_slot=2)), {})
             launch.assert_called_once()
 
-    def test_small_headroom_starts_ordinary_vm_without_a_native_queue(self):
-        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
+    def test_small_headroom_starts_selected_native_without_a_workspace_deduction(self):
+        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[dict(runtime=native.RUNTIME)]),
               patch.object(vm, "start_memory_available", return_value=25 * GIB),
               patch.object(vm, "_start", side_effect=lambda config: config)):
-            self.assertEqual(vm.start(self.config)["_ci_backend"], "vm")
+            self.assertEqual(vm.start(self.config)["_ci_backend"], native.RUNTIME)
 
-    def test_pending_native_growth_affects_only_startup_and_is_charged_once(self):
-        receipt = dict(runtime=native.RUNTIME, unit="native.service", expected_memory_bytes=32 * GIB)
-        with patch.object(native, "instances", return_value=[receipt]), patch.object(native, "run", return_value=Mock(stdout=str(8 * GIB))):
-            self.assertEqual(native.pending_growth(), 24 * GIB)
-            self.assertFalse(vm.start_memory_ok(dict(_ci_backend="vm", _ci_start_available=43 * GIB)))
-            self.assertTrue(vm.start_memory_ok(dict(_ci_backend="vm", _ci_start_available=44 * GIB)))
-        # The legacy helper without a backend selection keeps its prior behavior.
-        with patch.object(vm, "start_memory_available", return_value=20 * GIB), patch.object(native, "pending_growth", side_effect=AssertionError):
-            self.assertTrue(vm.start_memory_ok())
-
-    def test_dead_native_receipt_does_not_withhold_future_workspace_ram(self):
-        value = dict(runtime=native.RUNTIME, unit="native.service", phase="ready")
-        with (patch.object(native, "instances", return_value=[value]),
-              patch.object(native, "run", return_value=Mock(stdout="ActiveState=failed\nMemoryCurrent=[not set]\n"))):
-            self.assertEqual(native.pending_growth(), 0)
+    def test_memory_start_threshold_is_shared_between_backends(self):
+        for backend in ("vm", native.RUNTIME):
+            for available, expected in ((19, False), (20, True), (25, True)):
+                with self.subTest(backend=backend, available=available):
+                    self.assertEqual(vm.start_memory_ok(dict(_ci_backend=backend, _ci_start_available=available * GIB)), expected)
 
     def test_native_configuration_changes_only_next_backend(self):
         initial = dict(store.host_config(), ci_max_jobs=4, ci_staging_slots=1, ci_kinds=["pr", "staging"], workers_enabled=True)
@@ -257,7 +238,6 @@ class NativeRunner(unittest.TestCase):
         with patch.object(native, "run", return_value=Mock(returncode=3)), patch.object(native, "remove_root") as remove:
             native.cleanup(value)
             remove.assert_called_once_with(directory)
-        self.assertTrue(store.read(store.state_dir() / "native-backoff.json")["until"])
         self.assertEqual(store.read(store.state_dir() / "native-results" / directory.name / "native-result.json")["exit_code"], 75)
 
     def test_stage_is_small_and_filesystem_clone_runs_in_the_unit(self):
@@ -278,14 +258,6 @@ class NativeRunner(unittest.TestCase):
         self.assertIsNone(native.shared_json(target))
         target.rename(self.root / "control/events.jsonl")
         self.assertEqual(native.hook_lines(self.root), ([], 0))
-
-    def test_requested_idle_stop_does_not_create_native_cooldown(self):
-        directory = store.state_dir() / "vms" / "0123456789abcdef"
-        directory.mkdir(parents=True)
-        store.atomic(directory / "native-stop.json", dict(reason="requested retirement"))
-        with patch.object(native, "run", return_value=Mock(returncode=3)), patch.object(native, "remove_root"):
-            native.cleanup(dict(directory=str(directory), unit="native.service"))
-        self.assertFalse((store.state_dir() / "native-backoff.json").exists())
 
     def test_asynchronous_cleanup_keeps_slot_ownership_until_filesystem_is_gone(self):
         directory = store.state_dir() / "vms" / "0123456789abcdef"

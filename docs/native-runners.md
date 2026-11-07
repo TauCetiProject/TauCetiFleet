@@ -1,119 +1,100 @@
-# Native tmpfs PR runner canary
+# Disk-backed native PR runners
 
-The optional `native-tmpfs` backend replaces the next instance of one general PR
-slot. VM is the default. It uses the existing broker/JIT registration, durable
-instance and registration receipts, job hooks, slot recovery, idle retirement,
-priority, startup lock and spacing. Native instances count toward the existing
-runner ceiling throughout population, execution and cleanup. Reserved staging
-slots remain VMs.
+The `native-disk` backend runs general PR jobs in a private rootless namespace
+with a disk-backed Actions workspace. Spare RAM caches files and remains
+reclaimable by the host. VM remains the backend for staging and general slots
+not selected for native execution. There is one native implementation.
 
-There is no workspace reservation ledger or additional compiler admission rule.
-Lean/Lake, compiler admission criteria and the pressure protocol are unchanged.
-An inherited pressure stream keeps host sockets outside the job. A read-only
-cgroup-counter view under the existing `/usr` sandbox mount supplies the existing
-absolute local OOM guard without exposing writable host cgroups. The existing startup check
-uses a 52 GiB initial-headroom threshold (32 GiB expected complete-job footprint
-plus the existing 20 GiB compiler headroom). Autoscaling includes unrealized
-native growth once when considering additional runners, separately from measured
-RAM. It never deducts that forecast from compiler credits for active jobs.
-Insufficient startup headroom, a missing image, another owned native instance or
-a native failure cooldown selects VM before registration, without a native wait.
+Native instances use the existing broker/JIT registration, durable ownership,
+job hooks, slot recovery, idle retirement, priority, startup lock and spacing.
+Population, execution and cleanup count against the ordinary total runner ceiling.
+The compiler gate, pressure protocol and stock Lean/Lake are unchanged. There is
+no workspace RAM reservation or extra compiler admission rule.
 
-## Prepare and activate
+## Prepare and select
 
-Use the current supported Fleet release on the host. Fleet updates select the
-latest Worker `main` commit and report the installed SHA. Deploy with normal
-worker and CI admissions enabled; retain the operator's total CI ceiling and
-staging reservation. Existing worker processes and healthy CI jobs keep running.
+Prepare the supported native OS image and select an existing general PR slot:
 
 ```sh
-tauceti-fleet update tauchonki --json
 tauceti-fleet native-runner tauchonki --prepare --json
 tauceti-fleet native-runner tauchonki --json
 tauceti-fleet native-runner tauchonki --slot 3 --json
-# Or allow the single canary to use the next suitable general-slot turnover:
-tauceti-fleet native-runner tauchonki --next-general --json
 ```
 
-Choose an existing general PR slot from the current host inventory; `3` is an
-example. Selection affects its next instance at normal turnover. Healthy existing
-VMs keep running. No drain or global admissions change is needed. Online native
-runners that receive no job for five minutes enter the ordinary deregistration
-path, which checks GitHub ownership before stopping the unit.
+`3` is an example; choose a general slot from the current inventory. Selection
+changes its next instance at normal turnover. Existing healthy jobs and worker
+admissions continue. No drain is needed. Use a fixed slot for the first canary.
+After concurrent-job validation, `--next-general` selects disk-native for future
+general PR starts across slots. Multiple native jobs can run within the existing
+total slot limit; there is no separate one-native capacity restriction. Reserved
+staging slots remain VMs. `--off` clears the operator's native selection.
 
-`--next-general` considers each general slot at its ordinary startup decision,
-so a brief memory window in a different slot can be used without moving the
-selection manually. The first suitable start becomes native; all other starts
-use VM while that native receipt is owned, including during cleanup. Reserved
-staging slots are excluded. The total ceiling, startup spacing, memory threshold
-and one-native limit are unchanged. Status reports the requested selection and
-last startup attempt; active native instances and archived receipts identify the
-actual slot. `--slot N` retains the fixed-slot behavior and `--off` disables both
-modes. A mixed PR/staging idle-pool host without reserved staging capacity keeps
-its general spare on VM. Recovery placements and existing non-PR registration
-intents also stay on the ordinary VM path, preserving their original classes.
+Already-owned registration classes and a mixed PR/staging idle-pool spare retain
+their original classes. A selected native startup failure is reported explicitly
+and retried through normal slot handling; it does not silently select another
+backend. Native preparation, launch and cleanup use no host root or sysctl changes.
+The host needs the existing unprivileged namespaces, subordinate UID/GID mappings
+and `vm.max_map_count >= 1048576`.
 
-Preparation verifies the existing prepared VM image and exports its Ubuntu OS
-through a short-lived, unregistered 2-CPU/2-GiB guest with a 3-GiB scope cap. It
-records the export content identity, backing-image SHA and Actions runner version.
-No host root or host sysctl changes are used. The host needs unprivileged user,
-mount and PID namespaces with subordinate UID/GID mappings and
-`vm.max_map_count >= 1048576`; hosts without these should continue using VMs.
+## Memory and disk
 
-Each native job gets a private OS clone and a systemd cgroup with 54 GiB
-`MemoryMax`, zero swap and normal PR CPU priority. A monitored 24 GiB OS-disk
-budget bounds ordinary trusted setup writes; the monitor also stops a job below
-8 GiB free disk. This is not a filesystem quota. `LimitFSIZE` is unlimited because
-[.NET's W^X mapper uses a large logical RAM-backed file](https://github.com/dotnet/runtime/discussions/81752);
-a per-file limit kills the stock Actions listener during startup. The cgroup
-continues to bound actual memory allocation. A private 32 GiB tmpfs is
-mounted at the actual Actions runner `_work` before checkout or restoration.
-This includes `_actions`, `_temp`, checkout, downloaded caches and generated
-outputs. Toolchains live on the disposable OS disk. The trusted workflow retains
-its offline candidate bwrap sandbox, pinned tool installation and stock compiler.
-The runner root has no host home, credentials or host cgroups mounted.
-Trusted setup has root inside the disposable user namespace and shares host
-networking. Candidate computation keeps the trusted workflow’s offline bwrap
-network boundary. This canary deliberately provides less isolation for trusted
-setup than the VM backend.
+Each job gets a private OS clone and the real `/opt/actions-runner/_work`
+directory on local disk before checkout or cache restoration. This covers Actions
+scratch, toolchains, source and build outputs. Reflinks are optional; ordinary
+copies work. Writable job files are never shared with another job.
 
-## Observe and recover
+The systemd unit caps whole-job RAM at 54 GiB, disables job swap and preserves
+normal PR CPU priority. `LimitFSIZE` is unlimited because .NET's RAM-backed
+executable mapper otherwise fails. The existing ordinary PR startup RAM check
+(currently 20 GiB), lock and spacing apply to native jobs too. Clean host file
+cache is discounted in native memory estimates. Raw charge and peaks remain
+visible; the cap is not a reservation. The ordinary autoscaler forecasts future
+growth once and does not inflate VM estimates from native clean cache.
 
-`native-runner HOST --json` reports the selected slot, image, last backend-choice
-reason, measured instance RAM, expected footprint, startup forecast growth and
-workspace allocation/quota. Ordinary host status retains native runtime identity
-in its existing `ci_vms` collection; the collection is shared by both backends.
+Native startup checks for 48 GiB free on the instance filesystem before JIT
+registration. This is an estimate for population plus the host margin, not a disk
+reservation. A 56 GiB whole-instance allocated-disk budget and 8 GiB host free-space
+threshold are monitored. These are **not hard filesystem quotas**; bursts and
+other writers can exceed a budget between observations. No quota provisioning or
+FUSE is required.
 
-The ordinary instance directory contains `native.json`, `native-progress.json`,
-`native-samples.jsonl`, `native-result.json`, durable hook events and runner output.
-Completion is recorded before optional telemetry copying. Controller restart
-recovers the run ID from hook history before retiring an exited unit. Native
-samples include cgroup RAM/peak/events, CPU, I/O and workspace/phase progress.
-OOM and quota exhaustion are infrastructure failures. The pressure receiver restarts after a transient failure; a failed receiver
-supervisor fails the instance instead of leaving compiler waiters indefinitely blocked.
-A native infrastructure failure triggers a 15-minute native-only cooldown; normal
-VM capacity remains available through the existing start and recovery paths.
+Cheap free-space/inode checks and phase observations run every two seconds.
+Allocated disk is measured by one bounded whole-instance scan at most every
+60 seconds; slow scans do not block the cheap checks. Failed/timed-out scans are
+unknown rather than zero usage, and repeated failures stop the affected instance.
+A budget breach, low space, inode exhaustion or resource-monitor failure is an
+infrastructure failure. Only the affected instance is stopped and cleaned up.
 
-Retirement stops the whole unit first, preserves bounded diagnostics under
-`STATE/native-results/INSTANCE` (the latest 50 instances), removes the mapped-UID OS clone asynchronously, and only then
-releases ordinary slot ownership. Failed cleanup retains ownership for retry.
-Useful job conclusions and status semantics remain owned by the existing
-workflow/GitHub result collector.
+The runner root has no host home, credentials or writable host cgroups mounted.
+Trusted setup has root inside its disposable user namespace and shares host
+networking. Candidate computation retains the workflow's offline bwrap boundary.
+The existing read-only cgroup-counter view supplies the absolute local OOM guard.
 
-Rollback affects only future native admissions:
+## Observation and recovery
 
-```sh
-tauceti-fleet native-runner tauchonki --off --json
-```
+`native-runner HOST --json` reports selected slots, image and backend-choice
+reason. Each instance reports raw `memory_bytes`, `memory_working_bytes` after
+clean-file discount, clean-cache bytes, the 54 GiB cap and disk budget. Progress
+includes storage kind, host free space/inodes, whole-instance allocated disk,
+measurement timestamp/age, scan state/errors and phases. Shared filesystem free
+space is not labelled as a per-job workspace quota.
 
-Let healthy work finish. Stop only an actual failed or unsafe instance and use
-ordinary job/registration recovery. Verify both backend and worker revisions,
-continued useful completions and any interrupted/stranded work after handover.
+The instance directory holds `native.json`, `native-progress.json`,
+`native-samples.jsonl`, `native-result.json`, hooks and runner output. Completion
+is durable before optional diagnostics are copied. Controller restart recovers
+job ownership from hook history. The pressure receiver can restart without
+reusing compiler permits; a failed receiver supervisor fails the instance.
+Native infrastructure uses ordinary slot failure/retry handling.
 
-## Validation and expansion
+Retirement stops the whole unit, archives bounded diagnostics (latest 50
+instances), removes the mapped-UID root asynchronously, then releases ownership.
+Failed cleanup retains ownership for retry. Correct failures forward while
+unaffected jobs continue. GitHub conclusions remain owned by the workflow and
+usual result collector.
 
-Run the targeted contracts with the ordinary test suite. The optional real
-namespace harness does not register with GitHub or post statuses:
+## Validation and deployment
+
+Run the Fleet tests and supported unregistered namespace checks:
 
 ```sh
 python3 -m unittest discover -s tests
@@ -122,19 +103,26 @@ python3 tests/integration/native_runner.py tests/integration/native-listener-smo
 python3 tests/integration/native_runner.py SCRIPT --cancel-after 5
 ```
 
-`native-frozen-ci.sh` repeats the experiment's frozen H/B/tree and complete
-computational checks, including cold toolchain/cache setup and the actual Actions
-workspace layout. Supply `--input DIR` containing a `source.bundle` with the
-`paired-head` and `paired-base` refs. This fixture is test-only; production uses
-its assigned workflow inputs. The harness records private evidence and checks
-that the unit is unpopulated and the disposable filesystem is gone after cleanup.
+The smoke check exercises the real workspace filesystem, private hard links,
+stock namespace sudo, candidate isolation, receiver restart and the pressure/guard
+transport. The Listener smoke starts the real .NET executable without registration.
+Full frozen CI must preserve consumed inputs, tested tree, checks and rebuild set.
+Exercise cancellation while populating, waiting and computing, plus resource
+failure and ownership recovery.
 
-Keep the live native ceiling at one until at least ten useful native jobs across
-three PRs complete, including cold setup and varied artifact footprints, with no
-OOM, leaks, stranded ownership or pressure deadlocks. Compare actual tauchonki
-workload identities and phase timing with contemporary VMs. The earlier serial
-chungus2 results are feasibility evidence, not a production latency promise.
-Before expansion, require two full native jobs to execute concurrently under the
-existing count/capacity controls and demonstrate combined headroom and useful
-completions. A queued second job is not a concurrency pass. Expand one slot at a
-time only after that evidence; no additional capacity ledger is a prerequisite.
+Before the one-time cutover, inventory old experimental native units/receipts.
+Retire any such instance with its existing release before updating; keep normal
+VM admissions running. The disk implementation has no old-runtime reader or
+migration branch. Install live, select one fixed general slot, and verify a real
+Actions job's checks, identity, memory, disk and cleanup. Then prove two full
+native jobs run concurrently and complete under representative pressure before
+expanding native selection at normal turnover. Preserve total capacity, staging
+reservations and worker settings. Record running Fleet/Worker revisions, useful
+completions and repair any interrupted work.
+
+The [implementation plan](plans/disk-backed-native-workspaces.md) and
+[matched workspace evidence](../experiments/native-disk-workspace-20261107/README.md)
+explain the storage choice and experimental limits. Disk has extra I/O cost;
+removing the approximately 26 GiB persistent workspace floor is the reason to use
+it on the memory-constrained fleet. Do not promise a runner-count multiplier from
+a single-job benchmark.

@@ -1,0 +1,12 @@
+{
+  "label": "disk-supported",
+  "backend": "native",
+  "identity": "de8e6ce61b74eadd",
+  "unit": "tauceti-matched-disk-supported-de8e6ce61b74eadd.service",
+  "room": {
+    "total": 134688063488,
+    "available": 48749461504,
+    "free_disk": 73777164288,
+    "at": 1794051398.0147784
+  }
+}

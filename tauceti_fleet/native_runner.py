@@ -16,16 +16,15 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import capacity, lean_guest, lean_pressure, lean_runtime, lean_statistics, native_inside
+from . import capabilities, capacity, lean_guest, lean_pressure, lean_runtime, lean_statistics, native_inside
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir, update_host
 
 IMAGE_REVISION = 1
-WORKSPACE_GIB = 32
+DISK_START_GIB = 48
 MEMORY_GIB = 54
-EXPECTED_GIB = 32
-START_GIB = 52
-RUNTIME = "native-tmpfs"
+RUNTIME = "native-disk"
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 def image():
@@ -74,33 +73,25 @@ def instances():
     return [read(vm.slot_file({"ci_slot": slot}, "vm.json"), {}) for slot in vm.slots_in_use()]
 
 
-def expected_bytes(value):
-    return int(value.get("expected_memory_bytes", EXPECTED_GIB * 1024**3))
-
-
 def usage(value):
     result = run(["systemctl", "--user", "show", value["unit"], "-p", "MemoryCurrent", "-p", "ActiveState",
-                  "-p", "SubState", "-p", "LoadState"], check=False)
-    raw = result.stdout.strip()
-    fields = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+                  "-p", "SubState", "-p", "LoadState", "-p", "ControlGroup"], check=False)
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
     inactive = (fields.get("ActiveState") in ("inactive", "failed") or fields.get("SubState") == "exited"
                 or fields.get("LoadState") == "not-found")
-    current = fields.get("MemoryCurrent", raw)
-    return (int(current) if current.isdigit() else None), inactive
-
-
-def pending_growth():
-    """A startup forecast only; never deducted from running compiler credits."""
-    total = 0
-    for value in instances():
-        if not is_native(value) or value.get("phase") == "cleanup":
-            continue
-        current, inactive = usage(value)
-        if inactive:
-            continue
-        current = current or 0
-        total += max(0, expected_bytes(value) - current)
-    return total
+    memory = dict(memory_bytes=None, memory_working_bytes=None, memory_clean_file_bytes=None)
+    try:
+        group = Path(fields["ControlGroup"])
+        if not group.is_absolute() or group == Path("/") or ".." in group.parts:
+            raise ValueError("Invalid native cgroup")
+        group = CGROUP_ROOT / group.relative_to("/")
+        current = int((group / "memory.current").read_text())
+        stats = dict(line.split() for line in (group / "memory.stat").read_text().splitlines())
+        clean = capabilities.clean_file_bytes({key: int(value) for key, value in stats.items()})
+        memory.update(memory_bytes=current, memory_working_bytes=max(0, current - clean), memory_clean_file_bytes=clean)
+    except (KeyError, OSError, ValueError):
+        pass
+    return memory, inactive
 
 
 def status():
@@ -108,47 +99,38 @@ def status():
     for value in instances():
         if not is_native(value):
             continue
-        current, inactive = usage(value)
+        memory, inactive = usage(value)
         active.append(dict(instance=value["instance"], slot=value["slot"], unit=value["unit"],
-                           phase=value.get("phase"), run_id=value.get("run_id"), memory_bytes=current,
-                           expected_memory_bytes=expected_bytes(value),
-                           forecast_growth_bytes=0 if inactive or value.get("phase") == "cleanup" else max(0, expected_bytes(value) - (current or 0)),
-                           unit_inactive=inactive,
-                           memory_max_gib=value.get("memory_max_gib"), workspace_gib=value.get("workspace_gib"),
+                           phase=value.get("phase"), run_id=value.get("run_id"), **memory,
+                           unit_inactive=inactive, memory_max_gib=value.get("memory_max_gib"),
+                           disk_budget_gib=value.get("disk_budget_gib"), workspace_storage="disk",
                            progress=shared_json(Path(value["directory"]) / "control/native-progress.json", {})))
     return dict(ci_native_slot=host_config().get("ci_native_slot"), image=image(), ready=ready(),
                 choice=read(state_dir() / "native-choice.json", {}),
-                cooldown=read(state_dir() / "native-backoff.json", {}), instances=active)
+                instances=active)
 
 
 def choose(config, available):
-    """Choose before registration. A native deferral immediately falls back to VM."""
+    """Select disk-native before registration; startup faults remain explicit."""
     if not selected(config):
         return False
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
-    reason = None
-    cooldown = read(state_dir() / "native-backoff.json", {})
-    if cooldown.get("until", 0) > time.time():
-        reason = "native infrastructure cooldown"
-    elif not ready():
-        reason = "native image not prepared"
-    elif config.get("ci_recover_instance"):
-        reason = "preserve recovery runner classes on VM"
-    elif intent and intent.get("ci_kinds") != ["pr"]:
-        reason = "preserve existing registration classes on VM"
-    elif config.get("ci_idle_pool") and "staging" in config.get("ci_kinds", []) and not config.get("ci_staging_slots", 0):
-        reason = "preserve mixed-class idle-pool spare on VM"
-    elif not mapping_ok():
-        reason = "native host mapping limit is too small"
-    elif any(is_native(v) for v in instances()):
-        reason = "one native instance is already owned"
-    elif available is None or available < START_GIB * 1024**3:
-        reason = "native startup footprint does not fit"
+    # Preserve already-owned registration classes and the mixed-class spare.
+    if ((intent and intent.get("ci_kinds") != ["pr"])
+            or (config.get("ci_idle_pool") and "staging" in config.get("ci_kinds", [])
+                and not config.get("ci_staging_slots", 0))):
+        atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
+               selection=config.get("ci_native_slot"), backend="vm", reason="preserve existing runner classes"))
+        return False
+    reason = ("native image not prepared" if not ready() else
+              "native host mapping limit is too small" if not mapping_ok() else None)
     atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
-           selection=config.get("ci_native_slot"), backend="vm" if reason else RUNTIME, reason=reason, available_bytes=available,
-           startup_required_bytes=START_GIB * 1024**3))
-    return reason is None
+           selection=config.get("ci_native_slot"), backend=RUNTIME, reason=reason, available_bytes=available,
+           startup_required_bytes=vm.START_MEMORY_BYTES))
+    if reason:
+        raise FleetError(reason)
+    return True
 
 
 def configure(slot):
@@ -242,9 +224,9 @@ def stage(config, directory, jit):
     (directory / "control").mkdir(mode=0o700)
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
-    atomic(directory / "native.json", dict(image=value, workspace_gib=WORKSPACE_GIB, memory_gib=MEMORY_GIB))
-    return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_gib=WORKSPACE_GIB,
-                memory_max_gib=MEMORY_GIB, expected_memory_bytes=EXPECTED_GIB * 1024**3,
+    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB))
+    return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
+                disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
 
 
@@ -267,7 +249,7 @@ def prerequisites():
     """Check host capabilities without changing host sysctls or requiring root."""
     run(["unshare", "--user", "--map-auto", "--map-root-user", "--mount", "true"])
     if not mapping_ok():
-        raise FleetError("Native CI requires host vm.max_map_count >= 1048576; use the VM backend on this host")
+        raise FleetError("Native CI requires host vm.max_map_count >= 1048576")
 
 
 def argv(directory, *, offline=False):
@@ -277,7 +259,7 @@ def argv(directory, *, offline=False):
 def properties():
     # .NET's W^X mapper uses a memfd with a large logical size. RLIMIT_FSIZE
     # applies to that RAM-backed file and kills the stock Actions listener.
-    # Bound allocated RAM with the cgroup and workspace with its tmpfs quota.
+    # Bound allocated RAM with the cgroup; the watchdog monitors allocated disk.
     return ["-p", f"MemoryMax={MEMORY_GIB}G", "-p", "OOMPolicy=kill", "-p", "OOMScoreAdjust=1000",
             "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
@@ -308,14 +290,6 @@ def cleanup(value, *, asynchronous=False):
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (evidence / "archived.json").exists():
         atomic(evidence / "instance.json", value)
-        result = read(directory / "native-result.json", {})
-        stop = read(directory / "native-stop.json", {})
-        requested = stop or result.get("requested_stop")
-        infrastructure = result.get("infrastructure_error") or {}
-        benign_stop = bool(requested) and infrastructure.get("reason") in ("native runner exited without a job", "native supervisor failure")
-        if ((infrastructure and not benign_stop) or stop.get("reason") == "memory recovery"
-                or (not requested and (not result or result.get("exit_code", 0) != 0))):
-            atomic(state_dir() / "native-backoff.json", dict(until=time.time() + 900, instance=directory.name))
         for name in ("native.json", "native-result.json", "native-samples.jsonl", "native-stop.json", "runner-console.log"):
             copy_diagnostic(directory / name, evidence / name)
         for name in ("native-progress.json", "native-resource-error.json", "events.jsonl"):
@@ -550,7 +524,6 @@ def inside(directory):
         (root / "dev" / name).symlink_to("/proc/self/fd/" + str(fd))
     run([mount, "-t", "proc", "proc", root / "proc"])
     run([mount, "-t", "tmpfs", "-o", "mode=755,size=32M", "tmpfs", root / "run"])
-    run([mount, "-t", "tmpfs", "-o", f"size={WORKSPACE_GIB}G,mode=755", "tmpfs", root / "opt/actions-runner/_work"])
     resolver = root / "etc/resolv.conf"
     resolver.unlink(missing_ok=True)
     resolver.write_text(Path("/etc/resolv.conf").read_text())

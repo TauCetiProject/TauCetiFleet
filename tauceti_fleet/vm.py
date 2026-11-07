@@ -327,14 +327,6 @@ def start_memory_ok(config=None):
     """Unmeasurable memory does not block CI; a measured shortfall defers the start."""
     global _start_memory_deferred
     available = config["_ci_start_available"] if config and "_ci_start_available" in config else start_memory_available()
-    if config and "_ci_backend" in config:
-        from . import native_runner
-        if available is not None:
-            available -= native_runner.pending_growth()
-        if config["_ci_backend"] == native_runner.RUNTIME:
-            # Native selection already passed this same startup decision. No
-            # reservation or deduction is added to running compiler credits.
-            return available is not None and available >= native_runner.START_GIB * 1024**3
     required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
     deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
@@ -400,7 +392,7 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
-    startup_disk = 16 if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
+    startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
     registration = slot_file(config, "ci-registration.json")
@@ -421,9 +413,9 @@ def _start(config):
         atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
     from . import ci_images, dependency_prefill
 
-    prefill = dependency_prefill.claim(config, instance) if config.get("_ci_backend") != "native-tmpfs" else None
+    prefill = dependency_prefill.claim(config, instance) if config.get("_ci_backend") != native_runner.RUNTIME else None
     # Explicit one-use media and native runners do not use VM prefill images.
-    image = None if prefill or config.get("_ci_backend") == "native-tmpfs" else ci_images.select(config)
+    image = None if prefill or config.get("_ci_backend") == native_runner.RUNTIME else ci_images.select(config)
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
@@ -533,10 +525,8 @@ def _start(config):
             registration.unlink(missing_ok=True)
         except FleetError:
             pass
-        if config.get("_ci_backend") == "native-tmpfs":
-            atomic(state_dir() / "native-backoff.json", dict(until=time.time() + 900, instance=instance))
-            if (directory / "rootfs").exists():
-                native_runner.cleanup(dict(directory=str(directory), unit=unit + ".service"))
+        if config.get("_ci_backend") == native_runner.RUNTIME and (directory / "rootfs").exists():
+            native_runner.cleanup(dict(directory=str(directory), unit=unit + ".service"))
         shutil.rmtree(directory, ignore_errors=True)
         if read(slot_file(config, "vm.json"), {}).get("instance") == instance:
             slot_file(config, "vm.json").unlink(missing_ok=True)

@@ -14,6 +14,11 @@ from .store import FleetError, data_dir, host_config, read, state_dir
 GIB = 1024**3
 
 
+def clean_file_bytes(stats):
+    """Host file cache available for reclaim, excluding shmem and writeback."""
+    return max(0, stats["file"] - stats.get("shmem", 0) - stats["file_dirty"] - stats["file_writeback"])
+
+
 def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
     """Conservative working-set estimate; cold dirty cache is not immediately free."""
     cold_clean = max(
@@ -22,7 +27,7 @@ def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
         - stats["file_dirty"]
         - stats["file_writeback"],
     )
-    clean_file = max(0, stats["file"] - stats.get("shmem", 0) - stats["file_dirty"] - stats["file_writeback"])
+    clean_file = clean_file_bytes(stats)
     return dict(
         charged=current,
         high=high,

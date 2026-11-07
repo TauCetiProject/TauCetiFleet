@@ -34,7 +34,7 @@ while len(records) < 2:
                 continue
             records[name] = dict(pid=int(proc.name), artifact_devices=dict(artifacts),
                                  artifact_files=len(paths), toolchain_devices=dict(tools),
-                                 all_artifacts_tmpfs=set(artifacts) == {expected})
+                                 all_artifacts_workspace_disk=set(artifacts) == {expected})
             value = dict(at=time.time(), workspace_device=expected, processes=records)
             target = Path('/fleet-link/telemetry/artifact-mappings.json')
             temporary = target.with_suffix('.next')
