@@ -68,7 +68,10 @@ def wait_room():
     while time.monotonic() < deadline:
         total, available = lean_pressure.memory()
         disk = shutil.disk_usage(ROOT).free
-        if available >= 52 * GIB and disk >= 38 * GIB:
+        # Serial unregistered replay, below the production canary's deliberately
+        # conservative 52-GiB estimate. Apply the same rule to both backends;
+        # retain the live compiler gate and bound the complete unit to 54 GiB.
+        if available >= 40 * GIB and disk >= 38 * GIB:
             return dict(total=total, available=available, free_disk=disk, at=time.time())
         print(json.dumps(dict(waiting_for_start=True, available_gib=available / GIB, disk_gib=disk / GIB)), flush=True)
         time.sleep(15)
@@ -225,7 +228,8 @@ def main():
     save(ROOT / 'inputs.json', dict(archive_sha256=digest(ARCHIVE), archive_bytes=ARCHIVE.stat().st_size,
                                   code_revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                                   native_image=native_runner.image(), prepared_image=store.read(store.data_dir() / 'images/prepared.json'),
-                                  script_sha256=digest(SOURCE / 'job.sh'), config_sha256=hashlib.sha256(before).hexdigest()))
+                                  script_sha256=digest(SOURCE / 'job.sh'), config_sha256=hashlib.sha256(before).hexdigest(),
+                                  experimental_start_gib=40, memory_max_gib=54))
     os.environ['TAUCETI_FLEET_STATE'] = str(ROOT / 'native-state')
     (NORMAL_STATE / 'vms').mkdir(exist_ok=True)
     try:
