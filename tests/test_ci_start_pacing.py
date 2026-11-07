@@ -17,6 +17,9 @@ class StartPacing(unittest.TestCase):
         environment = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": temporary.name})
         environment.start()
         self.addCleanup(environment.stop)
+        memory = patch.object(vm, "start_memory_available", return_value=100 * 1024**3)
+        memory.start()
+        self.addCleanup(memory.stop)
         self.config = dict(ci_kinds=["pr", "staging"])
 
     def test_slots_and_new_callers_share_a_nonblocking_minute_gap(self):

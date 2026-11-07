@@ -34,6 +34,29 @@ def advance(value, seconds=30, cpu=.1):
 
 
 class CapacityPolicy(unittest.TestCase):
+    def test_native_peak_does_not_inflate_vm_growth_forecast(self):
+        c = auto.Controller(growth_delay=1)
+        s = snapshot(available=50)
+        s['vms'][2].update(runtime='native-tmpfs', memory_bytes=31*GIB, expected_memory_bytes=32*GIB)
+        c.decide(s,1000)
+        self.assertEqual(c.decide(advance(s),1030)['kind'],'limit')
+
+    def test_native_workspace_population_growth_is_counted_once(self):
+        for current, available, expected in ((0,50,'hold'), (8,50,'hold'), (8,80,'limit'), (31,50,'limit')):
+            with self.subTest(current=current, available=available):
+                c = auto.Controller(growth_delay=1)
+                s = snapshot(available=available)
+                s['vms'][2].update(runtime='native-tmpfs', memory_bytes=current*GIB, expected_memory_bytes=32*GIB)
+                c.decide(s,1000)
+                self.assertEqual(c.decide(advance(s),1030)['kind'],expected)
+
+    def test_native_cleanup_does_not_hold_a_workspace_growth_forecast(self):
+        c=auto.Controller(growth_delay=1)
+        s=snapshot(available=50)
+        s['vms'][2].update(runtime='native-tmpfs', phase='cleanup', memory_bytes=None, expected_memory_bytes=32*GIB)
+        c.decide(s,1000)
+        self.assertEqual(c.decide(advance(s),1030)['kind'],'limit')
+
     def test_idle_general_guest_is_trimmed_without_cancelling_work(self):
         c = auto.Controller()
         decision = c.decide(snapshot(limit=4, idle=True), 1000)

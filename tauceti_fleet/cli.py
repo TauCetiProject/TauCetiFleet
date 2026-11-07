@@ -30,6 +30,8 @@ def parser():
         if name == "status":
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+        if name == "update":
+            cmd.add_argument("--fleet-only", action="store_true", help="preserve the independently deployed worker runtime")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -49,6 +51,13 @@ def parser():
     enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
+    native = sub.add_parser("native-runner", help="prepare or select one rootless tmpfs PR canary at normal turnover")
+    native.add_argument("host")
+    selection = native.add_mutually_exclusive_group()
+    selection.add_argument("--prepare", action="store_true")
+    selection.add_argument("--slot", type=int)
+    selection.add_argument("--off", action="store_true")
+    native.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
@@ -201,6 +210,11 @@ def main(argv=None, *, _status_results=None):
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
                                memory_budget_gib=args.ci_memory_budget_gib)
+            if args.command == "native-runner":
+                if args.prepare:
+                    payload["prepare"] = True
+                if args.slot is not None or args.off:
+                    payload["slot"] = None if args.off else args.slot
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
@@ -217,14 +231,17 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "update":
-                results[name] = remote.deploy(entry["target"], live=True, expected_machine_id=entry["machine_id"])
+                options = dict(live=True, expected_machine_id=entry["machine_id"])
+                if args.fleet_only:
+                    options["fleet_only"] = True
+                results[name] = remote.deploy(entry["target"], **options)
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:
                 value = remote.call(
                     entry["target"],
                     payload,
-                    timeout=1800 if action == "prepare" else 3 if action == "status" else 90,
+                    timeout=2100 if action == "prepare" or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
