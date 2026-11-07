@@ -23,6 +23,9 @@ class NativeRunner(unittest.TestCase):
                                                for key in ("STATE", "CONFIG", "DATA")})
         environment.start()
         self.addCleanup(environment.stop)
+        mapping = patch.object(native, "mapping_ok", return_value=True)
+        mapping.start()
+        self.addCleanup(mapping.stop)
         (self.root / "control").mkdir()
         self.config = dict(ci_native_slot=1, ci_slot=1, ci_staging_slots=1,
                            ci_max_jobs=4, ci_kinds=["pr"], ci_enabled=True)
@@ -44,6 +47,12 @@ class NativeRunner(unittest.TestCase):
             instances.return_value = []
             store.atomic(store.state_dir() / "native-backoff.json", dict(until=10**12))
             self.assertFalse(native.choose(self.config, 100 * GIB))
+
+    def test_unsuitable_host_mapping_limit_falls_back_to_vm(self):
+        with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
+              patch.object(native, "mapping_ok", return_value=False)):
+            self.assertFalse(native.choose(self.config, 100 * GIB))
+            self.assertEqual(store.read(store.state_dir() / "native-choice.json")["reason"], "native host mapping limit is too small")
 
     def test_same_locked_start_decision_uses_one_memory_snapshot(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),

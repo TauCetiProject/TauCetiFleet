@@ -40,6 +40,13 @@ def ready():
     return value.get("revision") == IMAGE_REVISION and (root / "opt/actions-runner/bin/Runner.Listener").is_file()
 
 
+def mapping_ok():
+    try:
+        return int(Path("/proc/sys/vm/max_map_count").read_text()) >= 1048576
+    except (OSError, ValueError):
+        return False
+
+
 def selected(config):
     slot = config.get("ci_native_slot")
     # Recovery may narrow ci_kinds to PR even on a mixed-class host. The
@@ -113,7 +120,7 @@ def choose(config, available):
         reason = "native image not prepared"
     elif config.get("ci_recover_instance"):
         reason = "preserve recovery runner classes on VM"
-    elif int(Path("/proc/sys/vm/max_map_count").read_text()) < 1048576:
+    elif not mapping_ok():
         reason = "native host mapping limit is too small"
     elif any(is_native(v) for v in instances()):
         reason = "one native instance is already owned"
@@ -239,7 +246,7 @@ def materialize(directory):
 def prerequisites():
     """Check host capabilities without changing host sysctls or requiring root."""
     run(["unshare", "--user", "--map-auto", "--map-root-user", "--mount", "true"])
-    if int(Path("/proc/sys/vm/max_map_count").read_text()) < 1048576:
+    if not mapping_ok():
         raise FleetError("Native CI requires host vm.max_map_count >= 1048576; use the VM backend on this host")
 
 
