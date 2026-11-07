@@ -14,6 +14,7 @@ from .store import FleetError, atomic, locked, read, state_dir
 
 GIB = 1024**3
 REPO = "TauCetiProject/TauCeti"
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 def host_action(payload):
@@ -78,12 +79,26 @@ def host_action(payload):
     status = read(state_dir() / "status.json", {})
     pressure = read(state_dir() / "lean-host-pressure.json", {})
     timing = read(state_dir() / "lean-statistics-report.json", {})
-    family = Path((status.get("worker_memory") or {}).get("cgroup", "/nonexistent")).parent
+    # CI survives an explicit worker pause, including the worker cgroup's
+    # removal. Resolve each actual CI unit instead of inferring its ancestry
+    # from worker telemetry. Keep healthy units when another has just retired.
+    units = {value["unit"] for value in status.get("ci_vms", []) if value.get("unit")}
+    groups = {}
+    if units:
+        try:
+            result = vm.run(["systemctl", "--user", "show", "--property=Id,ControlGroup", "--", *sorted(units)], check=False)
+            for block in result.stdout.strip().split("\n\n"):
+                properties = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+                group = Path(properties.get("ControlGroup", ""))
+                if properties.get("Id") in units and group.is_absolute() and group != Path("/") and ".." not in group.parts:
+                    groups[properties["Id"]] = CGROUP_ROOT / group.relative_to("/")
+        except (FleetError, OSError):
+            pass
     vms = []
     for original in status.get("ci_vms", []):
         value = dict(original)
-        group = family / "tauceti-fleet-ci.slice" / value["unit"]
         try:
+            group = groups[value["unit"]]
             value["memory_bytes"] = int((group / "memory.current").read_text())
             value["cpu_usec"] = int(dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())["usage_usec"])
         except (OSError, ValueError, KeyError):
