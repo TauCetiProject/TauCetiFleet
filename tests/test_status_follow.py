@@ -11,6 +11,28 @@ from tauceti_fleet import ci_overview, cli, github, remote, status_follow as fol
 
 
 class Follow(unittest.TestCase):
+    def test_public_refresh_updates_follow_even_when_host_streams_are_quiet(self):
+        release, prepared = threading.Event(), threading.Event()
+        rendered = []
+
+        def refresh():
+            self.assertTrue(release.wait(2))
+            prepared.set()
+
+        def quiet(entry, emit, stop, *args):
+            stop.wait(3)
+
+        def render(results):
+            rendered.append(prepared.is_set())
+            if len(rendered) == 1:
+                release.set()
+                return "initial report"
+            raise KeyboardInterrupt
+
+        with patch.object(follow, "receive", side_effect=quiet), patch.object(follow.sys, "stdin", io.StringIO()), patch("sys.stdout", io.StringIO()):
+            self.assertEqual(follow.run(dict(one=self.entry), render, refresh=refresh), 0)
+        self.assertEqual(rendered, [False, True])
+
     def test_compiler_statistics_trigger_follow_without_collecting_or_calling_apis(self):
         before = follow.signature(self.machine)
         store.atomic(store.state_dir() / 'lean-statistics-report.json', dict(at=1))

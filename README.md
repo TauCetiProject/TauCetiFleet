@@ -538,6 +538,7 @@ active sessions may settle into a deficit.
 tauceti-fleet status
 tauceti-fleet status server1
 tauceti-fleet status --json
+tauceti-fleet status --all-jobs
 tauceti-fleet status -f
 tauceti-fleet status server1 --follow
 ```
@@ -548,12 +549,26 @@ aliases never multiply costs or output. Offline hosts retain their last small
 status snapshot with an explicit age and unavailable-host error; new machines
 without a snapshot contribute no invented financial totals.
 
+The CI pool activity table uses the same public aggregate as `/ci`: running and
+waiting builds, latest completion and outcome, oldest running/waiting job ages,
+and finished totals for 1h/3h/24h with failure and cancellation counts. Builds are
+the default; `--all-jobs` includes control jobs in the same table. JSON includes
+both scopes, all completion outcomes, and exact job identities and URLs under
+`_ci.pool_activity`. Coverage and observation age are explicit. An unavailable
+public source retains the last cached summary with an error; missing observations
+under partial coverage are unknown. Host-specific status still shows every pool.
+
+The operator client fetches one public manifest and its jobs summary per status
+invocation, independently of host count. It does not fetch job-detail pages or
+scan GitHub. This table needs only the updated operator CLI; hosts need no change.
+
 `status -f` / `--follow` opens a live, scrollable view. Use arrows or j/k,
 Page Up/Down, Home/End (g/G), and q or Ctrl-C to quit. Left/right scroll wide
 reports. Each host uses one persistent SSH connection and sends a new snapshot
 when its prepared status, CI overview, configuration, or activity report changes.
 File checks are local to that host; follow mode makes no GitHub requests and
-does not start background collectors. Disconnected hosts retain their last
+does not start host collectors. One client background reader refreshes the public
+pool aggregate every 30 seconds; redraws read its prepared cache. Disconnected hosts retain their last
 snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
