@@ -93,8 +93,8 @@ def run(label, backend):
     try:
         # Set marker before launch without changing the common stage routine.
         original_stage = m.native_runner.stage
-        def stage(config, dest, jit):
-            result = original_stage(config, dest, jit)
+        def stage(dest, jit):
+            result = original_stage(dest, jit)
             if backend == 'disk':
                 (Path(dest) / 'control/disk-workspace').touch()
             return result

@@ -48,7 +48,7 @@ if not args.without_pressure:
     bridge.symlink_to(directory, target_is_directory=True)
 started, terminal = time.time(), {}
 try:
-    native.stage({}, directory, "unregistered-offline-test")
+    native.stage(directory, "unregistered-offline-test")
     if args.input:
         shutil.copytree(args.input, directory / "control/input", ignore=shutil.ignore_patterns("*.git"))
     (directory / "control/offline-job.sh").write_text(script)

@@ -291,7 +291,7 @@ class NativeRunner(unittest.TestCase):
     def test_stage_is_small_and_filesystem_clone_runs_in_the_unit(self):
         (self.root / "control").rmdir()
         with patch.object(native, "image", return_value=dict(sha256="a"*64)), patch.object(native, "run") as run:
-            value = native.stage({}, self.root, "private-test-jit")
+            value = native.stage(self.root, "private-test-jit")
         run.assert_not_called()
         self.assertEqual(value["runtime"], native.RUNTIME)
         self.assertFalse((self.root / "rootfs").exists())
@@ -314,12 +314,12 @@ class NativeRunner(unittest.TestCase):
         config = dict(store.host_config(), ci_slot=1)
         path = vm.slot_file(config, "vm.json")
         store.atomic(path, value)
-        with (patch.object(native, "request_stop"), patch.object(native, "cleanup", return_value=False) as cleanup,
+        with (patch.object(native, "cleanup", return_value=False) as cleanup,
               patch.object(github, "retire_runner"), patch.object(vm, "run", return_value=Mock(returncode=0))):
             self.assertFalse(vm.retire(config, value))
             cleanup.assert_called_once_with(value, asynchronous=True)
         self.assertEqual(store.read(path)["phase"], "cleanup")
-        with (patch.object(native, "request_stop"), patch.object(native, "cleanup", return_value=True),
+        with (patch.object(native, "cleanup", return_value=True),
               patch.object(github, "retire_runner"), patch.object(vm, "run", return_value=Mock(returncode=0))):
             self.assertTrue(vm.retire(config, value))
         self.assertFalse(path.exists())
