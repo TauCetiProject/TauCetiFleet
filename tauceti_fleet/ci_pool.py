@@ -11,7 +11,7 @@ def plan(config, values, inventory, observation=None, recovery_slots=None, pendi
     live = {v.get("slot", 0): v for v in values if v}
     busy_ids = {r["id"] for r in inventory if r.get("busy")}
     if observation:
-        for i, value in live.items():
+        for value in live.values():
             own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
             labels = {label.lower() for label in (value.get("routing_labels") or
                       [label["name"] for label in own.get("labels", [])])}
@@ -20,12 +20,13 @@ def plan(config, values, inventory, observation=None, recovery_slots=None, pendi
     occupied = {i for i, v in live.items() if v.get("busy") or v.get("runner_id") in busy_ids}
     if not config["ci_enabled"]:
         return occupied
+    protected = set(capacity.protected_slots(config))
     if config.get("ci_idle_pool") and observation is None:
         # Unknown queued assignments must not cause additional admissions.
-        return set(live)
+        return set(live) | protected
     maximum = capacity.jobs(config)
-    desired = set(occupied) | set(recovery_slots or {})
-    candidates = [i for i in range(maximum) if i not in occupied and not live.get(i, {}).get("withdrawing_at")]
+    desired = set(occupied) | set(recovery_slots or {}) | protected
+    candidates = [i for i in range(maximum) if i not in desired and not live.get(i, {}).get("withdrawing_at")]
     if config.get("ci_idle_pool"):
         reserved, _ = capacity.reservation(config)
         # Keep reserved staging guests and one general spare. Busy guests above
@@ -74,6 +75,9 @@ def idle_ready(value, own, observation):
 
 
 def remember(value):
+    if value.get("ci_kinds") in (["control"], ["roadmap"]):
+        # Protected jobs target stable group/class labels, never an instance.
+        return
     # JIT labels are read-only. Retain enough identity to recreate a guest if
     # a picker races deregistration and subsequently queues on its old label.
     path = state_dir() / "ci-idle-retired.json"
@@ -108,9 +112,12 @@ def recovery_slots(config, values, inventory, observation, records):
     reserved, _ = capacity.reservation(config)
     result = {}
     for record in records:
+        if record.get("ci_kinds") in (["control"], ["roadmap"]):
+            continue
         if len(occupied | result.keys()) >= capacity.jobs(config):
             break
         candidates = [i for i in range(capacity.jobs(config)) if i not in live_slots and i not in result
+                      and i not in capacity.protected_slots(config)
                       and (i >= reserved or record["ci_kinds"] == ["staging"])]
         if candidates:
             result[candidates[0]] = record

@@ -8,7 +8,7 @@ FIELDS = ("ci_job_kind", "ci_kind_retry_at", "ci_priority_error", "cpu_weight")
 
 
 def staging(value):
-    return value.get("ci_kinds") == ["staging"] or value.get("ci_job_kind") == "staging"
+    return value.get("ci_kinds") in (["staging"], ["roadmap"], ["control"]) or value.get("ci_job_kind") == "staging"
 
 
 def headroom(total, *, staging=False):
@@ -80,6 +80,8 @@ def classify(config, value, now):
 
     if value.get("ci_kinds") == ["staging"]:
         value["ci_job_kind"] = "staging"
+    elif value.get("ci_kinds") in (["roadmap"], ["control"]):
+        value["ci_job_kind"] = value["ci_kinds"][0]
     elif value.get("ci_kinds") == ["pr"]:
         value["ci_job_kind"] = "pr"
     elif value.get("busy") and value.get("run_id") and not value.get("ci_job_kind"):
