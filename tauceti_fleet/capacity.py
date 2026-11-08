@@ -10,6 +10,10 @@ MAX_JOBS = 4096
 
 def guest_shape(config, caps=None):
     """Expose shared host capacity, not a fixed fraction reserved per guest."""
+    if config.get("ci_kinds") == ["control"]:
+        return dict(vcpus=2, memory_gib=4)
+    if config.get("ci_kinds") == ["roadmap"]:
+        return dict(vcpus=16, memory_gib=32)
     if caps is None:
         from .capabilities import resources
 
@@ -77,7 +81,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in KINDS.values():
+    if value not in [*KINDS.values(), ["control"], ["roadmap"]]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -89,7 +93,27 @@ def staging_slots(config):
         raise FleetError("ci_staging_slots must be an integer between zero and ci_max_jobs")
     if count and "staging" not in kinds(config):
         raise FleetError("Staging reservations require staging in the machine's CI classes")
+    protected_slots(config)
     return count
+
+
+def protected_slots(config):
+    """Explicit slots in separate runner groups; never borrowed by PR recovery."""
+    values = config.get("ci_protected_slots", {})
+    if not isinstance(values, dict):
+        raise FleetError("ci_protected_slots must map slot numbers to kind and runner_group_id")
+    result = {}
+    for key, value in values.items():
+        if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
+                or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
+                or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
+                or value["kind"] not in ("control", "roadmap")
+                or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
+                or value["runner_group_id"] == config.get("runner_group_id")
+                or config.get("ci_broker_url")):
+            raise FleetError("Protected slots require a separate runner group, a valid slot, and direct runner credentials")
+        result[int(key)] = value
+    return result
 
 
 def reservation(config):
@@ -101,6 +125,10 @@ def reservation(config):
 
 
 def for_slot(config, index):
+    protected = protected_slots(config).get(index)
+    if protected:
+        return dict(config, ci_slot=index, ci_kinds=[protected["kind"]],
+                    ci_slot_runner_group_id=protected["runner_group_id"])
     reserved, _ = reservation(config)
     return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
 

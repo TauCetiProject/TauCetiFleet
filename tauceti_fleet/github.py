@@ -1,6 +1,7 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -72,7 +73,7 @@ def runner_policy(config):
         if group != config.get("runner_group_id"):
             raise FleetError("CI broker returned a different runner group")
         return group
-    group = config.get("runner_group_id")
+    group = config.get("ci_slot_runner_group_id", config.get("runner_group_id"))
     if not isinstance(group, int) or group <= 0:
         raise FleetError(
             "Set runner_group_id to a GitHub runner group restricted to trusted main-defined fleet workflows"
@@ -81,6 +82,9 @@ def runner_policy(config):
         f"orgs/TauCetiProject/actions/runner-groups/{group}",
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
+    if kinds := config.get("ci_kinds"):
+        if kinds in (["roadmap"], ["control"]):
+            return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
@@ -92,6 +96,29 @@ def runner_policy(config):
     ):
         raise FleetError("Runner group must allow only pr-build.yml and optional fleet-smoke.yml at refs/heads/main")
     return group
+
+
+def protected_policy(config, data):
+    """Build VMs accept roadmap code; control VMs accept only trusted workflows."""
+    kind = config["ci_kinds"][0]
+    expected = "TauCetiRoadmap" if kind == "roadmap" else "TauCetiControl"
+    if data.get("name") != expected or data.get("visibility") != "selected":
+        raise FleetError("Protected runners require a selected-repository " + expected + " group")
+    repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
+                           token_file=config.get("ci_token_file") or config.get("github_token_file"))
+    if (repositories.get("total_count") != 1
+            or [r.get("full_name") for r in repositories.get("repositories", [])] != ["TauCetiProject/TauCetiRoadmap"]):
+        raise FleetError("Protected runner groups must allow only TauCetiProject/TauCetiRoadmap")
+    if kind == "control":
+        # These workflows execute trusted default-branch code, never PR content.
+        names = "auto-merge|grant-triage|sync-roadmap-dropdowns|promote-reviewers|main-red|progress-merge|label-intentions|labels-from-comments|intentions"
+        allowed = rf"TauCetiProject/TauCetiRoadmap/\.github/workflows/({names})\.yml@refs/heads/main"
+        progress = r"TauCetiProject/TauCetiProgress/\.github/workflows/(merge|announce)\.yml@[a-f0-9]{40}"
+        selected = data.get("selected_workflows", [])
+        if (not data.get("restricted_to_workflows") or not selected
+                or any(not (re.fullmatch(allowed, w) or re.fullmatch(progress, w)) for w in selected)):
+            raise FleetError("Control runners require trusted main-defined roadmap automation or pinned Progress workflows")
+    return config["ci_slot_runner_group_id"]
 
 
 def jit_config(config, name):

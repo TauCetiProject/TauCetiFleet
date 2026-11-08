@@ -571,9 +571,12 @@ def collect_ci_results(config):
             event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
             continue
         try:
+            repository = value.get("repository", "TauCetiProject/TauCeti")
+            if repository not in ("TauCetiProject/TauCeti", "TauCetiProject/TauCetiRoadmap"):
+                raise FleetError("Unknown CI repository")
             data = github.ci_read(
                 config,
-                f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
+                f"repos/{repository}/actions/runs/{value['run_id']}/jobs?filter=all&per_page=100",
             )
             jobs = [j for j in data["jobs"] if j.get("runner_id") == value["runner_id"]]
             job = jobs[0] if len(jobs) == 1 else None
@@ -588,7 +591,7 @@ def collect_ci_results(config):
                     continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            kind = "staging"
+            kind = "pr" if value.get("ci_kinds") in (["roadmap"], ["control"]) else "staging"
             if "pr" in value.get("ci_kinds", ["staging"]) and value.get("host_health") != "fault":
                 run = github.ci_read(config, f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}")
                 # The immutable receipt supplies the run ID, GitHub supplies its
@@ -620,6 +623,7 @@ def collect_ci_results(config):
                 identity=identity,
                 at=completed,
                 run_id=value["run_id"],
+                repository=repository,
                 job_id=job["id"],
                 conclusion=job["conclusion"],
                 runner_id=value["runner_id"],

@@ -325,6 +325,8 @@ def start_memory_ok(config=None):
     global _start_memory_deferred
     available = config["_ci_start_available"] if config and "_ci_start_available" in config else start_memory_available()
     required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
+    if (config or {}).get("ci_kinds") == ["control"]:
+        required = 5 * 1024**3
     deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
         print(
@@ -460,6 +462,7 @@ def _start(config):
         value = dict(
             slot=config.get("ci_slot", 0),
             ci_kinds=config.get("ci_kinds", ["staging"]),
+            repository="TauCetiProject/TauCetiRoadmap" if config.get("ci_kinds") in (["roadmap"], ["control"]) else "TauCetiProject/TauCeti",
             instance=instance,
             unit=unit + ".service",
             runner_id=runner_id,

@@ -54,7 +54,7 @@ def host_action(payload):
         return dict(removed=True)
     if mode == "retire":
         slot = payload["slot"]
-        if type(slot) is not int or slot < capacity.staging_slots(config):
+        if type(slot) is not int or slot < capacity.staging_slots(config) or slot in capacity.protected_slots(config):
             raise FleetError("Reserved staging slots cannot be retired by recovery")
         slot_config = dict(config, ci_slot=slot)
         with locked(vm.slot_file(slot_config, "vm.lock")):
@@ -110,7 +110,7 @@ def host_action(payload):
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
                 enabled=config["ci_enabled"], maximum=capacity.jobs(config),
-                reserved=capacity.staging_slots(config), cpus=status.get("resources", {}).get("cpus", 1),
+                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config))]), cpus=status.get("resources", {}).get("cpus", 1),
                 pressure=pressure, timing_at=timing.get("at", 0), ci=timing.get("ci", {}),
                 last_admission=timing.get("last_admission_seen", {}).get("ci"),
                 observation_since=timing.get("admission_seen_since", timing.get("at", 0)), vms=vms)

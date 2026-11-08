@@ -126,6 +126,36 @@ Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
 
+## Protected roadmap capacity
+
+Two existing CI slots can be reserved without another scheduler. The host's
+`ci_protected_slots` configuration maps slot numbers to a class and runner group:
+
+```json
+{
+  "0": {"kind": "control", "runner_group_id": 5},
+  "1": {"kind": "roadmap", "runner_group_id": 4}
+}
+```
+
+Use the actual IDs of the `TauCetiControl` and `TauCetiRoadmap` runner groups.
+Both groups allow only the TauCetiRoadmap repository. The control group also
+restricts execution to its trusted main-defined automation workflows and the
+full SHA pins of the Progress merge and announce workflows. Update that
+allowlist when changing either pin. Roadmap code builds run in disposable VMs;
+control VMs never execute PR code. This setup uses the operator host's existing
+direct runner credential, not the volunteer registration broker.
+
+The control guest has 2 CPUs and 4 GiB; the roadmap guest has 16 CPUs and 32 GiB.
+Both slots stay warm independently of TauCeti's capacity discovery and cannot
+be borrowed by its builds or recovery. The existing slot ceiling, launch pacing,
+memory checks, and disposable guest lifecycle still apply. Use the lowest slot
+numbers after any reserved staging slots so protected guests start first.
+Set these reservations before routing workflows to their groups. Existing work
+finishes normally; configure currently free slots or allow busy slots to finish
+before relying on the reservation. Ordinary roadmap PR builds use shared
+Namespace capacity; merge-group builds use the protected roadmap slot.
+
 ## Roles, resource priority, and activation
 
 For routine production updates, the operator prefers live updates with normal
