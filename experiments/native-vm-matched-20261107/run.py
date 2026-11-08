@@ -79,7 +79,7 @@ def wait_room():
 
 
 def launch_native(directory, unit):
-    native_runner.stage({}, directory, 'unregistered-matched-experiment')
+    native_runner.stage(directory, 'unregistered-matched-experiment')
     # Small control inputs are per-instance; the immutable archive is hardlinked.
     target = directory / 'control/input'
     target.mkdir()

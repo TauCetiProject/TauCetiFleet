@@ -209,7 +209,7 @@ def remove_root(root):
         raise FleetError("Native filesystem cleanup is incomplete; retain instance ownership")
 
 
-def stage(config, directory, jit):
+def stage(directory, jit):
     """Stage a small durable launch intent; allocate OS/workspace inside its unit."""
     directory = Path(directory)
     value = image()
@@ -257,16 +257,6 @@ def properties():
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
 
 
-def request_stop(value):
-    if not is_native(value):
-        return
-    result = run(["systemctl", "--user", "show", value["unit"], "-p", "MainPID", "--value"], check=False)
-    if result.stdout.strip().isdigit() and int(result.stdout.strip()) > 0:
-        notice = dict(at=time.time(), reason="memory recovery" if value.get("operator_recovery") else "requested retirement")
-        atomic(Path(value["directory"]) / "native-stop.json", notice)
-        return notice
-
-
 def cleanup(value, *, asynchronous=False):
     """Release only stopped, owned instances; daemon cleanup never blocks on rm."""
     directory = Path(value["directory"])
@@ -282,7 +272,7 @@ def cleanup(value, *, asynchronous=False):
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (evidence / "archived.json").exists():
         atomic(evidence / "instance.json", value)
-        for name in ("native.json", "native-result.json", "native-samples.jsonl", "native-stop.json", "runner-console.log"):
+        for name in ("native.json", "native-result.json", "native-samples.jsonl", "runner-console.log"):
             copy_diagnostic(directory / name, evidence / name)
         for name in ("native-progress.json", "native-resource-error.json", "events.jsonl"):
             copy_diagnostic(directory / "control" / name, evidence / name)

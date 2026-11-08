@@ -418,7 +418,7 @@ def _start(config):
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
         if native:
-            runtime_fields = native_runner.stage(config, directory, jit)
+            runtime_fields = native_runner.stage(directory, jit)
         else:
             run(
                 [
@@ -536,14 +536,7 @@ def retire_idle(config, value):
 
         remember(value)
         # GitHub rejects deletion if a job started after our last observation.
-        from . import native_runner
-        marker = native_runner.request_stop(value)
-        try:
-            github.retire_runner(config, value["runner_id"])
-        except Exception:
-            if marker:
-                (Path(value["directory"]) / "native-stop.json").unlink(missing_ok=True)
-            raise
+        github.retire_runner(config, value["runner_id"])
         return _retire(config, value, registration_removed=True) is not False
 
 
@@ -551,7 +544,6 @@ def _retire(config, value, *, registration_removed=False):
     from . import native_runner
     cleaning = native_runner.is_native(value) and value.get("phase") == "cleanup"
     if not cleaning:
-        native_runner.request_stop(value)
         run(["systemctl", "--user", "stop", value["unit"]], check=False)
         run(["systemctl", "--user", "reset-failed", value["unit"]], check=False)
         try:

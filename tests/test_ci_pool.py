@@ -43,15 +43,34 @@ class Pool(unittest.TestCase):
         self.assertFalse(ci_pool.idle_ready(value, own, observation))
         self.assertFalse(ci_pool.idle_ready(value, dict(own, busy=True), dict(queued=[])))
 
-    def test_idle_delete_rejection_never_stops_vm(self):
-        value = dict(slot=2, instance="a", runner_id=100, unit="vm", directory=str(self.root / "vms/a"),
-                     ci_kinds=["pr", "staging"], routing_labels=["fleet-instance-a"])
-        store.atomic(vm.slot_file(dict(ci_slot=2), "vm.json"), value)
-        with patch.object(github, "retire_runner", side_effect=store.FleetError("busy")), patch.object(vm, "run") as stop:
-            with self.assertRaises(store.FleetError):
-                vm.retire_idle(self.config, value)
-            stop.assert_not_called()
-            self.assertEqual(store.read(vm.slot_file(dict(ci_slot=2), "vm.json")), value)
+    def test_idle_delete_rejection_never_stops_vm_or_native_runner(self):
+        for runtime in ("vm", "native-disk"):
+            with self.subTest(runtime=runtime):
+                value = dict(slot=2, instance="a", runtime=runtime, runner_id=100, unit="runner",
+                             directory=str(self.root / "vms/a"), ci_kinds=["pr"], routing_labels=["fleet-instance-a"])
+                store.atomic(vm.slot_file(dict(ci_slot=2), "vm.json"), value)
+                with patch.object(github, "retire_runner", side_effect=store.FleetError("busy")), patch.object(vm, "run") as stop:
+                    with self.assertRaises(store.FleetError):
+                        vm.retire_idle(self.config, value)
+                    stop.assert_not_called()
+                    self.assertEqual(store.read(vm.slot_file(dict(ci_slot=2), "vm.json")), value)
+
+    def test_idle_native_retirement_deregisters_before_stop_and_cleanup(self):
+        from tauceti_fleet import native_runner
+
+        directory = self.root / "vms" / ("a" * 16)
+        directory.mkdir(parents=True)
+        value = dict(slot=2, instance=directory.name, runtime="native-disk", runner_id=100,
+                     unit="native.service", directory=str(directory), ci_kinds=["pr"], routing_labels=["fleet-instance-a"])
+        receipt = vm.slot_file(dict(ci_slot=2), "vm.json")
+        store.atomic(receipt, value)
+        operations = []
+        with (patch.object(github, "retire_runner", side_effect=lambda *_: operations.append("deregister")),
+              patch.object(vm, "run", side_effect=lambda argv, **_: operations.append(argv[2])),
+              patch.object(native_runner, "cleanup", side_effect=lambda *_a, **_k: operations.append("cleanup") or True)):
+            self.assertTrue(vm.retire_idle(self.config, value))
+        self.assertEqual(operations, ["deregister", "stop", "reset-failed", "cleanup"])
+        self.assertFalse(receipt.exists())
 
     def test_assigned_high_slot_uses_capacity_before_it_is_marked_busy(self):
         values = [dict(slot=i, runner_id=i + 100, busy=True) for i in range(1, 8)]

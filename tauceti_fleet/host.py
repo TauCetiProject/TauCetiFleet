@@ -692,7 +692,6 @@ class CISlot:
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
         if value:
-            from . import native_runner
             value = native_runner.reconcile_events(config, value)
         if not config["ci_enabled"] and not value:
             if time.time() >= self.next_cleanup:
