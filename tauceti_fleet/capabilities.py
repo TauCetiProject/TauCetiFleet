@@ -255,11 +255,14 @@ def doctor(config=None, *, probe=True):
         f"Effective allocation: {caps['cpus']:g} CPUs, {caps['memory_total'] / GIB:.1f} GiB RAM",
         "Effective ancestor cgroup limits must be readable",
     )
+    from . import native_runner
     from .capacity import disk_root, disk_startup_gib, guest_shape, jobs, kinds, memory_budget_gib
 
     count = jobs(config)
+    native_default = native_runner.selected(dict(config, ci_slot=config.get("ci_staging_slots", 0)))
+    native_count = count - config.get("ci_staging_slots", 0) if native_default else 0
     shape = guest_shape(config, caps)
-    ci_memory = count * shape["memory_gib"] * GIB
+    ci_memory = ((count - native_count) * shape["memory_gib"] + native_count * native_runner.MEMORY_GIB) * GIB
     budget = memory_budget_gib(config, caps) * GIB
     overcommit = ci_memory > budget
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
@@ -270,7 +273,7 @@ def doctor(config=None, *, probe=True):
     add(
         "ci-shape",
         "ok" if fits else "blocked",
-        f"CI exposes {count} shared jobs; new guests see {shape['vcpus']} virtual CPUs and {shape['memory_gib']} GiB virtual RAM each; aggregate physical CI ceiling {budget / GIB:g} GiB, OS headroom {reserve / GIB:.1f} GiB. {count * shape['vcpus']} vCPUs share {caps['cpus']:g} host CPUs without CPU reservations",
+        f"CI exposes {count} shared jobs ({native_count} disk-native PR slots capped at {native_runner.MEMORY_GIB} GiB each); VM guests see {shape['vcpus']} virtual CPUs and {shape['memory_gib']} GiB virtual RAM each; aggregate physical CI ceiling {budget / GIB:g} GiB, OS headroom {reserve / GIB:.1f} GiB. Limits are not reservations; jobs share {caps['cpus']:g} host CPUs",
         "Reduce the aggregate CI memory budget or guest RAM",
         roles=("ci",),
     )
@@ -295,7 +298,7 @@ def doctor(config=None, *, probe=True):
     )
     if overcommit:
         add("ci-memory-overcommit", "warning",
-            f"{ci_memory / GIB:g} GiB of virtual guest RAM shares {budget / GIB:g} GiB of physical capacity; simultaneous memory peaks may OOM CI guests",
+            f"{ci_memory / GIB:g} GiB of combined VM RAM/native limits shares {budget / GIB:g} GiB of physical capacity; simultaneous memory peaks may OOM CI jobs",
             "Observe CI completions and memory.events; adjust slots or the aggregate budget if useful throughput falls",
             roles=("ci",))
     try:
@@ -325,13 +328,25 @@ def doctor(config=None, *, probe=True):
             "Run tauceti-fleet prepare on this host to fetch the pinned Nix tools; otherwise ask for qemu and cloud-image-utils",
             roles=("ci",),
         )
+    if native_default:
+        try:
+            native_runner.prerequisites()
+            add("native-pr-isolation", "ok", "Unprivileged namespaces, UID/GID mappings and mapping limit verified", roles=("ci",))
+        except (FleetError, OSError) as error:
+            add("native-pr-isolation", "blocked", str(error),
+                "Verify unprivileged user namespaces, this account's subordinate UID/GID mappings, and vm.max_map_count >= 1048576; then retry enable --ci pr",
+                roles=("ci",))
     free = shutil.disk_usage(disk_root()).free
     startup = count * disk_startup_gib(config) * GIB
+    if native_default:
+        startup = max(startup, native_runner.DISK_START_GIB * GIB)
     add(
         "storage",
         "ok" if free >= startup else "blocked",
-        f"{free / GIB:.1f} GiB free on the guest overlay filesystem; {startup / GIB:g} GiB startup headroom for {count} jobs. QCOW2 disks grow on write; their {count * config['ci_disk_gib']} GiB virtual limit is not a reservation",
-        "Free space on the guest overlay filesystem; monitor actual overlay growth during builds",
+        (f"{free / GIB:.1f} GiB free on the instance filesystem; {startup / GIB:g} GiB startup headroom. Disk-native starts require {native_runner.DISK_START_GIB} GiB free; allocated disk is monitored, not reserved or hard-quota limited"
+         if native_default else
+         f"{free / GIB:.1f} GiB free on the guest overlay filesystem; {startup / GIB:g} GiB startup headroom for {count} jobs. QCOW2 disks grow on write; their {count * config['ci_disk_gib']} GiB virtual limit is not a reservation"),
+        "Free space on the instance filesystem; monitor actual allocated disk during builds",
         roles=("ci",),
     )
     worker = executable("tauceti")

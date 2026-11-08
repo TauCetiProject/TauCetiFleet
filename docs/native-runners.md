@@ -2,8 +2,8 @@
 
 The `native-disk` backend runs general PR jobs in a private rootless namespace
 with a disk-backed Actions workspace. Spare RAM caches files and remains
-reclaimable by the host. VM remains the backend for staging and general slots
-not selected for native execution. There is one native implementation.
+reclaimable by the host. This is the standard backend for PR-dedicated slots.
+Staging and mixed PR/staging registrations use VMs. There is one native implementation.
 
 Native instances use the existing broker/JIT registration, durable ownership,
 job hooks, slot recovery, idle retirement, priority, startup lock and spacing.
@@ -11,30 +11,45 @@ Population, execution and cleanup count against the ordinary total runner ceilin
 The compiler gate, pressure protocol and stock Lean/Lake are unchanged. There is
 no workspace RAM reservation or extra compiler admission rule.
 
-## Prepare and select
+## Standard setup
 
-Prepare the supported native OS image and select an existing general PR slot:
+Use the ordinary preparation and activation commands:
 
 ```sh
-tauceti-fleet native-runner tauchonki --prepare --json
-tauceti-fleet native-runner tauchonki --json
-tauceti-fleet native-runner tauchonki --slot 3 --json
+tauceti-fleet prepare HOST
+tauceti-fleet enable HOST --ci pr --max-jobs 4
+tauceti-fleet native-runner HOST --json
 ```
 
-`3` is an example; choose a general slot from the current inventory. Selection
-changes its next instance at normal turnover. Existing healthy jobs and worker
-admissions continue. No drain is needed. Use a fixed slot for the first canary.
-After concurrent-job validation, `--next-general` selects disk-native for future
-general PR starts across slots. Multiple native jobs can run within the existing
-total slot limit; there is no separate one-native capacity restriction. Reserved
-staging slots remain VMs. `--off` clears the operator's native selection.
+`--max-jobs 4` is an example ceiling, not a reservation. `enable --ci pr` prepares
+the native OS image from the verified base before registration. `prepare` also
+exports it when the host already has a PR role. No backend selection setting or
+extra activation command is needed. The image and role configuration persist
+across controller restarts and reboots.
 
-Already-owned registration classes and a mixed PR/staging idle-pool spare retain
-their original classes. A selected native startup failure is reported explicitly
-and retried through normal slot handling; it does not silently select another
-backend. Native preparation, launch and cleanup use no host root or sysctl changes.
-The host needs the existing unprivileged namespaces, subordinate UID/GID mappings
-and `vm.max_map_count >= 1048576`.
+The standard live `update` prepares a missing native image before handing over
+to the new controller. It uses the existing verified VM base; healthy jobs and
+normal worker/CI admissions continue. Existing VM jobs retain their ownership
+and finish normally, and later PR-dedicated starts use disk-native. Repeating
+setup/update reuses a valid image. Image export uses a small unregistered VM and
+requires the existing QEMU/KVM preparation tools. Neither image preparation nor
+execution uses host root or changes host sysctls.
+
+A PR-only host uses native in all its slots. A host accepting both classes with
+reserved staging slots uses VMs in those reserved slots and native in the others.
+A host accepting both classes without a reservation retains mixed VM runners so
+staging work remains eligible. `reserve-staging` prepares any newly needed native
+image before changing live slot classes; it preserves running jobs. Existing
+registration intents retain their original classes until resolved.
+
+The native host needs unprivileged namespaces, subordinate UID/GID mappings and
+`vm.max_map_count >= 1048576`. `doctor` reports these requirements for native PR
+slots. An image, namespace or mapping failure is explicit; it does not silently
+select a different backend. The compiler gate and shared slot/startup controls
+are unchanged. There are no canary slot selectors or native enable/disable flags.
+
+`native-runner HOST --prepare` remains available for an explicit image refresh;
+it is not required to enable PR CI through the standard setup.
 
 ## Memory and disk
 
@@ -72,8 +87,8 @@ The existing read-only cgroup-counter view supplies the absolute local OOM guard
 
 ## Observation and recovery
 
-`native-runner HOST --json` reports selected slots, image and backend-choice
-reason. Each instance reports raw `memory_bytes`, `memory_working_bytes` after
+`native-runner HOST --json` reports the standard PR backend, image readiness
+and last backend-choice reason. Each instance reports raw `memory_bytes`, `memory_working_bytes` after
 clean-file discount, clean-cache bytes, the 54 GiB cap and disk budget. Progress
 includes storage kind, host free space/inodes, whole-instance allocated disk,
 measurement timestamp/age, scan state/errors and phases. Shared filesystem free
@@ -110,15 +125,12 @@ Full frozen CI must preserve consumed inputs, tested tree, checks and rebuild se
 Exercise cancellation while populating, waiting and computing, plus resource
 failure and ownership recovery.
 
-Before the one-time cutover, inventory old experimental native units/receipts.
-Retire any such instance with its existing release before updating; keep normal
-VM admissions running. The disk implementation has no old-runtime reader or
-migration branch. Install live, select one fixed general slot, and verify a real
-Actions job's checks, identity, memory, disk and cleanup. Then prove two full
-native jobs run concurrently and complete under representative pressure before
-expanding native selection at normal turnover. Preserve total capacity, staging
-reservations and worker settings. Record running Fleet/Worker revisions, useful
-completions and repair any interrupted work.
+Use the supported live update path for existing hosts. Verify running
+Fleet/Worker and image revisions, useful completions, native disk/RAM observations
+and instance cleanup. Preserve total capacity, staging reservations and worker
+settings. Repair failures forward while unrelated jobs continue. The standard
+setup retains the validated namespace, offline-build sandbox, resource bounds
+and lifecycle behavior from the original cutover.
 
 The [implementation plan](plans/disk-backed-native-workspaces.md) and
 [matched workspace evidence](../experiments/native-disk-workspace-20261107/README.md)

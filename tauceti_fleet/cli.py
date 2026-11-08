@@ -43,19 +43,15 @@ def parser():
     enable.add_argument("host")
     enable.add_argument("--ci", choices=("pr", "staging", "both"), help="explicit CI job classes for this machine")
     enable.add_argument("--max-jobs", type=int, help="shared PR + staging concurrency limit")
-    enable.add_argument("--ci-vcpus", type=int, help="vCPUs per CI job")
-    enable.add_argument("--ci-memory-gib", type=int, help="GiB of guest RAM per CI job")
+    enable.add_argument("--ci-vcpus", type=int, help="vCPUs per VM job (staging/mixed registrations)")
+    enable.add_argument("--ci-memory-gib", type=int, help="GiB of VM RAM per staging/mixed job")
     enable.add_argument("--ci-memory-budget-gib", type=int, help="aggregate physical CI RAM ceiling; permits guest RAM overcommit and possible OOM failures")
-    enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable guest disk per CI job")
+    enable.add_argument("--ci-disk-gib", type=int, help="GiB of writable virtual disk per VM job")
     enable.add_argument("--workers", action="store_true")
     enable.add_argument("--json", action="store_true")
-    native = sub.add_parser("native-runner", help="prepare or select disk-backed rootless PR runners at normal turnover")
+    native = sub.add_parser("native-runner", help="inspect or refresh the standard disk-backed PR runner image")
     native.add_argument("host")
-    selection = native.add_mutually_exclusive_group()
-    selection.add_argument("--prepare", action="store_true")
-    selection.add_argument("--slot", type=int)
-    selection.add_argument("--next-general", action="store_true", help="use disk-native for future general PR slots at normal turnover")
-    selection.add_argument("--off", action="store_true")
+    native.add_argument("--prepare", action="store_true")
     native.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
@@ -212,8 +208,6 @@ def main(argv=None, *, _status_results=None):
             if args.command == "native-runner":
                 if args.prepare:
                     payload["prepare"] = True
-                if args.slot is not None or args.off or args.next_general:
-                    payload["slot"] = None if args.off else "next-general" if args.next_general else args.slot
             if args.command == "workers":
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
@@ -238,7 +232,7 @@ def main(argv=None, *, _status_results=None):
                 value = remote.call(
                     entry["target"],
                     payload,
-                    timeout=2100 if action == "prepare" or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
+                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging") or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value

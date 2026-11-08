@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import capabilities, capacity, lean_guest, lean_pressure, lean_runtime, lean_statistics, native_inside
 from .process import executable, run
-from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir, update_host
+from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
 IMAGE_REVISION = 1
 DISK_START_GIB = 48
@@ -47,15 +47,23 @@ def mapping_ok():
 
 
 def selected(config):
-    slot = config.get("ci_native_slot")
     # Recovery may narrow ci_kinds to PR even on a mixed-class host. The
     # reservation count still describes the host's slots in that case.
     reserved = config.get("ci_staging_slots", 0)
     index = config.get("ci_slot", 0)
-    return ((slot == "next-general" or (type(slot) is int and slot == index))
-            and type(index) is int and type(reserved) is int
+    kinds = config.get("ci_kinds", ["staging"])
+    # Without a staging reservation, mixed runners must still accept staging.
+    # Native setup has a weaker boundary and only registers for PR work.
+    return (type(index) is int and type(reserved) is int
             and 0 <= reserved <= index < capacity.jobs(config)
-            and "pr" in config.get("ci_kinds", []))
+            and "pr" in kinds and (kinds == ["pr"] or reserved > 0))
+
+
+def prepare_for_ci(config):
+    """Provision the default PR backend before enabling or handing over CI."""
+    if selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
+        return prepare(config)
+    return None
 
 
 def is_native(value):
@@ -105,7 +113,7 @@ def status():
                            unit_inactive=inactive, memory_max_gib=value.get("memory_max_gib"),
                            disk_budget_gib=value.get("disk_budget_gib"), workspace_storage="disk",
                            progress=shared_json(Path(value["directory"]) / "control/native-progress.json", {})))
-    return dict(ci_native_slot=host_config().get("ci_native_slot"), image=image(), ready=ready(),
+    return dict(pr_backend=RUNTIME, image=image(), ready=ready(),
                 choice=read(state_dir() / "native-choice.json", {}),
                 instances=active)
 
@@ -116,35 +124,19 @@ def choose(config, available):
         return False
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
-    # Preserve already-owned registration classes and the mixed-class spare.
-    if ((intent and intent.get("ci_kinds") != ["pr"])
-            or (config.get("ci_idle_pool") and "staging" in config.get("ci_kinds", [])
-                and not config.get("ci_staging_slots", 0))):
+    # A lost registration reply must retain the original job classes.
+    if intent and intent.get("ci_kinds") != ["pr"]:
         atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
-               selection=config.get("ci_native_slot"), backend="vm", reason="preserve existing runner classes"))
+               backend="vm", reason="preserve existing runner classes"))
         return False
     reason = ("native image not prepared" if not ready() else
               "native host mapping limit is too small" if not mapping_ok() else None)
     atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
-           selection=config.get("ci_native_slot"), backend=RUNTIME, reason=reason, available_bytes=available,
+           backend=RUNTIME, reason=reason, available_bytes=available,
            startup_required_bytes=vm.START_MEMORY_BYTES))
     if reason:
         raise FleetError(reason)
     return True
-
-
-def configure(slot):
-    config = host_config()
-    if slot is not None:
-        general = range(capacity.staging_slots(config), capacity.jobs(config))
-        if not general or (slot != "next-general" and (type(slot) is not int or slot not in general)):
-            raise FleetError("Choose an existing general PR slot, outside reserved staging slots")
-        if "pr" not in capacity.kinds(config):
-            raise FleetError("The native canary requires PR jobs on this host")
-        if not ready():
-            raise FleetError("Prepare the native image before selecting a slot")
-    update_host(ci_native_slot=slot)
-    return dict(ci_native_slot=slot, next_instance_only=True, image=image())
 
 
 def prepare(config=None):

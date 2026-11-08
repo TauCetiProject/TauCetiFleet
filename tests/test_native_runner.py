@@ -27,13 +27,14 @@ class NativeRunner(unittest.TestCase):
         mapping.start()
         self.addCleanup(mapping.stop)
         (self.root / "control").mkdir()
-        self.config = dict(ci_native_slot=1, ci_slot=1, ci_staging_slots=1,
+        self.config = dict(ci_slot=1, ci_staging_slots=1,
                            ci_max_jobs=4, ci_kinds=["pr"], ci_enabled=True)
 
-    def test_selection_never_claims_staging_or_another_slot(self):
+    def test_default_selection_preserves_staging_and_mixed_registrations(self):
         self.assertTrue(native.selected(self.config))
-        for change in (dict(ci_slot=0), dict(ci_native_slot=0, ci_slot=0),
-                       dict(ci_kinds=["staging"]), dict(ci_native_slot=None), dict(ci_native_slot=True)):
+        self.assertTrue(native.selected(dict(ci_kinds=["pr"])))
+        for change in (dict(ci_slot=0), dict(ci_slot=True), dict(ci_slot=-1),
+                       dict(ci_kinds=["staging"]), dict(ci_staging_slots=0, ci_kinds=["pr", "staging"])):
             self.assertFalse(native.selected(dict(self.config, **change)))
 
     def test_selected_native_fault_is_explicit_before_registration(self):
@@ -41,16 +42,16 @@ class NativeRunner(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "image not prepared"):
                 native.choose(self.config, 25 * GIB)
         self.assertEqual(store.read(store.state_dir() / "native-choice.json")["backend"], native.RUNTIME)
-    def test_next_general_selection_excludes_reserved_staging_and_invalid_slots(self):
-        config = dict(self.config, ci_native_slot="next-general")
+    def test_default_selection_excludes_reserved_staging_and_invalid_slots(self):
+        config = dict(self.config)
         for index in (1, 2, 3):
             self.assertTrue(native.selected(dict(config, ci_slot=index)))
         for index in (0, -1, 4, True, "1"):
             self.assertFalse(native.selected(dict(config, ci_slot=index)))
         self.assertFalse(native.selected(dict(config, ci_slot=2, ci_kinds=["staging"])))
 
-    def test_next_general_uses_total_slot_controls_for_concurrent_native_jobs(self):
-        config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"])
+    def test_default_uses_total_slot_controls_for_concurrent_native_jobs(self):
+        config = dict(self.config, ci_kinds=["pr", "staging"])
 
         def launch(value):
             if value["_ci_backend"] == native.RUNTIME:
@@ -70,25 +71,25 @@ class NativeRunner(unittest.TestCase):
             clock.return_value = 283
             self.assertEqual(vm.start(dict(config, ci_slot=3))["_ci_backend"], native.RUNTIME)
             choice = store.read(store.state_dir() / "native-choice.json")
-            self.assertEqual((choice["selection"], choice["slot"]), ("next-general", 3))
+            self.assertEqual((choice["backend"], choice["slot"]), (native.RUNTIME, 3))
 
-    def test_next_general_uses_ordinary_startup_headroom(self):
+    def test_default_uses_ordinary_startup_headroom(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(vm, "start_memory_available", return_value=25 * GIB),
               patch.object(vm, "_start", side_effect=lambda config: config)):
-            self.assertEqual(vm.start(dict(self.config, ci_native_slot="next-general", ci_slot=3))["_ci_backend"], native.RUNTIME)
+            self.assertEqual(vm.start(dict(self.config, ci_slot=3))["_ci_backend"], native.RUNTIME)
 
-    def test_next_general_keeps_mixed_idle_pool_spare_on_vm_and_recovers_pr_on_native(self):
-        config = dict(self.config, ci_native_slot="next-general", ci_staging_slots=0, ci_kinds=["pr", "staging"])
+    def test_default_keeps_mixed_idle_pool_spare_on_vm_and_recovers_pr_on_native(self):
+        config = dict(self.config, ci_staging_slots=0, ci_kinds=["pr", "staging"])
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(vm, "start_memory_available", return_value=80 * GIB),
               patch.object(vm, "_start", side_effect=lambda value: value)):
             value = vm.start(dict(config, ci_idle_pool=True))
             self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", ["pr", "staging"]))
-            self.assertTrue(native.choose(dict(config, ci_recover_instance="0123456789abcdef"), 80 * GIB))
+            self.assertTrue(native.choose(dict(config, ci_recover_instance="0123456789abcdef", ci_kinds=["pr"]), 80 * GIB))
 
-    def test_next_general_replays_existing_registration_classes_on_vm(self):
-        config = dict(self.config, ci_native_slot="next-general", ci_kinds=["pr", "staging"], ci_broker_url="https://broker.invalid")
+    def test_default_replays_existing_registration_classes_on_vm(self):
+        config = dict(self.config, ci_kinds=["pr", "staging"], ci_broker_url="https://broker.invalid")
         intent = dict(instance="0123456789abcdef", ci_kinds=["pr", "staging"])
         store.atomic(vm.slot_file(config, "ci-registration.json"), intent)
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
@@ -129,27 +130,68 @@ class NativeRunner(unittest.TestCase):
                 with self.subTest(backend=backend, available=available):
                     self.assertEqual(vm.start_memory_ok(dict(_ci_backend=backend, _ci_start_available=available * GIB)), expected)
 
-    def test_native_configuration_changes_only_next_backend(self):
-        initial = dict(store.host_config(), ci_max_jobs=4, ci_staging_slots=1, ci_kinds=["pr", "staging"], workers_enabled=True)
-        store.update_host(**initial)
-        with patch.object(native, "ready", return_value=True):
-            native.configure(3)
-            after = store.host_config()
-            self.assertEqual(after, dict(initial, ci_native_slot=3))
-            with self.assertRaises(store.FleetError):
-                native.configure(0)
-            native.configure("next-general")
-            self.assertEqual(store.host_config(), dict(initial, ci_native_slot="next-general"))
-            native.configure(None)
-            self.assertEqual(store.host_config(), dict(initial, ci_native_slot=None))
+    def test_staging_and_unsplit_mixed_hosts_do_not_prepare_native_images(self):
+        with patch.object(native, "prepare") as prepare:
+            for config in (dict(ci_kinds=["staging"]), dict(ci_kinds=["pr", "staging"]),
+                           dict(ci_kinds=["pr", "staging"], ci_staging_slots=2, ci_max_jobs=2)):
+                self.assertIsNone(native.prepare_for_ci(config))
+        prepare.assert_not_called()
 
-    def test_next_general_configuration_rejects_hosts_without_general_pr_slots(self):
-        with patch.object(native, "ready", return_value=True):
-            for change in (dict(ci_max_jobs=2, ci_staging_slots=2, ci_kinds=["pr", "staging"]),
-                           dict(ci_max_jobs=2, ci_staging_slots=0, ci_kinds=["staging"])):
-                store.update_host(**change)
-                with self.assertRaises(store.FleetError):
-                    native.configure("next-general")
+    def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
+        config = dict(ci_kinds=["pr"])
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        image = dict(sha256="b" * 64, vm_sha256="a" * 64)
+        with (patch.object(native, "prerequisites"), patch.object(vm, "prepare_tools"),
+              patch.object(vm, "digest", return_value="a" * 64),
+              patch.object(native, "ready", return_value=True), patch.object(native, "image", return_value=image),
+              patch.object(native, "run") as run):
+            self.assertEqual(native.prepare_for_ci(config), image)
+        run.assert_not_called()
+
+    def test_standard_enable_prepares_and_launches_native_without_host_opt_in(self):
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        operations = []
+
+        def prepare(config):
+            self.assertFalse(store.host_config()["ci_enabled"])
+            operations.append("image")
+            return {"sha256": "b" * 64}
+
+        def launch(config):
+            self.assertEqual(config["_ci_backend"], native.RUNTIME)
+            self.assertEqual(config["ci_kinds"], ["pr"])
+            operations.append("launch")
+            return dict(instance="a" * 16, runtime=native.RUNTIME)
+
+        with (patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))),
+              patch.object(github, "capacity_policy", return_value=dict(kinds=["pr"])),
+              patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}),
+              patch.object(host, "worker_config"), patch.object(host, "install_service"),
+              patch.object(native, "prepare", side_effect=prepare), patch.object(native, "ready", return_value=True),
+              patch.object(vm, "start_memory_available", return_value=25 * GIB),
+              patch.object(vm.time, "monotonic", return_value=100) as clock,
+              patch.object(vm, "_start", side_effect=launch)):
+            result = host.enable(ci="pr", maximum=4)
+            self.assertEqual(operations, ["image", "launch"])
+            # A replacement controller reads the persisted role and starts its
+            # next slot through the same native path, without provisioning again.
+            clock.return_value = 161
+            host.CISlot(1).step(store.host_config(), inventory=[], refresh=False, cooling=False)
+        self.assertTrue(result["ci_enabled"])
+        self.assertEqual(operations, ["image", "launch", "launch"])
+        self.assertNotIn("ci_native_slot", store.host_config())
+
+    def test_image_preparation_failure_does_not_enable_or_register_ci(self):
+        initial = store.host_config()
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        with (patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))),
+              patch.object(github, "capacity_policy", return_value=dict(kinds=["pr"])),
+              patch.object(native, "prepare", side_effect=store.FleetError("image export failed")),
+              patch.object(vm, "start") as start):
+            with self.assertRaisesRegex(store.FleetError, "image export failed"):
+                host.enable(ci="pr")
+        start.assert_not_called()
+        self.assertEqual(store.host_config(), initial)
 
     def test_lost_native_registration_reply_reuses_the_common_intent(self):
         config = dict(store.host_config(), **self.config, ci_broker_url="https://broker.invalid", _ci_backend=native.RUNTIME)

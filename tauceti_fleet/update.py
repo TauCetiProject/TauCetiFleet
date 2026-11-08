@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import capacity, vm
+from . import capacity, native_runner, vm
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
@@ -153,6 +153,10 @@ def install(release, *, expected_machine_id):
         controller = service()
         if controller.get("MainPID", "0") != "0" and controller.get("Restart") not in ("on-failure", "always"):
             raise FleetError("Controller requires Restart=on-failure for live handover")
+        if config["ci_enabled"]:
+            # Use the installed base image without replacing active guests or
+            # waiting for their completion. The old controller keeps serving CI.
+            native_runner.prepare_for_ci(config)
         revision = latest_worker_revision() if config["workers_enabled"] or old_worker else None
         worker = stage_worker(revision) if revision else None
         status = read(state_dir() / "status.json", {})
