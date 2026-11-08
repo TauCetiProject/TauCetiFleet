@@ -1,7 +1,6 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
 import json
-import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -99,7 +98,7 @@ def runner_policy(config):
 
 
 def protected_policy(config, data):
-    """Build VMs accept roadmap code; control VMs accept only trusted workflows."""
+    """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
     expected = "TauCetiRoadmap" if kind == "roadmap" else "TauCetiControl"
     if data.get("name") != expected or data.get("visibility") != "selected":
@@ -109,15 +108,6 @@ def protected_policy(config, data):
     if (repositories.get("total_count") != 1
             or [r.get("full_name") for r in repositories.get("repositories", [])] != ["TauCetiProject/TauCetiRoadmap"]):
         raise FleetError("Protected runner groups must allow only TauCetiProject/TauCetiRoadmap")
-    if kind == "control":
-        # These workflows execute trusted default-branch code, never PR content.
-        names = "auto-merge|grant-triage|sync-roadmap-dropdowns|promote-reviewers|main-red|progress-merge|label-intentions|labels-from-comments|intentions"
-        allowed = rf"TauCetiProject/TauCetiRoadmap/\.github/workflows/({names})\.yml@refs/heads/main"
-        progress = r"TauCetiProject/TauCetiProgress/\.github/workflows/(merge|announce)\.yml@[a-f0-9]{40}"
-        selected = data.get("selected_workflows", [])
-        if (not data.get("restricted_to_workflows") or not selected
-                or any(not (re.fullmatch(allowed, w) or re.fullmatch(progress, w)) for w in selected)):
-            raise FleetError("Control runners require trusted main-defined roadmap automation or pinned Progress workflows")
     return config["ci_slot_runner_group_id"]
 
 

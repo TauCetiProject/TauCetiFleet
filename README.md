@@ -139,11 +139,10 @@ Two existing CI slots can be reserved without another scheduler. The host's
 ```
 
 Use the actual IDs of the `TauCetiControl` and `TauCetiRoadmap` runner groups.
-Both groups allow only the TauCetiRoadmap repository. The control group also
-restricts execution to its trusted main-defined automation workflows and the
-full SHA pins of the Progress merge and announce workflows. Update that
-allowlist when changing either pin. Roadmap code builds run in disposable VMs;
-control VMs never execute PR code. This setup uses the operator host's existing
+Both groups allow only the TauCetiRoadmap repository. Repository isolation
+keeps TauCeti out without coupling runner policy to workflow pins or filenames.
+Every job runs in a disposable VM; ordinary builds select the roadmap class or
+Namespace, while small automation selects the control class. This setup uses the operator host's existing
 direct runner credential, not the volunteer registration broker.
 
 The control guest has 2 CPUs and 4 GiB; the roadmap guest has 16 CPUs and 32 GiB.

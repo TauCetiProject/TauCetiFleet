@@ -81,19 +81,18 @@ class ProtectedCI(unittest.TestCase):
         with self.assertRaises(store.FleetError):
             capacity.protected_slots(dict(self.config, ci_broker_url="https://broker"))
 
-    def test_group_policy_enforces_repository_and_trusted_control_workflows(self):
+    def test_group_policy_enforces_repository_isolation_without_workflow_pin_edits(self):
         repositories = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCetiRoadmap")])
-        group = dict(name="TauCetiControl", visibility="selected", restricted_to_workflows=True,
-                     selected_workflows=["TauCetiProject/TauCetiRoadmap/.github/workflows/auto-merge.yml@refs/heads/main",
-                                         "TauCetiProject/TauCetiProgress/.github/workflows/merge.yml@" + "a" * 40])
-        config = capacity.for_slot(self.config, 0)
-        with patch.object(github, "request", return_value=repositories):
-            self.assertEqual(github.protected_policy(config, group), 5)
-            for invalid in (dict(group, restricted_to_workflows=False),
-                            dict(group, selected_workflows=["TauCetiProject/TauCetiRoadmap/.github/workflows/ci.yml@refs/heads/main"]),
-                            dict(group, selected_workflows=["TauCetiProject/TauCetiProgress/.github/workflows/merge.yml@main"])):
-                with self.assertRaises(store.FleetError):
-                    github.protected_policy(config, invalid)
-        with patch.object(github, "request", return_value=dict(total_count=2, repositories=[])):
-            with self.assertRaises(store.FleetError):
-                github.protected_policy(config, group)
+        for index, name in ((0, "TauCetiControl"), (1, "TauCetiRoadmap")):
+            config = capacity.for_slot(self.config, index)
+            group = dict(name=name, visibility="selected", restricted_to_workflows=False)
+            with patch.object(github, "request", return_value=repositories):
+                self.assertEqual(github.protected_policy(config, group), config["ci_slot_runner_group_id"])
+                for invalid in (dict(group, name="TauCetiFleet"), dict(group, visibility="all")):
+                    with self.assertRaises(store.FleetError):
+                        github.protected_policy(config, invalid)
+            for invalid in (dict(total_count=2, repositories=[]),
+                            dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])):
+                with patch.object(github, "request", return_value=invalid):
+                    with self.assertRaises(store.FleetError):
+                        github.protected_policy(config, group)
