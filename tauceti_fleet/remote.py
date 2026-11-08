@@ -190,12 +190,12 @@ def deploy(target, *, live=False, expected_machine_id=None):
     if target != "local":
         command = "python3 -c " + shlex.quote(BOOTSTRAP)
         command += "".join(" " + shlex.quote(a) for a in args)
-        result = ssh(target, command, input=archive(), timeout=1800 if live else 120)
+        result = ssh(target, command, input=archive(), timeout=3000 if live else 120)
     else:
         import sys
 
         python = getattr(sys, "_base_executable", sys.executable)
-        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=1800 if live else 120)
+        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=3000 if live else 120)
     try:
         reply = json.loads(result.stdout)
     except ValueError:

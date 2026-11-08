@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -178,7 +178,9 @@ def prepare(config=None):
         symlink(data_dir() / "bin/tauceti", venv / "bin/tauceti")
         atomic(data_dir() / "worker-runtime.json", dict(revision=worker_revision))
     manifest = vm.prepare_image(config) if config["ci_allowed"] else None
-    return dict(worker=executable("tauceti"), worker_revision=worker_revision, image=manifest, smoke=vm.smoke(config) if manifest else None)
+    native_image = native_runner.prepare_for_ci(config) if manifest else None
+    return dict(worker=executable("tauceti"), worker_revision=worker_revision, image=manifest,
+                native_image=native_image, smoke=vm.smoke(config) if manifest else None)
 
 
 def worker_headroom(caps, *, ci_busy=False):
@@ -392,6 +394,7 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         capacity.authorize(config, github.capacity_policy(config))
         if not (data_dir() / "images/prepared.json").exists():
             raise FleetError("CI image missing; run prepare before enable --ci")
+        native_runner.prepare_for_ci(config)
     write_slices(dict(config, workers_enabled=config["workers_enabled"] or workers), resources())
     worker_config(config)
     if ci:
@@ -425,6 +428,8 @@ def reserve_staging(maximum):
     config = host_config()
     proposed = dict(config, ci_staging_slots=maximum)
     capacity.staging_slots(proposed)
+    if config["ci_enabled"]:
+        native_runner.prepare_for_ci(proposed)
     value = update_host(ci_staging_slots=maximum, validate=capacity.staging_slots)
     pending = []
     for index in range(maximum):
@@ -1015,11 +1020,8 @@ def rpc(payload):
 
         return host_action(payload)
     if action == "native-runner":
-        from . import native_runner
         if payload.get("prepare"):
             return native_runner.prepare()
-        if "slot" in payload:
-            return native_runner.configure(payload["slot"])
         return native_runner.status()
     if action == "configure":
         return configure(payload)

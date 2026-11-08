@@ -19,6 +19,9 @@ class StagingReservations(unittest.TestCase):
         memory = patch.object(vm, "start_memory_available", return_value=100 * 1024**3)
         memory.start()
         self.addCleanup(memory.stop)
+        prepare = patch.object(host.native_runner, "prepare", return_value={})
+        self.prepare = prepare.start()
+        self.addCleanup(prepare.stop)
         self.config = store.update_host(ci_enabled=True, workers_enabled=True, max_workers=40,
                                         ci_max_jobs=2, ci_kinds=["pr", "staging"])
 
@@ -49,6 +52,14 @@ class StagingReservations(unittest.TestCase):
         self.assertTrue(config["workers_enabled"])
         self.assertEqual(config["max_workers"], 40)
         self.assertEqual(config["ci_max_jobs"], 2)
+        self.prepare.assert_called_once()
+
+    def test_failed_native_preparation_leaves_live_slot_classes_unchanged(self):
+        before = store.host_config()
+        self.prepare.side_effect = store.FleetError("image export failed")
+        with self.assertRaisesRegex(store.FleetError, "image export failed"):
+            host.reserve_staging(1)
+        self.assertEqual(store.host_config(), before)
 
     def test_busy_old_guest_finishes_with_its_original_receipt_classes(self):
         config = dict(self.config, ci_staging_slots=1)

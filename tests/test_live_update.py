@@ -172,6 +172,53 @@ class LiveUpdate(unittest.TestCase):
         self.assertEqual(result["worker_revision"], self.revision)
         self.assertEqual(store.read(store.data_dir() / "worker-runtime.json")["revision"], self.revision)
 
+    def test_standard_prepare_exports_native_image_for_existing_pr_role(self):
+        config = store.update_host(ci_kinds=["pr"], workers_enabled=False, ci_enabled=False)
+        staged = store.data_dir() / "worker-runtimes" / self.revision
+        with (patch.object(update, "stage_worker", return_value=staged),
+              patch.object(update.vm, "outstanding", return_value=False),
+              patch.object(update.vm, "prepare_image", return_value={"sha256": "a" * 64}),
+              patch.object(update.native_runner, "prepare", return_value={"sha256": "b" * 64}) as prepare,
+              patch.object(update.vm, "smoke", return_value={})):
+            result = host.prepare(config)
+        prepare.assert_called_once_with(config)
+        self.assertEqual(result["native_image"]["sha256"], "b" * 64)
+
+    def test_live_update_prepares_native_before_handover_and_preserves_active_vm(self):
+        self.config = store.update_host(ci_kinds=["pr"])
+        self.protected[store.config_dir() / "host.json"] = (store.config_dir() / "host.json").read_bytes()
+        operations = []
+
+        def prepare(config):
+            self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+            self.assert_work_preserved()
+            operations.append("image")
+
+        def handover(release, **kwargs):
+            self.assertEqual(operations, ["image"])
+            operations.append("handover")
+            return dict(controller_release=str(release))
+
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update.native_runner, "prepare", side_effect=prepare),
+              patch.object(update, "stage_worker", return_value=store.data_dir() / "worker-runtimes" / self.revision),
+              patch.object(update, "handover", side_effect=handover)):
+            self.assertTrue(self.install()["installed"])
+        self.assertEqual(operations, ["image", "handover"])
+        self.assert_work_preserved()
+
+    def test_native_preparation_failure_preserves_live_release_and_admissions(self):
+        self.config = store.update_host(ci_kinds=["pr"])
+        self.protected[store.config_dir() / "host.json"] = (store.config_dir() / "host.json").read_bytes()
+        with (patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")),
+              patch.object(update.native_runner, "prepare", side_effect=store.FleetError("image export failed")),
+              patch.object(update, "handover") as handover):
+            with self.assertRaisesRegex(store.FleetError, "image export failed"):
+                self.install()
+        handover.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        self.assert_work_preserved()
+
     def test_failed_activation_restores_both_runtimes_and_recovers_old_controller(self):
         def fail_then_recover(release, **kwargs):
             if "on_signal" in kwargs:

@@ -65,6 +65,17 @@ class Overcommit(unittest.TestCase):
         self.assertEqual(self.checks(self.config)["storage"]["status"], "ok")
         self.assertEqual(self.checks(self.config, free=20 * GIB)["storage"]["status"], "blocked")
 
+    def test_native_readiness_reports_existing_namespace_and_disk_requirements(self):
+        config = dict(self.config, ci_kinds=["pr"], ci_max_jobs=4)
+        with patch.object(host.native_runner, "prerequisites", return_value=None):
+            checks = self.checks(config, free=48 * GIB)
+            self.assertEqual(checks["native-pr-isolation"]["status"], "ok")
+            self.assertEqual(checks["storage"]["status"], "ok")
+            self.assertIn("capped at 54 GiB", checks["ci-shape"]["evidence"])
+            self.assertEqual(self.checks(config, free=47 * GIB)["storage"]["status"], "blocked")
+        with patch.object(host.native_runner, "prerequisites", side_effect=store.FleetError("namespaces unavailable")):
+            self.assertEqual(self.checks(config)["native-pr-isolation"]["status"], "blocked")
+
     def test_overlay_filesystem_is_independent_of_image_storage(self):
         overlay = store.state_dir() / "vms"
         overlay.mkdir(parents=True)
@@ -119,6 +130,7 @@ class Overcommit(unittest.TestCase):
             patch.object(github, "capacity_policy", return_value=dict(max_jobs=12, kinds=["pr", "staging"])),
             patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}),
             patch.object(host, "worker_config"), patch.object(vm, "start") as start,
+            patch.object(host.native_runner, "prepare", return_value={}),
             patch.object(host, "install_service") as install, patch.object(vm, "retire") as retire,
         ):
             result = host.enable(ci="both", maximum=12, memory_budget_gib=80)

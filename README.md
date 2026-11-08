@@ -43,6 +43,16 @@ runner plus pinned GitHub CLI, boots a 2-vCPU/2-GiB guest to prepare the base im
 overlays. Smoke tests verify guest execution, the offline filesystem sandbox,
 and disk replacement without registering with GitHub or calling a model.
 
+PR-dedicated CI slots use [disk-backed native runners](docs/native-runners.md)
+by default. After `prepare`, `enable HOST --ci pr` automatically prepares their
+private OS image before registration; there is no separate native opt-in.
+`prepare` also exports that image for an already configured PR role. Standard
+live updates provision a missing native image before controller handover, leaving
+healthy jobs and admissions running. The prepared image and host role persist
+across restarts. Staging and mixed PR/staging registrations remain on VMs; a mixed
+host with reserved staging slots uses native for its other slots.
+
+
 `doctor` reports evidence, the affected role, a next step, and an administrator
 request where necessary. For example, lack of `/dev/kvm` access blocks CI but
 does not require a workers-only host to obtain virtualization access. Missing
@@ -147,8 +157,9 @@ and the host's `current` release before repeating an update.
 
 Already running worker managers and workers retain their existing Python runtime;
 the staged worker version takes effect at a future manager start. The update
-result reports that scope explicitly. CI backing images are preserved, so image
-maintenance still uses `prepare` separately. `prepare` also selects current Worker
+result reports that scope explicitly. Existing CI backing images are preserved;
+the updater exports a missing native image from the verified base when PR slots
+need it. Replacing the base image remains a separate `prepare` operation. `prepare` also selects current Worker
 `main`, rather than restoring a revision recorded by an older Fleet release.
 Existing releases and worker runtimes
 are retained while processes may still reference them.
@@ -166,8 +177,9 @@ it restarts only that controller's main process via its existing systemd restart
 policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
-fleet weight 10. The default CI shape is 32 vCPUs / 64 GiB, with 2 GiB additional
-host overhead per job. `--max-jobs` sets one shared concurrency limit across
+fleet weight 10. Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
+reserved workspace RAM. The default VM shape for staging/mixed registrations is
+32 vCPUs / 64 GiB, with 2 GiB additional host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
 explicitly declares which jobs the machine accepts. Guest vCPUs are shared by
 the host kernel without per-guest CPU quotas or core pinning. Their total may
