@@ -15,7 +15,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import github, bors_history as history_jobs
+from . import bors_history as history_jobs
+from . import github
 from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
@@ -474,6 +475,8 @@ def display(value, *, section="all"):
             held = data["held"] if data.get("held") is not None else "unknown"
             total = sum(b["size"] for b in batches)
             print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
+        from . import queue_status
+        queue_status.display(value.get("queue", {}), timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
         data, note = source("bors_history")
         if data:
             print(f"Bors history ({note}):")

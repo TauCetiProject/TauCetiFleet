@@ -823,3 +823,18 @@ sets the forwarding secret and deploys the public policy. It never changes host
 admissions or enrollment credentials. Later ordinary broker deploys retain this
 explicit policy (`keep_vars`). Removing an alias disables new publication for
 that host; remove it from the CI reader's public scope to revoke public reads.
+
+
+`status` includes a detailed merge-queue table from the prepared public operations
+snapshot: head and sealed-successor roles, PR counts, live repair/preparation claims,
+Lake build-task counters, CI phases and their times, waiting PRs, worker activity and
+the last confirmed landing. Prior preparation is distinguished from later additions.
+These reads use only the public snapshot and bounded immutable detail pages; they do
+not query GitHub or run worker collectors. A failed refresh retains the last facts
+with their original observation time and an explicit cached/stale label. Follow-mode
+redraws use the same local cache, refreshed by its existing background reader.
+
+Merge-queue timestamps default to `Australia/Sydney`, displaying AEDT or AEST as
+appropriate. Use `tauceti-fleet status --timezone UTC` to override it; the option also
+applies to `--follow`. JSON includes the same queue facts under `_ci.queue`.
+Lake counters count build tasks, can have growing totals, and are not CI verdicts.
