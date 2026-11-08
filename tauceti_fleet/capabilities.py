@@ -288,7 +288,9 @@ def doctor(config=None, *, probe=True):
         committed = 0
     additional = max(0, budget - committed)
     # The shared ceiling is available capacity, not an advance reservation.
-    needed = (min(2 * GIB, additional) if overcommit or config.get("ci_memory_budget_gib") is None else additional) + reserve
+    # Native per-job caps and the parent ceiling are limits, never advance RAM
+    # reservations. Keep startup headroom even when their sum fits the ceiling.
+    needed = (min(2 * GIB, additional) if native_default or overcommit or config.get("ci_memory_budget_gib") is None else additional) + reserve
     add(
         "available-memory-headroom",
         "ok" if caps["memory_available"] >= needed else "blocked",

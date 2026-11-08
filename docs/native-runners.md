@@ -66,6 +66,9 @@ cache is discounted in native memory estimates. Raw charge and peaks remain
 visible; the cap is not a reservation. The ordinary autoscaler forecasts future
 growth once and does not inflate VM estimates from native clean cache.
 
+Readiness checks startup headroom without reserving the aggregate CI memory
+budget or the sum of native per-job caps, even when those caps fit that budget.
+
 Native startup checks for 48 GiB free on the instance filesystem before JIT
 registration. This is an estimate for population plus the host margin, not a disk
 reservation. A 56 GiB whole-instance allocated-disk budget and 8 GiB host free-space
