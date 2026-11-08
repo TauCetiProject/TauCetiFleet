@@ -76,6 +76,16 @@ class Overcommit(unittest.TestCase):
         with patch.object(host.native_runner, "prerequisites", side_effect=store.FleetError("namespaces unavailable")):
             self.assertEqual(self.checks(config)["native-pr-isolation"]["status"], "blocked")
 
+    def test_native_caps_fitting_explicit_budget_do_not_reserve_that_budget(self):
+        config = dict(self.config, ci_kinds=["pr"], ci_max_jobs=2, ci_memory_budget_gib=110)
+        # Two 54 GiB caps fit the 110 GiB ceiling; the host currently has 30 GiB
+        # available. Starting a job needs startup headroom, not 110 GiB free.
+        with patch.object(host.native_runner, "prerequisites", return_value=None):
+            checks = self.checks(config)
+        self.assertEqual(checks["ci-shape"]["status"], "ok")
+        self.assertNotIn("ci-memory-overcommit", checks)
+        self.assertEqual(checks["available-memory-headroom"]["status"], "ok")
+
     def test_overlay_filesystem_is_independent_of_image_storage(self):
         overlay = store.state_dir() / "vms"
         overlay.mkdir(parents=True)
