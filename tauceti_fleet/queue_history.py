@@ -85,6 +85,10 @@ def display(report, *, timezone="Australia/Sydney", now=None):
     observed = value["observed_at"]
     when = datetime.fromtimestamp(observed, UTC).isoformat()
     notes = [clock(when, timezone), f"{max(0, int(now - observed))}s old"]
+    since = value.get("since")
+    if type(since) in (int, float) and since > now - 604800:
+        start = datetime.fromtimestamp(since, UTC).isoformat()
+        notes.append("7d limited to ledger since " + clock(start, timezone))
     if now - observed > 180 or report.get("error"):
         notes.append("STALE; cached" if report.get("error") else "STALE")
     print("Queue history (current controller ledger; " + "; ".join(notes) + "):")
