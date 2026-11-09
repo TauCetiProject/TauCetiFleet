@@ -240,7 +240,7 @@ class Overview(unittest.TestCase):
             self.assertIn("oldest_unavailable", data)
 
     def test_bors_total_and_legacy_backlog_cache(self):
-        batches = [dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]
+        batches = list(reversed([dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]))
         value = dict(sources=dict(
             bors=dict(value=dict(batches=batches, held=0), observed_at=time.time()),
             backlog=dict(value=dict(pr_builds=71, all_workflows=100,
