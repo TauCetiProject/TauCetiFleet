@@ -270,7 +270,7 @@ def activity(batch, claims, names, now, timezone):
             return result
         status = attempt.get("status") or "pending"
         return "CI " + text(status, 40).replace("_", " ")
-    label = "receiving PRs"
+    label = "membership fixed; waiting" if batch.get("sealed") else "receiving PRs"
     previous = batch.get("previous_preparation")
     if previous:
         label += "; prepared " + clock(previous["resolved_at"], timezone)
@@ -301,8 +301,13 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
         workers = value.get("workers") or []
         names = {w["id"]: f"worker {i + 1}" for i, w in enumerate(workers)}
         rows = []
+        sealed_waiting = sorted((b for b in value["batches"] if b["state"] != "head" and b.get("sealed")),
+                                key=lambda b: int(b["id"]))
+        next_head = sealed_waiting[0]["id"] if sealed_waiting else None
         for batch in value["batches"]:
-            role = "head" if batch["state"] == "head" else "sealed successor" if batch.get("sealed") else "unsealed"
+            role = ("head" if batch["state"] == "head" else
+                    "next head" if batch["id"] == next_head else
+                    "sealed, waiting" if batch.get("sealed") else "unsealed")
             rows.append((batch["id"], str(batch["size"]), role,
                          activity(batch, value["claims"], names, now, timezone)))
         print("  Batch   PRs  State             Activity")
