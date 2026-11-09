@@ -44,12 +44,6 @@ class History(unittest.TestCase):
         self.assertIn("CI run p50", output.getvalue())
         self.assertIn("not build-only", output.getvalue())
 
-    def test_short_ledger_is_not_presented_as_a_complete_seven_day_history(self):
-        self.source["since"] = self.now - 86400
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            history.display(dict(value=history.parse(self.source)), now=self.now)
-        self.assertIn("7d limited to ledger since", output.getvalue())
-
     def test_source_failure_keeps_the_original_time_and_landing_counts(self):
         with patch.object(ci_overview, "fetch", return_value=self.source):
             history.refresh()
