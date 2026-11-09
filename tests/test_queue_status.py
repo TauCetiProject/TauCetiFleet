@@ -58,7 +58,7 @@ class QueueStatus(unittest.TestCase):
     def test_batch_roles_progress_and_live_ci_phase_are_distinct(self):
         output = self.render()
         self.assertIn("head", output)
-        self.assertIn("sealed successor", output)
+        self.assertIn("next head", output)
         self.assertIn("unsealed", output)
         self.assertIn("CI reporting results", output)
         self.assertIn("worker 2: preparation; Lake 36,611/38,051 tasks", output)
@@ -93,6 +93,18 @@ class QueueStatus(unittest.TestCase):
         output = self.render()
         self.assertIn("Last landing: batch 389, 876 PRs at 09 Nov 10:41 AEDT", output)
         self.assertIn("Next head: batch 391 after its active preparation releases", output)
+
+    def test_two_sealed_batches_show_next_head_and_waiting_without_admitting_more_prs(self):
+        self.document["batches"][0] = dict(self.head, state="landed", landed_at="2026-11-08T23:41:08Z")
+        self.document["batches"][2].update(sealed=True, sealed_at="2026-11-08T23:35:00Z")
+        output = self.render()
+        first = next(line for line in output.splitlines() if line.strip().startswith("391 "))
+        second = next(line for line in output.splitlines() if line.strip().startswith("392 "))
+        self.assertIn("next head", first)
+        self.assertIn("sealed, waiting", second)
+        self.assertIn("membership fixed; waiting", second)
+        self.assertNotIn("receiving PRs", second)
+        self.assertNotIn("sealed successor", output)
 
     def test_sydney_daylight_saving_and_utc_override(self):
         self.assertIn("09 Nov 10:35 AEDT", self.render())

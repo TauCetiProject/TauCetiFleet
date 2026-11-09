@@ -849,3 +849,7 @@ p50/p95 durations for 1h, 3h, 24h and 7d. Run durations include setup, reporting
 publication, and are labelled separately from build-only time. Failed refreshes keep
 the original facts visibly cached/stale. Existing follow processes need a restart
 to load a new client release.
+
+The queue table labels the oldest sealed non-head batch `next head`, with later
+sealed batches `sealed, waiting`. A sealed batch has fixed membership even when
+its preparation has finished; only unsealed batches receive incoming PRs.
