@@ -67,7 +67,7 @@ An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 persistent user service on the SSH control host. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
-and compiler headroom. Guest launches still obey the host's minute spacing and
+and compiler headroom. Guest launches still obey the host's ten-second spacing and
 startup memory gate. One general slot is retained alongside staging reservations, even when reducing
 capacity; an existing staging-only ceiling can recover a general slot when memory
 allows it. The configured maximum is an experimental ceiling, not a reservation; normal worker and CI admissions remain enabled.
@@ -283,7 +283,7 @@ socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
 the controller starts the remaining slots after the role is enabled, with at least
-one minute between CI guest startup attempts across the host. Deferred starts do
+ten seconds between CI guest startup attempts across the host. Deferred starts do
 not block the controller. The shared gate survives controller restarts and also
 covers enable, retries, and recovered placements; existing guests are adopted
 immediately without consuming another startup turn.

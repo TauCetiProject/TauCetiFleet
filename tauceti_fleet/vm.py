@@ -243,6 +243,10 @@ def prepare_image(config=None):
         return manifest
 
 
+# Shared across CI slots, including replacements and recovery attempts.
+CI_START_GAP_SECONDS = 10
+
+
 def start(config):
     from .capacity import for_slot
 
@@ -263,8 +267,8 @@ def start(config):
             if pace.get("boot_id") == boot:
                 if pace.get("starting"):
                     # The previous caller died mid-start. Its guest may have
-                    # only just launched; give it a full minute to settle.
-                    atomic(path, dict(boot_id=boot, next_start_monotonic=now + 60))
+                    # only just launched; apply a fresh startup interval before retrying.
+                    atomic(path, dict(boot_id=boot, next_start_monotonic=now + CI_START_GAP_SECONDS))
                     return {}
                 if now < pace.get("next_start_monotonic", 0):
                     return {}
@@ -272,8 +276,8 @@ def start(config):
                 # Adopt recent starts made before this gate was installed.
                 latest = max((read(slot_file({"ci_slot": i}, "vm.json"), {}).get("started_at", 0)
                               for i in slots_in_use()), default=0)
-                remaining = 60 - (time.time() - latest)
-                if 0 < remaining <= 60:
+                remaining = CI_START_GAP_SECONDS - (time.time() - latest)
+                if 0 < remaining <= CI_START_GAP_SECONDS:
                     atomic(path, dict(boot_id=boot, next_start_monotonic=now + remaining))
                     return {}
             from . import native_runner
@@ -283,14 +287,14 @@ def start(config):
             if native:
                 config["ci_kinds"] = ["pr"]
             if not start_memory_ok(config):
-                # Defer without consuming the pacing minute; the slot retries in 5s.
+                # Defer without consuming the startup interval; the slot retries in 5s.
                 return {}
 
             def reserve(*, starting=False):
-                atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + 60, starting=starting))
+                atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + CI_START_GAP_SECONDS, starting=starting))
 
             # Reserve before registration for crash safety, then measure the
-            # full minute from launch completion (or a failed attempt).
+            # interval from launch completion (or a failed attempt).
             reserve(starting=True)
             try:
                 return _start(config)

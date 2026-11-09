@@ -22,18 +22,18 @@ class StartPacing(unittest.TestCase):
         self.addCleanup(memory.stop)
         self.config = dict(ci_kinds=["pr", "staging"])
 
-    def test_slots_and_new_callers_share_a_nonblocking_minute_gap(self):
+    def test_slots_and_new_callers_share_a_nonblocking_ten_second_gap(self):
         with patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(vm, "_start", return_value={"started": True}) as start:
             self.assertTrue(vm.start(dict(self.config, ci_slot=0)))
-            clock.return_value = 159.9
+            clock.return_value = 109.9
             self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
             self.assertEqual(vm.start(dict(self.config, ci_slot=2)), {})
             start.assert_called_once()
-            clock.return_value = 160
+            clock.return_value = 110
             self.assertTrue(vm.start(dict(self.config, ci_slot=2)))
             self.assertEqual(start.call_count, 2)
 
-    def test_low_memory_defers_start_without_consuming_the_pacing_minute(self):
+    def test_low_memory_defers_start_without_consuming_the_pacing_interval(self):
         gib = 1024**3
         with (
             patch.object(vm.time, "monotonic", return_value=100),
@@ -42,7 +42,7 @@ class StartPacing(unittest.TestCase):
         ):
             self.assertEqual(vm.start(dict(self.config, ci_slot=0)), {})
             start.assert_not_called()
-            # Once memory recovers, the start proceeds at once rather than a minute later.
+            # Once memory recovers, the start proceeds at once without an additional startup delay.
             memory.return_value = 20 * gib
             self.assertTrue(vm.start(dict(self.config, ci_slot=0)))
             # Unmeasurable memory never blocks CI; pacing still applies.
@@ -67,10 +67,10 @@ class StartPacing(unittest.TestCase):
             with patch.object(vm, "_start", side_effect=fail) as start:
                 with self.assertRaises(store.FleetError):
                     vm.start(dict(self.config, ci_slot=0))
-                clock.return_value = 189
+                clock.return_value = 139.9
                 self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
                 start.assert_called_once()
-            clock.return_value = 190
+            clock.return_value = 140
             with patch.object(vm, "_start", return_value={"started": True}):
                 self.assertTrue(vm.start(dict(self.config, ci_slot=1)))
 
@@ -91,22 +91,22 @@ class StartPacing(unittest.TestCase):
         launch.assert_called_once()
 
     def test_existing_recent_guest_seeds_the_gate_on_initial_install(self):
-        store.atomic(vm.slot_file(dict(ci_slot=3), "vm.json"), dict(started_at=990))
+        store.atomic(vm.slot_file(dict(ci_slot=3), "vm.json"), dict(started_at=995))
         with patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(vm.time, "time", return_value=1000), patch.object(vm, "_start", return_value={"started": True}) as start:
             self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
             start.assert_not_called()
-            clock.return_value = 150
+            clock.return_value = 105
             self.assertTrue(vm.start(dict(self.config, ci_slot=1)))
 
-    def test_interrupted_start_gets_a_fresh_minute_after_recovery(self):
+    def test_interrupted_start_gets_a_fresh_ten_seconds_after_recovery(self):
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         store.atomic(store.state_dir() / "ci-start-pace.json", dict(boot_id=boot, next_start_monotonic=10, starting=True))
         with patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(vm, "_start", return_value={"started": True}) as start:
             self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
-            clock.return_value = 159
+            clock.return_value = 109
             self.assertEqual(vm.start(dict(self.config, ci_slot=1)), {})
             start.assert_not_called()
-            clock.return_value = 160
+            clock.return_value = 110
             self.assertTrue(vm.start(dict(self.config, ci_slot=1)))
 
     def test_host_reboot_does_not_reuse_an_old_monotonic_deadline(self):
