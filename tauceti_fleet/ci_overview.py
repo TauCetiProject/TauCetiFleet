@@ -470,7 +470,7 @@ def display(value, *, section="all"):
         if data is None:
             print("Bors: unknown (background observation unavailable)")
         else:
-            batches = data["batches"]
+            batches = sorted(data["batches"], key=lambda batch: batch["id"])
             parts = [str(b["size"]) for b in batches]
             held = data["held"] if data.get("held") is not None else "unknown"
             total = sum(b["size"] for b in batches)
