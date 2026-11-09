@@ -266,7 +266,9 @@ def main(argv=None, *, _status_results=None):
             pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
             overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
             overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
-            overview["queue"] = overview["pool_activity"].get("queue", {})
+            from . import queue_history, queue_status
+            overview["queue"] = overview["pool_activity"].get("queue") or queue_status.cached()
+            overview["queue_history"] = queue_history.cached()
             overview["queue_timezone"] = args.timezone
             bors_printed = False
 
