@@ -195,7 +195,7 @@ class QueueStatus(unittest.TestCase):
     def test_shared_public_refresh_keeps_queue_independent_of_job_summary_failure(self):
         manifest = copy.deepcopy(self.manifest)
         manifest["domains"]["jobs"] = dict(url=self.path)
-        with patch.object(ci_overview, "fetch", side_effect=[manifest, OSError("jobs unavailable")]), patch.object(queue, "refresh", return_value=self.report()) as refresh:
+        with patch.object(ci_overview, "fetch", side_effect=[manifest, OSError("jobs unavailable"), OSError("history unavailable")]), patch.object(queue, "refresh", return_value=self.report()) as refresh:
             result = pool_activity.refresh()
         self.assertIn("error", result)
         self.assertEqual(result["queue"]["value"]["waiting"], 7)

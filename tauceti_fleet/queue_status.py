@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from . import ci_overview
-from .store import FleetError
+from .store import FleetError, atomic, config_dir, read
 
 ORIGIN = "https://ci-data.taucetiproject.org"
 DEFAULT_TIMEZONE = "Australia/Sydney"
@@ -159,7 +159,33 @@ def task(original, batch_id):
     return result
 
 
+def cache_path():
+    return config_dir() / "status-cache" / "merge-queue.json"
+
+
+def cached():
+    try:
+        value = read(cache_path(), {})
+        return value if isinstance(value, dict) else {}
+    except FleetError:
+        return dict(error="Merge queue cache is unreadable")
+
+
 def refresh(manifest, previous=None):
+    # Older status clients still rewrite pool-activity.json without queue fields. Keep this
+    # observation separately so an old follow process cannot erase a newer client's facts.
+    saved = cached()
+    if saved.get("value") and (not previous or saved.get("checked_at", 0) >= previous.get("checked_at", 0)):
+        previous = saved
+    report = _refresh(manifest, previous)
+    try:
+        atomic(cache_path(), report)
+    except (OSError, ValueError):
+        report["error"] = "Merge queue cache could not be saved"
+    return report
+
+
+def _refresh(manifest, previous=None):
     previous = previous or {}
     if previous.get("scope") != manifest.get("scope"):
         previous = {}

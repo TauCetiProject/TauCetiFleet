@@ -838,3 +838,14 @@ Merge-queue timestamps default to `Australia/Sydney`, displaying AEDT or AEST as
 appropriate. Use `tauceti-fleet status --timezone UTC` to override it; the option also
 applies to `--follow`. JSON includes the same queue facts under `_ci.queue`.
 Lake counters count build tasks, can have growing totals, and are not CI verdicts.
+
+
+Current queue details and rolling history have their own caches, so an older follow
+client refreshing the CI-pool cache cannot remove them. The `Queue history` table
+reads the current controller's read-only `/statistics` ledger projection; the retired
+Bors statistics feed is not a current queue history source. It reports distinct PR
+landing receipts, landed batches, completed CI attempt outcomes and workflow-run
+p50/p95 durations for 1h, 3h, 24h and 7d. Run durations include setup, reporting and
+publication, and are labelled separately from build-only time. Failed refreshes keep
+the original facts visibly cached/stale. Existing follow processes need a restart
+to load a new client release.

@@ -109,13 +109,17 @@ def refresh():
     except (FleetError, OSError, ValueError, TypeError, AttributeError) as error:
         value = dict(previous, error="Public CI activity refresh failed (" + type(error).__name__ + ")",
                      checked_at=time.time())
+    from . import queue_status
     if isinstance(manifest, dict) and "queue" in manifest.get("domains", {}):
-        from . import queue_status
         value["queue"] = queue_status.refresh(manifest, previous.get("queue"))
     elif isinstance(manifest, dict):
         value["queue"] = dict(error="Public queue observation is unavailable", checked_at=time.time())
-    elif previous.get("queue"):
-        value["queue"] = dict(previous["queue"], error="Public manifest unavailable; using cached queue", checked_at=time.time())
+    else:
+        saved_queue = queue_status.cached() or previous.get("queue", {})
+        value["queue"] = dict(saved_queue, error="Public manifest unavailable; using cached queue", checked_at=time.time())
+    if isinstance(manifest, dict) and "queue" in manifest.get("domains", {}):
+        from . import queue_history
+        queue_history.refresh()
     try:
         atomic(cache_path(), value)
     except (OSError, ValueError):

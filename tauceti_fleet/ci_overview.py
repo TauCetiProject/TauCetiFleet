@@ -478,7 +478,10 @@ def display(value, *, section="all"):
         from . import queue_status
         queue_status.display(value.get("queue", {}), timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
         data, note = source("bors_history")
-        if data:
+        if "queue_history" in value:
+            from . import queue_history
+            queue_history.display(value["queue_history"], timezone=value.get("queue_timezone", "Australia/Sydney"))
+        elif data:
             print(f"Bors history ({note}):")
             durations = {r["window"]: r for r in data["durations"]}
             windows = {r["window"]: r for r in data["windows"]}
