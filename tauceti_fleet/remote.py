@@ -153,6 +153,9 @@ def profile(name):
     # Always sent, so removing one of these keys from a profile returns the host to its default.
     for key in ("agent", "claude_billing", "sandbox", "pace", "env"):
         result[key] = value.get(key)
+    # Sent only when the profile names it, so groups edited on the host outlive a repeated add.
+    if "slots" in value:
+        result["slots"] = value["slots"]
     credentials = {}
     for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
         if name == "anthropic_api_key_file" and result["claude_billing"] == "subscription":

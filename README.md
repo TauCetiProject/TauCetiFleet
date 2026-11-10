@@ -158,6 +158,9 @@ login into its own home. Like a model change, changing any of these keys on an
 active host requires a drain before repeating `add`. A key removed from the
 profile returns to its default.
 
+`slots` gives groups of slots their own agent and work phases in place of one
+agent for all; see [Slot groups](#slot-groups).
+
 ## Protected roadmap capacity
 
 Two existing CI slots can be reserved without another scheduler. The host's
@@ -801,6 +804,63 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Slot groups
+
+Every worker slot runs the profile's agent through the worker's full rotation of
+work phases unless the profile divides the slots into groups, each with a count,
+an agent, and optionally the phases it is limited to:
+
+```json
+{
+  "mixed": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "slots": [
+      {"count": 6, "agent": "auto"},
+      {"count": 2, "agent": "claude", "roles": ["review"]},
+      {"count": 1, "agent": "codex", "roles": ["progress"]}
+    ]
+  }
+}
+```
+
+`roles` takes the worker's phase names: `rebase`, `bump`, `lint-repair`,
+`progress`, `fix-ci`, `fix`, `review`, `overlap-fix`, `overlap-scan`, and
+`roadmap`. A group without `roles` runs the full rotation, and one without
+`agent` uses the profile's. Fleet writes each group as the `agent` and `only`
+keys of its workers' definitions and holds every group to the profile's other
+keys: API billing admits only `claude` groups, and an `auto` group excludes
+`author_model` and `author_effort`. `doctor` checks the agent CLI of every group.
+
+The same list can be read and replaced on a running host, without a drain:
+
+```sh
+tauceti-fleet slots big-server            # the groups, their workers, and how many are admitted
+tauceti-fleet slots big-server --group 4:auto --group 4:claude:review --group 1:codex:progress
+tauceti-fleet slots big-server --clear    # every slot alike again
+```
+
+Each `--group` is `COUNT:AGENT[:ROLE,ROLE...]`; an empty agent, as in
+`2::review`, keeps the profile's. The groups given replace the saved list.
+Repeating `add` applies the profile's `slots` the same way when the profile has
+the key, and leaves the host's groups alone when it does not.
+
+Worker ids stay positional (`fleet-<machine>-<n>`). An edit keeps every worker
+in a group that still describes it and rewrites only the definitions that
+change group: going from the profile above to the command above rewrites two of
+the nine. The worker manager holds a changed `agent` or `only` until that
+worker's round ends; this needs a TauCetiWorker release that defers those two
+edits, and an older one restarts the changed workers at once. A group that
+shrinks gives up admissions and keeps its definitions, as lowering
+`workers --max` does, and a group that grows later takes those definitions
+before any is added.
+
+The counts say how many slots exist; `workers --max` remains the admission
+ceiling, so raise it when the groups total more. A ceiling below the total
+admits every group in proportion: a ceiling of five on the profile above
+admits three `auto` slots, one reviewer, and the progress slot. [Roadmap focus](#roadmap-focus)
+takes its share from the admitted slots whose phases include `roadmap`.
 
 ## Public operations telemetry
 

@@ -353,7 +353,8 @@ def doctor(config=None, *, probe=True):
     )
     worker = executable("tauceti")
     agent = config.get("agent") or "claude"
-    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agent in (name, "auto")]
+    agents = {group.get("agent") or agent for group in config.get("slots") or [{}]}
+    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agents & {name, "auto"}]
     if config.get("sandbox") == "bubble":
         tools += ["bubble", "incus"]
     for name in tools:

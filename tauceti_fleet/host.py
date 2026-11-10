@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, slot_groups, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -107,6 +107,7 @@ def configure(payload):
         "sandbox",
         "pace",
         "env",
+        "slots",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -131,8 +132,13 @@ def configure(payload):
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
     worker_fields(dict(current, **updates))
+    if updates.get("slots") is not None:
+        updates["slots"] = slot_groups.validate(updates["slots"])
+    if dict(current, **updates).get("slots"):
+        slot_groups.layout(dict(current, **updates), [], worker_fields)
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
+        # Slot groups change live: the worker manager holds an agent or phase edit until the round ends.
+        if any(current.get(k) != v for k, v in updates.items() if k != "slots"):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
@@ -347,22 +353,30 @@ def toml_value(value):
     return "true" if value is True else json.dumps(value)
 
 
-def worker_config(config):
-    # Existing worker definitions and the operator's manager are never rewritten.
-    fields = worker_fields(config)
-    lines = ["version = 1"]
-    ids = []
+def worker_plan(config):
+    """(id, definition keys, slot group or None) per worker, and the ids in admission order."""
     # Keep existing definitions when reducing admissions: removing a definition
     # makes the manager terminate its worker, including an admitted paid session.
     import tomllib
 
     prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
-    count = max(1, config["max_workers"], old_count)
-    for n in range(count):
-        wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
-        ids.append(wid)
+    old = tomllib.loads(prior.read_text()).get("workers", []) if preserve and prior.exists() else []
+    if config.get("slots"):
+        plan = slot_groups.layout(config, old, worker_fields)
+        admission = slot_groups.order([group for _, group in plan])
+    else:
+        plan = [(worker_fields(config), None)] * max(1, config["max_workers"], len(old))
+        admission = range(len(plan))
+    ids = ["fleet-" + config["machine_id"][:8] + f"-{n + 1}" for n in range(len(plan))]
+    return [(wid, *entry) for wid, entry in zip(ids, plan, strict=True)], [ids[n] for n in admission]
+
+
+def worker_config(config):
+    # Existing worker definitions and the operator's manager are never rewritten.
+    definitions, ids = worker_plan(config)
+    lines = ["version = 1"]
+    for wid, fields, _ in definitions:
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         for key, value in fields.items():
             if value is not None:
@@ -373,6 +387,38 @@ def worker_config(config):
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     return ids
+
+
+def maintenance_workers(config):
+    """Ids whose slot group leaves out roadmap rounds, where roadmap focus has nothing to steer."""
+    if not config.get("slots"):
+        return set()
+    return {wid for wid, fields, _ in worker_plan(config)[0] if "roadmap" not in fields.get("only", ["roadmap"])}
+
+
+def configure_slots(payload):
+    """Show or replace the slot groups. Definitions follow on the controller's next pass."""
+    config = host_config()
+    if payload.get("clear"):
+        config = update_host(slots=None)
+    elif payload.get("groups") is not None:
+        groups = slot_groups.validate(payload["groups"])
+        slot_groups.layout(dict(config, slots=groups), [], worker_fields)
+        config = update_host(slots=groups)
+    groups = config.get("slots")
+    result = dict(slots=groups, max_workers=config["max_workers"])
+    if groups:
+        definitions, _ = worker_plan(config)
+        admitted = read(state_dir() / "admission.json", {}).get("workers", [])
+        result["slots"] = []
+        for index, group in enumerate(groups):
+            workers = [wid for wid, _, placed in definitions if placed == index]
+            result["slots"].append(dict(group, workers=workers, admitted=len(set(workers) & set(admitted))))
+        total = sum(group["count"] for group in groups)
+        if config["max_workers"] < total:
+            result["detail"] = (f"The worker ceiling admits {config['max_workers']} of these {total} slots, "
+                                "each group in proportion; raise it with workers --max")
+    return result
 
 
 WORKER_OOM_SCORE_ADJ = 500
@@ -894,6 +940,8 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied_slots = None
+        maintenance = set()
         last_results = 0
         memory_paused = False
         while not stopping:
@@ -942,8 +990,10 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    grouped = config.get("slots")
+                    if not ids or grouped != applied_slots or (not grouped and len(ids) < config["max_workers"]):
+                        ids, applied_slots = worker_config(config), grouped
+                        maintenance = maintenance_workers(config)
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -974,13 +1024,14 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                roadmap_focus = focus.policy(config, ids[:target])
+                admitted = ids[:target]
+                roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
                 atomic(
                     state_dir() / "admission.json",
                     dict(
                         version=1,
                         expires_at=time.time() + 15,
-                        workers=ids[:target],
+                        workers=admitted,
                         reason=reason,
                         roadmap_focus=roadmap_focus,
                     ),
@@ -998,7 +1049,7 @@ def daemon():
                         workers_enabled=config["workers_enabled"],
                         ci_busy=busy,
                         ci_cooldown=circuit if cooling else None,
-                        active_worker_limit=target,
+                        active_worker_limit=len(admitted),
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
                         scaling_reason=reason,
@@ -1121,6 +1172,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "slots":
+        return configure_slots(payload)
     if action == "workers":
         return set_worker_maximum(payload["maximum"])
     if action == "reserve-staging":
