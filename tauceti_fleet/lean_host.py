@@ -152,6 +152,8 @@ class Publisher:
         )
         staging_paths = {Path(v["directory"]) / "pressure.sock" for v in ci_priority.receipts(status)
                          if v.get("directory") and ci_priority.staging(v)}
+        unrestricted_paths = {Path(v["directory"]) / "pressure.sock" for v in ci_priority.receipts(status)
+                              if v.get("directory") and ci_priority.staging_build(v)}
         for path in list(self.remote_statistics):
             if Path(path) not in paths and (path not in owned if owned is not None else not status):
                 self.archive_statistics(path)
@@ -206,15 +208,16 @@ class Publisher:
                 request, waiting = self.pending.get(path, (0, 0))
                 staging = path in staging_paths
                 headroom = ci_priority.headroom(total, staging=staging)
-                credits = max(0, math.ceil((available - headroom) / lean_pressure.WORST_FILE_RSS_BYTES) - len(self.recent))
+                unrestricted_memory = path in unrestricted_paths
+                credits = waiting if unrestricted_memory else max(0, math.ceil((available - headroom) / lean_pressure.WORST_FILE_RSS_BYTES) - len(self.recent))
                 if not staging and value["cpu_percent"] > lean_pressure.CPU_LIMIT_PERCENT:
                     credits = 0
                 unacknowledged = request != self.granted.get(path) or now - self.granted_at.get(path, 0) >= 2
                 permit = request if credits and request and unacknowledged else 0
                 remaining = sum(bool(self.pending.get(p, (0, 0))[0]) for p in ordered[ordered.index(path) :]
                                 if (p in staging_paths) == staging)
-                starts = min(waiting, math.ceil(credits / max(1, remaining))) if permit else 0
-                frame = (json.dumps(dict(ci_priority.frame(value, staging=staging), permit=permit, starts=starts), allow_nan=False) + "\n").encode()
+                starts = min(256, waiting if unrestricted_memory else min(waiting, math.ceil(credits / max(1, remaining)))) if permit else 0
+                frame = (json.dumps(dict(ci_priority.frame(value, staging=staging, unrestricted_memory=unrestricted_memory), permit=permit, starts=starts), allow_nan=False) + "\n").encode()
                 self.clients[path].sendall(frame)
                 if permit:
                     self.granted[path] = permit
@@ -235,7 +238,7 @@ class Publisher:
                 state_dir() / "lean-host-pressure.json",
                 dict(value, guests=len(self.clients), waiting_guests=sum(bool(n) for n, _ in self.pending.values()),
                      staging_priority=dict(guests=sum(path in staging_paths for path in self.clients),
-                                           cpu_sleeps=False, headroom_gib=ci_priority.headroom(total, staging=True) / 1024**3,
+                                           cpu_sleeps=False, memory_sleeps=False, headroom_gib=0,
                                            normal_headroom_gib=ci_priority.headroom(total) / 1024**3)),
             )
             self.reported_at = time.time()

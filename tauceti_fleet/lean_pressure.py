@@ -78,7 +78,7 @@ def pause(seconds, reason):
             _TRACE.event("prepare")
 
 
-def host_pressure(*, include_priority=False):
+def host_pressure(*, include_priority=False, include_memory_policy=False):
     """None means host measurements are unavailable, never permission to start."""
     try:
         value = json.loads(HOST_PRESSURE.read_text())
@@ -86,7 +86,7 @@ def host_pressure(*, include_priority=False):
         source_age = time.time() - value["at"]
         cpu = value.get("observed_cpu_percent", value["cpu_percent"])
         total = value["memory_total"]
-        available = value.get("observed_memory_available", value["memory_available"])
+        available = value.get("measured_memory_available", value.get("observed_memory_available", value["memory_available"]))
         if (
             value.get("version") != 1
             or not 0 <= age <= MAX_SAMPLE_AGE
@@ -98,18 +98,23 @@ def host_pressure(*, include_priority=False):
         ):
             return None
         result = (cpu, total, available)
-        return (*result, value.get("priority") == "staging") if include_priority else result
+        staging = value.get("priority") == "staging"
+        if include_memory_policy:
+            return (*result, staging, staging and value.get("memory_admission") == "unrestricted")
+        return (*result, staging) if include_priority else result
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
 
 def capacity_available():
-    """CI uses the host's pressure, retaining only an absolute guest OOM guard."""
+    """Staging skips RAM admission; other CI retains host and guest guards."""
     if HOST_REQUIRED.exists():
-        sample = host_pressure(include_priority=True)
+        sample = host_pressure(include_memory_policy=True)
         if sample is None:
             return False
-        cpu, total, available, staging = sample
+        cpu, total, available, staging, unrestricted_memory = sample
+        if unrestricted_memory:
+            return True
         # A guest's percentage usage is unrelated to spare host capacity. This
         # guard only protects a genuinely exhausted guest/cgroup, e.g. an old
         # guest during rollout, rather than imposing a second utilization cap.
