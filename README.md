@@ -589,6 +589,7 @@ tauceti-fleet status
 tauceti-fleet status server1
 tauceti-fleet status --json
 tauceti-fleet status --all-jobs
+tauceti-fleet status --workers
 tauceti-fleet status -f
 tauceti-fleet status server1 --follow
 ```
@@ -622,6 +623,23 @@ pool aggregate every 30 seconds; redraws read its prepared cache. Disconnected h
 snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
+
+`--workers` adds a table under each host's worker summary, one row per worker:
+state, stage, the PR or target it holds, agent, time in the current round and
+its last log line. The workers' latest PR events follow it: opened, pushed,
+replied, closed, and a finished round. It combines with `-f`. `status --json`
+always carries the same facts: every entry of `status.workers` has `agent`,
+`provider` (the agent of the round in progress), `pr`, `round_started_at` and
+`log_line`, and `status.worker_events` holds the last 15 events. The controller
+prepares them with each report, about every five seconds, from the worker
+status files, the last 64 KiB of each worker's console log and the last 128 KiB
+of `worker-events.jsonl`; it makes no GitHub request. A round's start is the
+time on its opening log line, read in the controller's time zone, and is
+unknown once that line lies before the part of the log that is read. Stage,
+target and round time appear while a worker reports `running`, `verifying` or
+`working`; stage and target also during the back-off after a failed round.
+GitHub writes that are neither a reply nor a closure, such as label changes,
+are left out of the events.
 
 The first lines report running jobs by runner pool,
 the queued PR-build and total workflow backlogs, and account authoring pressure

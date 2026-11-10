@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm, worker_view
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -490,7 +490,7 @@ def worker_statuses():
         if value.get("id"):
             status = {k: value.get(k) for k in (
                 "id", "state", "alive", "heartbeat_at", "phase", "target", "detail",
-                "wrapper_pid", "scope_unit", "isolation_error", "restart_count",
+                "wrapper_pid", "scope_unit", "isolation_error", "restart_count", "agent", "log_file",
             )}
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
@@ -945,7 +945,8 @@ def daemon():
                         memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,
-                        workers=worker_statuses(),
+                        workers=worker_view.rows(worker_statuses()),
+                        worker_events=worker_view.events(state_dir() / "worker-events.jsonl"),
                         worker_isolation=worker_isolation(),
                         error=None,
                         ci_vm=next((v for v in values if v.get("slot", 0) == 0), None),
