@@ -82,7 +82,7 @@ def runner_policy(config):
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
     if kinds := config.get("ci_kinds"):
-        if kinds in (["roadmap"], ["control"]):
+        if kinds in (["roadmap"], ["control"], ["queue-control"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main"}
@@ -100,14 +100,20 @@ def runner_policy(config):
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
-    expected = "TauCetiRoadmap" if kind == "roadmap" else "TauCetiControl"
+    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")
+    repository = "TauCetiProject/TauCeti" if kind == "queue-control" else "TauCetiProject/TauCetiRoadmap"
+    if kind == "queue-control":
+        allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
+                   for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
+        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != allowed:
+            raise FleetError("Queue control runners require exactly the trusted main picker, build and publisher workflows")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1
-            or [r.get("full_name") for r in repositories.get("repositories", [])] != ["TauCetiProject/TauCetiRoadmap"]):
-        raise FleetError("Protected runner groups must allow only TauCetiProject/TauCetiRoadmap")
+            or [r.get("full_name") for r in repositories.get("repositories", [])] != [repository]):
+        raise FleetError("Protected runner group must allow only " + repository)
     return config["ci_slot_runner_group_id"]
 
 

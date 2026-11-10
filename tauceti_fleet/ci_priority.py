@@ -8,7 +8,7 @@ FIELDS = ("ci_job_kind", "ci_kind_retry_at", "ci_priority_error", "cpu_weight")
 
 
 def staging(value):
-    return value.get("ci_kinds") in (["staging"], ["roadmap"], ["control"]) or value.get("ci_job_kind") == "staging"
+    return value.get("ci_kinds") in (["staging"], ["roadmap"], ["control"], ["queue-control"]) or value.get("ci_job_kind") == "staging"
 
 
 def staging_build(value):
@@ -88,7 +88,7 @@ def classify(config, value, now):
 
     if value.get("ci_kinds") == ["staging"]:
         value["ci_job_kind"] = "staging"
-    elif value.get("ci_kinds") in (["roadmap"], ["control"]):
+    elif value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"]):
         value["ci_job_kind"] = value["ci_kinds"][0]
     elif value.get("ci_kinds") == ["pr"]:
         value["ci_job_kind"] = "pr"
