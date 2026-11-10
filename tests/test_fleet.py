@@ -268,6 +268,90 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
+        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"), dict(binary=launch.call_args.args[0]))
+
+    def write_workers(self, **states):
+        for name, state in states.items():
+            row = dict(id=name, state=state, alive=state != "halted", detail="authoring", halt_reason=None)
+            if state == "halted":
+                row.update(halt_reason="account-halt", failure_reason="GitHub reports the account suspended", detail="rc=84")
+            store.atomic(store.state_dir() / "workers" / f"{name}.json", row)
+
+    def test_status_shows_a_halted_worker_with_its_reason_and_the_command_that_clears_it(self):
+        self.write_workers(w1="running")
+        unhalted = host.worker_statuses()
+        self.assertNotIn("halt_reason", unhalted[0])
+        self.write_workers(w2="halted")
+        workers = sorted(host.worker_statuses(), key=lambda w: w["id"])
+        self.assertEqual((workers[1]["halt_reason"], workers[1]["failure_reason"]),
+                         ("account-halt", "GitHub reports the account suspended"))
+        self.assertEqual(workers[0], unhalted[0])
+        entry = dict(machine_id="a", target="big")
+
+        def status(workers, *flags):
+            output = io.StringIO()
+            value = dict(machine_id="a", status=dict(workers=workers))
+            with (
+                patch.object(remote, "inventory", return_value={"big": entry}),
+                patch.object(remote, "call", return_value=value),
+                patch("sys.stdout", output),
+            ):
+                self.assertEqual(main(["status", *flags]), 0)
+            return output.getvalue()
+
+        text = status(workers)
+        self.assertIn("  w2: halted (account-halt) — GitHub reports the account suspended\n", text)
+        self.assertIn("tauceti-fleet clear-halt big [WORKER]", text)
+        self.assertNotIn("halt", status(unhalted))
+        self.assertEqual(json.loads(status(workers, "--json"))["big"]["status"]["workers"][1]["halt_reason"], "account-halt")
+
+    def test_clear_halt_clears_and_restarts_halted_workers_through_the_running_managers_runtime(self):
+        self.write_workers(w1="halted", w2="running", w3="halted")
+        store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/runtime/old/bin/tauceti"))
+        calls, active = [], 0
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            if args[0] == "systemctl":
+                return subprocess.CompletedProcess(args, active)
+            self.assertEqual(kwargs["env"]["TAUCETI_WORKERS_STATE_DIR"], str(store.state_dir() / "workers"))
+            self.assertEqual(kwargs["env"]["TAUCETI_RUNTIME_DIR"], str(store.state_dir() / "worker-runtime"))
+            return subprocess.CompletedProcess(args, 0)
+
+        def commands(*workers):
+            config = str(store.config_dir() / "workers.toml")
+            return [
+                ["/runtime/old/bin/tauceti", *tail]
+                for w in workers
+                for tail in (["work", "--worker-id", w, "--clear-halt"], ["workers", "--config", config, "restart", w])
+            ]
+
+        with patch.object(host, "run", side_effect=fake), patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"):
+            with self.assertRaisesRegex(store.FleetError, "w2 is not halted"):
+                host.rpc(dict(action="clear-halt", worker="w2"))
+            self.assertEqual(calls, [])
+            self.assertEqual(host.rpc(dict(action="clear-halt", worker="w3"))["cleared"], ["w3"])
+            self.assertEqual(calls[1:], commands("w3"))
+            del calls[:]
+            self.assertEqual(sorted(host.rpc(dict(action="clear-halt"))["cleared"]), ["w1", "w3"])
+            self.assertEqual(sorted(calls[1:]), sorted(commands("w1", "w3")))
+            del calls[:]
+            active = 3
+            with self.assertRaisesRegex(store.FleetError, "manager is not running"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual([c[0] for c in calls], ["systemctl"])
+            self.write_workers(w1="running", w3="running")
+            self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], [])
+            self.assertEqual(len(calls), 1)
+        entry = dict(machine_id="a", target="big")
+        with (
+            patch.object(remote, "inventory", return_value={"big": entry}),
+            patch.object(remote, "resolve", return_value=entry),
+            patch.object(remote, "call", return_value=dict(cleared=["w3"])) as call,
+            patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(main(["clear-halt", "big", "w3"]), 0)
+        self.assertEqual(call.call_args.args[1], dict(action="clear-halt", worker="w3"))
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")

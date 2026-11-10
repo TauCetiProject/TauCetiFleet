@@ -418,6 +418,24 @@ sessions can keep running while CI builds. CI has CPUWeight 1000 and workers 10.
 memory-bandwidth isolation are not provided. CI throughput must be measured
 under representative load; scheduling weights alone do not guarantee a runtime.
 
+A worker that TauCetiWorker stops for its GitHub identity (a login other than
+`github_account`, a rejected credential, or a suspended account) is listed by
+`status` as `halted (<reason>)` with the worker's description. `status --json`
+carries `halt_reason` and `failure_reason` on that worker's entry under
+`status.workers`. The worker manager does not start a halted worker again by
+itself. Once the account is in order:
+
+```sh
+tauceti-fleet clear-halt big-server                    # every halted worker on the host
+tauceti-fleet clear-halt big-server fleet-1a2b3c4d-2   # one worker
+```
+
+For each worker this runs `tauceti work --worker-id ID --clear-halt` and
+`tauceti workers restart ID` on the host, with the worker runtime the running
+manager was started from; it requires that manager to be running. A worker whose
+account is still wrong halts again. Worker releases without identity halts never
+report the state, and `clear-halt` then finds nothing to clear.
+
 Each worker runs in an independent systemd scope inside the same worker slice;
 memory remains pooled. A manager-service restart preserves scoped workers. Scope
 setup failures report degraded isolation and continue the same process. Whole-host
