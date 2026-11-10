@@ -2,6 +2,7 @@
 
 A source lists items and may acknowledge one. The first source is the worker's incident
 records (its docs/incidents.md): Fleet names the directory, the workers write into it.
+A worker's decide phase (its docs/decide.md) adds `ruling` records there, shown on the item they rule on.
 """
 
 import json
@@ -10,7 +11,8 @@ import re
 import sqlite3
 import time
 from calendar import timegm
-from contextlib import closing
+from contextlib import closing, suppress
+from pathlib import Path
 
 from . import activity, github
 from .store import FleetError, atomic, host_config, read, state_dir
@@ -18,6 +20,9 @@ from .store import FleetError, atomic, host_config, read, state_dir
 SCHEMA = "tauceti-incident/v1"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MAX_LOOKUPS = 100
+RULING = "ruling"
+NEEDS_PERSON = ("escalate", "roadmap")
+RECENT = 24 * 3600
 
 
 def enabled(config):
@@ -25,9 +30,14 @@ def enabled(config):
 
 
 def validate(config):
-    for name in ("incidents", "hold_declined"):
+    for name in ("incidents", "hold_declined", "decide_close"):
         if config.get(name) is not None and type(config[name]) is not bool:
             raise FleetError(f"{name} must be true or false")
+    cap = config.get("decide_max_closes_per_day")
+    if cap is not None and (type(cap) is not int or not 0 <= cap <= 100):
+        raise FleetError("decide_max_closes_per_day must be an integer from 0 to 100")
+    if not enabled(config) and (config.get("decide_close") or cap is not None):
+        raise FleetError("decide_close and decide_max_closes_per_day rule on incident records; set incidents to true")
 
 
 def incidents_dir():
@@ -40,11 +50,19 @@ def worker_env(config):
     env = {"TAUCETI_INCIDENTS_DIR": str(incidents_dir())}
     if config.get("hold_declined") is not False:
         env["TAUCETI_HOLD_DECLINED"] = "1"
+    if config.get("decide_close"):
+        env["TAUCETI_DECIDE_CLOSE"] = "1"
+    if config.get("decide_max_closes_per_day") is not None:
+        env["TAUCETI_DECIDE_MAX_CLOSES_PER_DAY"] = str(config["decide_max_closes_per_day"])
     return env
 
 
 def printable(value, limit):
     return "".join(c if c.isprintable() or c == "\n" else " " for c in str(value or "")[:limit])
+
+
+def line(value, limit):
+    return printable(value, limit).replace("\n", " ")
 
 
 def epoch(stamp):
@@ -99,6 +117,19 @@ def overtaken(record, observation):
     return None
 
 
+def load(path):
+    """A record file's value, or None when this release cannot read it. A file that has gone raises."""
+    try:
+        value = json.loads(path.read_text()) if path.stat().st_size <= 256 * 1024 else None
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError):
+        value = None
+    readable = (isinstance(value, dict) and value.get("schema") == SCHEMA
+                and all(isinstance(value.get(k), str) and value[k] for k in ("kind", "key")))
+    return value if readable else None
+
+
 def live_records():
     try:
         paths = sorted(incidents_dir().glob("*.json"))
@@ -106,16 +137,57 @@ def live_records():
         return []
     found = []
     for path in paths:
-        try:
-            value = json.loads(path.read_text()) if path.stat().st_size <= 256 * 1024 else None
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError):
-            value = None
-        readable = (isinstance(value, dict) and value.get("schema") == SCHEMA
-                    and all(isinstance(value.get(k), str) and value[k] for k in ("kind", "key")))
-        found.append((path.name, value if readable else None))
+        with suppress(FileNotFoundError):
+            found.append((path.name, load(path)))
     return found
+
+
+def is_ruling(record):
+    return (bool(record) and record["kind"] == RULING and isinstance(record.get("ruling"), str)
+            and bool(record["ruling"]) and type(record.get("pr")) is int)
+
+
+def ruling_facts(record, *, live, incident=None):
+    """What the list shows of a ruling. It stands while its record is live and, where the incident is
+    live as well, it was made on that write of the incident at that head."""
+    def listed(name, kind):
+        return [v for v in (record.get(name) if isinstance(record.get(name), list) else []) if type(v) is kind][:10]
+
+    return dict(
+        ruling=line(record["ruling"], 20),
+        stands=live and (incident is None or (record.get("head") == incident.get("head")
+                                              and record.get("incident_at") == incident.get("last_at"))),
+        at=line(record.get("last_at"), 20),
+        by=line(record.get("by"), 20),
+        note=printable(record.get("note"), 1500),
+        blocked_on=listed("blocked_on", int),
+        blocked_on_targets=[line(v, 80) for v in listed("blocked_on_targets", str)],
+        added=[line(v, 80) for v in listed("added", str)],
+        subsumed_by=listed("subsumed_by", int),
+        evidence=printable(record.get("evidence"), 1000),
+        recommend=line(record.get("recommend"), 200),
+        area=line(record.get("area"), 100),
+        drafted=bool(record.get("draft")),
+    )
+
+
+def recent_rulings():
+    """Rulings written in the last day, counted by name. Archiving renames a record, which keeps its
+    modification time, so older files are not opened."""
+    cutoff = time.time() - RECENT
+    counts = {}
+    for folder in (incidents_dir(), incidents_dir() / "acked"):
+        try:
+            paths = list(folder.glob(RULING + "-*.json"))
+        except OSError:
+            continue
+        for path in paths:
+            with suppress(OSError):
+                record = load(path) if path.stat().st_mtime >= cutoff else None
+                if is_ruling(record) and (epoch(record.get("last_at")) or 0) >= cutoff:
+                    name = line(record["ruling"], 20)
+                    counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def incident_items(config):
@@ -130,17 +202,27 @@ def incident_items(config):
         return None
 
     prepared = prepared_prs({pull_request(r) for _, r in records if r and pull_request(r)})
+    live = dict(records)
     items = []
     for name, record in records:
         if record is None:
             items.append(dict(source="incident", id=name, kind="unreadable", record=name,
                               text=f"{incidents_dir() / name} is not an incident record this release reads"))
             continue
+        ruled = is_ruling(record)
+        incident = live.get(name[len(RULING) + 1:]) if ruled else None
+        if incident and not is_ruling(incident):
+            continue
+        words = {} if ruled else record
+        if ruled:
+            # The phase archives an incident as it rules on it; the agent's message stays in that file.
+            with suppress(OSError):
+                words = load(incidents_dir() / "acked" / name[len(RULING) + 1:]) or {}
         target = pull_request(record)
         item = dict(
             source="incident",
             id=str(target[1]) if target else printable(record["key"], 100),
-            kind=printable(record["kind"], 40),
+            kind=printable(record.get("incident") or RULING if ruled else record["kind"], 40),
             record=name,
             at=printable(record.get("last_at"), 20),
             first_at=printable(record.get("first_at"), 20),
@@ -148,9 +230,21 @@ def incident_items(config):
             worker=printable(record.get("worker"), 100),
             stage=printable(record.get("stage"), 40),
             head=printable(record.get("head"), 64),
-            text=printable(record.get("summary") or record.get("detail") or record.get("reason"), 4000),
-            transcript=printable(record.get("transcript"), 1000),
+            text=printable(words.get("summary") or words.get("detail") or words.get("reason"), 4000),
+            transcript=printable(words.get("transcript"), 1000),
         )
+        if ruled:
+            item["ruling"] = ruling_facts(record, live=True)
+        elif is_ruling(live.get(f"{RULING}-{name}")):
+            item.update(ruling=ruling_facts(live[f"{RULING}-{name}"], live=True, incident=record),
+                        ruling_record=f"{RULING}-{name}")
+        else:
+            with suppress(OSError):
+                earlier = load(incidents_dir() / "acked" / f"{RULING}-{name}")
+                if is_ruling(earlier):
+                    item["ruling"] = ruling_facts(earlier, live=False)
+        if item.get("ruling", {}).get("stands"):
+            item["rank"] = 0 if item["ruling"]["ruling"] in NEEDS_PERSON else 2
         if target:
             cached = notes(name)
             written = epoch(record.get("last_at")) or float("inf")
@@ -161,7 +255,7 @@ def incident_items(config):
             item.update(repository=target[0], pr=target[1], cleared=overtaken(record, observation),
                         observed_at=observation["observed"] if observation else None, named=[])
             for relation in ("subsumed_by", "mentions"):
-                numbers = record.get(relation) if isinstance(record.get(relation), list) else []
+                numbers = words.get(relation) if isinstance(words.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
                     known = cached.get(f"{target[0]}#{number}")
                     item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
@@ -173,6 +267,24 @@ def incident_ack(config, item):
     acked = incidents_dir() / "acked"
     acked.mkdir(mode=0o700, exist_ok=True)
     os.replace(incidents_dir() / item["record"], acked / item["record"])
+    if item.get("ruling_record"):
+        with suppress(FileNotFoundError):
+            os.replace(incidents_dir() / item["ruling_record"], acked / item["ruling_record"])
+
+
+def roadmap_draft(number):
+    """The roadmap change a `roadmap` ruling drafted for a pull request, from the worker's `drafts/` folder."""
+    if type(number) is not int or not 0 < number < 10**9:
+        raise FleetError("Name the pull request whose drafted roadmap change to read")
+    path = incidents_dir() / "drafts" / f"roadmap-{number}.md"
+    try:
+        if path.stat().st_size > 256 * 1024:
+            raise FleetError(f"{path} is larger than a drafted roadmap change")
+        return dict(pr=number, path=str(path), text=path.read_text())
+    except FileNotFoundError:
+        raise FleetError(f"No roadmap change has been drafted for pull request {number} on this host") from None
+    except (OSError, ValueError) as exc:
+        raise FleetError(f"{path} could not be read: {exc}") from None
 
 
 def ask(config, repository, number, *, named):
@@ -227,7 +339,8 @@ def incident_lookup(config, items):
 
 # name -> how to list its items, and optionally how to acknowledge one and how to ask GitHub about them.
 # An item is a dict with `source`, `id` (what --ack takes), `kind` and `text`; `cleared` names what
-# overtook it. A source whose items only clear by themselves has no `ack`.
+# overtook it. A source whose items only clear by themselves has no `ack`. `rank` 0 lists an item
+# first; 2 lists it last, leaves it out of the count, and keeps `--ack all` off it.
 SOURCES = {
     "incident": dict(items=incident_items, ack=incident_ack, lookup=incident_lookup),
 }
@@ -235,7 +348,7 @@ SOURCES = {
 
 def gather(config):
     items = [item for source in SOURCES.values() for item in source["items"](config)]
-    return sorted(items, key=lambda item: item.get("at") or "")
+    return sorted(items, key=lambda item: (item.get("rank", 1), item.get("at") or ""))
 
 
 def listing(config):
@@ -245,6 +358,7 @@ def listing(config):
         hold_declined="TAUCETI_HOLD_DECLINED" in worker_env(config),
         items=[i for i in items if not i.get("cleared")],
         cleared=[{k: i.get(k) for k in ("source", "id", "kind", "record", "cleared")} for i in items if i.get("cleared")],
+        rulings=recent_rulings() if enabled(config) else {},
     )
 
 
@@ -252,7 +366,7 @@ def acknowledge(config, which):
     done = []
     for item in gather(config):
         ack = SOURCES[item["source"]].get("ack")
-        if ack and which in ("all", item["id"]):
+        if ack and (which == item["id"] or (which == "all" and (item.get("rank") != 2 or item.get("cleared")))):
             try:
                 ack(config, item)
             except FileNotFoundError:
@@ -268,8 +382,9 @@ def summary_path():
 def summarize(value):
     kinds = {}
     for item in value["items"]:
-        kinds[item["kind"]] = kinds.get(item["kind"], 0) + 1
-    return dict(at=time.time(), count=len(value["items"]), kinds=kinds)
+        if item.get("rank") != 2:
+            kinds[item["kind"]] = kinds.get(item["kind"], 0) + 1
+    return dict(at=time.time(), count=sum(kinds.values()), kinds=kinds, rulings=value["rulings"])
 
 
 def prepare(config):
@@ -293,6 +408,8 @@ def prepared():
 
 def host_action(payload):
     config = host_config()
+    if payload.get("draft") is not None:
+        return dict(draft=roadmap_draft(payload["draft"]))
     result = {}
     which = payload.get("ack")
     if which is not None:
@@ -318,14 +435,57 @@ def status_lines(name, value):
     if value.get("error"):
         return ["Needs you: unavailable; " + value["error"]]
     count = value.get("count", 0)
-    if not count:
-        return []
     kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(value.get("kinds", {}).items()))
     age = time.time() - value.get("at", 0)
-    return [
+    lines = [
         f"Needs you: {count} item{'s' if count != 1 else ''} ({kinds})" + (f", counted {age / 60:.0f}m ago" if age > 300 else ""),
         f"  tauceti-fleet attention {name}",
-    ]
+    ] if count else []
+    return lines + rulings_line(value.get("rulings"))
+
+
+def rulings_line(counts):
+    if not counts:
+        return []
+    return ["Rulings in the last 24h: " + ", ".join(f"{n} {ruling}" for ruling, n in sorted(counts.items()))]
+
+
+def ruling_lines(name, item):
+    ruling = item.get("ruling")
+    if not ruling:
+        return []
+    what = ruling["ruling"] + {
+        "wait": " on " + ", ".join(f"#{n}" for n in ruling["blocked_on"]),
+        "prerequisite": " on target " + ", ".join(ruling["blocked_on_targets"])
+        + (f" (added to the list: {', '.join(ruling['added'])})" if ruling["added"] else ""),
+        "close": " as subsumed by " + ", ".join(f"#{n}" for n in ruling["subsumed_by"]),
+        "roadmap": " change to " + ruling["area"],
+        "escalate": " to a person" + (f"; recommends {ruling['recommend']}" if ruling["recommend"] else ""),
+    }.get(ruling["ruling"], "")
+    lines = [f"   {'ruling' if ruling['stands'] else 'earlier ruling'}: {what}  ({ruling['by']}, {ruling['at']})"]
+    lines += ["      " + text for text in (ruling["note"] + "\n" + ruling["evidence"]).splitlines() if text]
+    if ruling["drafted"] and "pr" in item:
+        lines.append(f"      draft: tauceti-fleet attention {name} --show-roadmap {item['pr']}")
+    return lines
+
+
+def save_draft(number, text):
+    """Copy a draft into the current directory for the operator to file. An existing file is left alone."""
+    path = Path.cwd() / f"roadmap-{number}.md"
+    try:
+        with open(path, "x") as out:
+            out.write(text)
+    except FileExistsError:
+        raise FleetError(f"{path} already exists; move it aside to copy the draft again") from None
+    return str(path)
+
+
+def display_draft(draft):
+    if draft.get("saved"):
+        print(f"Copied {draft['path']} to {draft['saved']}")
+        print("Nothing has been opened anywhere: review the file and open the roadmap change yourself.")
+    else:
+        print(printable(draft["text"], 256 * 1024).rstrip("\n"))
 
 
 def display(name, value):
@@ -339,7 +499,11 @@ def display(name, value):
               + (f"; {looked['error']}" if looked.get("error") else ""))
     if "acknowledged" in value or looked:
         print()
-    for item in value["items"]:
+    if all(item.get("rank") == 2 for item in value["items"]):
+        print("Nothing needs you." + ("\n" if value["items"] else ""))
+    for index, item in enumerate(value["items"]):
+        if item.get("rank") == 2 and (not index or value["items"][index - 1].get("rank") != 2):
+            print("Under a ruling that waits for nobody:\n")
         facts = [item["kind"], item.get("stage"), item.get("worker"), item.get("at"),
                  f"seen {item['count']}x" if item.get("count", 1) > 1 else None]
         subject = item["id"]
@@ -359,9 +523,9 @@ def display(name, value):
                 print(f"   {label}: #{named['pr']}  {detail}")
         if item.get("transcript"):
             print("   transcript: " + item["transcript"])
-        print()
-    if not value["items"]:
-        print("Nothing needs you.")
+        print("\n".join(ruling_lines(name, item) + [""]))
+    for text in rulings_line(value.get("rulings")):
+        print(text)
     if value.get("cleared"):
         print(f"Not listed: {len(value['cleared'])} record{'s' if len(value['cleared']) != 1 else ''} "
               "whose pull request merged, closed or moved to a new head.")

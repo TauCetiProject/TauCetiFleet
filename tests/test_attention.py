@@ -4,6 +4,7 @@ import os
 import signal
 import sqlite3
 import tempfile
+import time
 import tomllib
 import unittest
 import urllib.error
@@ -326,6 +327,154 @@ class Attention(unittest.TestCase):
             status = self.controller_pass()
         self.assertEqual((status["error"], status["active_worker_limit"]), (None, 1))
         self.assertIn("unreadable", attention.prepared()["error"])
+
+    def ruling(self, incident, stage, pr, ruling, **fields):
+        path = self.record("ruling", f"{incident}-{stage}", pr, incident=incident, ruling=ruling, by="model",
+                           incident_at="2026-01-15T09:30:00Z", **fields)
+        path.write_text(json.dumps(json.loads(path.read_text()) | dict(stage=stage)))
+        return path
+
+    def test_an_item_shows_its_ruling_and_those_left_to_a_person_come_first(self):
+        config = self.on()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.record("declined", "rebase", 1, summary="unruled")
+        self.record("declined", "fix", 2, acked=True, summary="Main has all of it.", subsumed_by=[398])
+        self.ruling("declined", "fix", 2, "escalate", at="2026-01-15T10:00:00Z", recommend="close",
+                    note="Ruled `close`, not applied: #398 has not merged.\x1b[2J")
+        self.ruling("declined", "rebase", 3, "wait", at=now, blocked_on=[431, 433], note="#431 rewrites the file.")
+        self.ruling("budget-spent", "fix", 4, "roadmap", at="2026-01-15T11:00:00Z", area="Probability",
+                    draft="/elsewhere/roadmap-4.md", note="The milestone states a false lemma.")
+        self.record("declined", "fix", 5, at="2026-01-15T12:00:00Z", summary="declined again")
+        retried = self.ruling("declined", "fix", 5, "retry", at="2026-01-15T11:30:00Z", note="The build host was down.")
+        self.record("declined", "fix", 6, at="2026-01-15T13:00:00Z", head="b" * 40, summary="new head")
+        self.ruling("declined", "fix", 6, "wait", acked=True, at=now, blocked_on=[7])
+        self.ruling("declined", "rebase", 7, "close", at=now, subsumed_by=[398], evidence="every declaration is in #398")
+        self.ruling("declined", "fix-ci", 8, "prerequisite", at="2026-01-15T09:00:00Z",
+                    blocked_on_targets=["borel-cantelli"], added=["borel-cantelli"])
+        old = self.ruling("declined", "fix", 9, "wait", acked=True, at=now, blocked_on=[7])
+        os.utime(old, (0, 0))
+        value = self.listed()
+        self.assertEqual([(i["id"], i["kind"], i.get("rank"), i.get("ruling", {}).get("ruling")) for i in value["items"]], [
+            ("2", "declined", 0, "escalate"), ("4", "budget-spent", 0, "roadmap"),
+            ("1", "declined", None, None), ("5", "declined", None, "retry"), ("6", "declined", None, "wait"),
+            ("8", "declined", 2, "prerequisite"), ("3", "declined", 2, "wait"), ("7", "declined", 2, "close")])
+        self.assertEqual(value["items"][3]["ruling_record"], retried.name)
+        self.assertEqual(value["rulings"], {"wait": 2, "close": 1})
+        summary = attention.summarize(value)
+        self.assertEqual((summary["count"], summary["kinds"]), (5, {"declined": 4, "budget-spent": 1}))
+        code, text = self.cli("attention", "box")
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b", text)
+        for expected in (
+            f"   Main has all of it.\n   subsumed by: #398  https://github.com/{REPOSITORY}/pull/398  (--lookup for state and title)\n"
+            "   ruling: escalate to a person; recommends close  (model, 2026-01-15T10:00:00Z)\n"
+            "      Ruled `close`, not applied: #398 has not merged.",
+            "   ruling: roadmap change to Probability  (model, 2026-01-15T11:00:00Z)\n"
+            "      The milestone states a false lemma.\n"
+            "      draft: tauceti-fleet attention box --show-roadmap 4\n",
+            "   declined again\n   earlier ruling: retry  (model, 2026-01-15T11:30:00Z)\n      The build host was down.",
+            "   earlier ruling: wait on #7  (",
+            f"   ruling: wait on #431, #433  (model, {now})\n      #431 rewrites the file.",
+            "   ruling: prerequisite on target borel-cantelli (added to the list: borel-cantelli)  (",
+            f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
+            "      every declaration is in #398",
+            "\nRulings in the last 24h: 1 close, 2 wait\n",
+        ):
+            self.assertIn(expected, text)
+        self.assertLess(text.index("PR #1 "), text.index("Under a ruling that waits for nobody:"))
+        self.assertLess(text.index("Under a ruling that waits for nobody:"), text.index("PR #8 "))
+        self.assertNotIn("Nothing needs you.", text)
+        attention.prepare(config)
+        self.assertEqual(attention.status_lines("box", attention.prepared()), [
+            "Needs you: 5 items (1 budget-spent, 4 declined)", "  tauceti-fleet attention box",
+            "Rulings in the last 24h: 1 close, 2 wait"])
+        self.assertEqual(attention.status_lines("box", dict(count=0, kinds={}, rulings={"retry": 1})),
+                         ["Rulings in the last 24h: 1 retry"])
+
+    def test_ack_all_leaves_a_ruling_that_waits_for_nobody_and_a_number_archives_it(self):
+        self.on()
+        self.record("declined", "fix", 5, at="2026-01-15T12:00:00Z", summary="declined again")
+        self.ruling("declined", "fix", 5, "retry", at="2026-01-15T11:30:00Z")
+        waiting = self.ruling("declined", "rebase", 3, "wait", blocked_on=[431])
+        self.ruling("declined", "rebase", 4, "wait", blocked_on=[431])
+        self.ruling("declined", "fix", 2, "escalate")
+        self.observe(4, "MERGED", "a" * 40, attention.epoch("2026-01-15T09:30:00Z") + 1)
+        value = self.listed(ack="all")
+        self.assertEqual(sorted(d["record"] for d in value["acknowledged"]),
+                         ["declined-fix-5.json", "ruling-declined-fix-2.json", "ruling-declined-rebase-4.json"])
+        self.assertEqual([p.name for p in attention.incidents_dir().glob("*.json")], [waiting.name])
+        self.assertTrue((attention.incidents_dir() / "acked/ruling-declined-fix-5.json").exists())
+        code, text = self.cli("attention", "box")
+        self.assertIn("Nothing needs you.\n\nUnder a ruling that waits for nobody:\n\n== PR #3 ", text)
+        self.assertEqual(attention.prepared()["count"], 0)
+        self.assertEqual([d["record"] for d in self.listed(ack="3")["acknowledged"]], [waiting.name])
+
+    def test_a_drafted_roadmap_change_is_shown_or_copied_and_nothing_else_is_done(self):
+        self.on()
+        self.ruling("declined", "fix", 412, "roadmap", area="Probability", draft="/elsewhere/roadmap-412.md")
+        draft = attention.incidents_dir() / "drafts/roadmap-412.md"
+        draft.parent.mkdir()
+        draft.write_text("# Weaken the lemma\n\n- Roadmap: `Probability`\n\nThe statement\x1b[2J is false.\n")
+        before = sorted(p.name for p in attention.incidents_dir().iterdir())
+        code, text = self.cli("attention", "box", "--show-roadmap", "412")
+        self.assertEqual((code, text), (0, "box:\n# Weaken the lemma\n\n- Roadmap: `Probability`\n\nThe statement [2J is false.\n"))
+        here = self.root / "checkout"
+        here.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(here)
+        code, text = self.cli("attention", "box", "--file-roadmap", "412")
+        self.assertEqual(code, 0)
+        self.assertEqual((here / "roadmap-412.md").read_text(), draft.read_text())
+        self.assertIn(f"Copied {draft} to {(here / 'roadmap-412.md').resolve()}", text)
+        self.assertIn("Nothing has been opened anywhere", text)
+        code, text = self.cli("attention", "box", "--file-roadmap", "412")
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", text)
+        code, text = self.cli("attention", "box", "--show-roadmap", "413", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("No roadmap change has been drafted for pull request 413", text)
+        for argv in (("--show-roadmap", "412"), ("box", "--file-roadmap", "412", "--ack", "412"),
+                     ("box", "--show-roadmap", "412", "--lookup")):
+            code, text = self.cli("attention", *argv)
+            self.assertEqual(code, 1)
+            self.assertIn("one explicit host, without --ack or --lookup", text)
+        code, text = self.cli("attention", "box", "--show-roadmap", "412", call=lambda *_, **__: dict(items=[]))
+        self.assertEqual(code, 1)
+        self.assertIn("update it", text)
+        self.assertEqual(sorted(p.name for p in attention.incidents_dir().iterdir()), before)
+        self.assertEqual(self.github.call_count, 0)
+
+    def test_the_close_switch_and_its_cap_reach_the_workers_only_with_incidents(self):
+        with patch.object(host, "install_service"):
+            for keys in (dict(decide_close=True), dict(decide_max_closes_per_day=2),
+                         dict(incidents=False, decide_close=True)):
+                with self.assertRaisesRegex(store.FleetError, "set incidents to true"):
+                    host.configure(dict(profile="test", ci_allowed=False, **keys))
+            host.configure(dict(profile="test", ci_allowed=False, incidents=True, decide_close=True))
+            host.worker_config(store.host_config())
+            env = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]["env"]
+            self.assertEqual(env, {"TAUCETI_INCIDENTS_DIR": str(self.root / "state/incidents"),
+                                   "TAUCETI_HOLD_DECLINED": "1", "TAUCETI_DECIDE_CLOSE": "1"})
+            host.configure(dict(decide_close=False, decide_max_closes_per_day=0))
+            host.worker_config(store.host_config())
+            env = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]["env"]
+            self.assertEqual((env.get("TAUCETI_DECIDE_CLOSE"), env["TAUCETI_DECIDE_MAX_CLOSES_PER_DAY"]), (None, "0"))
+            for cap in (-1, 101, True, "3"):
+                with self.assertRaisesRegex(store.FleetError, "integer from 0 to 100"):
+                    host.configure(dict(decide_max_closes_per_day=cap))
+            with self.assertRaisesRegex(store.FleetError, "decide_close must be true or false"):
+                host.configure(dict(decide_close=1))
+            with self.assertRaisesRegex(store.FleetError, "set incidents to true"):
+                host.configure(dict(incidents=False))
+            host.configure(dict(incidents=False, decide_max_closes_per_day=None))
+            host.worker_config(store.host_config())
+            self.assertNotIn("env", (store.config_dir() / "workers.toml").read_text())
+        profiles = {"p": dict(github_account="someone", incidents=True, decide_close=True, decide_max_closes_per_day=5)}
+        store.atomic(store.config_dir() / "profiles.json", profiles)
+        with patch.object(remote, "run") as run:
+            run.return_value.returncode = 1
+            sent = remote.profile("p")
+        self.assertEqual((sent["decide_close"], sent["decide_max_closes_per_day"]), (True, 5))
 
 
 if __name__ == "__main__":

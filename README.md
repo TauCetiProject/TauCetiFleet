@@ -125,7 +125,8 @@ and effort are independent settings. Version 1 profiles use Claude API billing.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
-`incidents` and `hold_declined` are described under [Attention](#attention).
+`incidents`, `hold_declined`, `decide_close` and `decide_max_closes_per_day` are
+described under [Attention](#attention).
 
 ## Protected roadmap capacity
 
@@ -839,6 +840,78 @@ While records are on, the controller counts the listed items once a minute and
 Needs you: 3 items (1 budget-spent, 2 declined)
   tauceti-fleet attention server1
 ```
+
+### Rulings from the decide phase
+
+TauCetiWorker's decide phase (its `docs/decide.md`) rules on these records and
+writes each ruling into the same directory as a `ruling` record. Fleet does not
+start that phase: it runs on the workers whose phases name `decide`, and on a
+host with none the list is as described above. Where ruling records exist, an
+item shows the newest ruling on it under the agent's message:
+
+```text
+== PR #412  https://github.com/TauCetiProject/TauCeti/pull/412  (declined · rebase · decider · 2026-01-15T09:42:00Z)
+   Main already has every declaration of this PR ...
+   ruling: wait on #431  (model, 2026-01-15T09:42:00Z)
+      The conflict is with #431, which rewrites the same file and is green.
+```
+
+The line names what the ruling is about: the pull requests a `wait` is on, the
+target-list items a `prerequisite` waits on and added, the merged pull requests
+of a `close`, the roadmap of a `roadmap` change, and for an `escalate` the
+ruling the model recommends, with the reasoning beneath. `earlier ruling` marks
+one that no longer stands: its record is archived, or the incident was written
+again after it.
+
+Items under a standing `escalate` or `roadmap` ruling are listed first, since
+those two wait for a person. Items under a standing `retry`, `wait`,
+`prerequisite` or `close` are listed last under their own heading and are left
+out of the count in `status`. `--ack all` leaves those in place, because the
+phase looks again only at a live `wait` or `prerequisite` ruling; `--ack` with
+the pull request number archives one anyway, together with its incident record.
+
+`status` adds one line counting the ruling records written in the last 24
+hours, live or archived:
+
+```text
+Rulings in the last 24h: 1 close, 2 escalate, 3 wait
+```
+
+A `roadmap` ruling leaves a proposed roadmap change in
+`incidents/drafts/roadmap-<PR>.md` on the host. Fleet opens nothing on GitHub;
+it shows the draft, or copies it to your machine for you to file:
+
+```sh
+tauceti-fleet attention server1 --show-roadmap 412   # print the draft
+tauceti-fleet attention server1 --file-roadmap 412   # copy it to ./roadmap-412.md
+```
+
+`--file-roadmap` writes into the current directory and does not replace a file
+that is already there. Acknowledge the item once the change is filed or
+dropped.
+
+A `close` ruling closes one of the account's own pull requests when merged pull
+requests contain everything it adds. The worker offers it only behind a switch,
+which two more profile keys set:
+
+```json
+{
+  "personal": {
+    "github_account": "operator",
+    "incidents": true,
+    "decide_close": true,
+    "decide_max_closes_per_day": 3
+  }
+}
+```
+
+`decide_close` true writes `TAUCETI_DECIDE_CLOSE=1` into every worker
+definition's `env` table, and `decide_max_closes_per_day` (0 to 100) writes
+`TAUCETI_DECIDE_MAX_CLOSES_PER_DAY`; without the second key the worker's own
+limit of three closures a day applies. Both keys are refused unless `incidents`
+is true, so turning the records off takes `"decide_close": false` and
+`"decide_max_closes_per_day": null` in the same profile. They change worker
+definitions and follow the drain rule above.
 
 ## Public operations telemetry
 

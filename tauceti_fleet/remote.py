@@ -149,7 +149,7 @@ def profile(name):
     if value.get("ci_broker_url") or value.get("ci_broker_token_file"):
         raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
     allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url",
-               "incidents", "hold_declined"}
+               "incidents", "hold_declined", "decide_close", "decide_max_closes_per_day"}
     result = {k: v for k, v in value.items() if k in allowed}
     credentials = {}
     for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):

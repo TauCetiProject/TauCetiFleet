@@ -74,6 +74,9 @@ def parser():
     needs.add_argument("host", nargs="?")
     needs.add_argument("--ack", metavar="PR|all", help="archive this pull request's records, or every record; needs a host")
     needs.add_argument("--lookup", action="store_true", help="ask GitHub for the state of each listed pull request and the ones it names")
+    draft = needs.add_mutually_exclusive_group()
+    draft.add_argument("--show-roadmap", metavar="PR", type=int, help="print the roadmap change a ruling drafted for this pull request; needs a host")
+    draft.add_argument("--file-roadmap", metavar="PR", type=int, help="copy that draft to roadmap-PR.md in the current directory for you to file; needs a host")
     needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
@@ -188,6 +191,11 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.command == "attention" and args.ack and not args.host:
             raise FleetError("Acknowledging requires one explicit host; listing may cover the fleet")
+        drafted = None
+        if args.command == "attention":
+            drafted = args.show_roadmap if args.file_roadmap is None else args.file_roadmap
+        if drafted is not None and (not args.host or args.ack or args.lookup):
+            raise FleetError("A drafted roadmap change is read from one explicit host, without --ack or --lookup")
         if args.host == "local":
             local = read(config_dir() / "host.json")
             if not local or not local.get("machine_id"):
@@ -238,7 +246,7 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "attention":
-                payload.update(ack=args.ack, lookup=args.lookup)
+                payload.update(ack=args.ack, lookup=args.lookup, draft=drafted)
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
@@ -252,6 +260,10 @@ def main(argv=None, *, _status_results=None):
                     expected_machine_id=entry["machine_id"],
                 )
                 results[name] = value
+                if drafted is not None and "draft" not in value:
+                    raise FleetError("The Fleet release on this host does not read drafted roadmap changes; update it")
+                if drafted is not None and args.file_roadmap is not None:
+                    value["draft"]["saved"] = attention.save_draft(drafted, value["draft"]["text"])
                 if args.command == "status":
                     atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:
@@ -309,6 +321,8 @@ def main(argv=None, *, _status_results=None):
                     print_doctor(value)
                 elif args.command == "attention" and "items" in value:
                     attention.display(name, value)
+                elif args.command == "attention" and "draft" in value:
+                    attention.display_draft(value["draft"])
                 elif args.command == "status" and "status" in value:
                     status = value["status"]
                     if value.get("offline"):

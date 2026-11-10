@@ -103,6 +103,8 @@ def configure(payload):
         "author_effort",
         "incidents",
         "hold_declined",
+        "decide_close",
+        "decide_max_closes_per_day",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -126,7 +128,7 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
-    attention.validate(updates)
+    attention.validate(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
