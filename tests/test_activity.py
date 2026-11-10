@@ -78,9 +78,16 @@ class ActivityTests(unittest.TestCase):
                 pressure=True,
             ),
             expanded_cache=dict(workers=2, hits=1200, expanded=10, seconds=4),
-            work_recovery=dict(records=57, incomplete=5, corrupt=0, errors=0,
-                               recovery_eligible=26, recovery_resuming=17, cleanup_backlog=219,
-                               reasons=["worker/round: Provider credit balance exhausted"]),
+            work_recovery=dict(
+                records=57,
+                incomplete=5,
+                corrupt=0,
+                errors=0,
+                recovery_eligible=26,
+                recovery_resuming=17,
+                cleanup_backlog=219,
+                reasons=["worker/round: Provider credit balance exhausted"],
+            ),
         )
         value = dict(available=True, summary=summary)
         with (
@@ -276,9 +283,10 @@ class ActivityTests(unittest.TestCase):
                 windows={
                     "total": dict(
                         estimated_usd="100",
+                        loc_basis="landed_at",
                         landed_loc_added=200,
                         open_loc_added=0,
-                        landed_prs=2,
+                        landed_prs=3,
                         open_prs=1,
                         measured_pr_weight=2,
                         known_loc_prs=2,
@@ -287,9 +295,10 @@ class ActivityTests(unittest.TestCase):
                     ),
                     "7d": dict(
                         estimated_usd="30",
+                        loc_basis="landed_at",
                         landed_loc_added=0,
                         open_loc_added=0,
-                        landed_prs=0,
+                        landed_prs=1,
                         open_prs=1,
                         measured_pr_weight=0,
                         known_loc_prs=0,
@@ -312,13 +321,13 @@ class ActivityTests(unittest.TestCase):
         ):
             activity.display(activity.cached("m"))
         lines = output.getvalue().splitlines()
-        heading = next(line for line in lines if line.startswith("Costs / initiated PR output"))
-        rate = next(line for line in lines if line.startswith("Estimated $ / weighted LOC"))
+        heading = next(line for line in lines if line.startswith("Costs / landed PR output"))
+        rate = next(line for line in lines if line.startswith("Estimated $ / landed LOC"))
         expected = [heading.index(h) + len(h) for h in ("7 days", "All time")]
         self.assertEqual([m.end() for m in re.finditer(r"~\$(?:\d+\.\d+|∞)", rate)], expected)
-        self.assertIn("~$0.4000", rate)
+        self.assertIn("~$0.3333", rate)
         self.assertIn("~$∞", rate)
-        self.assertIn("~250", output.getvalue())
+        self.assertIn("~300", output.getvalue())
 
     def test_cached_snapshot_prs_keep_verified_landings_without_api(self):
         p = dict(
