@@ -591,7 +591,7 @@ def collect_ci_results(config):
                     continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            kind = "pr" if value.get("ci_kinds") in (["roadmap"], ["control"]) else "staging"
+            kind = "pr" if value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"]) else "staging"
             if "pr" in value.get("ci_kinds", ["staging"]) and value.get("host_health") != "fault":
                 run = github.ci_read(config, f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}")
                 # The immutable receipt supplies the run ID, GitHub supplies its

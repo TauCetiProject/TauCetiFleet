@@ -75,7 +75,7 @@ def idle_ready(value, own, observation):
 
 
 def remember(value):
-    if value.get("ci_kinds") in (["control"], ["roadmap"]):
+    if value.get("ci_kinds") in (["control"], ["roadmap"], ["queue-control"]):
         # Protected jobs target stable group/class labels, never an instance.
         return
     # JIT labels are read-only. Retain enough identity to recreate a guest if
@@ -112,7 +112,7 @@ def recovery_slots(config, values, inventory, observation, records):
     reserved, _ = capacity.reservation(config)
     result = {}
     for record in records:
-        if record.get("ci_kinds") in (["control"], ["roadmap"]):
+        if record.get("ci_kinds") in (["control"], ["roadmap"], ["queue-control"]):
             continue
         if len(occupied | result.keys()) >= capacity.jobs(config):
             break

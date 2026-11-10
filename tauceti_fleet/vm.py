@@ -331,6 +331,8 @@ def start_memory_ok(config=None):
     required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
     if (config or {}).get("ci_kinds") == ["control"]:
         required = 5 * 1024**3
+    if (config or {}).get("ci_kinds") == ["queue-control"]:
+        required = 9 * 1024**3
     deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
         print(
@@ -492,7 +494,7 @@ def _start(config):
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
-                "CPUWeight=" + ("10000" if config.get("ci_kinds") == ["staging"] else "100"),
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"]) else "100"),
                 "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",
