@@ -11,8 +11,10 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import activity, capabilities, host, pool_activity, remote, report, store, vm
+from tauceti_fleet import activity, capabilities, host, hostos, pool_activity, remote, report, store, vm
 from tauceti_fleet.cli import main
+
+hostos.MACOS = False
 
 
 class Isolated(unittest.TestCase):

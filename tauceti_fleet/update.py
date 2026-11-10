@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import capacity, native_runner, vm
+from . import capacity, hostos, native_runner, vm
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
@@ -68,12 +68,28 @@ def stage_worker(revision):
     return root
 
 
+@hostos.linux
 def service():
     result = run(["systemctl", "--user", "show", "tauceti-fleet.service",
                   "-p", "MainPID", "-p", "Restart"], check=False)
     if result.returncode:
         raise FleetError("Cannot inspect the Fleet controller service; run doctor")
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+@hostos.linux
+def reset_failed():
+    run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+
+
+@hostos.linux
+def signal_controller(name):
+    run(["systemctl", "--user", "kill", "--kill-whom=main", "--signal=" + name, "tauceti-fleet.service"])
+
+
+@hostos.linux
+def start_controller():
+    run(["systemctl", "--user", "start", "tauceti-fleet.service"])
 
 
 def extend_admission():
@@ -87,7 +103,7 @@ def handover(release, *, rollback=False, on_signal=None):
     previous = read(state_dir() / "status.json", {})
     before = service()
     if rollback:
-        run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+        reset_failed()
     pid = before.get("MainPID", "0")
     if pid != "0":
         modern = (not rollback and previous.get("live_update_protocol") == 1
@@ -105,12 +121,11 @@ def handover(release, *, rollback=False, on_signal=None):
                 indexes = sorted(set(range(capacity.jobs(host_config()))) | set(vm.slots_in_use()))
                 for index in indexes:
                     transactions.enter_context(locked(vm.slot_file({"ci_slot": index}, "vm.lock")))
-            run(["systemctl", "--user", "kill", "--kill-whom=main",
-                 "--signal=" + ("SIGHUP" if modern else "SIGKILL"), "tauceti-fleet.service"])
+            signal_controller("SIGHUP" if modern else "SIGKILL")
     else:
         if not rollback:
-            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
-        run(["systemctl", "--user", "start", "tauceti-fleet.service"])
+            reset_failed()
+        start_controller()
     if on_signal:
         on_signal()
     started = time.time()
@@ -126,8 +141,8 @@ def handover(release, *, rollback=False, on_signal=None):
         if running == "0":
             # HUP before Python installs its handler is a clean systemd exit;
             # a crash loop can also exhaust the service's automatic retries.
-            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
-            run(["systemctl", "--user", "start", "tauceti-fleet.service"])
+            reset_failed()
+            start_controller()
         extend_admission()
         time.sleep(1)
     raise FleetError("Controller did not publish a healthy status after live handover")

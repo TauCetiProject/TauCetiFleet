@@ -7,8 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from tauceti_fleet import hostos
 from tauceti_fleet import native_inside as inside
 from tauceti_fleet import native_runner as native
+
+hostos.MACOS = False
 
 GIB = 1024**3
 

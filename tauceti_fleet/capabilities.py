@@ -8,6 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import hostos
 from .process import executable, run
 from .store import FleetError, data_dir, host_config, read, state_dir
 
@@ -47,6 +48,7 @@ def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
     )
 
 
+@hostos.linux
 def worker_memory():
     result = run(
         [
@@ -102,6 +104,7 @@ def memory_pressure(memory, caps, *, recovering=False, reserve=None):
     return reasons
 
 
+@hostos.linux
 def resources():
     memory = {}
     try:
@@ -182,22 +185,8 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
     return values
 
 
-def doctor(config=None, *, probe=True):
-    config = config or host_config()
-    checks = []
-
-    def add(name, status, evidence, remedy="", admin="", roles=("workers", "ci")):
-        checks.append(
-            dict(
-                name=name,
-                status=status,
-                evidence=evidence,
-                remedy=remedy,
-                administrator_request=admin,
-                roles=list(roles),
-            )
-        )
-
+@hostos.linux
+def platform_check(add):
     linux = platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64")
     add(
         "platform",
@@ -205,12 +194,10 @@ def doctor(config=None, *, probe=True):
         f"{platform.system()} {platform.machine()}",
         "Version 1 requires Linux x86-64 with systemd and cgroup v2",
     )
-    add(
-        "python",
-        "ok" if sys.version_info >= (3, 11) else "blocked",
-        platform.python_version(),
-        "Install Python 3.11 or newer",
-    )
+
+
+@hostos.linux
+def service_checks(add, probe):
     try:
         result = run(["systemctl", "--user", "show", "-p", "ControlGroup", "--value"], check=False)
         if result.returncode or not result.stdout.strip():
@@ -248,6 +235,35 @@ def doctor(config=None, *, probe=True):
                 "Retry doctor in a systemd user session",
                 "Delegate cpu, memory and pids controllers to this user's systemd manager",
             )
+
+
+def doctor(config=None, *, probe=True):
+    config = config or host_config()
+    checks = []
+
+    def add(name, status, evidence, remedy="", admin="", roles=("workers", "ci")):
+        roles = [r for r in roles if r in hostos.roles()]
+        if not roles:
+            return
+        checks.append(
+            dict(
+                name=name,
+                status=status,
+                evidence=evidence,
+                remedy=remedy,
+                administrator_request=admin,
+                roles=roles,
+            )
+        )
+
+    platform_check(add)
+    add(
+        "python",
+        "ok" if sys.version_info >= (3, 11) else "blocked",
+        platform.python_version(),
+        "Install Python 3.11 or newer",
+    )
+    service_checks(add, probe)
     caps = resources()
     add(
         "capacity",
@@ -499,7 +515,7 @@ def doctor(config=None, *, probe=True):
             if any(c["status"] == "blocked" for c in relevant)
             else ("ready-with-limitations" if any(c["status"] == "warning" for c in relevant) else "ready")
         )
-    if not config["ci_allowed"]:
+    if not config["ci_allowed"] or "ci" not in hostos.roles():
         readiness["ci"] = "disabled-by-configuration"
     return dict(
         version=1,

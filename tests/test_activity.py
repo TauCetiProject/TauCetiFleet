@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import activity, host, report
+from tauceti_fleet import activity, host, hostos, report
+
+hostos.MACOS = False
 
 
 class ActivityTests(unittest.TestCase):

@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import lean_host, lean_pressure, store
+from tauceti_fleet import hostos, lean_host, lean_pressure, store
 from tauceti_fleet import lean_statistics as stats
+
+hostos.MACOS = False
 
 
 class CompilerStatistics(unittest.TestCase):

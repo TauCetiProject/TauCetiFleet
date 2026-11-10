@@ -9,7 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import capacity, host, lean_guest, lean_host, lean_pressure, lean_runtime, store, vm
+from tauceti_fleet import capacity, host, hostos, lean_guest, lean_host, lean_pressure, lean_runtime, store, vm
+
+hostos.MACOS = False
 
 GIB = 1024**3
 

@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tauceti_fleet import capacity, ci_autoscale, ci_pool, ci_priority, github, native_runner, store, vm
+from tauceti_fleet import capacity, ci_autoscale, ci_pool, ci_priority, github, hostos, native_runner, store, vm
+
+hostos.MACOS = False
 
 
 class ProtectedCI(unittest.TestCase):

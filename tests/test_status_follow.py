@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import ci_overview, cli, github, remote, status_follow as follow, store
+from tauceti_fleet import ci_overview, cli, github, hostos, remote, status_follow as follow, store
+
+hostos.MACOS = False
 
 
 class Follow(unittest.TestCase):

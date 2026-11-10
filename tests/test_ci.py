@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci, host, report, store
+from tauceti_fleet import ci, host, hostos, report, store
+
+hostos.MACOS = False
 
 
 def step(name, outcome="success", number=1, start="00:00:01", end="00:00:02"):

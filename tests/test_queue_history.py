@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tauceti_fleet import ci_overview, cli, pool_activity, queue_status, remote, store
+from tauceti_fleet import ci_overview, cli, hostos, pool_activity, queue_status, remote, store
 from tauceti_fleet import queue_history as history
+
+hostos.MACOS = False
 
 
 class History(unittest.TestCase):

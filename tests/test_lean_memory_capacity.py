@@ -3,7 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import lean_pressure
+from tauceti_fleet import hostos, lean_pressure
+
+hostos.MACOS = False
 
 GIB=1024**3
 
