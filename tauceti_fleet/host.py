@@ -2,13 +2,27 @@
 
 import json
 import os
+import re
 import signal
 import socket
 import sys
 import time
 from pathlib import Path
 
-from . import activity, attention, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import (
+    activity,
+    attention,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    claude_credentials,
+    focus,
+    github,
+    native_runner,
+    vm,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -101,6 +115,11 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
+        "env",
         "incidents",
         "hold_declined",
         "runner_group_id",
@@ -125,17 +144,27 @@ def configure(payload):
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
+    updates.update(claude_credentials.selected(dict(payload, credentials=credentials)))
     capacity.staging_slots(dict(current, **updates))
     attention.validate(updates)
+    worker_fields(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file", *claude_credentials.KINDS):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+        claude_credentials.validate(key, secret)
+    times = payload.get("credential_times")
+    # The usage login first: the stored token takes its subscription fields from it.
+    for key in reversed(claude_credentials.KINDS):
+        if key in credentials:
+            claude_credentials.install(key, credentials[key], times.get(key) if isinstance(times, dict) else None)
     for key, secret in credentials.items():
+        if key in claude_credentials.KINDS:
+            continue
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Private atomic secret installation. Never return credential values.
@@ -278,20 +307,82 @@ def write_slices(config, caps):
     return worker
 
 
-def worker_config(config):
-    # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace, env = config.get("pace"), config.get("env") or {}
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
+    valid = isinstance(env, dict) and all(
+        isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
+        and not k.startswith("TAUCETI_FLEET_") and k != "TAUCETI_WORKER_SLICE"
+        and isinstance(v, str) and v.isascii() and v.isprintable()
+        for k, v in env.items()
     )
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
+    if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
+        raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env"):
         if config.get(key):
             fields[key] = config[key]
-    env = attention.worker_env(config)
+    incident_env = attention.worker_env(config)
+    if set(incident_env) & set(env):
+        raise FleetError("env must not set " + " or ".join(sorted(incident_env)) + " beside the profile's incidents key")
+    if fleet_env := {**claude_credentials.worker_env(config), **incident_env}:
+        fields["env"] = dict(fields.get("env", {}), **fleet_env)
+    if config.get(claude_credentials.USAGE):
+        # Nothing else on the host uses the stored usage login, so the workers may renew it.
+        fields["auto_refresh"] = True
+    return fields
+
+
+def toml_value(value):
+    if isinstance(value, dict):
+        return "{" + ", ".join(k + " = " + json.dumps(v) for k, v in sorted(value.items())) + "}"
+    return "true" if value is True else json.dumps(value)
+
+
+def worker_config(config):
+    # Existing worker definitions and the operator's manager are never rewritten.
+    fields = worker_fields(config)
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -308,9 +399,7 @@ def worker_config(config):
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         for key, value in fields.items():
             if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
-        if env:
-            lines.append("env = {" + ", ".join(k + " = " + json.dumps(v) for k, v in env.items()) + "}")
+                lines.append(key + " = " + toml_value(value))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -1108,6 +1197,7 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            claude_credentials=claude_credentials.report(config),
             **({"attention": attention.prepared()} if attention.enabled(config) else {}),
         )
     raise FleetError("Unknown host operation")

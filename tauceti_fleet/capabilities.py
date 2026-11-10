@@ -8,6 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import claude_credentials
 from .process import executable, run
 from .store import FleetError, data_dir, host_config, read, state_dir
 
@@ -352,7 +353,11 @@ def doctor(config=None, *, probe=True):
         roles=("ci",),
     )
     worker = executable("tauceti")
-    for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
+    agent = config.get("agent") or "claude"
+    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agent in (name, "auto")]
+    if config.get("sandbox") == "bubble":
+        tools += ["bubble", "incus"]
+    for name in tools:
         path = executable(name)
         add(
             "worker-tool-" + name,
@@ -451,7 +456,9 @@ def doctor(config=None, *, probe=True):
                 "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    credential_names = ["github_token_file"]
+    if config.get("claude_billing") != "subscription":
+        credential_names.insert(0, "anthropic_api_key_file")
     if config.get("ci_broker_url"):
         credential_names.append("ci_broker_token_file")
     for name in credential_names:
@@ -470,6 +477,8 @@ def doctor(config=None, *, probe=True):
             "Configure the selected profile and repeat add; use chmod 600 for credential files",
             roles=roles,
         )
+    for check in claude_credentials.report(config):
+        add(check["name"], check["status"], check["evidence"], check["remedy"], roles=("workers",))
     if config.get("github_token_file"):
         try:
             from .github import request

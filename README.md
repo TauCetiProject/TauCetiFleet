@@ -59,8 +59,10 @@ does not require a workers-only host to obtain virtualization access. Missing
 lingering produces a persistence limitation and the request
 `loginctl enable-linger USER`; the installer does not attempt that privileged
 operation. Existing administrator resource allocations remain authoritative.
-Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
-in the account's PATH. Missing tools block worker activation with a remedy.
+Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and the
+profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PATH,
+plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
+tools block worker activation with a remedy.
 
 An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 --machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
@@ -121,11 +123,74 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 ```
 
 Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
-and effort are independent settings. Version 1 profiles use Claude API billing.
+and effort are independent settings.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
 `incidents` and `hold_declined` are described under [Attention](#attention).
+
+Profiles default to Claude API billing. These optional keys describe a fleet on
+Claude or Codex subscriptions; each applies to every worker slot:
+
+```json
+{
+  "subscription": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "agent": "auto",
+    "sandbox": "bubble",
+    "pace": "0:10,50:70,90:90",
+    "env": {"TAUCETI_OVERLAP_BATCH_COMMITS": "80"}
+  }
+}
+```
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
+| `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
+| `sandbox` | `host` or `bubble` | `host` |
+| `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
+
+With these keys alone a subscription profile carries no model credential. Sign
+in to `claude` or `codex` as the host account before enabling workers; each
+worker copies that login into its own home. Like a model change, changing any of
+these keys on an active host requires a drain before repeating `add`. A key
+removed from the profile returns to its default.
+
+Two more keys let a subscription profile carry the Claude sign-in, so the host
+account needs none of its own:
+
+```json
+{
+  "claude_token_file": "~/.config/tauceti-fleet/claude-setup-token",
+  "claude_usage_credentials_file": "~/.config/tauceti-fleet/claude-usage/.credentials.json"
+}
+```
+
+| Key | Holds | Lasts |
+| --- | --- | --- |
+| `claude_token_file` | The token `claude setup-token` prints. Every Claude agent on the host runs on it; it never rotates, so the workers share it | A year from when the file was saved |
+| `claude_usage_credentials_file` | The `.credentials.json` of an ordinary sign-in to the same account, made for the fleet alone: `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login`. A setup-token cannot read subscription usage, so workers read their quota windows through this login and renew it themselves (`auto_refresh`). Requires `claude_token_file` | About four weeks from the sign-in |
+
+Both files must be private and are transferred like the other credentials. On
+the host they are stored under `secrets/claude/` and `secrets/claude-usage/` in
+the shape Claude Code reads, and `workers.toml` names only those paths
+(`CLAUDE_CONFIG_DIR`, `TAUCETI_CLAUDE_USAGE_CREDENTIALS`). `doctor` and `status`
+report the days left on each. The token gets a note thirty days before it
+expires and the usage login four days before it stops renewing, each with the
+command that replaces it; a lapsed one blocks worker activation.
+
+Renewing a login replaces its refresh token, so once a worker has renewed the
+usage login the operator's copy no longer works. A repeated `add` therefore
+leaves the host's login in place unless the profile's file holds a different
+sign-in. When the login is due, either sign in again on the operator's machine
+and repeat `add`, or run the command `doctor` prints on the host; a profile may
+name a file the operator's machine does not hold when the host is signed in
+that way. Adding or removing either key takes a drained `add`; replacing a
+credential does not. A worker slot keeps the Claude credential directory it
+first ran with, so give a host these keys before its workers first start.
 
 ## Protected roadmap capacity
 
@@ -578,7 +643,8 @@ tauceti-fleet budget
 These wrap the existing local grant ledger. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
-Queries can aggregate hosts. Workers on a host share its budget. Estimated
+Queries can aggregate hosts. API-billed workers on a host share its budget;
+subscription workers do not draw on it. Estimated
 session costs reserve funds before launch; receipts settle actual costs. Credits
 accumulate while idle. Grants govern admissions, not a hard billing cap, and
 active sessions may settle into a deficit.
