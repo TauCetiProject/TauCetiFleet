@@ -711,6 +711,18 @@ rate pools spending over summed worker time; the elapsed-hour rate pools spendin
 over the longest covered wall-clock duration. These values come from the same
 prepared worker summary, with no extra collector or GitHub requests.
 
+For a profile with subscription billing or a Codex agent, `status` prints one
+usage line per provider above these tables, and `status --json` carries the
+same figures per host under `subscription_usage`:
+
+```
+Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 10m ago)
+```
+
+These are the responses the workers' pacer last cached on the host. Fleet sends
+no usage request, so a line ages while no worker is checking its quota, and a
+window that has reset since the reading shows no figure.
+
 Native host coding rounds can share immutable extracted Mathlib snapshots with
 private copy-on-write builds. The native activity collector prepares the sharing
 summary as well; Fleet only renders it. See the worker

@@ -1136,6 +1136,8 @@ def rpc(payload):
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
     if action == "status":
+        from . import subscription_usage
+
         config = host_config()
         pressure = read(state_dir() / "lean-host-pressure.json", {})
         pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
@@ -1158,5 +1160,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            **subscription_usage.status(config),
         )
     raise FleetError("Unknown host operation")
