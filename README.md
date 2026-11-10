@@ -814,6 +814,47 @@ and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
 
+## Weekly schedule
+
+Admit new worker rounds only during chosen parts of the week:
+
+```sh
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00"
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00" "Sat 09:00 -> Sun 21:00" --timezone Europe/Berlin
+tauceti-fleet schedule big-server          # show the saved slots, the current slot and the next boundary
+tauceti-fleet schedule big-server --clear  # admit at any time again
+```
+
+The host saves the slots in `host.json` as `worker_schedule`; a host without one
+behaves as before. Outside every slot the controller uses a worker ceiling of
+zero in its ordinary admission decision: admitted rounds finish, no new round
+starts, and the manager, the worker definitions, `workers --max` and CI
+admissions are untouched. Inside a slot the schedule changes nothing. A change
+applies on the controller's next pass, a few seconds later, without a restart or
+a timer unit.
+
+Slot times are wall-clock times in the host's local time zone, the zone its
+controller runs in. `--timezone` names an IANA zone to use instead and is saved
+with the slots; setting slots without it returns to host local time. Across a
+daylight-saving change a slot is an hour shorter or longer. Days are English
+names or their first three letters and times are 24-hour. A slot whose end is
+earlier in the week than its start runs past Sunday midnight, and slots that
+touch or overlap count as one. Several slots are separate arguments or one
+comma-separated argument, given before any option.
+
+`status` shows the zone, the current slot and the next boundary:
+
+```
+Starting new work: paused; outside the weekly schedule
+Weekly schedule (host local time): outside every slot; next slot starts Mon 23:00 CET (in 2d 3h)
+```
+
+JSON status has the same facts under `status.worker_schedule`, with the boundary
+as `boundary_at` in epoch seconds. A saved schedule the controller cannot read
+admits nothing and is reported there; `--clear` or a new set of slots replaces
+it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
+admission time left in the current slot.
+
 ## Public operations telemetry
 
 The existing Tau Ceti `/ci` page can display approved host observations alongside
