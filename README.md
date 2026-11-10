@@ -695,6 +695,63 @@ history in background. Fleet only collects the small prepared summaries.
 Neither status nor LOC preparation issues new GitHub API requests. The `budget`
 command remains the explicit interface for grants and replenishment changes.
 
+## Status export
+
+A host can keep a world-readable copy of its status for programs run by other
+Unix accounts on the same machine, which have neither SSH access to the fleet
+account nor a Fleet configuration of their own:
+
+```sh
+tauceti-fleet status-export big-server --dir /srv/fleet-status
+tauceti-fleet status-export big-server           # show the saved setting
+tauceti-fleet status-export big-server --clear   # stop exporting
+```
+
+The host saves this as `status_export` in `host.json`. It is unset by default and
+changes take effect without a restart or any change to admissions. While it is
+set, the controller writes `DIR/<machine_id>.json` at most once every 30 seconds:
+a finished temporary file in the same directory, mode 0644, renamed into place,
+so a reader never sees a partial file. The directory must already exist. Fleet
+never creates it or changes its permissions, so the operator decides who may
+read it; several fleet accounts can share one directory they can all write to,
+since their machine ids differ. A failed write is reported once in the
+controller's log and retried at the next interval; admissions and CI continue.
+Use local storage: the write happens inside the controller loop. `--clear` stops
+the updates and leaves the last file for the operator to remove.
+
+The file is the per-host object of `tauceti-fleet status --json` (the value under
+each host name) with one added key, `exported_at`, the Unix time of the write.
+`machine_id` identifies the host; `exported_at` dates the file and
+`status.observed_at` dates the controller report inside it. The object holds no
+credential contents. It does hold the account's spending, budget balance and PR
+counts (`activity`), its GitHub account name (`ci_overview`), and worker and
+runner identities, process ids, and paths under the fleet account's home
+directory and cgroup (`status`), so export only to a directory whose readers may
+see those.
+
+`tauceti_fleet.status_view.render(objects)` returns the text of `tauceti-fleet
+status` for a `{label: object}` dictionary of such objects:
+
+```python
+import json
+from pathlib import Path
+
+from tauceti_fleet import status_view
+
+objects = {path.stem: json.loads(path.read_text()) for path in Path("/srv/fleet-status").glob("*.json")}
+print(status_view.render(objects), end="")
+```
+
+It uses its argument alone: no Fleet configuration or cached observations, no
+SSH, no network requests and no credentials. It therefore draws every section
+whose data hosts prepare (running jobs, backlog and authoring pressure, the
+per-host report, activity, cost and budget tables, fleet totals across distinct
+machines, Bors batches and history, and host diagnostics) and omits the three
+that the operator client fetches from public sources: the CI pool activity
+table, the merge-queue table and queue history. Labels are the caller's; a
+reader that tracks freshness compares `exported_at` with its own clock. The file
+format and `render` are interfaces other tools may build on.
+
 ## Development
 
 ```sh
