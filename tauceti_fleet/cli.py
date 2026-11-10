@@ -392,6 +392,12 @@ def main(argv=None, *, _status_results=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    shared = status.get("shared_host")
+                    if shared:
+                        print(f"Shared machine: {shared['peers']} other installs with {shared['peer_workers']} workers; "
+                              f"this pool may take {shared['share']:.0%} of spare RAM"
+                              + ("; CI is building in another install" if shared["ci_busy"] else "")
+                              + ("; " + shared["error"] if shared["error"] else ""))
                     if status.get("roadmap_focus_error"):
                         print("Roadmap focus disabled: " + status["roadmap_focus_error"])
                     focus = status.get("roadmap_focus", {})

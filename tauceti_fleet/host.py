@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, shared_host, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -195,8 +195,8 @@ def worker_headroom(caps, *, ci_busy=False):
     return reserve
 
 
-def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
-    """Use presently spare RAM; retain a fixed host/swap emergency bound.
+def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False, share=1):
+    """Use this install's share of presently spare RAM; retain a fixed host/swap emergency bound.
 
     Workers and CI share the parent slice's hard ceiling, without a fixed RAM
     split. The soft bound tracks actual headroom. As CI or other host
@@ -207,17 +207,17 @@ def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
     maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
-    high = min(int(maximum * 0.95), max(pinned + GIB, pinned + caps["memory_available"] - reserve))
+    high = min(int(maximum * 0.95), max(pinned + GIB, pinned + int((caps["memory_available"] - reserve) * share)))
     return high, maximum
 
 
-def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
+def refresh_worker_memory(config, caps, memory, *, ci_busy=False, share=1):
     """Adjust the running slice without restarting work or blocking on reclaim."""
     if not caps["memory_total"]:
         memory["allocation_error"] = "Host memory measurement unavailable; retaining the last worker limit"
         return
     cg = Path(memory["cgroup"])
-    high, _ = worker_memory_limits(config, caps, memory["pinned"], ci_busy=ci_busy)
+    high, _ = worker_memory_limits(config, caps, memory["pinned"], ci_busy=ci_busy, share=share)
     maximum = memory["maximum"]
     high = min(high, int(maximum * 0.95))
     # Ignore sub-256 MiB movement. Opening nonblocking prevents synchronous
@@ -230,6 +230,17 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
         finally:
             os.close(fd)
     memory["high"] = int((cg / "memory.high").read_text())
+
+
+def host_share(config, *, ci_busy):
+    """This install's part of a machine that other accounts' installs also use; None without shared_host_dir."""
+    directory = config.get("shared_host_dir")
+    if not directory:
+        return None
+    # A paused or draining pool still holds memory, so it keeps its part while any worker lives.
+    workers = max(config["max_workers"] if config["workers_enabled"] else 0,
+                  sum(bool(w.get("alive")) for w in worker_statuses()))
+    return shared_host.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
 
 
 def write_slices(config, caps):
@@ -883,7 +894,9 @@ def daemon():
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
-                reserve = worker_headroom(caps, ci_busy=busy)
+                shared = host_share(config, ci_busy=busy)
+                host_busy = busy or bool(shared and shared["ci_busy"])
+                reserve = worker_headroom(caps, ci_busy=host_busy)
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
@@ -892,7 +905,8 @@ def daemon():
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
                     try:
-                        refresh_worker_memory(config, caps, memory, ci_busy=busy)
+                        refresh_worker_memory(config, caps, memory, ci_busy=host_busy,
+                                              share=shared["share"] if shared else 1)
                     except (OSError, ValueError) as exc:
                         # Retain the last applied limit and admissions on a transient
                         # tuning error; status keeps the operation and failure visible.
@@ -957,6 +971,7 @@ def daemon():
                         ci_staging_slots=capacity.reservation(config)[0],
                         ci_staging_reservation_error=capacity.reservation(config)[1],
                         ci_errors=slot_errors,
+                        **({"shared_host": shared} if shared else {}),
                     ),
                 )
                 error = None
