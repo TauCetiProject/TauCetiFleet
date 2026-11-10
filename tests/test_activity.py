@@ -328,6 +328,13 @@ class ActivityTests(unittest.TestCase):
         self.assertIn("~$0.3333", rate)
         self.assertIn("~$∞", rate)
         self.assertIn("~300", output.getvalue())
+        combined = activity.combine_status([dict(available=True, summary=summary), dict(available=False)])
+        total = combined["summary"]["costs"]["windows"]["total"]
+        self.assertEqual(total["loc_basis"], "landed_at")
+        self.assertEqual(total["landed_loc"], "300")
+        self.assertIsNone(total["usd_per_loc"])
+        self.assertIn("Some hosts have no prepared activity", combined["errors"])
+
 
     def test_cached_snapshot_prs_keep_verified_landings_without_api(self):
         p = dict(
