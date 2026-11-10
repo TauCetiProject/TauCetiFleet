@@ -150,8 +150,13 @@ def profile(name):
         raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
     allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
     result = {k: v for k, v in value.items() if k in allowed}
+    # Always sent, so removing one of these keys from a profile returns the host to its default.
+    for key in ("agent", "claude_billing", "sandbox", "pace", "env"):
+        result[key] = value.get(key)
     credentials = {}
     for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+        if name == "anthropic_api_key_file" and result["claude_billing"] == "subscription":
+            continue
         if value.get(name):
             path = Path(value[name]).expanduser()
             if path.exists():
