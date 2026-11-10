@@ -65,6 +65,12 @@ def configure(payload):
     elif "percent" in payload:
         value = validate(payload["percent"], policy(host_config(), [])["areas"])
     else:
-        return host_config().get("roadmap_focus", dict(percent=0, areas=[]))
+        return described(host_config().get("roadmap_focus", dict(percent=0, areas=[])))
     update_host(roadmap_focus=value)
+    return described(value)
+
+
+def described(value):
+    if isinstance(value, dict) and value.get("percent") and host_config().get("roadmap_targets"):
+        return dict(value, note="Not applied: workers under a target list take no roadmap focus; targets HOST --clear removes the list")
     return value
