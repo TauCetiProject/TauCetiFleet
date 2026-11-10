@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, targets, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -335,7 +335,7 @@ def worker_fields(config):
         github_account=config.get("github_account", "tauceti-ai-for-science"),
         anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
     )
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env", "roadmap_targets"):
         if config.get(key):
             fields[key] = config[key]
     return fields
@@ -557,6 +557,8 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("roadmap_target"):
+                status["roadmap_target"] = value["roadmap_target"]
             values.append(status)
     return values
 
@@ -894,6 +896,7 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied_targets = None
         last_results = 0
         memory_paused = False
         while not stopping:
@@ -942,8 +945,9 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    listed = config.get("roadmap_targets")
+                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
+                        ids, applied_targets = worker_config(config), listed
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -1007,6 +1011,7 @@ def daemon():
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_schedule=window,
@@ -1128,6 +1133,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_maximum(payload["maximum"])
     if action == "schedule":
