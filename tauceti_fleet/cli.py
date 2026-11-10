@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, attention, broker, host, pool_activity, remote
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -70,6 +70,11 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    needs = sub.add_parser("attention", help="list what is waiting for a person, or acknowledge it")
+    needs.add_argument("host", nargs="?")
+    needs.add_argument("--ack", metavar="PR|all", help="archive this pull request's records, or every record; needs a host")
+    needs.add_argument("--lookup", action="store_true", help="ask GitHub for the state of each listed pull request and the ones it names")
+    needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
@@ -181,6 +186,8 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
+        if args.command == "attention" and args.ack and not args.host:
+            raise FleetError("Acknowledging requires one explicit host; listing may cover the fleet")
         if args.host == "local":
             local = read(config_dir() / "host.json")
             if not local or not local.get("machine_id"):
@@ -230,6 +237,8 @@ def main(argv=None, *, _status_results=None):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "attention":
+                payload.update(ack=args.ack, lookup=args.lookup)
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
@@ -298,6 +307,8 @@ def main(argv=None, *, _status_results=None):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
+                elif args.command == "attention" and "items" in value:
+                    attention.display(name, value)
                 elif args.command == "status" and "status" in value:
                     status = value["status"]
                     if value.get("offline"):
@@ -307,6 +318,9 @@ def main(argv=None, *, _status_results=None):
                         if _status_results is not None:
                             print(value.get("error", "Live reports unavailable"))
                         print()
+                    needs = attention.status_lines(name, value.get("attention") or {})
+                    if needs:
+                        print("\n".join(needs) + "\n")
                     workers = status.get("workers")
                     if isinstance(workers, list):
                         running = sum(w.get("state") == "running" for w in workers)

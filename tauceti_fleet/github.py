@@ -32,9 +32,11 @@ def request(path, *, token_file=None, method="GET", data=None):
                 raise FleetError("GitHub response exceeds the observation limit")
             return json.loads(raw)
     except urllib.error.HTTPError as exc:
-        raise FleetError(
+        error = FleetError(
             f"GitHub {method} returned HTTP {exc.code}; check the selected account's repository/runner permissions"
-        ) from None
+        )
+        error.status = exc.code
+        raise error from None
     except (OSError, ValueError):
         raise FleetError("GitHub request unavailable; check network access and retry") from None
 

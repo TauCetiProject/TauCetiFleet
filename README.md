@@ -125,6 +125,7 @@ and effort are independent settings. Version 1 profiles use Claude API billing.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
+`incidents` and `hold_declined` are described under [Attention](#attention).
 
 ## Protected roadmap capacity
 
@@ -768,6 +769,76 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Attention
+
+`attention` lists what on a host is waiting for a person:
+
+```sh
+tauceti-fleet attention                    # every enrolled host
+tauceti-fleet attention server1
+tauceti-fleet attention server1 --lookup   # ask GitHub about the pull requests involved
+tauceti-fleet attention server1 --ack 412  # archive the records for pull request 412
+tauceti-fleet attention server1 --ack all
+tauceti-fleet attention --json
+```
+
+The list is built from sources ([`attention.py`](tauceti_fleet/attention.py)).
+The one source so far is the worker's incident records: a `rebase`, `fix` or
+`fix-ci` round that ended with nothing on GitHub (`declined`, with the agent's
+final message, the pull requests it named and the transcript path), and a stage
+that has used its attempts on a pull request head (`budget-spent`). The format
+is TauCetiWorker's `docs/incidents.md`. A worker release without incident
+records ignores the setting, and the list stays empty.
+
+Records are off until the host's profile sets `incidents`:
+
+```json
+{
+  "personal": {
+    "github_account": "operator",
+    "incidents": true,
+    "hold_declined": true
+  }
+}
+```
+
+With `incidents` true, every worker definition gets
+`TAUCETI_INCIDENTS_DIR=~/.local/state/tauceti-fleet/incidents` and
+`TAUCETI_HOLD_DECLINED=1` in its `env` table. The second variable keeps a stage
+off a pull request head that a `declined` record names, so a decline waits for a
+person and is not retried at that head; it also withholds the closure `fix`
+makes after spent attempts on that head. `hold_declined` false leaves it out:
+records are still written, and a declined head is retried until its attempts
+run out, each retry rewriting the record. Both keys change worker definitions,
+so on an active host they take the drained `add` that a model change takes. Set
+`incidents` to false to turn the records off; removing the key from the profile
+leaves the host as it was.
+
+`--ack` moves the matching live records into `incidents/acked/` and deletes
+nothing. An acknowledged `declined` record still holds its head, and an
+acknowledged `budget-spent` record is not written again for that head; delete
+the file to release either. `--ack` needs an explicit host.
+
+An item leaves the list by itself once its pull request is merged, closed or at
+a different head than the record names. The evidence is pull request state
+already on the host, read from the worker's prepared activity database, and only
+an observation newer than the record counts. That database covers pull requests
+this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
+credential: once per listed pull request, and once per pull request an item
+names until that one is known to be merged or closed, at most 100 requests a
+call. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
+worker's record files are never rewritten. Nothing else in `attention` or
+`status` contacts GitHub. `--ack all` also archives the records the list had
+already dropped.
+
+While records are on, the controller counts the listed items once a minute and
+`status` shows the count above the host's worker lines, with the command:
+
+```text
+Needs you: 3 items (1 budget-spent, 2 declined)
+  tauceti-fleet attention server1
+```
 
 ## Public operations telemetry
 
