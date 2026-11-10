@@ -62,6 +62,10 @@ def parser():
     workers.add_argument("host")
     workers.add_argument("--max", dest="maximum", type=int, required=True)
     workers.add_argument("--json", action="store_true")
+    clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
+    clear.add_argument("host")
+    clear.add_argument("worker", nargs="?", help="worker id (default: every halted worker on the host)")
+    clear.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
     focus.add_argument("--percent", type=int)
@@ -219,6 +223,8 @@ def main(argv=None, *, _status_results=None):
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "clear-halt":
+                payload.update(worker=args.worker)
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -415,14 +421,20 @@ def main(argv=None, *, _status_results=None):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
+                        detail = worker.get("detail") or ""
+                        if state == "halted":
+                            state = f"halted ({worker.get('halt_reason') or 'reason not recorded'})"
+                            detail = worker.get("failure_reason") or detail
                         error = worker.get("isolation_error")
-                        key = (state, worker.get("detail") or "", error, worker["id"] if error else None)
+                        key = (state, detail, error, worker["id"] if error else None)
                         groups.setdefault(key, []).append(worker["id"])
                     for (state, detail, error, _), workers in groups.items():
                         label = workers[0] if len(workers) == 1 else f"{len(workers)} workers"
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                    if any(w.get("state") == "halted" for w in status.get("workers", [])):
+                        print(f"  Halted workers stay stopped. Once the account is in order: tauceti-fleet clear-halt {name} [WORKER]")
                     print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)

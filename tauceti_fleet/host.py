@@ -332,6 +332,13 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
+
+
 def run_workers():
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
@@ -339,8 +346,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -364,7 +370,30 @@ def run_workers():
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def clear_halt(worker=None):
+    halted = [w["id"] for w in worker_statuses() if w.get("state") == "halted"]
+    if worker is not None and worker not in halted:
+        raise FleetError(f"Worker {worker} is not halted")
+    cleared = [worker] if worker else halted
+    if not cleared:
+        return dict(cleared=[], detail="No worker on this host is halted")
+    # A worker keeps its halt record beside the runtime it runs from, and a live update leaves the
+    # running manager on the runtime it started with, so clear with that one.
+    binary = read(state_dir() / "worker-manager.json", {}).get("binary") or executable("tauceti")
+    if not binary:
+        raise FleetError("TauCetiWorker is missing; run prepare")
+    # `workers restart` starts a manager of its own, outside the worker slice, when it finds none.
+    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False).returncode:
+        raise FleetError("The worker manager is not running; enable workers before clearing a halt")
+    env = dict(os.environ, **manager_environment())
+    for wid in cleared:
+        run([binary, "work", "--worker-id", wid, "--clear-halt"], env=env)
+        run([binary, "workers", "--config", config_dir() / "workers.toml", "restart", wid], env=env, timeout=60)
+    return dict(cleared=cleared, detail="Halt records removed and workers restarted; a worker whose account is still wrong halts again")
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -495,6 +524,8 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("state") == "halted":
+                status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"))
             values.append(status)
     return values
 
@@ -1065,6 +1096,8 @@ def rpc(payload):
         return reserve_staging(payload["maximum"])
     if action == "drain":
         return drain()
+    if action == "clear-halt":
+        return clear_halt(payload.get("worker"))
     if action == "budget":
         return budget(payload)
     if action == "snapshot":
