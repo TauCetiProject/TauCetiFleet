@@ -151,6 +151,8 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `sandbox` | `host` or `bubble` | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
 | `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `progress_repo` | The TauCetiProgress repository progress rounds run, as `OWNER/NAME`; written to each worker's `env` as `TAUCETI_PROGRESS_REPO` | the worker's pin |
+| `progress_ref` | The revision of it, as a full commit id; written as `TAUCETI_PROGRESS_REF` | the worker's pin |
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
@@ -833,6 +835,24 @@ keys of its workers' definitions and holds every group to the profile's other
 keys: API billing admits only `claude` groups, and an `auto` group excludes
 `author_model` and `author_effort`. `doctor` checks the agent CLI of every group.
 
+A group whose phases include `progress` can also carry the worker's progress
+report settings, which Fleet writes under the same names on that group's
+workers:
+
+```json
+{"count": 1, "agent": "codex", "roles": ["progress"],
+ "progress_strategy": "threshold", "progress_max_open": 3, "progress_skip": ["Sandbox"]}
+```
+
+`progress_strategy` takes `threshold`, `progress_max_open` a positive integer,
+and `progress_skip` a list of roadmap directory names; the worker's reference
+describes each. They need a TauCetiWorker release that reads these keys (an
+older one refuses the whole `workers.toml`) and, for `threshold`, a
+`progress_ref` whose `plan` has the strategy. `progress_repo` and `progress_ref`
+are profile keys and apply to every worker on the host. The longest wait
+between two `threshold` plans is the worker's `TAUCETI_PROGRESS_POLL`, set
+through `env`.
+
 The same list can be read and replaced on a running host, without a drain:
 
 ```sh
@@ -841,8 +861,11 @@ tauceti-fleet slots big-server --group 4:auto --group 4:claude:review --group 1:
 tauceti-fleet slots big-server --clear    # every slot alike again
 ```
 
-Each `--group` is `COUNT:AGENT[:ROLE,ROLE...]`; an empty agent, as in
-`2::review`, keeps the profile's. The groups given replace the saved list.
+Each `--group` is `COUNT:AGENT[:ROLE,ROLE...][:KEY=VALUE...]`; an empty agent,
+as in `2::review`, keeps the profile's. A further setting follows as
+`KEY=VALUE`, a list joined by commas:
+`1:codex:progress:progress_strategy=threshold:progress_skip=Sandbox,Drafts`.
+The groups given replace the saved list.
 Repeating `add` applies the profile's `slots` the same way when the profile has
 the key, and leaves the host's groups alone when it does not.
 
@@ -851,7 +874,8 @@ in a group that still describes it and rewrites only the definitions that
 change group: going from the profile above to the command above rewrites two of
 the nine. The worker manager holds a changed `agent` or `only` until that
 worker's round ends; this needs a TauCetiWorker release that defers those two
-edits, and an older one restarts the changed workers at once. A group that
+edits, and an older one restarts the changed workers at once. A changed
+progress setting restarts that group's workers at once under either. A group that
 shrinks gives up admissions and keeps its definitions, as lowering
 `workers --max` does, and a group that grows later takes those definitions
 before any is added.

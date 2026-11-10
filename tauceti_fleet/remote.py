@@ -151,7 +151,7 @@ def profile(name):
     allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
     result = {k: v for k, v in value.items() if k in allowed}
     # Always sent, so removing one of these keys from a profile returns the host to its default.
-    for key in ("agent", "claude_billing", "sandbox", "pace", "env"):
+    for key in ("agent", "claude_billing", "sandbox", "pace", "env", "progress_repo", "progress_ref"):
         result[key] = value.get(key)
     # Sent only when the profile names it, so groups edited on the host outlive a repeated add.
     if "slots" in value:

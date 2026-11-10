@@ -194,6 +194,67 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(numbers(policy["workers"]), [1, 2, 3])
         self.assertEqual(policy["roadmap_focus"]["workers"], policy["workers"])
 
+    def test_progress_settings_reach_only_their_group_and_the_source_reaches_every_worker(self):
+        reports = dict(count=1, agent="codex", roles=["progress"], progress_strategy="threshold",
+                       progress_max_open=3, progress_skip=["Sandbox", "Drafts", "Sandbox"])
+        source = dict(progress_repo="operator/TauCetiProgress", progress_ref="0123456789abcdef" * 2 + "01234567")
+        store.atomic(store.config_dir() / "profiles.json", {
+            "reports": dict(github_account="operator", claude_billing="subscription", env={"A": "1"},
+                            slots=[dict(count=2, agent="auto"), reports], **source),
+            "plain": dict(github_account="operator", claude_billing="subscription"),
+        })
+        with patch.object(remote, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
+            host.configure(dict(remote.profile("reports"), profile="reports", ci_allowed=False))
+            plain = remote.profile("plain")
+        _, workers = self.definitions()
+        own = {n: {k: v for k, v in w.items() if k.startswith("progress_")} for n, w in workers.items()}
+        self.assertEqual(own, {1: {}, 2: {}, 3: dict(progress_strategy="threshold", progress_max_open=3,
+                                                      progress_skip=["Drafts", "Sandbox"])})
+        for worker in workers.values():
+            self.assertEqual(worker["env"], {"A": "1", "TAUCETI_PROGRESS_REPO": source["progress_repo"],
+                                             "TAUCETI_PROGRESS_REF": source["progress_ref"]})
+        store.update_host(workers_enabled=True)
+        path = store.config_dir() / "workers.toml"
+        before = path.read_text().split("\n\n")
+        edited = "1:codex:progress:progress_strategy=threshold:progress_max_open=3:progress_skip=Drafts"
+        result = host.rpc(dict(action="slots", groups=[slot_groups.parse("2:auto"), slot_groups.parse(edited)]))
+        self.assertEqual(result["slots"][1]["progress_skip"], ["Drafts"])
+        _, workers = self.definitions()
+        after = path.read_text().split("\n\n")
+        self.assertEqual([n for n, (old, new) in enumerate(zip(before, after, strict=True)) if old != new], [3])
+        self.assertEqual(workers[3]["progress_skip"], ["Drafts"])
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(progress_ref="f" * 40))
+        store.update_host(workers_enabled=False)
+        # A profile without the two keys sends them empty, which returns the host to the worker's pin.
+        host.configure(dict(plain, slots=None))
+        _, workers = self.definitions()
+        self.assertFalse([k for w in workers.values() for k in w if k == "env" or k.startswith("progress_")])
+
+    def test_rejected_progress_settings(self):
+        def group(**settings):
+            return dict(slots=[dict(count=1, **settings)])
+
+        rejected = [
+            group(roles=["review"], progress_strategy="threshold"), group(roles=["review", "fix"], progress_skip=["PDE"]),
+            group(roles=["roadmap"], progress_max_open=1), group(progress_strategy="due"), group(progress_strategy=["threshold"]),
+            group(progress_max_open=0), group(progress_max_open=True), group(progress_max_open="3"),
+            group(progress_skip="PDE"), group(progress_skip=["a/b"]), group(progress_skip=[3]), group(progress_poll=60),
+            dict(progress_repo="TauCetiProgress"), dict(progress_repo=["a/b"]), dict(progress_ref="main"),
+            dict(progress_ref="0123abc"), dict(progress_ref="f" * 40, env={"TAUCETI_PROGRESS_REF": "e" * 40}),
+        ]
+        for shape in rejected:
+            with self.assertRaises(store.FleetError, msg=shape):
+                host.configure(shape)
+        self.assertFalse({"slots", "progress_repo", "progress_ref", "env"} & set(store.host_config()))
+        host.configure(group(progress_strategy="threshold", roles=[]))
+        self.assertEqual(store.host_config()["slots"], [dict(count=1, progress_strategy="threshold")])
+        for text in ("1:codex:progress:review", "1:codex:progress:progress_poll=60", "1:codex:progress:progress_skip=A:progress_skip=B"):
+            with self.assertRaises(store.FleetError, msg=text):
+                slot_groups.parse(text)
+        self.assertEqual(slot_groups.parse("1::progress_strategy=threshold:progress_max_open=x"),
+                         dict(count=1, progress_strategy="threshold", progress_max_open="x"))
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (

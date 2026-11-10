@@ -1,5 +1,6 @@
 """Slot groups: an agent and a set of work phases for each share of a host's worker slots."""
 
+import re
 from collections import Counter
 from fractions import Fraction
 
@@ -16,9 +17,42 @@ def roles(value):
     return [role for role in ROLES if role in value]
 
 
-# Group key -> (worker definition key, normalizer), beside `count` and `agent`.
-# A further per-group worker setting is one more entry.
-KEYS = {"roles": ("only", roles)}
+def strategy(value):
+    if value != "threshold":
+        raise FleetError("A slot group's progress_strategy must be threshold")
+    return value
+
+
+def limit(value):
+    if type(value) is not int or not 1 <= value <= 4096:
+        raise FleetError("A slot group's progress_max_open must be a positive integer at most 4096")
+    return value
+
+
+def areas(value):
+    if not isinstance(value, list) or not all(isinstance(a, str) and re.fullmatch(r"[A-Za-z0-9_-]+", a) for a in value):
+        raise FleetError("A slot group's progress_skip must be a list of roadmap directory names")
+    return sorted(set(value))
+
+
+def names(text):
+    return [name for name in text.split(",") if name]
+
+
+def number(text):
+    return int(text) if text.isascii() and text.isdigit() else text
+
+
+# Group key -> (worker definition key, normalizer, reader of its --group text,
+# the phase it configures), beside `count` and `agent`. A further per-group
+# worker setting is one more entry; `roles` stays first, since validate checks
+# each later key's phase against it.
+KEYS = {
+    "roles": ("only", roles, names, None),
+    "progress_strategy": ("progress_strategy", strategy, str, "progress"),
+    "progress_max_open": ("progress_max_open", limit, number, "progress"),
+    "progress_skip": ("progress_skip", areas, names, "progress"),
+}
 
 
 def validate(raw):
@@ -36,9 +70,11 @@ def validate(raw):
             if not isinstance(group["agent"], str):
                 raise FleetError("A slot group's agent must be claude, codex, or auto")
             value["agent"] = group["agent"]
-        for key, (_, normal) in KEYS.items():
+        for key, (_, normal, _, phase) in KEYS.items():
             if group.get(key) not in (None, []):
                 value[key] = normal(group[key])
+                if phase and phase not in value.get("roles", ROLES):
+                    raise FleetError(f"A slot group's {key} needs {phase} among its roles")
         groups.append(value)
     if sum(group["count"] for group in groups) > 4096:
         raise FleetError("slots may total at most 4096")
@@ -46,16 +82,25 @@ def validate(raw):
 
 
 def parse(text):
-    """One --group value: COUNT:AGENT[:ROLE,ROLE...]; an empty AGENT keeps the profile's."""
-    count, _, rest = text.partition(":")
-    agent, _, listed = rest.partition(":")
+    """One --group value: COUNT:AGENT[:ROLE,ROLE...][:KEY=VALUE...]; an empty AGENT keeps the profile's.
+
+    KEY is an entry of KEYS, and a list VALUE is joined by commas.
+    """
+    usage = FleetError(f"--group {text!r} must be COUNT:AGENT[:ROLE,ROLE...][:KEY=VALUE...], KEY one of: " + ", ".join(KEYS))
+    count, agent, *fields = text.split(":") + [""] * (":" not in text)
     if not (count.isascii() and count.isdigit()):
-        raise FleetError(f"--group {text!r} must be COUNT:AGENT[:ROLE,ROLE...]")
+        raise usage
     group = dict(count=int(count))
     if agent:
         group["agent"] = agent
-    if listed:
-        group["roles"] = [role for role in listed.split(",") if role]
+    for position, field in enumerate(fields):
+        key, named, value = field.partition("=")
+        if not named and position == 0:
+            key, value = "roles", field
+        if key not in KEYS or key in group:
+            raise usage
+        if value:
+            group[key] = KEYS[key][2](value)
     return group
 
 
@@ -108,7 +153,7 @@ def layout(config, old, worker_fields):
     default = config.get("agent") or "claude"
     wanted = [dict({key: group[key] for key in KEYS if key in group}, agent=group.get("agent") or default)
               for group in config["slots"]]
-    prior = [dict({key: worker[name] for key, (name, _) in KEYS.items() if worker.get(name)}, agent=worker.get("agent"))
+    prior = [dict({key: worker[name] for key, (name, *_) in KEYS.items() if worker.get(name)}, agent=worker.get("agent"))
              for worker in old]
     counts = [group["count"] for group in config["slots"]]
     result = []
@@ -116,7 +161,7 @@ def layout(config, old, worker_fields):
         own = prior[position] if group is None else wanted[group]
         try:
             fields = worker_fields(dict(config, agent=own["agent"]))
-            fields.update((name, own[key]) for key, (name, _) in KEYS.items() if key in own)
+            fields.update((name, own[key]) for key, (name, *_) in KEYS.items() if key in own)
         except FleetError:
             if group is not None:
                 raise

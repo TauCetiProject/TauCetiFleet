@@ -73,7 +73,7 @@ def parser():
     groups = sub.add_parser("slots", help="give groups of worker slots their own agent and work phases")
     groups.add_argument("host")
     change = groups.add_mutually_exclusive_group()
-    change.add_argument("--group", action="append", metavar="COUNT:AGENT[:ROLE,ROLE...]",
+    change.add_argument("--group", action="append", metavar="COUNT:AGENT[:ROLE,ROLE...][:KEY=VALUE...]",
                         help="one group; repeat for each, replacing the saved list")
     change.add_argument("--clear", action="store_true", help="return every slot to the profile's agent and the full rotation")
     groups.add_argument("--json", action="store_true")

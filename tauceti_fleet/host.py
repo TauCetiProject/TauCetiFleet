@@ -107,6 +107,8 @@ def configure(payload):
         "sandbox",
         "pace",
         "env",
+        "progress_repo",
+        "progress_ref",
         "slots",
         "runner_group_id",
         "github_state_url",
@@ -289,6 +291,11 @@ def write_slices(config, caps):
 
 
 WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# Profile key -> (the variable the worker reads it from, accepted form, its description).
+PROGRESS_SOURCE = {
+    "progress_repo": ("TAUCETI_PROGRESS_REPO", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "OWNER/NAME"),
+    "progress_ref": ("TAUCETI_PROGRESS_REF", r"[0-9a-f]{40}", "a full commit id"),
+}
 
 
 def pace_curve(spec):
@@ -330,6 +337,13 @@ def worker_fields(config):
         and isinstance(v, str) and v.isascii() and v.isprintable()
         for k, v in env.items()
     )
+    for key, (name, form, description) in PROGRESS_SOURCE.items():
+        if valid and config.get(key) is not None:
+            if not (isinstance(config[key], str) and re.fullmatch(form, config[key])):
+                raise FleetError(f"{key} must be {description}")
+            if name in env:
+                raise FleetError(f"{key} sets {name}; leave it out of env")
+            env = {**env, name: config[key]}
     if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
         raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
     fields = dict(
@@ -341,9 +355,11 @@ def worker_fields(config):
         github_account=config.get("github_account", "tauceti-ai-for-science"),
         anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
     )
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
         if config.get(key):
             fields[key] = config[key]
+    if env:
+        fields["env"] = env
     return fields
 
 
