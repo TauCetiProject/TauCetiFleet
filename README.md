@@ -867,13 +867,22 @@ tauceti-fleet attention server1 --ack all
 tauceti-fleet attention --json
 ```
 
-The list is built from sources ([`attention.py`](tauceti_fleet/attention.py)).
-The one source so far is the worker's incident records: a `rebase`, `fix` or
-`fix-ci` round that ended with nothing on GitHub (`declined`, with the agent's
-final message, the pull requests it named and the transcript path), and a stage
-that has used its attempts on a pull request head (`budget-spent`). The format
-is TauCetiWorker's `docs/incidents.md`. A worker release without incident
-records ignores the setting, and the list stays empty.
+The list is built from three sources
+([`attention.py`](tauceti_fleet/attention.py)):
+
+- Halted workers: each worker reporting `halted`, with its reason and the
+  `clear-halt` command for it.
+- Claude credentials: a profile's setup-token or usage login inside its notice
+  period, lapsed or missing, with the sign-in that replaces it.
+- The worker's incident records: a `rebase`, `fix` or `fix-ci` round that ended
+  with nothing on GitHub (`declined`, with the agent's final message, the pull
+  requests it named and the transcript path), and a stage that has used its
+  attempts on a pull request head (`budget-spent`). The format is
+  TauCetiWorker's `docs/incidents.md`. A worker release without incident
+  records ignores the setting, and this source stays empty.
+
+The first two need no setting and leave the list by themselves, once the halt
+is cleared or the credential replaced; `--ack` applies to incident records only.
 
 Records are off until the host's profile sets `incidents`:
 
@@ -912,17 +921,26 @@ this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
 credential: once per listed pull request, and once per pull request an item
 names until that one is known to be merged or closed, at most 100 requests a
 call. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
-worker's record files are never rewritten. Nothing else in `attention` or
-`status` contacts GitHub. `--ack all` also archives the records the list had
-already dropped.
+worker's live record files are never rewritten. Nothing else in `attention` or
+`status` contacts GitHub.
 
-While records are on, the controller counts the listed items once a minute and
-`status` shows the count above the host's worker lines, with the command:
+Once a minute the host controller moves the records the list has dropped into
+`incidents/acked/`, each with an `overtaken` field giving the time and `merged`,
+`closed` or `new head`; a record a person acknowledged has no such field. The
+live folder therefore holds only what still waits. The controller makes no
+GitHub request for this: a record judged from a `--lookup` answer is moved on
+the next pass.
+
+In the same pass the controller counts the listed items, and `status` shows the
+count above the host's worker lines, with the command:
 
 ```text
-Needs you: 3 items (1 budget-spent, 2 declined)
+Needs you: 4 items (1 budget-spent, 2 declined, 1 halted)
   tauceti-fleet attention server1
 ```
+
+A host with `incidents` unset shows the block only while a worker is halted or
+a credential is due.
 
 ## Public operations telemetry
 

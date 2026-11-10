@@ -1,7 +1,9 @@
 """What on a host is waiting for a person, gathered from a small set of sources.
 
-A source lists items and may acknowledge one. The first source is the worker's incident
-records (its docs/incidents.md): Fleet names the directory, the workers write into it.
+A source lists items and may acknowledge one. The incident source reads the worker's incident
+records (its docs/incidents.md): Fleet names the directory, the workers write into it. The other
+two read what the host already reports: workers stopped by an identity halt, and Claude
+credentials that are due or have lapsed.
 """
 
 import json
@@ -12,7 +14,7 @@ import time
 from calendar import timegm
 from contextlib import closing
 
-from . import activity, github
+from . import activity, claude_credentials, github
 from .store import FleetError, atomic, host_config, read, state_dir
 
 SCHEMA = "tauceti-incident/v1"
@@ -175,6 +177,48 @@ def incident_ack(config, item):
     os.replace(incidents_dir() / item["record"], acked / item["record"])
 
 
+def incident_sweep(config, items):
+    """Archive the records events have overtaken, marked as such, so the live folder holds what still waits."""
+    for item in items:
+        path = incidents_dir() / item["record"]
+        try:
+            record = json.loads(path.read_text())
+            # A worker may have rewritten the record for a later round since it was judged.
+            if (printable(record.get("last_at"), 20), printable(record.get("head"), 64)) != (item["at"], item["head"]):
+                continue
+            record["overtaken"] = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), by=item["cleared"])
+            atomic(incidents_dir() / "acked" / item["record"], record)
+            path.unlink()
+            notes_path(item["record"]).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
+
+
+def halt_items(config):
+    from . import host  # host imports this module
+
+    items = []
+    for worker in host.worker_statuses():
+        if worker.get("state") == "halted":
+            wid = printable(worker["id"], 100)
+            reason = ": ".join(str(v) for v in (worker.get("halt_reason"), worker.get("failure_reason")) if v)
+            items.append(dict(
+                source="halt", id=wid, kind="halted", command=["clear-halt", wid],
+                text=printable(reason or "reason not recorded", 1000)
+                + "\nThe worker stays stopped; clear the halt once the account is in order.",
+            ))
+    return items
+
+
+def credential_items(config):
+    # A token without a usage login is a standing doctor note about the profile, never something due.
+    return [
+        dict(source="credential", id=entry["name"], kind="credential", text=entry["evidence"], next=entry["remedy"])
+        for entry in claude_credentials.report(config)
+        if entry["status"] != "ok" and (entry["name"] != "claude-usage-login" or config.get(claude_credentials.USAGE))
+    ]
+
+
 def ask(config, repository, number, *, named):
     """One GitHub read. The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
     try:
@@ -225,11 +269,15 @@ def incident_lookup(config, items):
     return dict(asked=asked, error=error)
 
 
-# name -> how to list its items, and optionally how to acknowledge one and how to ask GitHub about them.
+# name -> how to list its items, and optionally how to acknowledge one, how to ask GitHub about them,
+# and how the controller puts away the ones that have cleared.
 # An item is a dict with `source`, `id` (what --ack takes), `kind` and `text`; `cleared` names what
-# overtook it. A source whose items only clear by themselves has no `ack`.
+# overtook it. `next` is the step that settles it, or `command` the tauceti-fleet subcommand and the
+# arguments that follow the host. A source whose items only clear by themselves has no `ack`.
 SOURCES = {
-    "incident": dict(items=incident_items, ack=incident_ack, lookup=incident_lookup),
+    "halt": dict(items=halt_items),
+    "credential": dict(items=credential_items),
+    "incident": dict(items=incident_items, ack=incident_ack, lookup=incident_lookup, sweep=incident_sweep),
 }
 
 
@@ -272,16 +320,30 @@ def summarize(value):
     return dict(at=time.time(), count=len(value["items"]), kinds=kinds)
 
 
-def prepare(config):
-    """Write the count `status` shows. A failure is reported there and never reaches the controller."""
+def publish(config, value):
+    """Keep the summary only where there is something to show, so `status` on other hosts is unchanged."""
     try:
+        if enabled(config) or value.get("count") or "error" in value:
+            atomic(summary_path(), value)
+        else:
+            summary_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def prepare(config):
+    """The controller's minute: put away what has cleared, then write the count `status` shows.
+
+    Makes no GitHub request. A failure is reported in `status` and never reaches the controller.
+    """
+    try:
+        for source in SOURCES.values():
+            if source.get("sweep"):
+                source["sweep"](config, [i for i in source["items"](config) if i.get("cleared")])
         value = summarize(listing(config))
     except Exception as exc:
         value = dict(at=time.time(), error=f"{type(exc).__name__}: {exc}"[:200])
-    try:
-        atomic(summary_path(), value)
-    except OSError:
-        pass
+    publish(config, value)
 
 
 def prepared():
@@ -307,10 +369,7 @@ def host_action(payload):
                 looked = dict(asked=looked["asked"] + answer["asked"], error=looked["error"] or answer["error"])
         result["lookup"] = looked
     value = listing(config)
-    try:
-        atomic(summary_path(), summarize(value))
-    except OSError:
-        pass
+    publish(config, summarize(value))
     return dict(value, **result)
 
 
@@ -359,6 +418,10 @@ def display(name, value):
                 print(f"   {label}: #{named['pr']}  {detail}")
         if item.get("transcript"):
             print("   transcript: " + item["transcript"])
+        command = item.get("command")
+        step = item.get("next") or (command and " ".join(["tauceti-fleet", command[0], name, *command[1:]]))
+        if step:
+            print("   Next step: " + step)
         print()
     if not value["items"]:
         print("Nothing needs you.")
@@ -368,7 +431,7 @@ def display(name, value):
     unseen = sum("pr" in item and item.get("observed_at") is None for item in value["items"])
     if unseen and not looked:
         print(f"This host has no pull request state newer than the record for {unseen} of these; --lookup asks GitHub.")
-    if value["items"]:
+    if any(SOURCES.get(item["source"], {}).get("ack") for item in value["items"]):
         print(f"Acknowledge with: tauceti-fleet attention {name} --ack <PR number> | all")
     if not value.get("incidents"):
         print('Incident records are off for this host; the profile key "incidents" turns them on.')

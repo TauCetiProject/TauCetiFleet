@@ -4,6 +4,7 @@ import os
 import signal
 import sqlite3
 import tempfile
+import time
 import tomllib
 import unittest
 import urllib.error
@@ -11,11 +12,12 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
-from tauceti_fleet import attention, github, host, remote, store
+from tauceti_fleet import attention, claude_credentials, github, host, remote, store
 from tauceti_fleet.cli import main
 
 REPOSITORY = "TauCetiProject/TauCeti"
 REQUEST = github.request
+DAY = 86400
 
 
 class Attention(unittest.TestCase):
@@ -284,7 +286,7 @@ class Attention(unittest.TestCase):
             attention.prepare(config)
         self.assertEqual(attention.prepared()["error"], "OSError: unreadable")
 
-    def controller_pass(self):
+    def controller_pass(self, workers=()):
         published, handlers = {}, {}
 
         def publish(path, value):
@@ -302,7 +304,7 @@ class Attention(unittest.TestCase):
                 collect_ci_results=Mock(),
                 worker_config=Mock(return_value=["w1"]),
                 start_workers=Mock(),
-                worker_statuses=Mock(return_value=[]),
+                worker_statuses=Mock(return_value=list(workers)),
                 worker_memory=Mock(return_value=None),
                 atomic=publish,
             ),
@@ -326,6 +328,103 @@ class Attention(unittest.TestCase):
             status = self.controller_pass()
         self.assertEqual((status["error"], status["active_worker_limit"]), (None, 1))
         self.assertIn("unreadable", attention.prepared()["error"])
+
+    def test_a_halted_worker_is_listed_with_its_reason_and_command_on_a_host_with_nothing_set(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        halted = dict(id="w2", state="halted", alive=False, detail="rc=84", halt_reason="account-halt",
+                      failure_reason="GitHub reports the account suspended\x1b[2J")
+        for row in (dict(id="w1", state="running", alive=True), halted):
+            store.atomic(store.state_dir() / "workers" / f"{row['id']}.json", row)
+        self.record("declined", "fix", 7, at="2026-01-15T09:30:00Z", summary="no")
+        value = self.listed()
+        self.assertEqual([(i["source"], i["id"], i["kind"], i["command"]) for i in value["items"]],
+                         [("halt", "w2", "halted", ["clear-halt", "w2"])])
+        code, text = self.cli("attention", "box")
+        self.assertIn("== w2  (halted)\n   account-halt: GitHub reports the account suspended [2J\n", text)
+        self.assertIn("   Next step: tauceti-fleet clear-halt box w2\n", text)
+        self.assertNotIn("Acknowledge with", text)
+        self.assertEqual(self.listed(ack="all")["acknowledged"], [])
+        self.on()
+        self.assertEqual([i["id"] for i in self.listed()["items"]], ["w2", "7"])
+        self.assertIn("Acknowledge with", self.cli("attention", "box")[1])
+        store.update_host(incidents=None)
+
+        self.controller_pass(host.worker_statuses())
+        with patch.object(host.ci_overview, "cached", return_value={}):
+            self.assertEqual(host.rpc(dict(action="status"))["attention"], dict(at=ANY, count=1, kinds={"halted": 1}))
+            self.controller_pass()
+            self.assertNotIn("attention", host.rpc(dict(action="status")))
+        self.assertFalse(attention.summary_path().exists())
+
+    def test_claude_credentials_are_listed_when_due_or_lapsed_with_the_sign_in(self):
+        def login(refresh):
+            return json.dumps({"claudeAiOauth": dict(accessToken="access", refreshToken=refresh)})
+
+        now = time.time()
+        for kind in claude_credentials.KINDS:
+            store.update_host(claude_billing="subscription", **{kind: str(claude_credentials.path(kind))})
+        claude_credentials.install(claude_credentials.USAGE, login("one"), now - 10 * DAY)
+        claude_credentials.install(claude_credentials.TOKEN, "sk-ant-oat01-token", now - 100 * DAY)
+        self.assertEqual(self.listed()["items"], [])
+        claude_credentials.install(claude_credentials.USAGE, login("two"), now - 26 * DAY)
+        claude_credentials.install(claude_credentials.TOKEN, "sk-ant-oat01-token", now - 366 * DAY)
+        items = self.listed()["items"]
+        self.assertEqual([(i["source"], i["id"], i["kind"], i["text"]) for i in items], [
+            ("credential", "claude-setup-token", "credential", "setup-token expired 1 days ago"),
+            ("credential", "claude-usage-login", "credential", "usage login renews for another 2 days")])
+        code, text = self.cli("attention", "box")
+        self.assertIn("== claude-setup-token  (credential)\n   setup-token expired 1 days ago\n   Next step: Run claude setup-token", text)
+        self.assertIn(f"   Next step: Sign in on this host: CLAUDE_CONFIG_DIR={claude_credentials.path(claude_credentials.USAGE).parent} "
+                      "claude auth login", text)
+        attention.prepare(store.host_config())
+        self.assertEqual(attention.prepared()["kinds"], {"credential": 2})
+        claude_credentials.install(claude_credentials.TOKEN, "sk-ant-oat01-token", now)
+        store.update_host(claude_usage_credentials_file=None)
+        self.assertEqual([e["status"] for e in claude_credentials.report(store.host_config())], ["ok", "warning"])
+        self.assertEqual(self.listed()["items"], [])
+
+    def test_controller_archives_overtaken_records_as_overtaken_without_asking_github(self):
+        config = self.on(workers_enabled=True, max_workers=1)
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        for pr in (1, 2, 3, 4, 5):
+            self.record("declined", "fix", pr, summary="no")
+        text = (attention.incidents_dir() / "declined-fix-1.json").read_text()
+        self.observe(1, "MERGED", "a" * 40, at + 60)
+        self.observe(2, "CLOSED", "a" * 40, at + 60)
+        self.observe(3, "OPEN", "b" * 40, at + 60)
+        self.observe(4, "OPEN", "a" * 40, at + 60)
+        store.atomic(attention.notes_path("declined-fix-1.json"), dict(version=1, prs={}))
+        self.listed(ack="5")
+        self.controller_pass()
+        acked = attention.incidents_dir() / "acked"
+        self.assertEqual([p.name for p in attention.incidents_dir().glob("*.json")], ["declined-fix-4.json"])
+        self.assertEqual({p.name: json.loads(p.read_text()).get("overtaken", {}).get("by") for p in acked.iterdir()},
+                         {"declined-fix-1.json": "merged", "declined-fix-2.json": "closed", "declined-fix-3.json": "new head",
+                          "declined-fix-5.json": None})
+        swept = json.loads((acked / "declined-fix-1.json").read_text())
+        self.assertEqual(dict(swept, overtaken=None), dict(json.loads(text), overtaken=None))
+        self.assertIsNotNone(attention.epoch(swept["overtaken"]["at"]))
+        self.assertFalse(attention.notes_path("declined-fix-1.json").exists())
+        self.assertEqual((attention.prepared().get("error"), attention.prepared()["count"]), (None, 1))
+        self.assertEqual(self.listed()["cleared"], [])
+
+        self.observe(4, "MERGED", "a" * 40, at + 120)
+        judged = [i for i in attention.incident_items(config) if i.get("cleared")]
+        later = self.record("declined", "fix", 4, at="2026-01-15T12:00:00Z", summary="again")
+        attention.incident_sweep(config, judged)
+        self.assertTrue(later.exists())
+        self.assertEqual(self.github.call_count, 0)
+
+    def test_incident_and_credential_variables_share_one_env_table(self):
+        with patch.object(host, "install_service"):
+            host.configure(dict(profile="test", ci_allowed=False, incidents=True, claude_billing="subscription",
+                                env={"A": "1"}, credentials=dict(claude_token_file="sk-ant-oat01-token")))
+            host.worker_config(store.host_config())
+            worker = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]
+            self.assertEqual(sorted(worker["env"]), ["A", "CLAUDE_CONFIG_DIR", "TAUCETI_HOLD_DECLINED", "TAUCETI_INCIDENTS_DIR"])
+            with self.assertRaisesRegex(store.FleetError, "env must not set TAUCETI_HOLD_DECLINED or TAUCETI_INCIDENTS_DIR"):
+                host.configure(dict(env={"TAUCETI_INCIDENTS_DIR": "/elsewhere"}))
+            host.configure(dict(incidents=False, env={"TAUCETI_INCIDENTS_DIR": "/elsewhere"}))
 
 
 if __name__ == "__main__":

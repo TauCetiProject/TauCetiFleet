@@ -968,7 +968,7 @@ def daemon():
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
                     last_results = time.time()
-                if attention.enabled(config) and time.time() - last_attention >= 60:
+                if time.time() - last_attention >= 60:
                     attention.prepare(config)
                     last_attention = time.time()
                 current = cpu_sample()
@@ -1231,6 +1231,6 @@ def rpc(payload):
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
             claude_credentials=claude_credentials.report(config),
-            **({"attention": attention.prepared()} if attention.enabled(config) else {}),
+            **({"attention": needs} if (needs := attention.prepared()) or attention.enabled(config) else {}),
         )
     raise FleetError("Unknown host operation")
