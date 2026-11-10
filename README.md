@@ -152,11 +152,44 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
 | `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
 
-A subscription profile carries no model credential. Sign in to `claude` or
-`codex` as the host account before enabling workers; each worker copies that
-login into its own home. Like a model change, changing any of these keys on an
-active host requires a drain before repeating `add`. A key removed from the
-profile returns to its default.
+With these keys alone a subscription profile carries no model credential. Sign
+in to `claude` or `codex` as the host account before enabling workers; each
+worker copies that login into its own home. Like a model change, changing any of
+these keys on an active host requires a drain before repeating `add`. A key
+removed from the profile returns to its default.
+
+Two more keys let a subscription profile carry the Claude sign-in, so the host
+account needs none of its own:
+
+```json
+{
+  "claude_token_file": "~/.config/tauceti-fleet/claude-setup-token",
+  "claude_usage_credentials_file": "~/.config/tauceti-fleet/claude-usage/.credentials.json"
+}
+```
+
+| Key | Holds | Lasts |
+| --- | --- | --- |
+| `claude_token_file` | The token `claude setup-token` prints. Every Claude agent on the host runs on it; it never rotates, so the workers share it | A year from when the file was saved |
+| `claude_usage_credentials_file` | The `.credentials.json` of an ordinary sign-in to the same account, made for the fleet alone: `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login`. A setup-token cannot read subscription usage, so workers read their quota windows through this login and renew it themselves (`auto_refresh`). Requires `claude_token_file` | About four weeks from the sign-in |
+
+Both files must be private and are transferred like the other credentials. On
+the host they are stored under `secrets/claude/` and `secrets/claude-usage/` in
+the shape Claude Code reads, and `workers.toml` names only those paths
+(`CLAUDE_CONFIG_DIR`, `TAUCETI_CLAUDE_USAGE_CREDENTIALS`). `doctor` and `status`
+report the days left on each. The token gets a note thirty days before it
+expires and the usage login four days before it stops renewing, each with the
+command that replaces it; a lapsed one blocks worker activation.
+
+Renewing a login replaces its refresh token, so once a worker has renewed the
+usage login the operator's copy no longer works. A repeated `add` therefore
+leaves the host's login in place unless the profile's file holds a different
+sign-in. When the login is due, either sign in again on the operator's machine
+and repeat `add`, or run the command `doctor` prints on the host; a profile may
+name a file the operator's machine does not hold when the host is signed in
+that way. Adding or removing either key takes a drained `add`; replacing a
+credential does not. A worker slot keeps the Claude credential directory it
+first ran with, so give a host these keys before its workers first start.
 
 ## Protected roadmap capacity
 

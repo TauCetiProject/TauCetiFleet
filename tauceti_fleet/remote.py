@@ -7,6 +7,7 @@ import shlex
 import zipfile
 from pathlib import Path
 
+from . import claude_credentials
 from .process import run
 from .store import FleetError, atomic, config_dir, locked, read
 
@@ -153,8 +154,11 @@ def profile(name):
     # Always sent, so removing one of these keys from a profile returns the host to its default.
     for key in ("agent", "claude_billing", "sandbox", "pace", "env"):
         result[key] = value.get(key)
+    for key in claude_credentials.KINDS:
+        result[key] = bool(value.get(key)) or None
     credentials = {}
-    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+    times = result["credential_times"] = {}
+    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", *claude_credentials.KINDS):
         if name == "anthropic_api_key_file" and result["claude_billing"] == "subscription":
             continue
         if value.get(name):
@@ -163,6 +167,8 @@ def profile(name):
                 if path.stat().st_mode & 0o077:
                     raise FleetError(f"Credential file {path} is not private; use chmod 600")
                 credentials[name] = path.read_text().strip()
+                if name in claude_credentials.KINDS:
+                    times[name] = path.stat().st_mtime
     if "github_token_file" not in credentials and result.get("github_account"):
         token = run(["gh", "auth", "token", "--user", result["github_account"]], check=False)
         if token.returncode == 0:

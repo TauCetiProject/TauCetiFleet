@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, broker, claude_credentials, host, pool_activity, remote
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -317,6 +317,7 @@ def main(argv=None, *, _status_results=None):
                     else:
                         print("Worker rounds: unknown")
                     print(f"New-round admission limit: {status.get('active_worker_limit', 0)} / {value.get('max_workers', 0)}")
+                    claude_credentials.display(value.get("claude_credentials", []))
                     pressure = value.get("lean_host_pressure")
                     if pressure is not None:
                         health = "healthy" if pressure.get("healthy") else "STALE or unavailable; new CI compilers wait"

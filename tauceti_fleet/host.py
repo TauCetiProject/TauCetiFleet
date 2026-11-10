@@ -9,7 +9,19 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import (
+    activity,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    claude_credentials,
+    focus,
+    github,
+    native_runner,
+    vm,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -129,17 +141,26 @@ def configure(payload):
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
+    updates.update(claude_credentials.selected(dict(payload, credentials=credentials)))
     capacity.staging_slots(dict(current, **updates))
     worker_fields(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file", *claude_credentials.KINDS):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+        claude_credentials.validate(key, secret)
+    times = payload.get("credential_times")
+    # The usage login first: the stored token takes its subscription fields from it.
+    for key in reversed(claude_credentials.KINDS):
+        if key in credentials:
+            claude_credentials.install(key, credentials[key], times.get(key) if isinstance(times, dict) else None)
     for key, secret in credentials.items():
+        if key in claude_credentials.KINDS:
+            continue
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Private atomic secret installation. Never return credential values.
@@ -338,6 +359,11 @@ def worker_fields(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env"):
         if config.get(key):
             fields[key] = config[key]
+    if claude_env := claude_credentials.worker_env(config):
+        fields["env"] = dict(fields.get("env", {}), **claude_env)
+    if config.get(claude_credentials.USAGE):
+        # Nothing else on the host uses the stored usage login, so the workers may renew it.
+        fields["auto_refresh"] = True
     return fields
 
 
@@ -1158,5 +1184,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            claude_credentials=claude_credentials.report(config),
         )
     raise FleetError("Unknown host operation")

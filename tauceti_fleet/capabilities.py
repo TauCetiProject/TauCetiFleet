@@ -8,6 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import claude_credentials
 from .process import executable, run
 from .store import FleetError, data_dir, host_config, read, state_dir
 
@@ -476,6 +477,8 @@ def doctor(config=None, *, probe=True):
             "Configure the selected profile and repeat add; use chmod 600 for credential files",
             roles=roles,
         )
+    for check in claude_credentials.report(config):
+        add(check["name"], check["status"], check["evidence"], check["remedy"], roles=("workers",))
     if config.get("github_token_file"):
         try:
             from .github import request
