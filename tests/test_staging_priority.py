@@ -22,12 +22,12 @@ class StagingPriority(unittest.TestCase):
         self.observation=dict(version=1,at=100,cpu_percent=100,memory_total=112*GIB,memory_available=12*GIB)
 
     def capacity(self, *, staging, available=12, guest_available=30):
-        value=ci_priority.frame(dict(self.observation,memory_available=available*GIB),staging=staging)
+        value=ci_priority.frame(dict(self.observation,memory_available=available*GIB),staging=staging,unrestricted_memory=staging)
         self.target.write_text(json.dumps(dict(value,received_monotonic=100)))
         with patch.object(lean_pressure.time,'time',return_value=100), patch.object(lean_pressure.time,'monotonic',return_value=100), patch.object(lean_pressure,'memory',return_value=(112*GIB,guest_available*GIB)):
             return lean_pressure.capacity_available(),lean_pressure.host_pressure()
 
-    def test_staging_ignores_cpu_pressure_and_uses_less_host_ram_headroom(self):
+    def test_staging_ignores_cpu_and_memory_pressure(self):
         allowed,measured=self.capacity(staging=True)
         self.assertTrue(allowed)
         self.assertEqual(measured,(100,112*GIB,12*GIB))
@@ -35,18 +35,35 @@ class StagingPriority(unittest.TestCase):
         self.assertLess(ci_priority.headroom(112*GIB,staging=True),12*GIB)
         self.assertGreater(ci_priority.headroom(112*GIB),12*GIB)
 
-    def test_staging_still_rejects_actual_host_or_guest_exhaustion(self):
-        self.assertFalse(self.capacity(staging=True,available=5)[0])
-        self.assertFalse(self.capacity(staging=True,guest_available=2)[0])
+    def test_staging_bypasses_host_and_guest_memory_admission(self):
+        self.assertTrue(self.capacity(staging=True,available=0)[0])
+        self.assertTrue(self.capacity(staging=True,guest_available=0)[0])
+
+    def test_unrestricted_staging_still_requires_fresh_valid_host_policy(self):
+        self.capacity(staging=True,available=0,guest_available=0)
+        value=json.loads(self.target.read_text())
+        value['at']=0
+        self.target.write_text(json.dumps(value))
+        with patch.object(lean_pressure.time,'time',return_value=100),patch.object(lean_pressure.time,'monotonic',return_value=100):
+            self.assertFalse(lean_pressure.capacity_available())
+
+    def test_normal_priority_cannot_bypass_memory_guard_with_an_unrestricted_flag(self):
+        value=ci_priority.frame(dict(self.observation,memory_available=0),staging=False)
+        value.update(memory_admission='unrestricted',received_monotonic=100)
+        self.target.write_text(json.dumps(value))
+        with patch.object(lean_pressure.time,'time',return_value=100),patch.object(lean_pressure.time,'monotonic',return_value=100),patch.object(lean_pressure,'memory',return_value=(112*GIB,0)):
+            self.assertFalse(lean_pressure.capacity_available())
 
     def test_live_legacy_wrappers_receive_equivalent_admission_policy(self):
-        frame=ci_priority.frame(self.observation,staging=True)
+        frame=ci_priority.frame(self.observation,staging=True,unrestricted_memory=True)
         limit=lean_pressure.memory_limit(frame['memory_total'])
         self.assertEqual(frame['cpu_percent'],0)
         self.assertLessEqual(100*(1-frame['memory_available']/frame['memory_total']),limit)
         self.assertEqual(frame['observed_cpu_percent'],100)
-        self.assertEqual(frame['observed_memory_available'],12*GIB)
-        self.assertFalse(self.capacity(staging=True,available=5)[0])
+        self.assertEqual(frame['observed_memory_available'],112*GIB)
+        self.assertEqual(frame['measured_memory_available'],12*GIB)
+        self.assertEqual(frame['memory_admission'],'unrestricted')
+        self.assertTrue(self.capacity(staging=True,available=0)[0])
 
     def publisher_frames(self, *, available, busy_cpu, stage_waiters=8):
         peers=[];receipts=[]
@@ -68,7 +85,7 @@ class StagingPriority(unittest.TestCase):
         pr,stage=self.publisher_frames(available=12,busy_cpu=True)
         self.assertEqual(pr['permit'],0)
         self.assertEqual(stage['permit'],1)
-        self.assertEqual(stage['starts'],1)
+        self.assertEqual(stage['starts'],8)
         self.assertEqual(stage['priority'],'staging')
         # Cached status retains measured pressure, not legacy admission fields.
         cached=store.read(self.root/'lean-host-pressure.json')
@@ -76,13 +93,30 @@ class StagingPriority(unittest.TestCase):
         self.assertGreater(cached['cpu_percent'],90)
         self.assertFalse(cached['staging_priority']['cpu_sleeps'])
 
-    def test_staging_takes_first_permits_without_double_spending_ram_budget(self):
+    def test_live_guest_receives_permits_at_zero_host_memory(self):
+        pr,stage=self.publisher_frames(available=0,busy_cpu=True,stage_waiters=96)
+        self.assertEqual(pr['permit'],0)
+        self.assertEqual(stage['permit'],1)
+        self.assertEqual(stage['starts'],96)
+        self.assertEqual(stage['observed_memory_available'],112*GIB)
+        self.assertEqual(stage['measured_memory_available'],0)
+        cached=store.read(self.root/'lean-host-pressure.json')
+        self.assertEqual(cached['memory_available'],0)
+        self.assertFalse(cached['staging_priority']['memory_sleeps'])
+
+    def test_control_priority_keeps_memory_admission_limits(self):
+        self.assertTrue(ci_priority.staging(dict(ci_kinds=['control'])))
+        self.assertFalse(ci_priority.staging_build(dict(ci_kinds=['control'])))
+        frame=ci_priority.frame(self.observation,staging=True)
+        self.assertEqual(frame['memory_admission'],'pressure')
+        self.assertEqual(frame['observed_memory_available'],12*GIB)
+
+    def test_staging_admits_all_waiters_without_using_the_normal_ram_budget(self):
         pr,stage=self.publisher_frames(available=50,busy_cpu=False)
         self.assertGreater(stage['starts'],0)
         self.assertEqual(stage['permit'],1)
         self.assertEqual(pr['permit'],0)
-        budget=__import__('math').ceil((50*GIB-ci_priority.headroom(112*GIB,staging=True))/lean_pressure.WORST_FILE_RSS_BYTES)
-        self.assertEqual(stage['starts'],budget)
+        self.assertEqual(stage['starts'],8)
 
     def test_reserved_staging_can_boot_with_less_headroom_and_keeps_boot_margin(self):
         with patch.object(vm,'start_memory_available',return_value=15*GIB):
@@ -149,7 +183,7 @@ class StagingPriority(unittest.TestCase):
         self.assertEqual(updated['cpu_weight'],10000)
 
     def test_staging_cache_reclaim_uses_measured_ram_even_with_legacy_admission_capacity(self):
-        frame=ci_priority.frame(dict(self.observation,memory_available=17*GIB),staging=True)
+        frame=ci_priority.frame(dict(self.observation,memory_available=17*GIB),staging=True,unrestricted_memory=True)
         with patch.object(lean_guest.time,'monotonic',return_value=100),patch.object(Path,'write_text') as write:
             self.assertEqual(lean_guest.reclaim(frame,0),100)
             write.assert_called_once_with('1\n')

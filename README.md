@@ -384,7 +384,8 @@ percentages. A separate user service samples the host ten times per second, insi
 the same ancestor memory limits as CI, and broadcasts a small JSON frame over
 dedicated virtio serial ports. Guests send only a bounded numeric request ID for
 the next compiler start. The host grants starts fairly across waiting guests,
-limiting bursts using current free RAM and a quarter-second startup allowance.
+limiting ordinary CI bursts using current free RAM and a quarter-second startup allowance.
+Staging requests receive all their pending permits without that memory budget.
 This is transient admission accounting, not a physical resource reservation.
 It accepts no guest commands and makes no network or GitHub API requests.
 A root guest service caches the frame under `/usr/local`,
@@ -392,13 +393,12 @@ readable through the existing offline sandbox's read-only `/usr` mount. Missing,
 invalid, or ten-second-old observations make new compilers wait; existing
 compilers continue. Guest file caches are released at most once per 30 seconds
 when the host needs RAM, allowing free-page reporting to return it to the host.
-The only guest-local admission check is enough absolute RAM for one measured
+Ordinary CI also requires enough guest-local absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
 
-Staging compiler starts bypass CPU-utilization sleeps and require one measured
-worst-file RAM margin before starting instead of two for ordinary CI. On a
-112 GiB shared budget this allows roughly 91% use (about 10 GiB free before admission),
-compared with 83% (about 19 GiB) for ordinary CI. Guest exhaustion checks and
+Staging compiler starts bypass CPU-utilization sleeps and all memory admission
+checks, both host pressure and the guest-local worst-file margin. Ordinary CI
+retains its existing CPU, host RAM and guest RAM checks. Physical VM memory and
 hard cgroup RAM caps still apply. The reserved staging guest can boot with
 14 GiB of free RAM instead of 20 GiB, retaining room for guest preparation.
 Staging guests receive CPUWeight=10000 versus
@@ -410,10 +410,13 @@ shared guests are classified once per job from trusted GitHub event/title data
 and a matching active runner assignment,
 with a two-minute retry backoff on read failures. Guest notices cannot assert
 staging priority. The active CPU/RAM policy is included in prepared status data.
-Existing guests receive compatible admission fields over the serial link, with
-actual CPU and RAM measurements preserved explicitly as `observed_*` fields.
-New wrappers use those measured fields and the explicit policy. Host reports
-always show the measured values. Live priority updates preserve running guests.
+Existing guests receive unrestricted host-memory admission capacity over the
+serial link without restarting the guest or build. Actual RAM is retained in
+`measured_memory_available`; historical gates use the compatibility fields.
+An existing guest retains its installed absolute guest-local exhaustion check
+until it finishes. New staging wrappers also bypass that local check. Protected
+control/roadmap jobs retain their memory admission policy. Host reports always
+show actual measurements. Live priority updates preserve running guests.
 
 `status` also shows compiler throttling statistics in Workers/CI columns: observed
 invocations, current waiters and executing compilers, the fraction that waited,

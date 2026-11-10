@@ -31,7 +31,7 @@ HEADROOM = 2 * 9_431_461_888
 def reclaim(value, last_reclaim):
     now = time.monotonic()
     limit = max(60, math.floor(100 - 100 * HEADROOM / value["memory_total"]) - 1)
-    used = 100 * (1 - value.get("observed_memory_available", value["memory_available"]) / value["memory_total"])
+    used = 100 * (1 - value.get("measured_memory_available", value.get("observed_memory_available", value["memory_available"])) / value["memory_total"])
     if used > limit - 3 and now - last_reclaim >= 30:
         try:
             # Host QEMU RSS includes the guest's file cache. Without reclaim,

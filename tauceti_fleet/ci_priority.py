@@ -1,4 +1,4 @@
-"""Staging gets CPU precedence and a smaller compiler admission RAM margin."""
+"""Staging gets CPU precedence and unrestricted compiler memory admission."""
 
 from . import lean_pressure
 from .process import run
@@ -11,24 +11,32 @@ def staging(value):
     return value.get("ci_kinds") in (["staging"], ["roadmap"], ["control"]) or value.get("ci_job_kind") == "staging"
 
 
+def staging_build(value):
+    return value.get("ci_kinds") == ["staging"] or value.get("ci_job_kind") == "staging"
+
+
 def headroom(total, *, staging=False):
     return total * (1 - lean_pressure.memory_limit(total, staging=staging) / 100)
 
 
-def frame(observation, *, staging=False):
-    """Keep live older guests compatible, with measured values explicit.
+def frame(observation, *, staging=False, unrestricted_memory=False):
+    """Express admission policy to both current and already-running guest gates.
 
-    Old wrappers only know the two-file CPU/RAM gate. For them the legacy
-    fields express admission capacity. New wrappers use the measured fields and
-    explicit priority. Host status always reports the original measurements.
+    Historical gates inspect observed_memory_available even for staging. Give
+    those gates unrestricted host admission capacity, while retaining the real
+    observation separately. New gates also bypass their guest-local RAM guard.
+    The host's prepared pressure report always retains actual measurements.
     """
     total = observation["memory_total"]
     delta = headroom(total) - headroom(total, staging=True) if staging else 0
+    unrestricted_memory = staging and unrestricted_memory
     return dict(observation, priority="staging" if staging else "normal",
+                memory_admission="unrestricted" if unrestricted_memory else "pressure",
+                measured_memory_available=observation["memory_available"],
                 observed_cpu_percent=observation["cpu_percent"],
-                observed_memory_available=observation["memory_available"],
+                observed_memory_available=total if unrestricted_memory else observation["memory_available"],
                 cpu_percent=0 if staging else observation["cpu_percent"],
-                memory_available=min(total, observation["memory_available"] + delta))
+                memory_available=total if unrestricted_memory else min(total, observation["memory_available"] + delta))
 
 
 def apply(value):
