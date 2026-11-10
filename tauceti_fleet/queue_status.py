@@ -1,6 +1,8 @@
 """Merge-queue activity from the prepared public snapshot; no GitHub or worker calls."""
 
+import hashlib
 import re
+import socket
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -240,9 +242,11 @@ def activity(batch, claims, names, now, timezone):
             if build.get("last_progress_at"):
                 label += "; advanced " + clock(build["last_progress_at"], timezone)
         elif progress.get("state"):
-            label += "; " + progress["state"].replace("_", " ")
+            phase = progress["state"]
+            label += "; " + {"freezing_cache_outputs":"freezing cache outputs", "audit_import":"import audit", "audit_duplicates":"duplicate audit", "audit_axioms":"axiom audit", "environment_lint":"environment lint"}.get(phase,phase.replace("_"," "))
             if progress.get("observed_at"):
-                label += " since " + clock(progress["observed_at"], timezone)
+                checkpoint = phase in ("artifacts_ready","sources_ready","agent_running","verifying")
+                label += ("; checkpoint " if checkpoint else " since ") + clock(progress["observed_at"], timezone)
         return label
     attempt = batch.get("latest_attempt")
     if batch["state"] == "head":
@@ -282,6 +286,27 @@ def activity(batch, claims, names, now, timezone):
     return label
 
 
+def worker_names(workers, inventory=None):
+    """Resolve public fingerprints using this operator's existing host inventory."""
+    from . import remote
+
+    inventory = remote.inventory() if inventory is None else inventory
+    names = {w["id"]: f"worker {i + 1}" for i, w in enumerate(workers)}
+    for name, entry in inventory.items():
+        hosts = {name, *entry.get("aliases", [])}
+        target = entry.get("target", "")
+        hosts.add(socket.gethostname().split(".")[0] if target == "local" else target.rsplit("@",1)[-1].split(".")[0])
+        for host in hosts:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", host):
+                continue
+            for number in range(1,33):
+                identity = "repair" if number == 1 else f"repair-{number}"
+                alias = "queue-worker-" + hashlib.sha256(f"{identity}@{host}".encode()).hexdigest()[:12]
+                if alias in names:
+                    names[alias] = f"{identity}@{host}"
+    return names
+
+
 def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
     now = time.time() if now is None else now
     value = report.get("value") if isinstance(report, dict) else None
@@ -299,7 +324,7 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
             notes.extend(("cached", report["error"]))
         print("Merge queue (" + "; ".join(notes) + "):")
         workers = value.get("workers") or []
-        names = {w["id"]: f"worker {i + 1}" for i, w in enumerate(workers)}
+        names = worker_names(workers)
         rows = []
         sealed_waiting = sorted((b for b in value["batches"] if b["state"] != "head" and b.get("sealed")),
                                 key=lambda b: int(b["id"]))
@@ -320,8 +345,9 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
             if successor and successor["active_tasks"]:
                 print("  Next head: batch " + successor["id"] + " after its active preparation releases.")
         print(f"  Waiting for placement: {value['waiting']} PRs.")
-        if workers:
-            print("  Workers: " + "; ".join(f"worker {i + 1} {w['state']}" for i, w in enumerate(workers)))
+        visible = [w for w in workers if w.get("state") not in ("stopped","unknown") and w.get("coverage") != "unavailable"]
+        if visible:
+            print("  Workers: " + "; ".join(f"{names[w['id']]} {w['state']}" for w in visible))
         last = value.get("last_landing")
         if last:
             print(f"  Last landing: batch {last['id']}, {last['size']} PRs at " + clock(last["landed_at"], timezone) + ".")

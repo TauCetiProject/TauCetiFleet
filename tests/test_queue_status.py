@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import io
+import hashlib
 import json
 import os
 import tempfile
@@ -66,6 +67,20 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("Waiting for placement: 7 PRs", output)
         self.assertIn("worker 1 alive / idle", output)
         self.assertNotIn("96%", output, "discovered build totals may grow")
+
+    def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
+        identity = "repair-3@chungus2"
+        alias = "queue-worker-" + hashlib.sha256(identity.encode()).hexdigest()[:12]
+        workers = [{"id":"worker-1"},{"id":alias}]
+        names = queue.worker_names(workers,{"chungus2":{"target":"kim@chungus2.example.org"}})
+        self.assertEqual(names[alias],identity)
+
+    def test_live_phase_has_its_own_start_time_instead_of_old_checkpoint(self):
+        self.task["progress"] = dict(coverage="observed",state="audit_axioms",observed_at="2026-11-08T23:35:00Z")
+        output = self.render()
+        self.assertIn("axiom audit since 09 Nov 10:35 AEDT",output)
+        self.task["progress"]["state"]="artifacts_ready"
+        self.assertIn("artifacts ready; checkpoint",self.render())
 
     def test_queued_task_without_a_live_claim_is_not_shown_as_building(self):
         self.document["claims"][0]["expires_at"] = "2026-11-08T23:30:00Z"
