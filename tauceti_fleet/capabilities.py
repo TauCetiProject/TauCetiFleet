@@ -417,6 +417,13 @@ def doctor(config=None, *, probe=True):
             "Install a Worker release with roadmap_targets protocol support, or replace the list with targets HOST --file or remove it with targets HOST --clear",
             roles=("workers",),
         )
+    if config.get("outside_list_cap") and config.get("roadmap_targets"):
+        supported = protocol.get("targets_fallback") == 1
+        add(
+            "outside-list-cap", "ok" if supported else "warning",
+            "Worker reads the paced outside-list cap" if supported else "Installed worker cannot author outside a target list; the cap is not paced",
+            "Install a Worker release with targets_fallback protocol support using a live update", roles=("workers",),
+        )
     image = data_dir() / "images/prepared.json"
     add(
         "ci-image",

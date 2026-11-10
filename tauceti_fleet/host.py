@@ -9,7 +9,20 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, targets, vm
+from . import (
+    activity,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    focus,
+    github,
+    native_runner,
+    outside_list,
+    targets,
+    vm,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -107,6 +120,7 @@ def configure(payload):
         "sandbox",
         "pace",
         "env",
+        "outside_list_cap",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -131,6 +145,7 @@ def configure(payload):
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
     worker_fields(dict(current, **updates))
+    outside_list.settings(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -349,7 +364,7 @@ def toml_value(value):
 
 def worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
-    fields = worker_fields(config)
+    fields = dict(worker_fields(config), **outside_list.worker_keys(config))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -557,8 +572,9 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
-            if value.get("roadmap_target"):
-                status["roadmap_target"] = value["roadmap_target"]
+            for key in ("roadmap_target", "roadmap_work"):
+                if value.get(key):
+                    status[key] = value[key]
             values.append(status)
     return values
 
@@ -896,7 +912,8 @@ def daemon():
         pool_error = None
         error = None
         ids = []
-        applied_targets = None
+        applied = None
+        pacer = outside_list.Pacer()
         last_results = 0
         memory_paused = False
         while not stopping:
@@ -944,10 +961,11 @@ def daemon():
                         if value.get("ci_priority_error"):
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
+                pacing = pacer.tick(config, worker_statuses)
                 if config["workers_enabled"]:
-                    listed = config.get("roadmap_targets")
-                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
-                        ids, applied_targets = worker_config(config), listed
+                    wanted = (config.get("roadmap_targets"), pacer.keys)
+                    if not ids or len(ids) < config["max_workers"] or wanted != applied:
+                        ids, applied = worker_config(config), wanted
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -1012,6 +1030,7 @@ def daemon():
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
                         roadmap_targets=targets.status(config, worker_statuses()),
+                        outside_list_cap=pacing,
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_schedule=window,

@@ -448,6 +448,10 @@ def main(argv=None, *, _status_results=None):
                         if focus.get("percent"):
                             print("  Not applied: workers under a target list take no roadmap focus")
                         print("\n".join(targets.summary_lines(listed)))
+                    if status.get("outside_list_cap"):
+                        from . import outside_list
+
+                        print(outside_list.describe(status["outside_list_cap"]))
                     if status.get("workers"):
                         print()
                     groups = {}

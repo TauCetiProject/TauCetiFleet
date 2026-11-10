@@ -151,6 +151,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `sandbox` | `host` or `bubble` | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
 | `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `outside_list_cap` | `{"ceiling": N}`, optionally with `floor` and `start`: pace [authoring outside a target list](#authoring-outside-the-list) by the subscription's weekly window | off |
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
@@ -928,6 +929,71 @@ the host's copy, so make the same edits in your own file.
 A worker under a target list takes no roadmap focus. With both set, `focus`,
 `targets` and `status` say that the focus share is not applied; it applies again
 after `targets HOST --clear`.
+
+### Authoring outside the list
+
+A worker whose list offers it nothing ends its round, unless the worker is given
+a cutoff: it then authors outside the list while the account has fewer open pull
+requests outside the list than the cutoff (TauCetiWorker's
+`docs/target-lists.md`, "Authoring outside the list"). A subscription profile
+can have the controller move that cutoff so that the weekly usage window is
+spent when it ends, with list work served first:
+
+```json
+{"outside_list_cap": {"floor": 0, "ceiling": 40, "start": 8}}
+```
+
+`ceiling` is required; `floor` defaults to 0 and `start`, the cap before the
+first step, to the floor. Without the key nothing below happens. With it, and
+with a target list set, every worker definition gains
+`targets_fallback_cap_file`, a file in the controller's state directory holding
+the current cap, and `targets_fallback_max_open`, which applies only if that
+file cannot be read. The installed TauCetiWorker must report `targets_fallback`
+in its Fleet protocol; otherwise the definitions stay as they are and `status`
+and `doctor` say the cap is not paced.
+
+Every 15 minutes the controller takes one step:
+
+1. The spending rate is the change in the weekly usage figure over the last six
+   hours of readings, in percent of the window per hour. The readings are the
+   ones [`status` shows](#status-and-cost-estimates); a profile with both
+   providers is paced by its Claude window.
+2. The horizon is the end of the weekly window, or of the current
+   [schedule](#weekly-schedule) slot when that comes first. The rate times the
+   hours left is the projected spend at the end.
+3. The rate is divided between list work and outside-list work in the proportion
+   of running rounds that reported `roadmap_work` `list` and `outside-list` over
+   the same six hours. Rounds that report neither, such as reviews and repairs,
+   are divided in that proportion too; while no authoring round of either kind
+   has run, nothing counts as list work.
+4. List work's part of the rate, continued to the horizon and raised by a
+   quarter, is reserved. What is left after the reserve, divided by the hours
+   left, is the rate planned for outside-list work.
+5. The cap rises by a tenth (at least 1) when outside-list work spends less than
+   80% of that plan, falls by a tenth when it spends more than 120%, and falls
+   whenever the reserve alone exceeds what is left. It stays between `floor`
+   and `ceiling`.
+
+The cap holds when there is no reading, when the reading is over 30 minutes old
+or gives no weekly figure, for the first two hours of readings after the window
+resets or the measurement restarts, outside every schedule slot, and while
+workers are not enabled. It is not raised while less than 10% of the session
+window is left, and it is not lowered for spending over plan while no
+outside-list round is running, because a cap already below the open pull
+requests admits nothing and would only take longer to return.
+
+```text
+Outside-list cap: 14 (bounds 0-40); 91% of the weekly window projected spent when the slot ends in 14h00m; last step 12m ago: 13 -> 14, spending under plan
+```
+
+`status --json` has the step under `status.outside_list_cap`. The split is an
+estimate from round counts: Fleet has no per-round cost, so a review is priced
+like an authoring round, and anything else drawing on the same subscription is
+divided in the same proportion. Fleet also cannot count the open pull requests
+outside the list, so a cap below that count changes nothing until it has
+stepped past it; set `start` near the number already open. The key changes like
+the other profile keys, with a drain before repeating `add`, and turning it on
+changes every worker definition once.
 
 ## Public operations telemetry
 
