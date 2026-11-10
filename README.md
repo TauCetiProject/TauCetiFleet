@@ -325,7 +325,7 @@ The worker manager maintains the cache in background. `tauceti activity
 install-timer` is optional for installations without a running manager. Shared
 server reporting reads stored facts only; missing/stale data never triggers
 GitHub fallback or reconciliation. `status` includes cached cost estimates,
-weighted authored LOC, review/assist counts, budget balances and local CI history.
+landed authored LOC, review/assist counts, budget balances and local CI history.
 It never scans ledgers, opens reporting databases or invokes the budget command.
 The shared presentation/aggregation module is vendored from the pinned worker.
 Missing finish records show counts by round start time over 1h and 24h, the
@@ -653,15 +653,16 @@ installs the observation timer; for a live code update, install/start only that
 timer while leaving the controller, workers, and CI guests running. JSON status
 includes the combined observations under `_ci` and each host's `ci_overview`.
 
-Costs have 7 days and All time columns. All conversation costs, including reviews
-and fixes for others, are amortized over initiated PR output: landed Lean lines
-added plus half of currently open Lean lines added. The seven-day output cohort
-contains only PRs initiated in that window. Completed costs and recorded running usage
-are shown separately, and ratios pool cost/output before division.
-Missing LOC is estimated from measured PRs in that window, preserving half credit
-for open PRs. Such estimates show `~` and measurement coverage. Unknown PR states
-and LOC with no measured sample contribute zero; positive spending over zero LOC
-shows `$∞`, so missing PR data never hides the rate.
+Costs have 24h, 7 days and All time columns. All conversation costs, including reviews
+and fixes for others, are amortized over landed PR output. Each window includes
+every fleet-created PR that landed during that window, regardless of when it was
+opened. Open PRs receive no LOC credit. Older retained creation receipts remain
+eligible. Fleet totals pool costs and landed LOC before computing the ratio.
+Completed costs and recorded running usage are shown separately.
+Missing LOC is estimated from measured landed PRs in that window. Such estimates
+show `~` and measurement coverage. With no measured sample, output contributes
+zero; positive spending over zero LOC shows `$∞`. Older creation-cohort summaries
+show unavailable landed output until their collectors are refreshed.
 
 Spending has 3h, 24h, 7d and All time columns: worker-hours recorded, API dollars
 per worker-hour and API dollars per elapsed hour, using accrued usage from running, completed and interrupted conversations.
