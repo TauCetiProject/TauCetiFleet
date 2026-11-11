@@ -372,9 +372,24 @@ def worker_plan(config):
     return [(wid, *entry) for wid, entry in zip(ids, plan, strict=True)], [ids[n] for n in admission]
 
 
+def written_roles():
+    """(agent, phases) of each worker definition the manager reads now."""
+    import tomllib
+
+    path = config_dir() / "workers.toml"
+    workers = tomllib.loads(path.read_text()).get("workers", []) if path.exists() else []
+    return {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
+
+
 def worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     definitions, ids = worker_plan(config)
+    before = written_roles()
+    changed = {wid for wid, fields, _ in definitions
+               if wid in before and before[wid] != (fields["agent"], fields.get("only", []))}
+    if changed:
+        pending = set(read(state_dir() / "unapplied-workers.json", {}).get("workers", []))
+        atomic(state_dir() / "unapplied-workers.json", dict(workers=sorted(pending | changed)))
     lines = ["version = 1"]
     for wid, fields, _ in definitions:
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
@@ -396,22 +411,29 @@ def maintenance_workers(config):
     return {wid for wid, fields, _ in worker_plan(config)[0] if "roadmap" not in fields.get("only", ["roadmap"])}
 
 
-def unapplied_workers(config):
-    """Ids whose live worker still runs another agent or phase list than its slot group gives it.
+def unapplied_workers():
+    """Ids not yet confirmed to run the agent and phases written for them.
 
-    The manager restarts a parked worker on its new definition on its next pass;
-    admitting it before then would start one more round under the old group.
+    The manager reads definitions once per pass and may launch, or keep
+    polling admission with, the previous ones; an id whose agent or phases
+    were rewritten stays out until its live status shows the new ones.
     """
-    if not config.get("slots"):
-        return set()
+    path = state_dir() / "unapplied-workers.json"
+    pending = set(read(path, {}).get("workers", []))
     held = set()
-    for wid, fields, _ in worker_plan(config)[0]:
+    for wid, wanted in written_roles().items():
         status = read(state_dir() / "workers" / f"{wid}.json", {})
-        applied = status.get("applied_spec")
-        if not (status.get("alive") and isinstance(applied, dict)):
-            continue
-        if (applied.get("agent", "auto"), applied.get("only", [])) != (fields["agent"], fields.get("only", [])):
+        # Workers older than applied_spec publish agent and only beside it.
+        applied = status.get("applied_spec") if isinstance(status.get("applied_spec"), dict) else status
+        known = "agent" in applied or "only" in applied
+        running = (applied.get("agent", "auto"), applied.get("only", []))
+        if status.get("alive") and (running == wanted or not known):
+            pending.discard(wid)
+        elif wid in pending or status.get("alive"):
             held.add(wid)
+    pending &= held
+    if pending != set(read(path, {}).get("workers", [])):
+        atomic(path, dict(workers=sorted(pending)))
     return held
 
 
@@ -1043,7 +1065,7 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                held = unapplied_workers(config)
+                held = unapplied_workers()
                 admitted = [wid for wid in ids[:target] if wid not in held]
                 roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
                 atomic(
