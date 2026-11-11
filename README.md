@@ -148,7 +148,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | --- | --- | --- |
 | `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
-| `sandbox` | `host` or `bubble` | `host` |
+| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
 | `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
 | `outside_list_cap` | `{"ceiling": N}`, optionally with `floor` and `start`: pace [authoring outside a target list](#authoring-outside-the-list) by the subscription's weekly window | off |
@@ -722,7 +722,11 @@ Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 1
 
 These are the responses the workers' pacer last cached on the host. Fleet sends
 no usage request, so a line ages while no worker is checking its quota, and a
-window that has reset since the reading shows no figure.
+window that has reset since the reading shows no figure. The caches are kept per
+credential, and Fleet does not read credentials, so it cannot tell which one is
+active: while more than one credential has a reading the worker would still use
+(an hour for Claude, ten minutes for Codex), each is printed on its own line under
+a short credential label, and the JSON value is `{"credentials": [...]}`.
 
 Native host coding rounds can share immutable extracted Mathlib snapshots with
 private copy-on-write builds. The native activity collector prepares the sharing

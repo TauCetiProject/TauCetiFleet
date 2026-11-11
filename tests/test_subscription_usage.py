@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -42,12 +43,12 @@ class SubscriptionUsage(unittest.TestCase):
 
     def cache(self, path, payload, age, **extra):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dict(fetched_at=NOW - age, fp="account", payload=payload, **extra)))
+        path.write_text(json.dumps(dict(fetched_at=NOW - age, payload=payload, **dict(dict(fp="account"), **extra))))
 
-    def codex(self, path, age, *windows):
+    def codex(self, path, age, *windows, **extra):
         records = [dict(used_percent=used, limit_window_seconds=seconds, reset_after_seconds=after)
                    for used, seconds, after in windows]
-        self.cache(path, dict(rate_limit=dict(zip(("primary_window", "secondary_window"), records, strict=False))), age)
+        self.cache(path, dict(rate_limit=dict(zip(("primary_window", "secondary_window"), records, strict=False))), age, **extra)
 
     def test_profile_selects_the_providers_and_api_billing_adds_nothing_to_status(self):
         for config, expected in (
@@ -75,11 +76,12 @@ class SubscriptionUsage(unittest.TestCase):
         (self.runtime("b" * 40) / "state/fleet-3/cache").mkdir(parents=True)
         (self.runtime("b" * 40) / "state/fleet-3/cache/quota-codex.json").write_text('{"fetched_at": ')
         self.cache(self.runtime("b" * 40) / "state/fleet-4/cache/quota-codex.json", {}, -30)
+        account = hashlib.sha256(b"account").hexdigest()[:8]
         expected = dict(
-            claude=dict(fetched_at=NOW - 600, windows=dict(
+            claude=dict(credential=account, fetched_at=NOW - 600, windows=dict(
                 session=dict(seconds=5 * hour, used=37.5, left=62.5, resets_at=NOW + 2 * hour),
                 weekly=dict(seconds=7 * 24 * hour, used=59.0, left=41.0, resets_at=NOW + 80 * hour))),
-            codex=dict(fetched_at=NOW - 120, windows=dict(
+            codex=dict(credential=account, fetched_at=NOW - 120, windows=dict(
                 weekly=dict(seconds=7.0 * 24 * hour, used=12.0, left=88.0, resets_at=NOW - 120 + 100 * hour),
                 session=dict(seconds=5.0 * hour, used=40.0, left=60.0, resets_at=NOW - 120 + hour))),
         )
@@ -147,6 +149,48 @@ class SubscriptionUsage(unittest.TestCase):
             "Kiro usage: no reading yet",
             "Other usage: unreadable response (read 0m ago)",
         ])
+
+    def test_credentials_with_served_readings_are_listed_rather_than_one_chosen(self):
+        hour = 3600
+
+        def claude(fp, used, age, **extra):
+            name = hashlib.sha256(fp.encode()).hexdigest()[:16]
+            self.cache(self.login / f"quota-claude-{name}.json", flat(dict(utilization=used, resets_at=iso(NOW + hour)), None),
+                       age, fp=fp, **extra)
+
+        def label(fp):
+            return hashlib.sha256(fp.encode()).hexdigest()[:8]
+
+        claude("first", 99, 600)
+        claude("second", 10, 60)
+        claude("third", 50, 2 * hour)
+        claude("fourth", 20, 30, valid_until=NOW - 1)
+        value = subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]
+        self.assertEqual([(each["credential"], each["windows"]["session"]["left"]) for each in value["credentials"]],
+                         [(label("second"), 90.0), (label("first"), 1.0)])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            subscription_usage.display(dict(claude=value), NOW)
+        self.assertEqual(output.getvalue().splitlines(), [
+            "Claude usage: 2 credentials have current readings; the workers use the active one",
+            f"  credential {label('second')}: 5h 90% left, resets in 1h00m; 7d 100% left, no window open (read 1m ago)",
+            f"  credential {label('first')}: 5h 1% left, resets in 1h00m; 7d 100% left, no window open (read 10m ago)",
+        ])
+
+        # A reading no worker would serve any more gives way to one that would; with none served, the newest stands.
+        (self.login / f"quota-claude-{hashlib.sha256(b'second').hexdigest()[:16]}.json").unlink()
+        self.assertEqual(subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]["credential"], label("first"))
+        (self.login / f"quota-claude-{hashlib.sha256(b'first').hexdigest()[:16]}.json").unlink()
+        self.assertEqual(subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]["credential"], label("fourth"))
+
+        self.codex(self.runtime("a" * 40) / "state/fleet-1/cache/quota-codex.json", 120, (40, 5 * hour, hour), fp="one")
+        self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour), fp="two")
+        self.codex(self.runtime("a" * 40) / "state/fleet-3/cache/quota-codex.json", 30, (7, 5 * hour, hour))
+        codex = subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["credentials"]
+        self.assertEqual([each["credential"] for each in codex], [label("account"), label("two"), label("one")])
+        self.codex(self.runtime("a" * 40) / "state/fleet-1/cache/quota-codex.json", 700, (40, 5 * hour, hour), fp="one")
+        self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour))
+        self.assertEqual(subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["fetched_at"], NOW - 30)
 
 
 if __name__ == "__main__":
