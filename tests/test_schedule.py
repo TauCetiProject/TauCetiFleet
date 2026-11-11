@@ -110,6 +110,19 @@ class Slots(unittest.TestCase):
             "Weekly schedule (Europe/Berlin): outside every slot; next slot starts Sat 22:00 CET (in 6d 9h)",
         )
 
+    def test_a_boundary_skipped_by_daylight_saving_moves_to_the_next_week(self):
+        # 1 March 2026 04:00 EST; the Sunday 02:00-03:00 hour does not exist on 8 March.
+        now = at(1, 9, month=3)
+        gap = config("Sun 03:00 -> Sun 02:00", timezone="America/New_York")
+        window = schedule.state(gap, now)
+        self.assertTrue(window["active"])
+        self.assertEqual((window["boundary_at"], window["boundary"]), (at(15, 6, month=3), "Sun 02:00 EDT"))
+        self.assertEqual(schedule.seconds_until_slot_ends(gap, now), 1_198_800)
+        self.assertNotIn("cover the whole week", schedule.describe(window, now))
+        inside_gap = schedule.state(config("Sun 02:10 -> Sun 02:40", timezone="America/New_York"), now)
+        self.assertFalse(inside_gap["active"])
+        self.assertEqual(inside_gap["boundary_at"], at(15, 6, 10, month=3))
+
     def test_a_time_skipped_by_daylight_saving_is_the_end_of_the_gap(self):
         # New York skips 02:00-03:00 on 8 March 2026: 07:00 UTC is 03:00 EDT.
         whole = config("Mon 00:00 -> Sun 03:00", "Sun 02:30 -> Mon 00:00", timezone="America/New_York")

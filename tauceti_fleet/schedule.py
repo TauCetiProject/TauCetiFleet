@@ -73,7 +73,7 @@ def occurrences(slots, tz, now):
     """Epoch (start, end, slot) for each slot in the weeks around `now`; slot times are wall-clock times."""
     local = datetime.fromtimestamp(now, tz)
     monday = datetime(local.year, local.month, local.day) - timedelta(days=local.weekday())
-    for week in range(-1, 3):
+    for week in range(-1, 4):
         for slot in slots:
             start, end = parse(slot)
             end += 7 * 1440 if end < start else 0
@@ -81,6 +81,14 @@ def occurrences(slots, tz, now):
                 *(instant(monday + timedelta(weeks=week, minutes=m), tz) for m in (start, end)),
                 slot,
             )
+
+
+def whole_week(slots):
+    covered = bytearray(7 * 1440)
+    for start, end in map(parse, slots):
+        for m in range(start, end + (7 * 1440 if end < start else 0)):
+            covered[m % (7 * 1440)] = 1
+    return all(covered)
 
 
 def state(config, now=None):
@@ -102,10 +110,11 @@ def state(config, now=None):
         return next((slot for start, end, slot in spans if start <= at < end), None)
 
     slot = inside(now)
-    # Slots covering the whole week never flip. Their generated occurrences run
-    # out more than two weeks ahead, which the eight-day horizon excludes.
-    edges = sorted(e for start, end, _ in spans for e in (start, end) if now < e < now + 8 * 86400)
-    boundary = next((e for e in edges if bool(inside(e)) != bool(slot)), None)
+    boundary = None
+    if not whole_week(value["slots"]):
+        # A spring-forward gap can swallow one week's transition, so the next one may be nearly two weeks away.
+        edges = sorted(e for start, end, _ in spans for e in (start, end) if now < e < now + 15 * 86400)
+        boundary = next((e for e in edges if bool(inside(e)) != bool(slot)), None)
     result = dict(
         value,
         active=bool(slot),
