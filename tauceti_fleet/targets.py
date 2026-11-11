@@ -96,14 +96,16 @@ def parse(text):
                 malformed.append(number)
                 continue
             group = CLAUSES.search(match.group(4)[slug.end():])
-            clauses = {}
+            clauses, needs = {}, []
             for clause in group.group(1).split(";") if group else []:
                 key, _, value = clause.partition(":")
-                # The worker reads every `partial:` clause, so a repeated key keeps all its values.
-                key = key.strip().lower()
-                clauses[key] = "; ".join(filter(None, (clauses.get(key), value.strip())))
-            needs = clauses.get("needs", "none")
-            needs = [] if needs.lower() == "none" else [s.strip().strip("`").strip() for s in needs.split(",") if s.strip("` \t")]
+                key, value = key.strip().lower(), value.strip()
+                # As in the worker: the last `needs:` naming slugs counts, and every `partial:` does.
+                if key == "needs":
+                    if value.lower() != "none":
+                        needs = [s.strip().strip("`").strip() for s in value.split(",") if s.strip("` \t")]
+                else:
+                    clauses[key] = "; ".join(filter(None, (clauses.get(key), value)))
             items.append(dict(area=area, slug=slug.group(1).strip(), status=MARKS[match.group(2)], needs=needs,
                               line=number, clauses=clauses))
     return dict(areas=areas, items=items, malformed=malformed)

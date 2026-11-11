@@ -121,6 +121,12 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
         mixed = targets.parse(EXAMPLE.replace("`borel-cantelli`, `truncation-bounds`", "borel-cantelli, `truncation-bounds`"))
         self.assertEqual(mixed["items"][-1]["needs"], ["borel-cantelli", "truncation-bounds"])
+        # As in the worker, the last `needs:` clause naming slugs is the one that counts.
+        for repeated, needs in (("needs: `borel-cantelli`; needs: `borel-cantelli`", ["borel-cantelli"]),
+                                ("needs: `strong-law`; needs: `borel-cantelli`", ["borel-cantelli"]),
+                                ("needs: `borel-cantelli`; needs: none", ["borel-cantelli"])):
+            item = targets.parse(EXAMPLE.replace("needs: `borel-cantelli`)", repeated + ")"))["items"][1]
+            self.assertEqual(item["needs"], needs, repeated)
         undefined = EXAMPLE.replace("needs: none", "needs: no-such-slug")
         self.assertEqual(targets.summarize(targets.parse(undefined), [])["blocked"], 1)
         with self.assertRaisesRegex(FleetError, "marker"):
