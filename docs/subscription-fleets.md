@@ -158,7 +158,9 @@ tauceti-fleet slots big-server            # the groups, their workers, how many 
 tauceti-fleet slots big-server --group 4:auto --group 4:claude:review --group 1:codex:progress
 ```
 
-An edit rewrites only the workers that change group, and the worker manager
+The groups given replace the saved list, so name every group on each edit: a
+group left out admits no more rounds. An edit rewrites only the workers that
+change group, and the worker manager
 holds a changed agent or phase list until that worker's round ends. Fleet admits
 a rewritten worker only once its status shows the new agent and phases. The
 counts say how many slots exist; `workers --max` stays the admission ceiling,
@@ -276,8 +278,14 @@ A group whose `roles` include `progress` can carry the worker's report settings:
 strategy follows the project-wide cadence. Under it the worker plans no report
 while `progress_max_open` of the account's reports are open (2 unless set).
 `progress_skip` names roadmap directories never reported on. On a running host
-the three follow the roles as `KEY=VALUE`:
-`slots HOST --group 1:codex:progress:progress_strategy=threshold:progress_skip=Sandbox,Drafts`.
+the three follow the roles as `KEY=VALUE`, in a command that names every group,
+since the groups given replace the saved list:
+
+```sh
+tauceti-fleet slots big-server --group 4:auto --group 4:claude:review \
+  --group 1:codex:progress:progress_strategy=threshold:progress_skip=Sandbox,Drafts
+```
+
 The profile keys `progress_repo` (`OWNER/NAME`) and `progress_ref` (a full
 commit id) choose the TauCetiProgress every worker runs; `threshold` needs a
 revision whose `plan` has the strategy. Several installs acting as one account
