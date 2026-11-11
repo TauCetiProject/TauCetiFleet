@@ -65,7 +65,7 @@ class ClaudeCredentials(unittest.TestCase):
         stored = json.loads((secrets / "claude/.credentials.json").read_text())["claudeAiOauth"]
         self.assertEqual(stored, dict(accessToken=TOKEN, expiresAt=int((self.files["token"].stat().st_mtime + 365 * DAY) * 1000),
                                       scopes=["user:inference"], subscriptionType="max"))
-        self.assertEqual(json.loads((secrets / "claude-usage/.credentials.json").read_text()), login())
+        self.assertEqual(json.loads((secrets / "claude-usage/.credentials.json").read_text())["claudeAiOauth"], login()["claudeAiOauth"])
         for path in (secrets, secrets / "claude", secrets / "claude-usage", secrets / "claude/.credentials.json",
                      secrets / "claude-usage/.credentials.json", secrets / "claude-usage/transferred.json"):
             self.assertEqual(path.stat().st_mode & 0o077, 0, path)
@@ -93,18 +93,18 @@ class ClaudeCredentials(unittest.TestCase):
         store.atomic(held, login("refresh-2"))
         store.update_host(workers_enabled=True)
         self.add()
-        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-2")["claudeAiOauth"])
         self.write("usage", json.dumps(login("refresh-of-a-new-sign-in")))
         self.write("token", "sk-ant-oat01-next")
         self.add()
-        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-of-a-new-sign-in")["claudeAiOauth"])
         token = json.loads((held.parent.parent / "claude/.credentials.json").read_text())["claudeAiOauth"]
         self.assertEqual((token["accessToken"], token["subscriptionType"]), ("sk-ant-oat01-next", "max"))
         # The same login in other formatting, or with other metadata, is not a new sign-in.
         store.atomic(held, login("refresh-3"))
         self.write("usage", json.dumps(login("refresh-of-a-new-sign-in", rateLimitTier="x"), indent=4))
         self.add()
-        self.assertEqual(json.loads(held.read_text()), login("refresh-3"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-3")["claudeAiOauth"])
         self.files["usage"].unlink()
         self.add()
         self.assertTrue(held.is_file())
@@ -125,7 +125,7 @@ class ClaudeCredentials(unittest.TestCase):
             store.atomic(held, login("refresh-2"))
             fcntl.flock(lock, fcntl.LOCK_UN)
         replacing.join(10)
-        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-of-a-new-sign-in")["claudeAiOauth"])
 
     def test_a_sign_in_on_the_host_restarts_the_login_lifetime(self):
         now = time.time()
@@ -149,7 +149,7 @@ class ClaudeCredentials(unittest.TestCase):
             os.utime(path, (now + 10, now + 10))
         self.assertEqual(usage(), ("ok", "usage login renews for another 28 days"))
         self.add()
-        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-2")["claudeAiOauth"])
 
     def test_a_usage_login_goes_to_one_host(self):
         self.add()
@@ -195,9 +195,9 @@ class ClaudeCredentials(unittest.TestCase):
         script = "import json, os, sys; open(os.environ['CLAUDE_CONFIG_DIR'] + '/.credentials.json', 'w').write(sys.argv[1])"
         with self.assertRaisesRegex(store.FleetError, "left no login"):
             claude_credentials.sign_in([sys.executable, "-c", "raise SystemExit(1)"])
-        self.assertEqual(json.loads(held.read_text()), login())
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login()["claudeAiOauth"])
         claude_credentials.sign_in([sys.executable, "-c", script, json.dumps(login("refresh-of-a-host-sign-in"))])
-        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-host-sign-in"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-of-a-host-sign-in")["claudeAiOauth"])
         self.assertEqual(held.stat().st_mode & 0o077, 0)
         # A worker renews before Fleet reports: the login, then its success marker.
         store.atomic(held, login("refresh-2"))
@@ -205,7 +205,7 @@ class ClaudeCredentials(unittest.TestCase):
         entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
         self.assertEqual((entry["status"], entry["evidence"]), ("ok", "usage login renews for another 28 days"))
         self.add()
-        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"], login("refresh-2")["claudeAiOauth"])
 
     def test_status_does_not_wait_for_a_renewal_in_progress(self):
         self.add()
@@ -219,6 +219,28 @@ class ClaudeCredentials(unittest.TestCase):
             self.assertFalse(reading.is_alive())
         entries = {e["name"]: e["status"] for e in replies[0]["claude_credentials"]}
         self.assertEqual(entries, {"claude-setup-token": "ok", "claude-usage-login": "ok"})
+
+    def test_a_retry_after_a_lost_transfer_record_keeps_the_renewed_login(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in")))
+        write = claude_credentials.atomic
+
+        def full(path, value):
+            if Path(path).name == "transferred.json":
+                raise OSError(28, "No space left on device")
+            write(path, value)
+
+        with patch.object(claude_credentials, "atomic", side_effect=full), self.assertRaises(OSError):
+            self.add()
+        # A worker renews the installed login, keeping the file's other keys.
+        renewed = json.loads(held.read_text())
+        renewed["claudeAiOauth"]["refreshToken"] = "refresh-2"
+        store.atomic(held, renewed)
+        self.add()
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"]["refreshToken"], "refresh-2")
+        recorded = json.loads(held.with_name("transferred.json").read_text())
+        self.assertEqual(recorded["sha256"], claude_credentials.fingerprint(json.dumps(login("refresh-of-a-new-sign-in"))))
 
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
