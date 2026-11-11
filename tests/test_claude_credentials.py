@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -186,6 +187,26 @@ class ClaudeCredentials(unittest.TestCase):
             self.files["usage"].unlink()
             add("a")
 
+    def test_signing_in_on_the_host_survives_a_renewal_before_any_report(self):
+        now = time.time()
+        os.utime(self.files["usage"], (now - 30 * DAY, now - 30 * DAY))
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        script = "import json, os, sys; open(os.environ['CLAUDE_CONFIG_DIR'] + '/.credentials.json', 'w').write(sys.argv[1])"
+        with self.assertRaisesRegex(store.FleetError, "left no login"):
+            claude_credentials.sign_in([sys.executable, "-c", "raise SystemExit(1)"])
+        self.assertEqual(json.loads(held.read_text()), login())
+        claude_credentials.sign_in([sys.executable, "-c", script, json.dumps(login("refresh-of-a-host-sign-in"))])
+        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-host-sign-in"))
+        self.assertEqual(held.stat().st_mode & 0o077, 0)
+        # A worker renews before Fleet reports: the login, then its success marker.
+        store.atomic(held, login("refresh-2"))
+        store.atomic(held.with_name(".credentials.json.refresh.last-success"), {"at": now})
+        entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
+        self.assertEqual((entry["status"], entry["evidence"]), ("ok", "usage login renews for another 28 days"))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [
@@ -233,7 +254,7 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertEqual((usage["status"], usage["evidence"], usage["remedy"]), ("ok", "usage login renews for another 8 days", ""))
         usage = report(25, signed_in)["claude-usage-login"]
         self.assertEqual((usage["status"], usage["evidence"]), ("warning", "usage login renews for another 3 days"))
-        self.assertIn(f"CLAUDE_CONFIG_DIR={directory} claude auth login", usage["remedy"])
+        self.assertIn("tauceti-fleet claude-usage-login", usage["remedy"])
         self.assertEqual(report(30, signed_in)["claude-usage-login"]["status"], "blocked")
         store.atomic(directory / ".credentials.json", login(refreshTokenExpiresAt=int((signed_in + 40 * DAY) * 1000)))
         self.assertEqual(report(30, signed_in)["claude-usage-login"]["evidence"], "usage login renews for another 10 days")

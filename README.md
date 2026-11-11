@@ -190,9 +190,10 @@ setup-token may go to every host, but `add` records in
 sending it and whether or not `add` then succeeds, and refuses it to any other,
 so give each host its own profile and sign-in. When the login is
 due, either sign in again on the operator's machine and repeat `add`, or run
-the command `doctor` prints on the host, from which `doctor` counts the four
-weeks again; a profile may name a file the operator's machine does not hold
-when the host is signed in that way. Adding or removing either key takes a
+`tauceti-fleet claude-usage-login` on the host, which runs `claude auth login`
+for the stored login and records when, so `doctor` counts the four weeks from
+then; a profile may name a file the operator's machine does not hold when the
+host is signed in that way. Adding or removing either key takes a
 drained `add`; replacing a credential does not. A worker slot keeps the Claude
 credential directory it first ran with, so give a host these keys before its
 workers first start.

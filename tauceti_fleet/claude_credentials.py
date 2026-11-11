@@ -8,7 +8,9 @@ named by `TAUCETI_CLAUDE_USAGE_CREDENTIALS` and renews that login under `auto_re
 
 import hashlib
 import json
-import shlex
+import os
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -138,6 +140,38 @@ def signed_in(target):
     return since if type(since) in (int, float) else None
 
 
+def sign_in(command=("claude", "auth", "login")):
+    """On the host: sign in the usage login and record when, so its lifetime counts from now.
+
+    The sign-in is made in a scratch directory and moved into place under the worker's renewal
+    lock, so a renewal of the old login in flight cannot write over it.
+    """
+    if not (read(config_dir() / "host.json", {}) or {}).get(USAGE):
+        raise FleetError("This host's profile names no claude_usage_credentials_file")
+    target = path(USAGE)
+    for directory in (target.parent.parent, target.parent):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    started = time.time()
+    with tempfile.TemporaryDirectory(prefix=".claude-usage-", dir=target.parent.parent) as scratch:
+        try:
+            result = subprocess.run(list(command), env=dict(os.environ, CLAUDE_CONFIG_DIR=scratch))
+        except FileNotFoundError:
+            raise FleetError(f"Required executable {command[0]} is missing; run tauceti-fleet doctor") from None
+        signed = Path(scratch) / ".credentials.json"
+        try:
+            secret = signed.read_text() if result.returncode == 0 else ""
+        except OSError:
+            secret = ""
+        if not block(secret).get("refreshToken"):
+            raise FleetError("claude auth login left no login; the usage login is unchanged")
+        validate(USAGE, secret)
+        signed.chmod(0o600)
+        marker = target.with_name("transferred.json")
+        with refresh_lock(target):
+            os.replace(signed, target)
+            atomic(marker, dict(read(marker, {}), signed_in=started))
+
+
 def worker_env(config):
     """Environment pointing each worker at the stored credentials; empty when the profile names none."""
     token, usage = config.get(TOKEN), config.get(USAGE)
@@ -165,7 +199,7 @@ def report(config, *, now=None):
         if remedy is None and kind == TOKEN:
             remedy = "Run claude setup-token, save the token in the profile's claude_token_file (chmod 600), and repeat add"
         elif remedy is None:
-            remedy = (f"Sign in on this host: CLAUDE_CONFIG_DIR={shlex.quote(str(path(USAGE).parent))} claude auth login; "
+            remedy = ("Sign in on this host: tauceti-fleet claude-usage-login; "
                       "or sign in where the profile's claude_usage_credentials_file is kept and repeat add")
         name = "claude-setup-token" if kind == TOKEN else "claude-usage-login"
         entries.append(dict(name=name, status=status, evidence=evidence, remedy="" if status == "ok" else remedy))
