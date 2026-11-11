@@ -412,6 +412,25 @@ def maintenance_workers(config):
     return {wid for wid, fields, _ in worker_plan(config)[0] if "roadmap" not in fields.get("only", ["roadmap"])}
 
 
+def unapplied_workers(config):
+    """Ids whose live worker still runs another agent or phase list than its slot group gives it.
+
+    The manager restarts a parked worker on its new definition on its next pass;
+    admitting it before then would start one more round under the old group.
+    """
+    if not config.get("slots"):
+        return set()
+    held = set()
+    for wid, fields, _ in worker_plan(config)[0]:
+        status = read(state_dir() / "workers" / f"{wid}.json", {})
+        applied = status.get("applied_spec")
+        if not (status.get("alive") and isinstance(applied, dict)):
+            continue
+        if (applied.get("agent", "auto"), applied.get("only", [])) != (fields["agent"], fields.get("only", [])):
+            held.add(wid)
+    return held
+
+
 def configure_slots(payload):
     """Show or replace the slot groups. Definitions follow on the controller's next pass."""
     config = host_config()
@@ -1040,7 +1059,8 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                admitted = ids[:target]
+                held = unapplied_workers(config)
+                admitted = [wid for wid in ids[:target] if wid not in held]
                 roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
                 atomic(
                     state_dir() / "admission.json",

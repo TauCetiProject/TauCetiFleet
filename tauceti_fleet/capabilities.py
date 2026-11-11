@@ -366,6 +366,14 @@ def doctor(config=None, *, probe=True):
             "Install this tool in the account's PATH before enabling workers; lake is supplied by elan and claude by Claude Code",
             roles=("workers",),
         )
+    if config.get("sandbox") == "bubble":
+        add(
+            "worker-sandbox-bubble",
+            "warning",
+            "Bubble containers run under the Incus daemon, outside tauceti-fleet-workers.slice: its memory ceiling and CPU weight do not apply to them and worker memory does not count them; host headroom at admission is the only bound",
+            "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
+            roles=("workers",),
+        )
     compatible = False
     protocol = {}
     if worker:

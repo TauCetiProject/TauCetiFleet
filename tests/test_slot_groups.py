@@ -90,7 +90,7 @@ class SlotGroups(unittest.TestCase):
         self.assertNotIn("worker-tool-codex", plain)
 
     def test_every_ceiling_admits_each_group_in_proportion(self):
-        for counts in ([6, 2, 1], [40, 8, 2], [1, 1], [3], [5, 5, 5, 1]):
+        for counts in ([6, 2, 1], [40, 8, 2], [1, 1], [3], [5, 5, 5, 1], [8, 1, 1, 1], [1, 1, 1, 5]):
             placed = [group for group, count in enumerate(counts) for _ in range(count)]
             order = slot_groups.order(placed + [None, None])
             self.assertEqual(sorted(order), list(range(sum(counts))))
@@ -254,6 +254,35 @@ class SlotGroups(unittest.TestCase):
                 slot_groups.parse(text)
         self.assertEqual(slot_groups.parse("1::progress_strategy=threshold:progress_max_open=x"),
                          dict(count=1, progress_strategy="threshold", progress_max_open="x"))
+
+    def test_a_reassigned_worker_waits_for_its_new_definition_before_admission(self):
+        store.update_host(workers_enabled=True, max_workers=8)
+        prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
+
+        def running(n, agent, only, alive=True):
+            store.atomic(store.state_dir() / "workers" / f"{prefix}{n}.json", dict(
+                id=f"{prefix}{n}", alive=alive, state="waiting-capacity", agent=agent, only=only,
+                applied_spec=dict(id=f"{prefix}{n}", enabled=True, agent=agent, only=only)))
+
+        def admitted():
+            return [int(wid.rsplit("-", 1)[1]) for wid in self.daemon_pass()["workers"]]
+
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
+        running(1, "claude", ["review"])
+        running(2, "claude", ["review"])
+        self.assertEqual(admitted(), [1, 2])
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review")]))
+        self.assertEqual(admitted(), [1])
+        # Worker 2 is rewritten for the new group while its old loop still polls for admission.
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+        self.assertEqual(self.shape(self.definitions()[1])[2], ("codex", "progress"))
+        self.assertEqual(admitted(), [1])
+        self.assertEqual(host.rpc(dict(action="slots"))["slots"][1]["admitted"], 0)
+        running(2, "codex", ["progress"])
+        self.assertEqual(admitted(), [1, 2])
+        # A stopped worker starts on whatever definition is written.
+        running(2, "claude", ["review"], alive=False)
+        self.assertEqual(admitted(), [1, 2])
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")

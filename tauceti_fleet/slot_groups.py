@@ -1,7 +1,7 @@
 """Slot groups: an agent and a set of work phases for each share of a host's worker slots."""
 
+import functools
 import re
-from collections import Counter
 from fractions import Fraction
 
 from .store import FleetError
@@ -128,20 +128,55 @@ def place(wanted, prior):
     return placed
 
 
-def order(placed):
-    """Placed positions in admission order.
+@functools.cache
+def sequence(counts):
+    """The group of each admission in turn, for groups of these sizes.
 
-    Member j of a group of n sits at (2j + 1) / 2n, so every prefix holds each
-    group's share of it to within one slot and a higher ceiling only adds.
+    Still's quota-divisor method with Webster priorities: member j of a group
+    of n ranks at (2j + 1) / 2n, among the groups that stay within the upper
+    quota of this prefix and leave this and every later prefix able to reach
+    each group's lower quota. Every prefix then holds each group's share of it to within one
+    slot, and a higher ceiling only adds.
     """
-    size = Counter(group for group in placed if group is not None)
-    seen = Counter()
-    keyed = []
+    total = sum(counts)
+    taken = [0] * len(counts)
+
+    def reachable(prefix):
+        for later in range(prefix, total + 1):
+            floors = [later * count // total for count in counts]
+            if sum(max(t, f) for t, f in zip(taken, floors, strict=True)) > later:
+                return False
+            if all(t <= f for t, f in zip(taken, floors, strict=True)):
+                return True
+        return True
+
+    result = []
+    for prefix in range(1, total + 1):
+        ranked = sorted((g for g, count in enumerate(counts) if taken[g] * total < prefix * count),
+                        key=lambda g: (Fraction(2 * taken[g] + 1, counts[g]), g))
+        for group in ranked:
+            taken[group] += 1
+            if reachable(prefix):
+                break
+            taken[group] -= 1
+        result.append(group)
+    return tuple(result)
+
+
+def order(placed):
+    """Placed positions in admission order, each group's in position order."""
+    members = {}
     for position, group in enumerate(placed):
         if group is not None:
-            keyed.append((Fraction(2 * seen[group] + 1, 2 * size[group]), group, position))
-            seen[group] += 1
-    return [position for _, _, position in sorted(keyed)]
+            members.setdefault(group, []).append(position)
+    groups = sorted(members)
+    taken = dict.fromkeys(groups, 0)
+    result = []
+    for index in sequence(tuple(len(members[g]) for g in groups)):
+        group = groups[index]
+        result.append(members[group][taken[group]])
+        taken[group] += 1
+    return result
 
 
 def layout(config, old, worker_fields):

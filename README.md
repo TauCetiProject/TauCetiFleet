@@ -148,7 +148,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | --- | --- | --- |
 | `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
-| `sandbox` | `host` or `bubble` | `host` |
+| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
 | `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
 | `progress_repo` | The TauCetiProgress repository progress rounds run, as `OWNER/NAME`; written to each worker's `env` as `TAUCETI_PROGRESS_REPO` | the worker's pin |
@@ -875,15 +875,17 @@ change group: going from the profile above to the command above rewrites two of
 the nine. The worker manager holds a changed `agent` or `only` until that
 worker's round ends; this needs a TauCetiWorker release that defers those two
 edits, and an older one restarts the changed workers at once. A changed
-progress setting restarts that group's workers at once under either. A group that
-shrinks gives up admissions and keeps its definitions, as lowering
+progress setting restarts that group's workers at once under either. Fleet
+admits a rewritten worker only once its status shows the new agent and phases.
+A group that shrinks gives up admissions and keeps its definitions, as lowering
 `workers --max` does, and a group that grows later takes those definitions
 before any is added.
 
 The counts say how many slots exist; `workers --max` remains the admission
 ceiling, so raise it when the groups total more. A ceiling below the total
-admits every group in proportion: a ceiling of five on the profile above
-admits three `auto` slots, one reviewer, and the progress slot. [Roadmap focus](#roadmap-focus)
+admits each group within one slot of its proportional share, and raising the
+ceiling only adds slots: a ceiling of five on the profile above admits three
+`auto` slots, one reviewer, and the progress slot. [Roadmap focus](#roadmap-focus)
 takes its share from the admitted slots whose phases include `roadmap`.
 
 ## Public operations telemetry
