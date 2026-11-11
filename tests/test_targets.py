@@ -121,6 +121,12 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
         mixed = targets.parse(EXAMPLE.replace("`borel-cantelli`, `truncation-bounds`", "borel-cantelli, `truncation-bounds`"))
         self.assertEqual(mixed["items"][-1]["needs"], ["borel-cantelli", "truncation-bounds"])
+        # As in the worker, the last `needs:` clause naming slugs is the one that counts.
+        for repeated, needs in (("needs: `borel-cantelli`; needs: `borel-cantelli`", ["borel-cantelli"]),
+                                ("needs: `strong-law`; needs: `borel-cantelli`", ["borel-cantelli"]),
+                                ("needs: `borel-cantelli`; needs: none", ["borel-cantelli"])):
+            item = targets.parse(EXAMPLE.replace("needs: `borel-cantelli`)", repeated + ")"))["items"][1]
+            self.assertEqual(item["needs"], needs, repeated)
         undefined = EXAMPLE.replace("needs: none", "needs: no-such-slug")
         self.assertEqual(targets.summarize(targets.parse(undefined), [])["blocked"], 1)
         with self.assertRaisesRegex(FleetError, "marker"):
@@ -267,7 +273,10 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         machine = store.host_config()["machine_id"]
         listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1; partial: #9)\n- [~] `item-2` — text (in flight: #2)\n"
                                  "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [~] `item-5` — text (in flight: #5)\n"
+                                 "- [~] `item-6` — text (in flight: https://forge.example/o/r/pulls/1234)\n"
                                  "- [ ] no slug\n\n## Notes")
+        # A Forgejo pull request is named by URL; the inventory and `#N` are GitHub's.
+        listed = listed.replace("in flight: #1234)", "in flight: #1234; partial: https://forge.example/o/r/pulls/1)")
         path = self.root / "checkout/list.md"
         path.parent.mkdir()
         path.write_text(listed)
@@ -287,7 +296,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual((result["corrections"], result["applied"]), (2, False))
         self.assertEqual(path.read_text(), listed)
         for expected in (
-            "Line 20 is an item line without a `slug`; workers skip it",
+            "Line 21 is an item line without a `slug`; workers skip it",
             "No roadmap directory for Probability in the workers' roadmap mirror",
             "w1 is authoring MeasureTheory/borel-cantelli, which the file marks done",
             "w2 is authoring Probability/renamed, which the file does not list",
@@ -296,15 +305,16 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
             "Probability/truncation-bounds: #1234 landed -> [x]",
         ):
             self.assertTrue(any(d.startswith(expected) for d in details), expected)
-        self.assertFalse(any(f"item-{n}" in d for d in details for n in (3, 4, 5)))
+        self.assertFalse(any(f"item-{n}" in d for d in details for n in (3, 4, 5, 6)))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             targets.display(targets.configure(dict(audit=True, apply=True), rounds))
         self.assertIn(f"2 line(s) rewritten in {link}", out.getvalue())
         self.assertEqual(link.resolve(), path.resolve())
         after = path.read_text()
-        self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234)\n", after)
+        self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234; partial: https://forge.example/o/r/pulls/1)\n", after)
         self.assertIn("- [ ] `item-1` — text (partial: #1; partial: #9)\n", after)
-        self.assertEqual(after.count("\n- [~]"), 4)
+        self.assertEqual(after.count("\n- [~]"), 5)
+        self.assertIn("(in flight: https://forge.example/o/r/pulls/1234)\n", after)
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(targets.configure(dict(audit=True, apply=True), [])["corrections"], 0)
         store.update_host(roadmap_targets=None)
