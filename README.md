@@ -831,7 +831,8 @@ an observation newer than the record counts. That database covers pull requests
 this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
 credential: once per listed pull request, and once per pull request an item
 names until that one is known to be merged or closed, at most 100 requests a
-call. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
+call, items asked about least recently first, so repeated calls reach every
+item. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
 worker's record files are never rewritten. Nothing else in `attention` or
 `status` contacts GitHub. `--ack all` also archives the records the list had
 already dropped.
