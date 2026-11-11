@@ -12,7 +12,7 @@ import shlex
 import time
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, read
+from .store import FleetError, atomic, config_dir, locked, read
 
 TOKEN = "claude_token_file"
 USAGE = "claude_usage_credentials_file"
@@ -42,6 +42,11 @@ def selected(payload):
         if named or kind in payload:
             updates[kind] = str(path(kind)) if named else None
     return updates
+
+
+def refresh_lock(target):
+    """The lock the worker holds while it renews the login in `target`."""
+    return locked(target.with_name(f".{target.name.lstrip('.')}.refresh.lock"))
 
 
 def block(secret):
@@ -77,10 +82,12 @@ def install(kind, secret, since=None):
     # dead, and writing it again on a repeated add would end the chain the host now holds.
     digest = hashlib.sha256(secret.strip().encode()).hexdigest()
     marker = target.with_name("transferred.json")
-    if target.is_file() and read(marker, {}).get("sha256") == digest:
-        return
-    atomic(target, json.loads(secret))
-    atomic(marker, dict(sha256=digest, signed_in=since))
+    # A worker renewing under this lock writes back a rotation of the login it read before the wait.
+    with refresh_lock(target):
+        if target.is_file() and read(marker, {}).get("sha256") == digest:
+            return
+        atomic(target, json.loads(secret))
+        atomic(marker, dict(sha256=digest, signed_in=since))
 
 
 def worker_env(config):

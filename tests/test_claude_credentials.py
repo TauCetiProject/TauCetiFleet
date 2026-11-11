@@ -1,9 +1,11 @@
 import contextlib
+import fcntl
 import io
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -102,6 +104,22 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertTrue(held.is_file())
         with self.assertRaisesRegex(store.FleetError, "Drain"):
             self.add(claude_usage_credentials_file=None)
+
+    def test_replacing_a_login_waits_for_a_renewal_in_progress(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in")))
+        payload = remote.profile("p")
+        # The worker's lock name, held as a renewal of the old login holds it across its token exchange.
+        with held.with_name(".credentials.json.refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            replacing = threading.Thread(target=host.configure, args=(dict(payload, profile="p", ci_allowed=False),))
+            replacing.start()
+            time.sleep(0.5)
+            store.atomic(held, login("refresh-2"))
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        replacing.join(10)
+        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
 
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
