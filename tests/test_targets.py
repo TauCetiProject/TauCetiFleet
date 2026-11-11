@@ -152,7 +152,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         shared.parent.mkdir()
         shared.write_text(EXAMPLE)
         result = targets.configure(dict(path=str(shared)), [])
-        self.assertEqual((result["roadmap_targets"], result["transferred"]), (str(shared), False))
+        self.assertEqual((result["roadmap_targets"], result["transferred"]), (str(shared.resolve()), False))
         self.assertIn("Areas not checked: this host has no roadmap mirror yet", result["notes"])
         self.assertFalse(targets.stored().exists())
         shared.write_text(EXAMPLE.replace("[~] `truncation", "[x] `truncation"))
@@ -165,7 +165,20 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         shared.parent.mkdir()
         shared.write_text(EXAMPLE)
         targets.configure(dict(path=str(shared)), [])
-        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(shared)})
+        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(shared.resolve())})
+
+    def test_setting_a_symlinked_list_again_follows_the_link(self):
+        one, two, link = self.root / "one.md", self.root / "two.md", self.root / "current.md"
+        one.write_text(EXAMPLE)
+        two.write_text(EXAMPLE.replace("[~] `truncation", "[x] `truncation"))
+        link.symlink_to(one)
+        result = targets.configure(dict(path=str(link)), [])
+        self.assertEqual(result["roadmap_targets"], str(one.resolve()))
+        self.assertIn(f"{link} resolves to {one.resolve()}", result["notes"][0])
+        link.unlink()
+        link.symlink_to(two)
+        self.assertEqual(targets.configure(dict(path=str(link)), [])["list"]["done"], 2)
+        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(two.resolve())})
 
     def test_refused_lists_change_nothing(self):
         self.mirror("TauCetiRoadmap/MeasureTheory", "Completed/Probability")

@@ -316,10 +316,17 @@ def configure(payload, workers):
             except UnicodeEncodeError:
                 raise FleetError("A target list's path must be valid UTF-8") from None
             text = load(path)
+            # Workers resolve the path once when they start, so save what it names now; a definition
+            # that changes with the link's destination is what restarts them onto the new file.
+            resolved = str(Path(path).resolve())
+            if resolved != path:
+                notes.append(f"{path} resolves to {resolved}; workers read that file, so set the list again after repointing the link")
+            path = resolved
         elif not isinstance(text, str) or len(text.encode()) > LIMIT:
             raise FleetError(f"A transferred target list is text of at most {LIMIT // 1024} KiB")
         listing = parse(text)
-        repeated, notes = structure_problems(listing)
+        repeated, undefined = structure_problems(listing)
+        notes += undefined
         areas = area_problems(listing)
         if repeated or areas:
             raise FleetError("; ".join(repeated + (areas or [])))
