@@ -336,6 +336,9 @@ def configure(payload, workers):
                 path.encode()
             except UnicodeEncodeError:
                 raise FleetError("A target list's path must be valid UTF-8") from None
+            # The worker strips the path it is given, so it would read a different file.
+            if path != path.strip():
+                raise FleetError("A target list's path begins or ends with whitespace; rename the file")
             text = load(path)
             # Workers resolve the path once when they start, so save what it names now; a definition
             # that changes with the link's destination is what restarts them onto the new file.

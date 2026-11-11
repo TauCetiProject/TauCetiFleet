@@ -188,6 +188,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
 
     def test_refused_lists_change_nothing(self):
         self.mirror("TauCetiRoadmap/MeasureTheory", "Completed/Probability")
+        (self.root / "list.md ").write_text(EXAMPLE)
         repeated = EXAMPLE.replace("`strong-law`", "`borel-cantelli`")
         for payload, message in (
             (dict(text=EXAMPLE.replace("tauceti-targets:v1", "targets")), "marker"),
@@ -197,6 +198,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
             (dict(text="x" * (targets.LIMIT + 1)), "at most 256 KiB"),
             (dict(path="list.md"), "absolute path"),
             (dict(path="/lists/\ud835.md"), "valid UTF-8"),
+            (dict(path=str(self.root / "list.md ")), "begins or ends with whitespace"),
             (dict(path=str(self.root / "absent.md")), "Cannot read target list"),
             (dict(text=EXAMPLE, path="/list.md"), "not both"),
         ):
