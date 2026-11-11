@@ -420,6 +420,38 @@ class Attention(unittest.TestCase):
         self.assertEqual(value["lookup"], dict(asked=2, error="https://forge.example request unavailable"))
         self.assertEqual([c["id"] for c in value["cleared"]], ["8"])
 
+    def test_forges_that_time_out_move_behind_the_requests_not_yet_asked(self):
+        self.on()
+        for pr, name in ((5, "a.example"), (6, "b.example")):
+            self.record("declined", "fix", pr, at="2026-01-15T09:00:00Z", suffix=f".{pr:012d}",
+                        forge=dict(kind="forgejo", url=f"https://{name}"))
+        self.record("declined", "fix", 8, summary="no")
+        clock = [0.0]
+
+        def timeout(at, path):
+            clock[0] += 20
+            raise store.FleetError(f"{at} request unavailable; check network access and retry")
+
+        self.forgejo.side_effect = timeout
+        self.github.side_effect = lambda path, **_: dict(state="closed", merged_at=None, head=dict(sha="a" * 40))
+        asked = []
+        with patch.object(attention.time, "monotonic", side_effect=lambda: clock[0]):
+            for _ in range(2):
+                self.forgejo.reset_mock()
+                self.github.reset_mock()
+                value = self.listed(lookup=True)
+                asked.append(([c.args[0] for c in self.forgejo.call_args_list], self.github.call_count))
+        self.assertEqual(asked, [(["https://a.example", "https://b.example"], 0),
+                                 (["https://a.example", "https://b.example"], 1)])
+        self.assertEqual([c["id"] for c in value["cleared"]], ["8"])
+        self.assertEqual([i["id"] for i in value["items"]], ["a.example/TauCetiProject/TauCeti#5",
+                                                            "b.example/TauCetiProject/TauCeti#6"])
+        self.assertEqual(sorted(attention.failed_origins()), ["https://a.example", "https://b.example"])
+        self.forgejo.side_effect = lambda at, path: dict(state="open", merged=False, merged_at=None,
+                                                         head=dict(sha="a" * 40))
+        self.listed(lookup=True)
+        self.assertEqual(attention.failed_origins(), {})
+
     def test_forgejo_reads_are_anonymous_and_keep_the_http_status(self):
         seen = []
 
