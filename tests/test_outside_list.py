@@ -526,6 +526,17 @@ class Wiring(unittest.TestCase):
         block = pacer.tick(config, list, now=now)
         self.assertEqual((block["cap"], block["reason"]), (4, "under 2 h of usage readings in this weekly window"))
 
+    def test_status_line_for_a_weekly_window_already_over_its_limit(self):
+        now, resets = 50 * HOUR, 80 * HOUR
+        state = dict(cap=12, resets_at=resets, readings=[[now - 3 * HOUR, 101.0]], rounds=[])
+        stepped = outside_list.advance(state, now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, session_left=60.0, rounds=(0, 0, 0),
+                                       curve=outside_list.pace_points({}), reading=dict(fetched_at=now - 60, used=101.0, resets_at=resets))
+        self.assertEqual((stepped["held"], stepped["left"], stepped["rate"]), (False, 0.0, 0.0))
+        self.assertIn("already spent until it resets in 30h00m", outside_list.describe(dict(stepped, active=True, ends="slot", ends_at=now + HOUR), now))
+        self.assertEqual(outside_list.describe(dict(stepped, active=True), now),
+                         "Outside-list cap: 11 (bounds 0-40); the weekly window is already spent until it resets in 30h00m; "
+                         "last step 0m ago: 12 -> 11, list work is projected to use all that may still be spent")
+
     def test_status_line(self):
         now = 1_000_000.0
         moving = dict(active=True, held=False, cap=14, previous=13, floor=0, ceiling=40, at=now - 720, reason="spending under plan",

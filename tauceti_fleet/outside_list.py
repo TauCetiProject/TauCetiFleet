@@ -308,7 +308,9 @@ def describe(value, now=None):
     text = f"Outside-list cap: {value['cap']} (bounds {value['floor']}-{value['ceiling']})"
     if not value["held"]:
         end = f"the {value['ends']} ends in {span(value['ends_at'] - now)}"
-        if value["projected"] > 100:
+        if value["left"] <= 0:
+            text += f"; the weekly window is already spent until it resets in {span(value['resets_at'] - now)}"
+        elif value["projected"] > 100:
             early = (value["ends_at"] - value["at"]) - value["left"] / value["rate"] * 3600
             text += f"; at this rate the weekly window is spent {span(early)} before {end}"
         else:
