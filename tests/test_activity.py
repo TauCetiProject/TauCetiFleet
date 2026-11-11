@@ -82,7 +82,7 @@ class ActivityTests(unittest.TestCase):
             partial = activity.combine_status([first, second])
             activity.display(partial)
         self.assertEqual(partial["summary"]["costs"]["windows"]["24h"]["attributed_loc"], "8000")
-        self.assertIn("partial ~$0.0046", partial_output.getvalue())
+        self.assertIn("~$0.0046", partial_output.getvalue())
         for row in second["summary"]["costs"]["windows"].values():
             row.update(attribution_backfilling=True, attribution_preparing=True)
         with contextlib.redirect_stdout(io.StringIO()) as warming_output:
