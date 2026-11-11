@@ -12,7 +12,7 @@ section here links to the README section that is its reference.
 | --- | --- | --- |
 | A GitHub account of its own | Sign `gh` in as it on the machine you run `tauceti-fleet` from: `gh auth login -h github.com -p https -s workflow`. Or name a token in the profile's `github_token_file` | Until revoked |
 | A Claude setup-token | `claude setup-token`, saved in a private file | A year; it never rotates, so every worker shares it |
-| A Claude usage sign-in, same account | `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login` | About four weeks from the sign-in |
+| A Claude usage sign-in, same account | `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login` on Linux, which writes `.credentials.json` in that directory. On a Mac it writes no file ([macOS](#macos)) | About four weeks from the sign-in |
 | A Codex sign-in, for `codex` and `auto` slots | `codex login` on the host, as the host account | Renewed by the workers, see below |
 
 **The account.** The fleet acts as the profile's `github_account` and as nothing
@@ -123,7 +123,8 @@ credential blocks worker activation. Once a worker has renewed the usage
 sign-in the operator's copy of it no longer works, so a repeated `add` leaves
 the host's sign-in in place unless the profile's file holds a different one.
 When it is due, sign in again on the operator's machine and repeat `add`, or run
-the command `doctor` prints on the host.
+the command `doctor` prints on the host; both need Linux, since on a Mac the
+sign-in goes to the Keychain and the file stays as it was.
 
 ### Slot groups
 
@@ -402,12 +403,17 @@ A Mac takes the workers role and nothing else
 - The agents inherit the non-interactive PATH of the SSH session that installed
   them (zsh reads `~/.zshenv`), which must provide Python 3.11+, `uv` and the
   worker tools `doctor` lists.
-- Claude Code keeps an ordinary sign-in in the login Keychain. With the two
+- Claude Code keeps an ordinary sign-in in the login Keychain, also with
+  `CLAUDE_CONFIG_DIR` set, and writes no `.credentials.json`. With the two
   credential keys of the [profile](#a-minimal-profile), the workers run their
   agents from the token file, renew the usage sign-in as a file, and read no
-  Claude item from the Keychain. Nobody may sign in to `claude` with the token's
-  directory as `CLAUDE_CONFIG_DIR`: Claude Code prefers a Keychain item for
-  that directory to the file. Codex keeps a file and is renewed as on Linux.
+  Claude item from the Keychain. That file has to be made on Linux: sign in
+  there as in [What it needs](#what-it-needs) and transfer it with `add`, both
+  the first time and when it falls due. The sign-in command `doctor` prints
+  updates only the Keychain when run on the Mac, and `add` from a Mac finds no
+  file to transfer. Nobody may sign in to `claude` with the token's directory as
+  `CLAUDE_CONFIG_DIR`: Claude Code prefers a Keychain item for that directory to
+  the file. Codex keeps a file and is renewed as on Linux.
 
 ## Troubleshooting
 
@@ -415,7 +421,7 @@ A Mac takes the workers role and nothing else
 | --- | --- | --- |
 | Every worker `waiting-quota`; the usage line shows a window at 0% left | The subscription's session or weekly allowance is spent | Nothing: workers resume when the window resets, and `auto` slots keep working while the other provider has room |
 | Workers wait with `claude usage HTTP 403` | The agents run on a setup-token and there is no usage sign-in to read the windows with | Add `claude_usage_credentials_file` to the profile and repeat `add` |
-| Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, and keep that directory for the fleet alone |
+| Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, on Linux ([macOS](#macos)), and keep that directory for the fleet alone |
 | `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it | Run `codex` as the host account, signing in again if it asks; then let the workers renew it ([Codex renewal](#what-it-needs)) |
 | A worker's log repeats `keeps Claude creds first copied from ...` | The slot first ran before the host had `claude_token_file` and still uses the sign-in it copied then | With the worker stopped, remove `.credentials.json` and `.tauceti-creds-source` from the `.claude` directory of that worker's isolated home; its next start copies the token |
 | `Starting new work: paused; outside the weekly schedule` in a slot you expected | Slot times are host local time unless saved with `--timezone`; a saved schedule the controller cannot read admits nothing | `schedule HOST` shows what is saved; `--clear` or a new set of slots replaces it |
