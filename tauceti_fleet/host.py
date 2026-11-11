@@ -409,8 +409,9 @@ def running_manager():
 
 
 RESTART_MANAGER = (
-    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, which ends every worker's "
-    "current round, then clear the halt again"
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, then clear the halt again. "
+    "Workers in their own scopes keep running and the new manager adopts them; a worker whose status shows "
+    "degraded isolation runs inside the manager's service and its round ends with it"
 )
 
 
