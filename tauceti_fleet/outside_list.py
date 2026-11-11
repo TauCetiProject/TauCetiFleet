@@ -151,7 +151,9 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     curve lets the workers spend by the horizon is planned for. `session` is the
     session window as dict(used, resets_at) or None. The cap holds whenever the
     inputs cannot support a decision, and is not raised while the curve lets no
-    round start in either window.
+    round start in either window. Rounds are recorded through every hold but the
+    schedule's and a disabled host's, so that the split covers the span the
+    spending rate is measured over.
     """
     floor, ceiling = bounds["floor"], bounds["ceiling"]
     cap = min(ceiling, max(floor, state["cap"] if type(state.get("cap")) is int else bounds["start"]))
@@ -180,10 +182,11 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
         if not readings or reading["fetched_at"] > readings[-1][0]:
             readings.append([reading["fetched_at"], reading["used"]])
         readings = [r for r in readings if r[0] >= now - WINDOW]
-        samples = [s for s in [*samples, [now, *rounds]] if s[0] >= now - WINDOW]
         rate = burn(readings)
         if rate is None:
             hold = f"under {MIN_SPAN // 3600} h of usage readings in this weekly window"
+    if enabled and slot_seconds != 0:
+        samples = [s for s in [*samples, [now, *rounds]] if s[0] >= now - WINDOW]
     result = dict(version=1, at=now, cap=cap, previous=cap, floor=floor, ceiling=ceiling,
                   readings=readings, rounds=samples, resets_at=resets_at, held=hold is not None, reason=hold)
     if hold:

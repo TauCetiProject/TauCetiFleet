@@ -168,6 +168,21 @@ class ControlLaw(unittest.TestCase):
         opening = outside_list.advance(state, **dict(values, reading=dict(fetched_at=now - 60, used=0.0, resets_at=None)), session=session)
         self.assertEqual(opening["cap"], 12)
 
+    def test_rounds_are_kept_while_the_reading_is_held(self):
+        now = 50 * HOUR
+        state = dict(cap=14, resets_at=100 * HOUR, readings=[[now - 6 * HOUR, 0.0], [now - 4 * HOUR, 2.0]],
+                     rounds=[[now - 6 * HOUR + 900 * n, 1, 0, 0] for n in range(8)])
+        values = dict(now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, session_left=60.0, curve=outside_list.pace_points(dict(pace="0:100")))
+        for n in range(15):
+            at = now - 4 * HOUR + 900 * (n + 1)
+            state = outside_list.advance(state, **dict(values, now=at), reading=None, rounds=(0, 1, 0))
+            self.assertEqual(state["reason"], "no usage reading yet")
+        self.assertEqual(len(state["rounds"]), 23)
+        stepped = outside_list.advance(state, **values, reading=dict(fetched_at=now - 60, used=6.0, resets_at=100 * HOUR), rounds=(0, 1, 0))
+        self.assertAlmostEqual(stepped["outside_share"], 16 / 24)
+        # Two hours of list work and four of outside-list work at 1%/h, 50 h left: a third of 50%, plus a quarter, reserved.
+        self.assertAlmostEqual(stepped["reserve"], 50 / 3 * 1.25, delta=0.1)
+
     def test_simulated_weeks(self):
         for name, simulation, quiet_from in WEEKS:
             with self.subTest(name):
