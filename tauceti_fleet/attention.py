@@ -234,6 +234,9 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
     """One read from the pull request's own forge, GitHub with the host's credential or Forgejo anonymously.
     The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
     path = f"repos/{repository}/{'issues' if named else 'pulls'}/{number}"
+    # The answer may describe the pull request as of any moment after the request starts, so it counts only
+    # from then: a record rewritten while the request is in flight is newer than the answer.
+    started = time.time()
     try:
         if forge == "github":
             data = github.request(path, token_file=config.get("github_token_file"))
@@ -257,7 +260,7 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
             raise
     except (KeyError, TypeError, AttributeError):
         raise FleetError(f"{origin} returned an unexpected answer for {repository}#{number}") from None
-    return dict(value, observed=time.time())
+    return dict(value, observed=started)
 
 
 def origins_path():

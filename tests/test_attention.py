@@ -5,6 +5,7 @@ import os
 import signal
 import sqlite3
 import tempfile
+import time
 import tomllib
 import unittest
 import urllib.error
@@ -170,6 +171,26 @@ class Attention(unittest.TestCase):
         self.assertEqual(len(self.listed()["cleared"]), 3)
         (self.root / "activity/activity.sqlite").write_text("not a database")
         self.assertEqual(len(self.listed()["items"]), 6)
+
+    def test_an_answer_counts_from_when_its_request_started(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 7, head="a" * 40, summary="A")
+        clock = [at + 10]
+
+        def answer(path, **_):
+            clock[0] = at + 15
+            self.record("declined", "fix", 7, head="b" * 40, summary="B",
+                        at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at + 15)))
+            clock[0] = at + 20
+            return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+
+        self.github.side_effect = answer
+        with patch.object(attention.time, "time", side_effect=lambda: clock[0]):
+            value = self.listed(lookup=True)
+        self.assertEqual([(i["id"], i["head"]) for i in value["items"]], [("7", "b" * 40)])
+        self.assertEqual(store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]["observed"],
+                         at + 10)
 
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()

@@ -837,22 +837,22 @@ An item leaves the list by itself once its pull request is merged, closed or at
 a different head than the record names. The evidence is pull request state
 already on the host, read from the worker's prepared activity database, and only
 an observation from a later second than the record's `last_at`, which has
-whole-second resolution, counts. That database covers GitHub pull requests this
-host's workers opened, and is never matched against a Forgejo record. For the
-rest, `--lookup` asks the record's forge: GitHub with the host's credential, a
-Forgejo instance anonymously through its REST API, so a private Forgejo
-repository cannot be looked up. It asks once per listed pull request, once per
-pull request an item names until that one is known to be merged or closed, and
-once per dropped record whose pull request has not merged, since it can reopen
-at the same head. That is at most 100 requests a call, each pull request asked
-about least recently first, so repeated calls reach every one. A forge that
-fails leaves the other's requests to go ahead and is asked after them in later
-calls, and a pull request its forge will not show (HTTP 404, or 403 on Forgejo)
-is reported and asked again in turn without stopping the rest of that forge. The
-answers are kept in `~/.local/state/tauceti-fleet/attention/`; the worker's
-record files are never rewritten. Nothing else in `attention` or `status`
-contacts a forge. `--ack all` also archives the records the list had already
-dropped.
+whole-second resolution, counts; a `--lookup` answer is dated from when its
+request started. That database covers GitHub pull requests this host's workers
+opened, and is never matched against a Forgejo record. For the rest, `--lookup`
+asks the record's forge: GitHub with the host's credential, a Forgejo instance
+anonymously through its REST API, so a private Forgejo repository cannot be
+looked up. It asks once per listed pull request, once per pull request an item
+names until that one is known to be merged or closed, and once per dropped
+record whose pull request has not merged, since it can reopen at the same head.
+That is at most 100 requests a call, each pull request asked about least
+recently first, so repeated calls reach every one. A forge that fails leaves the
+other's requests to go ahead and is asked after them in later calls, and a pull
+request its forge will not show (HTTP 404, or 403 on Forgejo) is reported and
+asked again in turn without stopping the rest of that forge. The answers are
+kept in `~/.local/state/tauceti-fleet/attention/`; the worker's record files are
+never rewritten. Nothing else in `attention` or `status` contacts a forge.
+`--ack all` also archives the records the list had already dropped.
 
 While records are on, the controller counts the listed items once a minute and
 `status` shows the count above the host's worker lines, with the command:
