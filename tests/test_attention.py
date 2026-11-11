@@ -307,6 +307,21 @@ class Attention(unittest.TestCase):
         self.assertEqual(sorted(store.read(attention.notes_path("declined-fix-7.json"))["prs"]),
                          [f"{REPOSITORY}#{n}" for n in (11, 12, 13, 7)])
 
+    def test_an_unreadable_incident_directory_is_reported_and_not_counted_as_empty(self):
+        config = self.on()
+        self.record("declined", "fix", 7, summary="no")
+        attention.incidents_dir().chmod(0o300)
+        self.addCleanup(lambda: attention.incidents_dir().exists() and attention.incidents_dir().chmod(0o700))
+        if os.access(attention.incidents_dir(), os.R_OK):
+            self.skipTest("permissions do not apply to this user")
+        with self.assertRaises(store.FleetError):
+            self.listed()
+        attention.prepare(config)
+        self.assertIn("could not be listed", attention.prepared()["error"])
+        attention.incidents_dir().chmod(0o700)
+        attention.incidents_dir().rename(self.root / "elsewhere")
+        self.assertEqual(self.listed()["items"], [])
+
     def test_lookup_asks_again_about_a_closed_record_until_it_is_acknowledged(self):
         self.on()
         self.record("declined", "fix", 7, summary="no")

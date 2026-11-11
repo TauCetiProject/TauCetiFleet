@@ -100,10 +100,14 @@ def overtaken(record, observation):
 
 
 def live_records():
+    """Path.glob hides a directory it cannot read, which would look like no records at all."""
     try:
-        paths = sorted(incidents_dir().glob("*.json"))
-    except OSError:
+        with os.scandir(incidents_dir()) as entries:
+            paths = sorted(incidents_dir() / e.name for e in entries if e.name.endswith(".json"))
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise FleetError(f"{incidents_dir()} could not be listed: {exc.strerror or exc}") from None
     found = []
     for path in paths:
         try:
