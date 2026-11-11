@@ -102,10 +102,14 @@ def overtaken(record, observation):
 
 
 def live_records():
+    """Path.glob hides a directory it cannot read, which would look like no records at all."""
     try:
-        paths = sorted(incidents_dir().glob("*.json"))
-    except OSError:
+        with os.scandir(incidents_dir()) as entries:
+            paths = sorted(incidents_dir() / e.name for e in entries if e.name.endswith(".json"))
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise FleetError(f"{incidents_dir()} could not be listed: {exc.strerror or exc}") from None
     found = []
     for path in paths:
         try:
@@ -295,34 +299,36 @@ def incident_lookup(config, items):
             return []
         return [n for n in item["named"] if n.get("state") in (None, "OPEN") and n["pr"] != item["pr"]]
 
-    def checked(item):
-        """When this item's pull requests were last asked about, so a bounded call starts where the last one stopped."""
-        own = notes(item["record"]).get(f"{item['repository']}#{item['pr']}")
-        times = [own.get("observed") if isinstance(own, dict) else None] + [n.get("observed") for n in open_named(item)]
-        return min(t if isinstance(t, int | float) else 0 for t in times)
+    def observed(value):
+        return value["observed"] if isinstance(value, dict) and isinstance(value.get("observed"), int | float) else 0
 
-    items = [i for i in items if "pr" in i and i.get("cleared") != "merged"]
-    for item in sorted(items, key=checked):
-        if error:
+    # Each request is ordered by when it was last answered, so a bounded call resumes where the last one stopped,
+    # inside an item as well as between items.
+    requests = []
+    for item in (i for i in items if "pr" in i and i.get("cleared") != "merged"):
+        own = notes(item["record"]).get(f"{item['repository']}#{item['pr']}")
+        requests.append((observed(own), item, item["pr"], False))
+        requests += [(observed(n), item, n["pr"], True) for n in open_named(item)]
+    requests.sort(key=lambda r: r[0])
+    for _, item, number, named in requests:
+        key = (item["repository"], number, named)
+        if key in answers:
+            continue
+        if asked >= MAX_LOOKUPS or time.monotonic() >= deadline:
+            error = f"stopped after {asked} requests; run --lookup again for the rest"
             break
-        cached = notes(item["record"])
-        fresh = {}
-        wanted = [(item["pr"], False)] + [(n["pr"], True) for n in open_named(item)]
-        for number, named in wanted:
-            key = (item["repository"], number, named)
-            if key not in answers:
-                if asked >= MAX_LOOKUPS or time.monotonic() >= deadline:
-                    error = f"stopped after {asked} requests; run --lookup again for the rest"
-                    break
-                try:
-                    asked += 1
-                    answers[key] = ask(config, item["repository"], number, named=named)
-                except FleetError as exc:
-                    error = str(exc)
-                    break
-            fresh[f"{item['repository']}#{number}"] = answers[key]
-        if fresh:
-            atomic(notes_path(item["record"]), dict(version=1, prs={**cached, **fresh}))
+        try:
+            asked += 1
+            answers[key] = ask(config, item["repository"], number, named=named)
+        except FleetError as exc:
+            error = str(exc)
+            break
+    fresh = {}
+    for _, item, number, named in requests:
+        if (key := (item["repository"], number, named)) in answers:
+            fresh.setdefault(item["record"], {})[f"{item['repository']}#{number}"] = answers[key]
+    for record, values in fresh.items():
+        atomic(notes_path(record), dict(version=1, prs={**notes(record), **values}))
     return dict(asked=asked, error=error)
 
 

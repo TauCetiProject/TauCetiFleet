@@ -931,8 +931,8 @@ this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
 credential: once per listed pull request, once per pull request an item names
 until that one is known to be merged or closed, and once per dropped record
 whose pull request has not merged, since it can reopen at the same head. That
-is at most 100 requests a call, items asked about least recently first, so
-repeated calls reach every item. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
+is at most 100 requests a call, each pull request asked about least recently
+first, so repeated calls reach every one. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
 worker's live record files are never rewritten. Nothing else in `attention` or
 `status` contacts GitHub. `--ack all` also archives the records the list had
 already dropped.
@@ -955,6 +955,9 @@ Needs you: 4 items (1 budget-spent, 2 declined, 1 halted)
 
 A host with `incidents` unset shows the block only while a worker is halted or
 a credential is due.
+
+An incident directory Fleet cannot list is an error in `attention` and a
+`Needs you: unavailable` line in `status`, never an empty list.
 
 ## Public operations telemetry
 
