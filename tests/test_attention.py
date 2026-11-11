@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -579,6 +580,23 @@ class Attention(unittest.TestCase):
             "Rulings in the last 24h: 1 close, 2 wait"])
         self.assertEqual(attention.status_lines("box", dict(count=0, kinds={}, rulings={"retry": 1})),
                          ["Rulings in the last 24h: 1 retry"])
+
+    def test_a_ruling_stands_only_on_the_write_of_the_incident_whose_version_it_records(self):
+        self.on()
+        on_forgejo = dict(forge=dict(kind="forgejo", url="https://forge.example"), repository_id=1, suffix=".0123456789ab")
+        for fields in ({}, on_forgejo):
+            first = self.record("declined", "fix", 5, summary="declined", **fields)
+            version = hashlib.sha256(json.dumps(json.loads(first.read_text()), sort_keys=True).encode()).hexdigest()[:20]
+            self.ruling("declined", "fix", 5, "retry", incident_version=version, **fields)
+        value = self.listed()
+        self.assertEqual([(i["ruling"]["stands"], i.get("rank")) for i in value["items"]], [(True, 2), (True, 2)])
+        self.assertEqual(attention.summarize(value)["count"], 0)
+        for fields in ({}, on_forgejo):
+            self.record("declined", "fix", 5, summary="declined again", count=2, **fields)
+        value = self.listed()
+        self.assertEqual([(i["ruling"]["stands"], i.get("rank")) for i in value["items"]], [(False, None), (False, None)])
+        self.assertEqual(attention.summarize(value)["count"], 2)
+        self.assertEqual(len(self.listed(ack="all")["acknowledged"]), 2)
 
     def test_ack_all_leaves_a_ruling_that_waits_for_nobody_and_a_number_archives_it(self):
         self.on()

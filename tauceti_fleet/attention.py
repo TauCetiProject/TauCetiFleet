@@ -6,6 +6,7 @@ A worker's decide phase (its docs/decide.md) adds `ruling` records there, shown 
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -154,6 +155,17 @@ def is_ruling(record):
             and bool(record["ruling"]) and type(record.get("pr")) is int)
 
 
+def made_on(ruling, incident):
+    """Whether `ruling` was made on this write of `incident`, as the worker decides it: by the
+    `incident_version` digest it records, or by `incident_at` from a worker that records no digest."""
+    if ruling.get("head") != incident.get("head"):
+        return False
+    if "incident_version" in ruling:
+        digest = hashlib.sha256(json.dumps(incident, sort_keys=True).encode()).hexdigest()[:20]
+        return ruling["incident_version"] == digest
+    return ruling.get("incident_at") == incident.get("last_at")
+
+
 def ruling_facts(record, *, live, incident=None):
     """What the list shows of a ruling. It stands while its record is live and, where the incident is
     live as well, it was made on that write of the incident at that head."""
@@ -162,8 +174,7 @@ def ruling_facts(record, *, live, incident=None):
 
     return dict(
         ruling=line(record["ruling"], 20),
-        stands=live and (incident is None or (record.get("head") == incident.get("head")
-                                              and record.get("incident_at") == incident.get("last_at"))),
+        stands=live and (incident is None or made_on(record, incident)),
         at=line(record.get("last_at"), 20),
         by=line(record.get("by"), 20),
         note=printable(record.get("note"), 1500),
