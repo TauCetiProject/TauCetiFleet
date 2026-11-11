@@ -261,7 +261,32 @@ class Store(unittest.TestCase):
         (self.bin / "tauceti").write_text(TAUCETI)
         self.inventory(dict(number=7, state="OPEN", head=self.head), dict(number=9, state="OPEN", head="f" * 40))
         state = mathlib_store.warm(config, now=1002)
-        self.assertEqual((list(state["needed"]), state["error"]), ([self.new, self.old], "some pull request heads could not be fetched"))
+        self.assertEqual((list(state["needed"]), state["error"]), ([self.new, self.old],
+                         "some pull request heads could not be fetched; pins unreadable at #9; keeping their last known revisions"))
+
+    def test_unreadable_pins_keep_their_last_known_revision_and_remove_nothing(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        git(self.tauceti, "checkout", "-q", "--detach", self.head)
+        moved = commit(self.tauceti, {"lake-manifest.json": "{"})
+        git(self.tauceti, "update-ref", "refs/pull/7/head", moved)
+        git(self.tauceti, "checkout", "-q", "main")
+        self.inventory(dict(number=7, state="OPEN", head=moved))
+        for now in (50000, 50000 + hold):
+            state = mathlib_store.warm(config, now=now)
+            self.assertEqual((state["needed"][self.old]["pinned_by"], state["unpinned"]), (["#7"], {}))
+            self.assertEqual(state["error"], "pins unreadable at #7; keeping their last known revisions")
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        # A clock that has run out is not acted on while the inventory is unavailable.
+        self.inventory(dict(number=7, state="CLOSED", head=moved))
+        self.assertEqual(mathlib_store.warm(config, now=60000)["unpinned"], {self.old: 60000})
+        (self.bin / "tauceti").write_text("#!/bin/sh\nexit 1\n")
+        state = mathlib_store.warm(config, now=60000 + hold)
+        self.assertIn("activity inventory", state["error"])
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        (self.bin / "tauceti").write_text(TAUCETI)
+        mathlib_store.warm(config, now=60000 + hold)
+        self.assertFalse((self.mounted / self.old).exists())
 
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})

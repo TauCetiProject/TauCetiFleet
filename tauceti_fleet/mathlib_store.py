@@ -86,18 +86,21 @@ def open_prs(config):
     }
 
 
-def pins(config):
+def pins(config, known=None):
     """Mathlib revision and toolchain pinned by main and by each open pull request of this host's workers.
 
     The pull requests come from the worker's prepared inventory. One fetch brings main and
     the heads that moved into a blobless cache, from which the two pin files are read.
+    Returns the pins, a note on what could not be read, and whether every pin was read: a
+    pull request whose pins are unreadable keeps the revision `known` (the last pass's
+    pins) gives it.
     """
     cache = data_dir() / "mathlib-store" / "tauceti.git"
     repo = functools.partial(git, "--git-dir", cache)
     if not (cache / "HEAD").exists():
         git("init", "-q", "--bare", cache)
         repo("remote", "add", "origin", SOURCE)
-    note = None
+    notes = []
     held = dict(
         line.split() for line in repo("for-each-ref", "--format=%(refname:lstrip=2) %(objectname)", "refs/pins/").splitlines()
     )
@@ -107,7 +110,7 @@ def pins(config):
             repo("update-ref", "-d", "refs/pins/" + name)
     except (FleetError, ValueError, KeyError, TypeError, AttributeError):
         prs = {name: head for name, head in held.items() if name != "main"}
-        note = "open pull requests unavailable from the worker's activity inventory; keeping the last known ones"
+        notes.append("open pull requests unavailable from the worker's activity inventory; keeping the last known ones")
     fetch = ("fetch", "-q", "--depth=1", "--filter=blob:none", "--no-tags", "--no-write-fetch-head", "origin",
              "+refs/heads/main:refs/pins/main")
     moved = [f"+refs/pull/{name}/head:refs/pins/{name}" for name, head in prs.items() if held.get(name) != head]
@@ -119,9 +122,12 @@ def pins(config):
             if not refspecs:
                 raise FleetError("Cannot fetch TauCeti main to read its Mathlib pin") from None
             # A single pull request ref the remote no longer has fails the whole fetch.
-            note = "some pull request heads could not be fetched"
-    needed = {}
+            notes.append("some pull request heads could not be fetched")
+    last = {who: (revision, entry.get("toolchain")) for revision, entry in (known or {}).items()
+            for who in entry.get("pinned_by", [])}
+    needed, unread = {}, []
     for name in ["main", *sorted(prs, key=int)]:
+        who = name if name == "main" else "#" + name
         try:
             packages = json.loads(repo("show", f"refs/pins/{name}:lake-manifest.json"))["packages"]
             revision = next(p["rev"] for p in packages if p.get("name") == "mathlib")
@@ -131,10 +137,15 @@ def pins(config):
         except (FleetError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
             if name == "main":
                 raise FleetError("Cannot read the Mathlib pin of TauCeti main") from None
-            continue
+            unread.append(who)
+            if who not in last:
+                continue
+            revision, toolchain = last[who]
         entry = needed.setdefault(revision, dict(toolchain=toolchain, pinned_by=[]))
-        entry["pinned_by"].append(name if name == "main" else "#" + name)
-    return needed, note
+        entry["pinned_by"].append(who)
+    if unread:
+        notes.append("pins unreadable at " + ", ".join(unread) + "; keeping their last known revisions")
+    return needed, "; ".join(notes) or None, not notes
 
 
 def ready(store, revision):
@@ -194,23 +205,24 @@ def warm(config=None, now=None):
             store.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(root / "staging", ignore_errors=True)
             try:
-                state["needed"], state["error"] = pins(config)
-                state["checked_at"], checked = now, True
+                state["needed"], state["error"], complete = pins(config, state["needed"])
+                state["checked_at"] = now
             except FleetError as exc:
-                state["error"], checked = str(exc), False
+                state["error"], complete = str(exc), False
             needed, failures = state["needed"], state["failures"]
             held = [p.name for p in store.iterdir() if REVISION.fullmatch(p.name)]
-            # A failed check says nothing about what is pinned now: no clock starts and nothing pinned is removed.
-            if checked:
+            # Only a check that read every open pull request's pins says what is unpinned: after any
+            # failed read no clock starts and nothing is removed.
+            if complete:
                 state["unpinned"] = {name: state["unpinned"].get(name, now) for name in held
                                      if name not in needed and ready(store, name)}
             for name in held:
                 if ready(store, name):
-                    expired = checked and now - state["unpinned"].get(name, now) >= hold(config)
+                    expired = now - state["unpinned"].get(name, now) >= hold(config)
                 else:
                     # Its marker was deleted to withdraw it, which is when the directory last changed.
                     expired = now - (store / name).stat().st_mtime >= hold(config)
-                if expired:
+                if complete and expired:
                     shutil.rmtree(store / name)
                     state["unpinned"].pop(name, None)
             for revision, entry in needed.items():
