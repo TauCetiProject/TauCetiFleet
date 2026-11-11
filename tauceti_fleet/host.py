@@ -400,10 +400,11 @@ def written_roles():
 
 
 def worker_config(config):
-    # enable() writes definitions beside the controller; the lock keeps a hold
-    # it records from being dropped by a concurrent unapplied_workers().
+    # enable() writes definitions beside the controller. Under this lock the
+    # saved configuration replaces the caller's snapshot, and holds, admission
+    # revocation and the controller's acknowledgment and publication serialize.
     with locked(state_dir() / "worker-definitions.lock"):
-        return write_worker_config(config)
+        return write_worker_config(dict(config, **host_config()))
 
 
 def write_worker_config(config):
@@ -415,6 +416,15 @@ def write_worker_config(config):
     if changed:
         pending = set(read(state_dir() / "unapplied-workers.json", {}).get("workers", []))
         atomic(state_dir() / "unapplied-workers.json", dict(workers=sorted(pending | changed)))
+        admission = read(state_dir() / "admission.json")
+        if admission and changed & set(admission.get("workers", [])):
+            focused = admission.get("roadmap_focus") or {}
+            if focused.get("fractional_worker") in changed:
+                focused["fractional_worker"] = None
+            if "workers" in focused:
+                focused["workers"] = [w for w in focused["workers"] if w not in changed]
+            atomic(state_dir() / "admission.json",
+                   dict(admission, workers=[w for w in admission["workers"] if w not in changed]))
     lines = ["version = 1"]
     for wid, fields, _ in definitions:
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
@@ -1097,19 +1107,20 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                held = unapplied_workers()
-                admitted = [wid for wid in ids[:target] if wid not in held]
-                roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
-                atomic(
-                    state_dir() / "admission.json",
-                    dict(
-                        version=1,
-                        expires_at=time.time() + 15,
-                        workers=admitted,
-                        reason=reason,
-                        roadmap_focus=roadmap_focus,
-                    ),
-                )
+                with locked(state_dir() / "worker-definitions.lock"):
+                    held = acknowledge_workers()
+                    admitted = [wid for wid in ids[:target] if wid not in held]
+                    roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
+                    atomic(
+                        state_dir() / "admission.json",
+                        dict(
+                            version=1,
+                            expires_at=time.time() + 15,
+                            workers=admitted,
+                            reason=reason,
+                            roadmap_focus=roadmap_focus,
+                        ),
+                    )
                 atomic(
                     state_dir() / "status.json",
                     dict(
