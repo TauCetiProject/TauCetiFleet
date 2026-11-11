@@ -247,7 +247,7 @@ class ClaudeCredentials(unittest.TestCase):
         cases = [
             (dict(claude_billing=None), "require claude_billing subscription"),
             (dict(claude_token_file=None), "requires claude_token_file"),
-            (dict(env={"CLAUDE_CONFIG_DIR": "/elsewhere"}), "env must not set"),
+            (dict(env={"TAUCETI_CLAUDE_USAGE_CREDENTIALS": "/elsewhere"}), "env must not set TAUCETI_CLAUDE_USAGE_CREDENTIALS"),
             (dict(env={"A": "x" * (16 * 1024 - 3)}), "credential paths Fleet adds to it exceed 16 KB"),
         ]
         for changes, message in cases:

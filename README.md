@@ -150,13 +150,14 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
 | `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
-| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
 
 With these keys alone a subscription profile carries no model credential. Sign
 in to `claude` or `codex` as the host account before enabling workers; each
-worker copies that login into its own home. Like a model change, changing any of
-these keys on an active host requires a drain before repeating `add`. A key
-removed from the profile returns to its default.
+worker copies that login into its own home once and keeps following that
+location. Like a model change, changing any of these keys on an active host
+requires a drain before repeating `add`. A key removed from the profile returns
+to its default.
 
 Two more keys let a subscription profile carry the Claude sign-in, so the host
 account needs none of its own:
