@@ -257,6 +257,27 @@ class SubscriptionUsage(unittest.TestCase):
         self.assertEqual(subscription_usage.claude_logins(dict(claude_billing="subscription")),
                          [self.root / "home/.claude", chosen])
 
+    def test_worker_data_root_inherited_by_the_worker_launcher_is_searched_by_a_later_status(self):
+        hour = 3600
+        kept = self.root / "durable"
+        token = self.root / "token"
+        token.write_text("synthetic-token")
+        store.update_host(github_token_file=str(token), agent="codex")
+        self.codex(kept / "state/fleet-1/cache/quota-codex.json", 60, (20, 5 * hour, hour))
+        self.assertIsNone(subscription_usage.readings(store.host_config(), NOW)["codex"])
+        with (
+            patch.dict(os.environ, {"TAUCETI_LEGACY_DATA_ROOT": str(kept)}),
+            patch.object(host, "executable", return_value="/fake/tauceti"),
+            patch.object(host.os, "execv"),
+        ):
+            host.run_workers()
+        # Status runs in another process, which does not share the launcher's environment.
+        self.assertNotIn("TAUCETI_LEGACY_DATA_ROOT", os.environ)
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
+        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        self.assertIsNone(subscription_usage.readings(store.host_config(), NOW)["codex"])
+
 
 if __name__ == "__main__":
     unittest.main()
