@@ -443,7 +443,11 @@ class Wiring(unittest.TestCase):
                          (dict(fetched_at=now - 120, used=30.0, resets_at=now + 100 * HOUR), 5.0, None, [0.0, 0.0, 0.0]))
         self.assertEqual(seen["curve"], [(0.0, 0.0), (60.0, 40.0), (100.0, 100.0)])
         self.assertEqual(seen["session"], dict(used=95.0, resets_at=now + HOUR))
+        # A credential the workers no longer serve leaves the reading in force.
         other = cache.with_name("quota-claude-other.json")
+        other.write_text(json.dumps(dict(fetched_at=now - 2 * HOUR, fp="other", payload=windows)))
+        pacer.state["at"] = now - outside_list.EVERY
+        self.assertEqual(pacer.tick(config, list, now=now)["reason"], "under 2 h of usage readings in this weekly window")
         other.write_text(json.dumps(dict(fetched_at=now - 60, fp="other", payload=windows)))
         pacer.state["at"] = now - outside_list.EVERY
         block = pacer.tick(config, list, now=now)

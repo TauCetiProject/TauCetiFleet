@@ -970,8 +970,8 @@ file cannot be read. The installed TauCetiWorker, and the one a running worker
 manager started from, must report `targets_fallback` in their Fleet protocol;
 otherwise the definitions stay as they are and `status` and `doctor` say the
 cap is not paced. A live update leaves a running manager on its old runtime,
-so after one `status` names the manager restart, which ends every worker's
-current round; the controller checks again within 15 minutes.
+so after one `status` names the manager restart; the controller checks again
+within 15 minutes.
 
 Every 15 minutes the controller takes one step:
 
