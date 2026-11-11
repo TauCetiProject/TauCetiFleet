@@ -11,7 +11,7 @@ from pathlib import Path
 from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, hostos, native_runner, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
 from .process import executable, run
-from .report import snapshot
+from .report import budget_environment, budget_path, snapshot
 from .store import (
     FleetError,
     atomic,
@@ -377,7 +377,7 @@ def run_workers():
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
-    os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
+    os.environ.setdefault("TAUCETI_BUDGET_DIR", str(budget_path()))
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
@@ -1028,7 +1028,7 @@ def budget(payload):
             except (InvalidOperation, ValueError):
                 raise FleetError("Budget amounts must be finite and nonnegative") from None
             args += ["--" + name.replace("_", "-"), str(amount)]
-    return json.loads(run(args, timeout=30).stdout)
+    return json.loads(run(args, timeout=30, env=budget_environment()).stdout)
 
 
 def rpc(payload):

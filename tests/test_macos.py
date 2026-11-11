@@ -156,6 +156,24 @@ class MacOS(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "no worker slice"):
             host.stop_workers()
 
+    def test_workers_and_funding_share_one_budget_ledger(self):
+        for name in ("TAUCETI_BUDGET_DIR", "XDG_STATE_HOME"):
+            os.environ.pop(name, None)
+        ledger = str(self.home / ".local/state/tauceti/budget")
+        funded = subprocess.CompletedProcess([], 0, stdout="{}")
+        with patch.object(host, "executable", return_value="/fake/tauceti"), \
+                patch.object(host, "run", return_value=funded) as run:
+            host.budget(dict(grant=100))
+        self.assertEqual(run.call_args.args[0][-2:], ["--grant", "100"])
+        self.assertEqual(run.call_args.kwargs["env"]["TAUCETI_BUDGET_DIR"], ledger)
+        self.assertNotIn("TAUCETI_BUDGET_DIR", os.environ)
+        secret = self.home / "token"
+        secret.write_text("fake-token")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        self.assertEqual(os.environ["TAUCETI_BUDGET_DIR"], ledger)
+
     def test_resources_count_free_speculative_and_inactive_pages(self):
         caps = capabilities.resources()
         self.assertEqual(caps["memory_total"], 32 * GIB)
