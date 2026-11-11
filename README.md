@@ -150,7 +150,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
 | `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
-| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, `TAUCETI_WORKER_SLICE`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`) are refused. Not a secret store: values are written to `workers.toml` | none |
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
@@ -241,7 +241,7 @@ it restarts only that controller's main process via its existing systemd restart
 policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
-fleet weight 10. Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
+fleet weight 10 (except bubble containers; see `sandbox`). Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
 reserved workspace RAM. The default VM shape for staging/mixed registrations is
 32 vCPUs / 64 GiB, with 2 GiB additional host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
@@ -251,7 +251,7 @@ exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
 scheduling overhead. By default, CI and workers share a parent memory ceiling
-that preserves host OS headroom. An explicit
+that preserves host OS headroom; bubble containers are outside it. An explicit
 `--ci-memory-budget-gib N` additionally bounds the whole CI child slice at N GiB and permits
 guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
 completions and memory events when choosing concurrency. Workers use currently
