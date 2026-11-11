@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -420,6 +421,25 @@ class Attention(unittest.TestCase):
         self.assertNotIn("Authorization", seen[0][1])
         with self.assertRaises(store.FleetError):
             FORGEJO_REQUEST("https://forge.example/evil?", "x")
+
+    def test_an_interrupted_response_is_a_fleet_error_on_both_forges(self):
+        class Interrupted:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                raise http.client.IncompleteRead(b"{")
+
+        with patch("urllib.request.urlopen", return_value=Interrupted()):
+            for call in (lambda: FORGEJO_REQUEST("https://forge.example", "repos/O/R/pulls/1"),
+                         lambda: REQUEST("repos/O/R/pulls/1")):
+                with self.assertRaises(store.FleetError):
+                    call()
 
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()

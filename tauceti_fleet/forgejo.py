@@ -1,5 +1,6 @@
 """Anonymous reads from a Forgejo instance's REST API. Fleet holds no Forgejo credential."""
 
+import http.client
 import json
 import re
 import urllib.error
@@ -26,5 +27,5 @@ def request(origin, path):
         error = FleetError(f"{origin} GET returned HTTP {exc.code}")
         error.status = exc.code
         raise error from None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         raise FleetError(f"{origin} request unavailable; check network access and retry") from None

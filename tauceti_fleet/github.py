@@ -1,5 +1,6 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -37,7 +38,7 @@ def request(path, *, token_file=None, method="GET", data=None):
         )
         error.status = exc.code
         raise error from None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         raise FleetError("GitHub request unavailable; check network access and retry") from None
 
 
