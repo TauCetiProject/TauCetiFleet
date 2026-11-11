@@ -122,7 +122,10 @@ class Isolated(unittest.TestCase):
             self.assertEqual(checks["worker-tool-" + tool]["roles"], ["workers"])
         self.assertNotIn("anthropic_api_key_file", checks)
         self.assertIn("anthropic_api_key_file", defaults)
-        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus"} & defaults)
+        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus", "worker-sandbox-bubble"} & defaults)
+        bubble = checks["worker-sandbox-bubble"]
+        self.assertEqual((bubble["status"], bubble["roles"]), ("warning", ["workers"]))
+        self.assertIn("outside tauceti-fleet-workers.slice", bubble["evidence"])
 
     def test_profile_rejects_what_the_worker_rejects_and_changes_only_while_drained(self):
         store.host_config()
@@ -162,6 +165,18 @@ class Isolated(unittest.TestCase):
             host.configure(dict(claude_billing=None, agent=None))
         fields = host.worker_fields(store.host_config())
         self.assertEqual((fields["agent"], fields["claude_billing"], fields["budget"]), ("claude", "api", True))
+
+    def test_profile_without_model_overrides_clears_the_saved_ones(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "api": dict(self.secrets(), author_model="model", author_effort="high"),
+            "auto": dict(github_account="operator", claude_billing="subscription", agent="auto"),
+        })
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("api"), profile="api", ci_allowed=False))
+            host.configure(dict(remote.profile("auto"), profile="auto"))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual(fields["agent"], "auto")
+        self.assertFalse({"author_model", "author_effort"} & set(fields))
 
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
