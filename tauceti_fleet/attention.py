@@ -261,6 +261,12 @@ def incident_items(config):
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
                     known = cached.get(f"{target[0]}#{number}")
                     item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
+            ruling = item.get("ruling") or {}
+            for relation in ("blocked_on", "subsumed_by"):
+                for number in ruling.get(relation, []):
+                    if number > 0 and number != target[1] and all(n["pr"] != number for n in item["named"]):
+                        known = cached.get(f"{target[0]}#{number}")
+                        item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
         items.append(item)
     return items
 
@@ -554,7 +560,7 @@ def display(name, value):
         print(f"== {subject}  ({' · '.join(f for f in facts if f)})")
         for line in item.get("text", "").splitlines():
             print("   " + line)
-        for relation, label in (("subsumed_by", "subsumed by"), ("mentions", "mentions")):
+        for relation, label in (("subsumed_by", "subsumed by"), ("mentions", "mentions"), ("blocked_on", "waits on")):
             for named in (n for n in item.get("named", []) if n["relation"] == relation):
                 if named.get("state"):
                     detail = "  ".join(str(v) for v in (

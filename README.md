@@ -864,7 +864,9 @@ target-list items a `prerequisite` waits on and added, the merged pull requests
 of a `close`, the roadmap of a `roadmap` change, and for an `escalate` the
 ruling the model recommends, with the reasoning beneath. `earlier ruling` marks
 one that no longer stands: its record is archived, or the incident was written
-again after it.
+again after it. The pull requests a `wait` or `close` names are listed with the
+item as `waits on` and `subsumed by`, and `--lookup` asks about them as it does
+about the ones the agent named.
 
 Items under a standing `escalate` or `roadmap` ruling are listed first, since
 those two wait for a person. Items under a standing `retry`, `wait`,

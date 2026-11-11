@@ -392,7 +392,11 @@ class Attention(unittest.TestCase):
             "   earlier ruling: wait on #7  (",
             f"   ruling: wait on #431, #433  (model, {now})\n      #431 rewrites the file.",
             "   ruling: prerequisite on target borel-cantelli (added to the list: borel-cantelli)  (",
-f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
+            f"   waits on: #431  https://github.com/{REPOSITORY}/pull/431  (--lookup for state and title)\n"
+            f"   waits on: #433  https://github.com/{REPOSITORY}/pull/433  (--lookup for state and title)\n"
+            f"   ruling: wait on #431, #433  (model, {now})",
+            f"(declined · rebase · w1 · {now})\n   subsumed by: #398  https://github.com/{REPOSITORY}/pull/398  "
+            "(--lookup for state and title)\n   ruling: close as subsumed by #398  (",
             "      every declaration is in #398",
             "\nRulings in the last 24h: 1 close, 2 wait\n",
         ):
@@ -469,6 +473,28 @@ f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
         self.assertEqual((acked / "ruling-declined-fix-5.json").read_text(), texts[1])
         self.assertEqual((acked / "ruling-declined-fix-5.json.1").read_text(), texts[0])
         self.assertEqual(sorted(p.name for p in acked.glob("*.json")), ["declined-fix-5.json", "ruling-declined-fix-5.json"])
+
+    def test_lookup_covers_the_pull_requests_a_ruling_names(self):
+        self.on()
+        self.record("declined", "rebase", 3, acked=True, summary="conflicts")
+        self.ruling("declined", "rebase", 3, "wait", blocked_on=[431])
+        self.record("declined", "fix", 7, summary="Subsumed-by: #398", subsumed_by=[398])
+        self.ruling("declined", "fix", 7, "close", subsumed_by=[398, 399])
+
+        def answer(path, *, token_file=None):
+            kind, number = path.split("/")[-2:]
+            if kind == "pulls":
+                return dict(state="open", merged_at=None, head=dict(sha="a" * 40), title="Own", user=dict(login="a"))
+            return dict(state="closed", title=f"Title {number}", user=dict(login="b"),
+                        pull_request=dict(merged_at="2026-01-14T10:00:00Z"))
+
+        self.github.side_effect = answer
+        code, output = self.cli("attention", "box", "--lookup")
+        self.assertEqual(sorted(c.args[0] for c in self.github.call_args_list), [
+            f"repos/{REPOSITORY}/issues/{n}" for n in (398, 399, 431)] + [f"repos/{REPOSITORY}/pulls/{n}" for n in (3, 7)])
+        self.assertIn("   waits on: #431  MERGED  2026-01-14  Title 431  (b)\n   ruling: wait on #431", output)
+        self.assertIn("   subsumed by: #398  MERGED", output)
+        self.assertIn("   subsumed by: #399  MERGED  2026-01-14  Title 399  (b)\n   ruling: close", output)
 
     def test_a_drafted_roadmap_change_is_shown_or_copied_and_nothing_else_is_done(self):
         self.on()
