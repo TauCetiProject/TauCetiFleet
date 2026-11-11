@@ -128,10 +128,11 @@ def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, cei
     return dict(cap=min(ceiling, max(floor, cap)), reason=reason, reserve=reserve, projected=100 - left + (listed + outside) * hours)
 
 
-def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds, curve):
+def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds, curve, missing="no usage reading yet"):
     """The pacer's state after one step, from plain inputs.
 
-    `reading` is the weekly window as dict(fetched_at, used, resets_at) or None,
+    `reading` is the weekly window as dict(fetched_at, used, resets_at), or None
+    with `missing` saying why,
     `slot_seconds` what `schedule.seconds_until_slot_ends` returned, `rounds` the
     average numbers of running (list, outside-list, other) rounds since the last
     step, `curve` the workers' pacing curve from `pace_points`. Only what that
@@ -148,7 +149,7 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
         hold = "outside the weekly schedule" if enabled else "workers are not enabled"
         readings, samples = [], []
     elif reading is None:
-        hold = "no usage reading yet"
+        hold = missing
     elif idle:
         if now - reading["fetched_at"] > STALE:
             hold = f"the usage reading is {int(now - reading['fetched_at']) // 60} minutes old"
@@ -258,6 +259,7 @@ class Pacer:
         provider = subscription_usage.providers(config)[0]
         usage = subscription_usage.readings(config, now).get(provider) or {}
         windows = usage.get("windows") or {}
+        several = len(usage.get("credentials") or [])
         weekly = windows.get("weekly")
         state = advance(
             self.state, now=now, bounds=settings(config), enabled=bool(config.get("workers_enabled")),
@@ -265,6 +267,7 @@ class Pacer:
             reading=dict(fetched_at=usage["fetched_at"], used=weekly["used"], resets_at=weekly["resets_at"]) if weekly else None,
             session_left=(windows.get("session") or {}).get("left"),
             rounds=[count / self.passes for count in self.seen], curve=pace_points(config),
+            missing=f"{several} credentials have current usage readings and the active one cannot be told" if several else "no usage reading yet",
         )
         state["provider"] = provider
         self.save(state)

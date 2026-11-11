@@ -982,7 +982,9 @@ Every 15 minutes the controller takes one step:
    whenever the reserve alone exceeds what may still be spent. It stays between
    `floor` and `ceiling`.
 
-The cap holds when there is no reading, when the reading is over 30 minutes old
+The cap holds when there is no reading, while readings from several credentials
+are current (the workers use one of them and the caches do not say which),
+when the reading is over 30 minutes old
 or gives no weekly figure, for the first two hours of readings after the window
 resets or the measurement restarts, outside every schedule slot, and while
 workers are not enabled. It is not raised while less than 10% of the session

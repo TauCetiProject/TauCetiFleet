@@ -377,6 +377,13 @@ class Wiring(unittest.TestCase):
         self.assertEqual((seen["reading"], seen["session_left"], seen["slot_seconds"], seen["rounds"]),
                          (dict(fetched_at=now - 120, used=30.0, resets_at=now + 100 * HOUR), 5.0, None, [0.0, 0.0, 0.0]))
         self.assertEqual(seen["curve"], [(0.0, 0.0), (60.0, 40.0), (100.0, 100.0)])
+        other = cache.with_name("quota-claude-other.json")
+        other.write_text(json.dumps(dict(fetched_at=now - 60, fp="other", payload=windows)))
+        pacer.state["at"] = now - outside_list.EVERY
+        block = pacer.tick(config, list, now=now)
+        self.assertEqual((block["held"], block["reason"]),
+                         (True, "2 credentials have current usage readings and the active one cannot be told"))
+        self.assertTrue(outside_list.describe(block, now).endswith("held, " + block["reason"]))
         store.update_host(pace="0:10,50:70")
         self.assertEqual(outside_list.pace_points(store.host_config()), [(0.0, 10.0), (50.0, 70.0), (100.0, 100.0)])
 
