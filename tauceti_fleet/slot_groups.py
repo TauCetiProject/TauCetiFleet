@@ -1,6 +1,5 @@
 """Slot groups: an agent and a set of work phases for each share of a host's worker slots."""
 
-from collections import Counter
 from fractions import Fraction
 
 from .store import FleetError
@@ -86,17 +85,24 @@ def place(wanted, prior):
 def order(placed):
     """Placed positions in admission order.
 
-    Member j of a group of n sits at (2j + 1) / 2n, so every prefix holds each
-    group's share of it to within one slot and a higher ceiling only adds.
+    Balinski and Young's quota method: each next admission goes to the group
+    with the most slots per admission it would hold, among those still below
+    the upper quota of the longer prefix. Every prefix then holds each group's
+    share of it to within one slot, and a higher ceiling only adds.
     """
-    size = Counter(group for group in placed if group is not None)
-    seen = Counter()
-    keyed = []
+    members = {}
     for position, group in enumerate(placed):
         if group is not None:
-            keyed.append((Fraction(2 * seen[group] + 1, 2 * size[group]), group, position))
-            seen[group] += 1
-    return [position for _, _, position in sorted(keyed)]
+            members.setdefault(group, []).append(position)
+    total = sum(len(own) for own in members.values())
+    taken = dict.fromkeys(members, 0)
+    result = []
+    for prefix in range(1, total + 1):
+        eligible = [g for g, own in members.items() if taken[g] * total < prefix * len(own)]
+        group = max(eligible, key=lambda g: (Fraction(len(members[g]), taken[g] + 1), -g))
+        result.append(members[group][taken[group]])
+        taken[group] += 1
+    return result
 
 
 def layout(config, old, worker_fields):
