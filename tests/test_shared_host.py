@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,6 +160,51 @@ class SharedHost(unittest.TestCase):
         with patch.object(host, "worker_statuses", return_value=alive):
             status, _ = self.run_controller_once(70 * GIB, cgroup)
         self.assertEqual((status["shared_host"]["workers"], status["shared_host"]["share"]), (6, 0.2))
+
+    def test_a_running_ci_job_keeps_its_claim_while_a_cycle_waits_on_github_and_fails(self):
+        cgroup = self.root / "cgroup"
+        cgroup.mkdir()
+        (cgroup / "memory.high").write_text("0")
+        memory = dict(cgroup=str(cgroup), pinned=4 * GIB, working_set=4 * GIB, swap=0, maximum=110 * GIB)
+        store.update_host(workers_enabled=True, max_workers=8, shared_host_dir=str(self.directory))
+        own = self.directory / (self.machine + ".json")
+        clock, handlers, renewed = [1000.0], {}, []
+
+        def sleep(_):
+            # Two cycles 35 s apart, so the second one asks GitHub for the runner inventory again.
+            clock[0] += 3.5
+            if clock[0] >= 1070:
+                handlers[signal.SIGTERM]()
+
+        def runners(_):
+            if clock[0] < 1035:
+                return []
+            deadline = host.time.monotonic() + 5
+            while host.time.monotonic() < deadline and json.loads(own.read_text())["expires_at"] < 1050:
+                threading.Event().wait(0.01)
+            peer = shared_host.step(str(self.directory), "peer", workers=24, ci_busy=False, now=1036)
+            renewed.append((json.loads(own.read_text()), peer["ci_busy"]))
+            raise store.FleetError("runner inventory unavailable")
+
+        with (
+            patch.object(shared_host.Heartbeat, "interval", 0.01),
+            patch.object(host, "install_pressure_service"),
+            patch.object(host, "resources", return_value=dict(self.caps, memory_available=18 * GIB)),
+            patch.object(host, "cpu_sample", return_value=(10, 9)),
+            patch.object(host, "collect_ci_results"),
+            patch.object(host, "start_workers"),
+            patch.object(host, "worker_memory", return_value=memory),
+            patch.object(host.vm, "slots_in_use", return_value=[0]),
+            patch.object(host.vm, "outstanding", return_value=True),
+            patch.object(host.github, "runners", side_effect=runners),
+            patch.object(host.CISlot, "step", return_value=dict(slot=0, busy=True)),
+            patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
+            patch.object(host.time, "time", side_effect=lambda: clock[0]),
+            patch.object(host.time, "sleep", side_effect=sleep),
+        ):
+            host.daemon()
+        self.assertEqual(store.read(store.state_dir() / "status.json")["error"], "runner inventory unavailable")
+        self.assertEqual(renewed, [(dict(version=1, expires_at=1050, workers=8, ci_busy=True), True)])
 
     def test_doctor_reports_the_directory_only_when_the_setting_is_present(self):
         def check(config):

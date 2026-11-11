@@ -232,15 +232,16 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False, share=1):
     memory["high"] = int((cg / "memory.high").read_text())
 
 
-def host_share(config, *, ci_busy):
+def host_share(config, heartbeat, *, ci_busy):
     """This install's part of a machine that other accounts' installs also use; None without shared_host_dir."""
     directory = config.get("shared_host_dir")
     if not directory:
+        heartbeat.clear()
         return None
     # A paused or draining pool still holds memory, so it keeps its part while any worker lives.
     workers = max(config["max_workers"] if config["workers_enabled"] else 0,
                   sum(bool(w.get("alive")) for w in worker_statuses()))
-    return shared_host.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
+    return heartbeat.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
 
 
 def write_slices(config, caps):
@@ -845,6 +846,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        heartbeat = shared_host.Heartbeat()
         while not stopping:
             config = host_config()
             try:
@@ -894,7 +896,7 @@ def daemon():
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
-                shared = host_share(config, ci_busy=busy)
+                shared = host_share(config, heartbeat, ci_busy=busy)
                 host_busy = busy or bool(shared and shared["ci_busy"])
                 reserve = worker_headroom(caps, ci_busy=host_busy)
                 maximum = config["max_workers"]
@@ -995,6 +997,7 @@ def daemon():
                 if stopping:
                     break
                 time.sleep(0.5)
+        heartbeat.stop()
         if not handover:
             atomic(
                 state_dir() / "admission.json",

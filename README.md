@@ -528,7 +528,10 @@ Each cycle the controller writes `<machine_id>.json` there, mode 0644:
 `workers` is the install's worker ceiling while workers are enabled, or the
 number of its workers still alive if that is larger. `ci_busy` reports a CI job
 running in that install. A claim expires after 15 seconds, so an install whose
-controller has stopped drops out. The other installs' claims change two decisions:
+controller has stopped drops out. While the controller runs, a background thread
+renews the last claim every five seconds, so a cycle that waits on GitHub or
+fails keeps a running CI job's claim alive. The other installs' claims change two
+decisions:
 
 - The worker soft memory limit grows by the install's share of spare RAM, its
   `workers` over the sum of everyone's, where an install alone grows by all of

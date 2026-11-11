@@ -1,8 +1,10 @@
 """Divide one machine between Fleet installs that run under different accounts."""
 
+import contextlib
 import json
 import os
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -58,6 +60,14 @@ def peers(directory, machine_id, now=None):
     return values
 
 
+def publish(directory, machine_id, *, workers, ci_busy, now):
+    atomic(
+        Path(directory) / (machine_id + ".json"),
+        dict(version=1, expires_at=now + LEASE, workers=workers, ci_busy=ci_busy),
+        mode=0o644,
+    )
+
+
 def step(directory, machine_id, *, workers, ci_busy, now=None):
     """Publish this install's claim and return its part of the machine."""
     now = time.time() if now is None else now
@@ -65,11 +75,7 @@ def step(directory, machine_id, *, workers, ci_busy, now=None):
     others = []
     if error is None:
         try:
-            atomic(
-                Path(directory) / (machine_id + ".json"),
-                dict(version=1, expires_at=now + LEASE, workers=workers, ci_busy=ci_busy),
-                mode=0o644,
-            )
+            publish(directory, machine_id, workers=workers, ci_busy=ci_busy, now=now)
         except OSError as exc:
             error = f"cannot publish in {directory}: {type(exc).__name__}"
         others = peers(directory, machine_id, now)
@@ -83,3 +89,46 @@ def step(directory, machine_id, *, workers, ci_busy, now=None):
         ci_busy=any(value["ci_busy"] for value in others),
         error=error,
     )
+
+
+class Heartbeat:
+    """Renew the claim the controller last made while its cycle waits on the network or fails.
+
+    One cycle can block on GitHub or the broker for longer than LEASE, and a failed
+    cycle skips the claim; a CI job still running must keep the other installs' reserve.
+    """
+
+    interval = LEASE / 3
+
+    def __init__(self):
+        self.claim = None
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = None
+
+    def step(self, directory, machine_id, *, workers, ci_busy):
+        with self.lock:
+            self.claim = (directory, machine_id, dict(workers=workers, ci_busy=ci_busy))
+            if self.thread is None:
+                self.thread = threading.Thread(target=self.run, name="shared-host-heartbeat", daemon=True)
+                self.thread.start()
+            return step(directory, machine_id, workers=workers, ci_busy=ci_busy)
+
+    def clear(self):
+        with self.lock:
+            self.claim = None
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+
+    def run(self):
+        while not self.stopped.wait(self.interval):
+            with self.lock:
+                if self.claim is None:
+                    continue
+                directory, machine_id, claim = self.claim
+                if problem(directory) is None:
+                    with contextlib.suppress(OSError):
+                        publish(directory, machine_id, **claim, now=time.time())
