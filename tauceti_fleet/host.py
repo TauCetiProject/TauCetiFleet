@@ -367,6 +367,8 @@ def worker_fields(config):
             fields[key] = config[key]
     if claude_env := claude_credentials.worker_env(config):
         fields["env"] = dict(fields.get("env", {}), **claude_env)
+        if sum(len(k) + len(v) + 2 for k, v in fields["env"].items()) > 16 * 1024:
+            raise FleetError("env and the Claude credential paths Fleet adds to it exceed 16 KB; shorten env")
     if config.get(claude_credentials.USAGE):
         # Nothing else on the host uses the stored usage login, so the workers may renew it.
         fields["auto_refresh"] = True
