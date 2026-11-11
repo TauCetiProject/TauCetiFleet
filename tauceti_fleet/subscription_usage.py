@@ -1,5 +1,6 @@
 """Subscription usage as the workers last read it; only their cached responses, never a request."""
 
+import hashlib
 import json
 import math
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from .store import data_dir
 
 SESSION, WEEK = 5 * 3600.0, 7 * 86400.0
+# How long a worker keeps serving its cached reading for the credential it was fetched under.
+SERVED = dict(claude=3600.0, codex=600.0)
 
 
 def providers(config):
@@ -114,6 +117,11 @@ def codex_windows(payload, fetched_at, now):
     return result
 
 
+def credential(fp):
+    """A short label for the credential a reading was fetched under; for Claude, the start of the cache file's suffix."""
+    return hashlib.sha256(fp.encode()).hexdigest()[:8] if isinstance(fp, str) and fp else None
+
+
 def cached(path, now):
     try:
         value = json.loads(path.read_text())
@@ -122,27 +130,35 @@ def cached(path, now):
     fetched_at = number(value.get("fetched_at")) if isinstance(value, dict) else None
     if fetched_at is None or fetched_at > now or not isinstance(value.get("payload"), dict):
         return None
-    return fetched_at, value["payload"]
+    valid_until = number(value.get("valid_until"))
+    return dict(fetched_at=fetched_at, payload=value["payload"], credential=credential(value.get("fp")),
+                valid_until=valid_until)
 
 
 def readings(config, now=None):
-    """The newest cached reading per provider the profile uses, as plain data.
+    """The cached readings per provider the profile uses, as plain data.
 
-    {provider: None before any reading, or {fetched_at, windows: {session | weekly:
+    {provider: None before any reading, or {credential, fetched_at, windows: {session | weekly:
     {seconds, used, left, resets_at}}}}. Times are epoch seconds, used and left are
     percentages; both are None when the response gave no usable figure or the
-    window has reset since.
+    window has reset since. While more than one credential has a reading a worker
+    would still serve, the provider's value is {credentials: [reading, ...]}, newest
+    first, since the active one cannot be told from the caches.
     """
     now = time.time() if now is None else now
     result = {}
     for provider in providers(config):
-        found = [entry for entry in (cached(path, now) for path in reading_files(config, provider)) if entry]
-        if not found:
-            result[provider] = None
-            continue
-        fetched_at, payload = max(found, key=lambda entry: entry[0])
-        windows = claude_windows(payload, now) if provider == "claude" else codex_windows(payload, fetched_at, now)
-        result[provider] = dict(fetched_at=fetched_at, windows=windows)
+        newest = {}
+        for entry in filter(None, (cached(path, now) for path in reading_files(config, provider))):
+            if entry["fetched_at"] > newest.get(entry["credential"], {}).get("fetched_at", -math.inf):
+                newest[entry["credential"]] = entry
+        found = sorted(newest.values(), key=lambda entry: entry["fetched_at"], reverse=True)
+        served = [entry for entry in found if now - entry["fetched_at"] <= SERVED[provider]
+                  and (entry["valid_until"] is None or now < entry["valid_until"])]
+        chosen = [dict(credential=entry["credential"], fetched_at=entry["fetched_at"], windows=(
+            claude_windows(entry["payload"], now) if provider == "claude" else codex_windows(entry["payload"], entry["fetched_at"], now)
+        )) for entry in (served if len(served) > 1 else served or found[:1])]
+        result[provider] = None if not chosen else chosen[0] if len(chosen) == 1 else dict(credentials=chosen)
     return result
 
 
@@ -159,22 +175,30 @@ def span(seconds):
     return f"{hours}h{minutes:02}m" if hours < 48 else f"{hours // 24}d{hours % 24:02}h"
 
 
+def windows_text(reading, now):
+    parts = []
+    for name, item in sorted(reading["windows"].items(), key=lambda pair: pair[1]["seconds"] or 0):
+        seconds, resets_at = item["seconds"], item["resets_at"]
+        length = name if not seconds else f"{seconds / 3600:g}h" if seconds <= 86400 else f"{seconds / 86400:g}d"
+        if resets_at is not None and resets_at <= now:
+            parts.append(f"{length} reset since this reading")
+        elif item["left"] is None:
+            parts.append(f"{length} unreadable")
+        else:
+            reset = f", resets in {span(resets_at - now)}" if resets_at is not None else "" if item["used"] else ", no window open"
+            parts.append(f"{length} {item['left']:.0f}% left{reset}")
+    return ("; ".join(parts) or "unreadable response") + f" (read {span(now - reading['fetched_at'])} ago)"
+
+
 def display(value, now=None):
     now = time.time() if now is None else now
     for provider, reading in value.items():
         label = provider.capitalize() + " usage: "
         if not reading:
             print(label + "no reading yet")
-            continue
-        parts = []
-        for name, item in sorted(reading["windows"].items(), key=lambda pair: pair[1]["seconds"] or 0):
-            seconds, resets_at = item["seconds"], item["resets_at"]
-            length = name if not seconds else f"{seconds / 3600:g}h" if seconds <= 86400 else f"{seconds / 86400:g}d"
-            if resets_at is not None and resets_at <= now:
-                parts.append(f"{length} reset since this reading")
-            elif item["left"] is None:
-                parts.append(f"{length} unreadable")
-            else:
-                reset = f", resets in {span(resets_at - now)}" if resets_at is not None else "" if item["used"] else ", no window open"
-                parts.append(f"{length} {item['left']:.0f}% left{reset}")
-        print(label + ("; ".join(parts) or "unreadable response") + f" (read {span(now - reading['fetched_at'])} ago)")
+        elif "credentials" in reading:
+            print(label + f"{len(reading['credentials'])} credentials have current readings; the workers use the active one")
+            for each in reading["credentials"]:
+                print(f"  credential {each['credential'] or 'unknown'}: " + windows_text(each, now))
+        else:
+            print(label + windows_text(reading, now))

@@ -721,7 +721,11 @@ Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 1
 
 These are the responses the workers' pacer last cached on the host. Fleet sends
 no usage request, so a line ages while no worker is checking its quota, and a
-window that has reset since the reading shows no figure.
+window that has reset since the reading shows no figure. The caches are kept per
+credential, and Fleet does not read credentials, so it cannot tell which one is
+active: while more than one credential has a reading the worker would still use
+(an hour for Claude, ten minutes for Codex), each is printed on its own line under
+a short credential label, and the JSON value is `{"credentials": [...]}`.
 
 Native host coding rounds can share immutable extracted Mathlib snapshots with
 private copy-on-write builds. The native activity collector prepares the sharing
