@@ -1,5 +1,6 @@
 import fcntl
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -173,6 +174,16 @@ class Attention(unittest.TestCase):
         self.assertEqual(len(self.listed()["cleared"]), 3)
         (self.root / "activity/activity.sqlite").write_text("not a database")
         self.assertEqual(len(self.listed()["items"]), 6)
+
+    def test_an_observation_inside_the_records_write_second_is_not_newer(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        for pr, observed in ((1, at + 0.1), (2, at + 0.999), (3, at + 1), (4, at - 1)):
+            self.record("declined", "fix", pr, head="b" * 40, summary="no")
+            self.observe(pr, "OPEN", "a" * 40, observed)
+        value = self.listed()
+        self.assertEqual({c["id"]: c["cleared"] for c in value["cleared"]}, {"3": "new head"})
+        self.assertEqual([(i["id"], i["observed_at"]) for i in value["items"]], [("1", None), ("2", None), ("4", None)])
 
     def test_ack_moves_records_and_an_acked_decline_keeps_its_file_for_the_hold(self):
         self.on()
@@ -424,6 +435,74 @@ class Attention(unittest.TestCase):
         self.assertNotIn("Authorization", seen[0][1])
         with self.assertRaises(store.FleetError):
             FORGEJO_REQUEST("https://forge.example/evil?", "x")
+
+    def test_a_repository_its_forge_will_not_show_leaves_the_rest_of_that_forge_to_be_asked(self):
+        self.on()
+        origin = "https://forge.example"
+        for pr, repository in ((1, "private/project"), (2, "public/project")):
+            self.record("declined", "fix", pr, repository=repository, forge=dict(kind="forgejo", url=origin),
+                        suffix=f".{pr:012d}")
+
+        def answer(at, path):
+            if path.startswith("repos/private/"):
+                error = store.FleetError(f"{origin} GET returned HTTP 404")
+                error.status = 404
+                raise error
+            return dict(state="closed", merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+        self.forgejo.side_effect = answer
+        for _ in range(3):
+            self.forgejo.reset_mock()
+            value = self.listed(lookup=True)
+            self.assertEqual(sorted(c.args[1] for c in self.forgejo.call_args_list),
+                             ["repos/private/project/pulls/1", "repos/public/project/pulls/2"])
+        self.assertEqual(value["lookup"]["error"], f"{origin} answered HTTP 404 for private/project#1")
+        self.assertEqual([i["id"] for i in value["items"]], ["forge.example/private/project#1"])
+        self.assertEqual(value["items"][0]["observed_at"], None)
+        self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/public/project#2"])
+        code, output = self.cli("attention", "box")
+        self.assertIn("   its forge answered HTTP 404 for this pull request; --lookup reads Forgejo anonymously", output)
+
+    def test_an_interrupted_response_is_a_fleet_error_on_both_forges(self):
+        class Interrupted:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                raise http.client.IncompleteRead(b"{")
+
+        with patch("urllib.request.urlopen", return_value=Interrupted()):
+            for call in (lambda: FORGEJO_REQUEST("https://forge.example", "repos/O/R/pulls/1"),
+                         lambda: REQUEST("repos/O/R/pulls/1")):
+                with self.assertRaises(store.FleetError):
+                    call()
+
+    def test_forgejo_origins_are_the_ones_the_worker_writes(self):
+        self.on()
+        for pr, url in ((5, "http://[::1]:3000"), (6, "http://forge.example"), (7, "https://Forge.example:443")):
+            self.record("declined", "fix", pr, forge=dict(kind="forgejo", url=url), suffix=f".{pr:012d}")
+        value = self.listed()
+        self.assertEqual([i["id"] for i in value["items"]], ["[::1]:3000/TauCetiProject/TauCeti#5", "fix-6.000000000006",
+                                                            "fix-7.000000000007"])
+        self.forgejo.side_effect = lambda at, path: dict(state="open", merged=False, merged_at=None,
+                                                         head=dict(sha="a" * 40))
+        self.listed(lookup=True)
+        self.assertEqual([c.args for c in self.forgejo.call_args_list],
+                         [("http://[::1]:3000", f"repos/{REPOSITORY}/pulls/5")])
+        seen = []
+
+        def opened(request, timeout):
+            seen.append(request.full_url)
+            raise OSError("refused")
+
+        with patch("urllib.request.urlopen", side_effect=opened), self.assertRaises(store.FleetError):
+            FORGEJO_REQUEST("http://[::1]:3000", "repos/O/R/pulls/5")
+        self.assertEqual(seen, ["http://[::1]:3000/api/v1/repos/O/R/pulls/5"])
 
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()
