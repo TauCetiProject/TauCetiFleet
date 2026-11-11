@@ -6,6 +6,7 @@ against files already on the host, and never makes a GitHub request.
 """
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -13,8 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import activity, capabilities
-from .process import run
+from . import capabilities
+from .process import executable, run
 from .store import FleetError, config_dir, host_config, read, update_host
 
 MARKER = re.compile(r"<!--\s*tauceti-targets:v1\s*-->")
@@ -177,6 +178,17 @@ def structure_problems(listing):
             ["`needs:` names slugs the list never defines, which block nothing: " + ", ".join(undefined)] if undefined else [])
 
 
+def landings(machine):
+    """This host's pull requests as the worker's prepared activity records them, read without GitHub."""
+    worker = executable("tauceti")
+    if not worker:
+        raise FleetError("No worker runtime is installed")
+    result = run([worker, "activity", "--inventory", "--group", machine], check=False)
+    if result.returncode:
+        raise FleetError("tauceti activity --inventory failed")
+    return json.loads(result.stdout)["prs"]
+
+
 def rewritten(line, mark, clause=None):
     """An item line with a new mark and its `in flight:` clause replaced by `clause` or dropped."""
     ending = line[len(line.rstrip("\r\n")):]
@@ -213,8 +225,8 @@ def audit(config, text, workers):
             note("round", f"{held['worker']} is authoring {held['item']}, which the file "
                  + ("marks done" if item else "does not list"), item=held["item"])
     try:
-        prs = {p["number"]: p for p in activity.inventory(config["machine_id"]) if p["repo"] == REPOSITORY}
-    except (FleetError, KeyError, TypeError):
+        prs = {p["number"]: p for p in landings(config["machine_id"]) if p["repo"] == REPOSITORY}
+    except (FleetError, ValueError, KeyError, TypeError):
         prs = None
         note("pull-requests", "This host's prepared pull request inventory is unreadable; in-flight items not checked")
     lines = text.splitlines(keepends=True)

@@ -4,7 +4,9 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -74,6 +76,24 @@ class TargetLists(unittest.TestCase):
         base.mkdir(parents=True)
         subprocess.run(["git", "clone", "-q", "--bare", str(source), str(base / "mirror.git")], check=True)
         (base / "state.json").write_text(json.dumps(dict(sha=sha, fetched=1)))
+
+    def worker_inventory(self, prs):
+        """The worker's prepared `prs` table and a stand-in for its read-only `activity --inventory` command."""
+        (self.root / "activity").mkdir()
+        with contextlib.closing(sqlite3.connect(self.root / "activity/activity.sqlite")) as db, db:
+            db.execute("CREATE TABLE prs(repo TEXT,number INTEGER,worker TEXT,scope TEXT,created REAL,state TEXT,"
+                       "landed REAL,observed REAL,checked REAL,head TEXT,source TEXT,PRIMARY KEY(repo,number))")
+            db.executemany("INSERT INTO prs(repo,number,scope,state,landed) VALUES (:repo,:number,:scope,:state,:landed)", prs)
+        worker = store.data_dir() / "bin/tauceti"
+        worker.parent.mkdir(parents=True, exist_ok=True)
+        worker.write_text(f"""#!{sys.executable}
+import json, os, sqlite3, sys
+assert sys.argv[1:4] == ["activity", "--inventory", "--group"], sys.argv
+db = sqlite3.connect(os.environ["TAUCETI_ACTIVITY_DIR"] + "/activity.sqlite")
+db.row_factory = sqlite3.Row
+print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM prs WHERE scope=?", sys.argv[4:5])])))
+""")
+        worker.chmod(0o755)
 
     def definitions(self):
         host.worker_config(store.host_config())
@@ -193,7 +213,8 @@ class TargetLists(unittest.TestCase):
         self.mirror("TauCetiRoadmap/MeasureTheory")
         machine = store.host_config()["machine_id"]
         listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1)\n- [~] `item-2` — text (in flight: #2)\n"
-                                 "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [ ] no slug\n\n## Notes")
+                                 "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [~] `item-5` — text (in flight: #5)\n"
+                                 "- [ ] no slug\n\n## Notes")
         path = self.root / "checkout/list.md"
         path.parent.mkdir()
         path.write_text(listed)
@@ -204,8 +225,8 @@ class TargetLists(unittest.TestCase):
         prs = [dict(scope=machine, repo=targets.REPOSITORY, number=n, state=state, landed=landed)
                for n, state, landed in ((1, "MERGED", 5.0), (2, "CLOSED", None), (3, "OPEN", None), (1234, "CLOSED", 9.0))]
         prs.append(dict(scope=machine, repo="TauCetiProject/TauCetiRoadmap", number=4, state="MERGED", landed=1.0))
-        (self.root / "activity").mkdir()
-        (self.root / "activity/prs.json").write_text(json.dumps(dict(prs=prs)))
+        prs.append(dict(scope="another-host", repo=targets.REPOSITORY, number=5, state="MERGED", landed=1.0))
+        self.worker_inventory(prs)
         rounds = [dict(id="w1", state="running", roadmap_target="MeasureTheory/borel-cantelli"),
                   dict(id="w2", state="surveying", roadmap_target="Probability/renamed")]
         result = targets.configure(dict(audit=True), rounds)
@@ -213,7 +234,7 @@ class TargetLists(unittest.TestCase):
         self.assertEqual((result["corrections"], result["applied"]), (2, False))
         self.assertEqual(path.read_text(), listed)
         for expected in (
-            "Line 19 is an item line without a `slug`; workers skip it",
+            "Line 20 is an item line without a `slug`; workers skip it",
             "No roadmap directory for Probability in the workers' roadmap mirror",
             "w1 is authoring MeasureTheory/borel-cantelli, which the file marks done",
             "w2 is authoring Probability/renamed, which the file does not list",
@@ -222,7 +243,7 @@ class TargetLists(unittest.TestCase):
             "Probability/truncation-bounds: #1234 landed -> [x]",
         ):
             self.assertTrue(any(d.startswith(expected) for d in details), expected)
-        self.assertFalse(any("item-3" in d or "item-4" in d for d in details))
+        self.assertFalse(any(f"item-{n}" in d for d in details for n in (3, 4, 5)))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             targets.display(targets.configure(dict(audit=True, apply=True), rounds))
         self.assertIn(f"2 line(s) rewritten in {link}", out.getvalue())
@@ -230,7 +251,7 @@ class TargetLists(unittest.TestCase):
         after = path.read_text()
         self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234)\n", after)
         self.assertIn("- [ ] `item-1` — text (partial: #1)\n", after)
-        self.assertEqual(after.count("\n- [~]"), 3)
+        self.assertEqual(after.count("\n- [~]"), 4)
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(targets.configure(dict(audit=True, apply=True), [])["corrections"], 0)
         store.update_host(roadmap_targets=None)
