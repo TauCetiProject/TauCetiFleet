@@ -809,6 +809,9 @@ the runtime a running worker manager started from, which a live update leaves in
 place. Fleet refuses to set a list otherwise, because a worker manager that does
 not know the key loads no worker from definitions that name it; restarting
 `tauceti-fleet-workers.service` moves the manager to the installed runtime.
+Workers in their own scopes keep running and the new manager adopts them; a
+worker whose status shows degraded isolation runs inside the manager's service
+and its round ends with it.
 `doctor` blocks worker activation for the same reason or when the saved list has
 become unreadable.
 
