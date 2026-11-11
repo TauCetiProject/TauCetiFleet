@@ -135,15 +135,24 @@ def cached(path, now):
                 valid_until=valid_until)
 
 
+def exhausted(payload, windows, now):
+    """Whether the reading shows a spent window that has not reset, which a worker keeps acting on after the reading expires."""
+    limits = payload.get("rate_limit")
+    reached = isinstance(limits, dict) and limits.get("limit_reached") is True
+    return any(item["resets_at"] is not None and item["resets_at"] > now and (reached or (item["used"] or 0) >= 100)
+               for item in windows.values())
+
+
 def readings(config, now=None):
     """The cached readings per provider the profile uses, as plain data.
 
-    {provider: None before any reading, or {credential, fetched_at, windows: {session | weekly:
-    {seconds, used, left, resets_at}}}}. Times are epoch seconds, used and left are
-    percentages; both are None when the response gave no usable figure or the
-    window has reset since. While more than one credential has a reading a worker
-    would still serve, the provider's value is {credentials: [reading, ...]}, newest
-    first, since the active one cannot be told from the caches.
+    {provider: None before any reading, or {credential, other_credentials, fetched_at,
+    windows: {session | weekly: {seconds, used, left, resets_at}}}}. Times are epoch
+    seconds, used and left are percentages; both are None when the response gave no
+    usable figure or the window has reset since. A reading is current while a worker
+    would still serve it or while a spent window in it has not reset. While more than
+    one credential has a current reading, the provider's value is {credentials:
+    [reading, ...]}, newest first, since the active one cannot be told from the caches.
     """
     now = time.time() if now is None else now
     result = {}
@@ -152,13 +161,19 @@ def readings(config, now=None):
         for entry in filter(None, (cached(path, now) for path in reading_files(config, provider))):
             if entry["fetched_at"] > newest.get(entry["credential"], {}).get("fetched_at", -math.inf):
                 newest[entry["credential"]] = entry
-        found = sorted(newest.values(), key=lambda entry: entry["fetched_at"], reverse=True)
-        served = [entry for entry in found if now - entry["fetched_at"] <= SERVED[provider]
-                  and (entry["valid_until"] is None or now < entry["valid_until"])]
-        chosen = [dict(credential=entry["credential"], fetched_at=entry["fetched_at"], windows=(
-            claude_windows(entry["payload"], now) if provider == "claude" else codex_windows(entry["payload"], entry["fetched_at"], now)
-        )) for entry in (served if len(served) > 1 else served or found[:1])]
-        result[provider] = None if not chosen else chosen[0] if len(chosen) == 1 else dict(credentials=chosen)
+        found = []
+        for entry in sorted(newest.values(), key=lambda entry: entry["fetched_at"], reverse=True):
+            payload, fetched_at = entry["payload"], entry["fetched_at"]
+            windows = claude_windows(payload, now) if provider == "claude" else codex_windows(payload, fetched_at, now)
+            served = now - fetched_at <= SERVED[provider] and (entry["valid_until"] is None or now < entry["valid_until"])
+            found.append((served or exhausted(payload, windows, now), dict(credential=entry["credential"], fetched_at=fetched_at, windows=windows)))
+        current = [reading for is_current, reading in found if is_current]
+        if len(current) > 1:
+            result[provider] = dict(credentials=current)
+        elif found:
+            result[provider] = dict((current or [found[0][1]])[0], other_credentials=len(found) - 1)
+        else:
+            result[provider] = None
     return result
 
 
@@ -201,4 +216,7 @@ def display(value, now=None):
             for each in reading["credentials"]:
                 print(f"  credential {each['credential'] or 'unknown'}: " + windows_text(each, now))
         else:
+            others = reading.get("other_credentials")
+            if others:
+                label = f"{provider.capitalize()} usage, credential {reading['credential'] or 'unknown'} ({others} other credential{'s have' if others > 1 else ' has'} an older reading): "
             print(label + windows_text(reading, now))

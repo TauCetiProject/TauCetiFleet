@@ -78,10 +78,10 @@ class SubscriptionUsage(unittest.TestCase):
         self.cache(self.runtime("b" * 40) / "state/fleet-4/cache/quota-codex.json", {}, -30)
         account = hashlib.sha256(b"account").hexdigest()[:8]
         expected = dict(
-            claude=dict(credential=account, fetched_at=NOW - 600, windows=dict(
+            claude=dict(credential=account, other_credentials=0, fetched_at=NOW - 600, windows=dict(
                 session=dict(seconds=5 * hour, used=37.5, left=62.5, resets_at=NOW + 2 * hour),
                 weekly=dict(seconds=7 * 24 * hour, used=59.0, left=41.0, resets_at=NOW + 80 * hour))),
-            codex=dict(credential=account, fetched_at=NOW - 120, windows=dict(
+            codex=dict(credential=account, other_credentials=0, fetched_at=NOW - 120, windows=dict(
                 weekly=dict(seconds=7.0 * 24 * hour, used=12.0, left=88.0, resets_at=NOW - 120 + 100 * hour),
                 session=dict(seconds=5.0 * hour, used=40.0, left=60.0, resets_at=NOW - 120 + hour))),
         )
@@ -191,6 +191,42 @@ class SubscriptionUsage(unittest.TestCase):
         self.codex(self.runtime("a" * 40) / "state/fleet-1/cache/quota-codex.json", 700, (40, 5 * hour, hour), fp="one")
         self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour))
         self.assertEqual(subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["fetched_at"], NOW - 30)
+
+    def test_an_expired_reading_with_an_exhausted_window_stays_attributed_until_that_window_resets(self):
+        hour = 3600
+
+        def claude(fp, session, weekly, age):
+            name = hashlib.sha256(fp.encode()).hexdigest()[:16]
+            self.cache(self.login / f"quota-claude-{name}.json", flat(
+                dict(utilization=session, resets_at=iso(NOW + hour)), dict(utilization=weekly, resets_at=iso(NOW + 72 * hour))),
+                age, fp=fp)
+
+        def label(fp):
+            return hashlib.sha256(fp.encode()).hexdigest()[:8]
+
+        claude("active", 20, 100, 3700)
+        claude("other", 10, 10, 60)
+        value = subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]
+        self.assertNotIn("windows", value)
+        self.assertEqual([(each["credential"], each["windows"]["weekly"]["left"]) for each in value["credentials"]],
+                         [(label("other"), 90.0), (label("active"), 0.0)])
+
+        # Once nothing else is current, the reading that remains is still named beside the ones set aside.
+        claude("active", 20, 99, 3700)
+        value = subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]
+        self.assertEqual((value["credential"], value["other_credentials"]), (label("other"), 1))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            subscription_usage.display(dict(claude=value), NOW)
+        self.assertEqual(output.getvalue(), f"Claude usage, credential {label('other')} (1 other credential has an older reading): "
+                         "5h 90% left, resets in 1h00m; 7d 90% left, resets in 3d00h (read 1m ago)\n")
+
+        self.cache(self.runtime("a" * 40) / "state/fleet-1/cache/quota-codex.json", dict(rate_limit=dict(
+            limit_reached=True, primary_window=dict(used_percent=30, limit_window_seconds=5 * hour, reset_after_seconds=2 * hour))),
+            900, fp="one")
+        self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour), fp="two")
+        codex = subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["credentials"]
+        self.assertEqual([each["credential"] for each in codex], [label("two"), label("one")])
 
 
 if __name__ == "__main__":
