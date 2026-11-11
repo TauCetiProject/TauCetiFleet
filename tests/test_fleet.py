@@ -147,7 +147,8 @@ class Isolated(unittest.TestCase):
             dict(env={"A": "line\nbreak"}),
             dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
             dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
-            dict(env={"TAUCETI_WORKER_SLICE": "other.slice"}),
+            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
+            dict(env={"TAUCETI_BUDGET_DIR": "/elsewhere"}),
             dict(env={"A": "x" * 16384}),
         ]
         with patch.object(host, "install_service"):

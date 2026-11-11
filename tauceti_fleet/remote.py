@@ -247,8 +247,8 @@ def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=
     else:
         machine = expected_machine_id or call(target, dict(action="status"))["machine_id"]
         names = {entry["machine_id"]: name for name, entry in inventory().items()}
-        with claude_credentials.handed_to(machine, usage, names):
-            status = call(target, payload, expected_machine_id=machine)
+        claude_credentials.reserve(machine, usage, names)
+        status = call(target, payload, expected_machine_id=machine)
     matching = remember(target, status, profile_name=status["profile"])
     readiness = call(target, dict(action="doctor"), expected_machine_id=status["machine_id"])
     return dict(host=matching, installed=status, doctor=readiness)

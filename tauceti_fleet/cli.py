@@ -35,6 +35,7 @@ def parser():
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
             )
+    sub.add_parser("claude-usage-login", help="sign in this host's Claude usage login")
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
     budget.add_argument("--grant")
@@ -161,6 +162,10 @@ def main(argv=None, *, _status_results=None):
                 print(json.dumps(dict(ok=True, result=value)))
             except (FleetError, OSError, ValueError, KeyError) as exc:
                 print(json.dumps(dict(ok=False, error=str(exc))))
+            return 0
+        if args.command == "claude-usage-login":
+            claude_credentials.sign_in()
+            print("Usage login signed in; doctor counts its four weeks from now.")
             return 0
         if args.command == "host-daemon":
             host.daemon()

@@ -485,7 +485,7 @@ def doctor(config=None, *, probe=True):
             "Configure the selected profile and repeat add; use chmod 600 for credential files",
             roles=roles,
         )
-    for check in claude_credentials.report(config):
+    for check in claude_credentials.report(config, wait=False):
         add(check["name"], check["status"], check["evidence"], check["remedy"], roles=("workers",))
     if config.get("github_token_file"):
         try:

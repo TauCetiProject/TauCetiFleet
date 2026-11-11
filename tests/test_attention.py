@@ -444,8 +444,7 @@ class Attention(unittest.TestCase):
             ("credential", "claude-usage-login", "credential", "usage login renews for another 2 days")])
         code, text = self.cli("attention", "box")
         self.assertIn("== claude-setup-token  (credential)\n   setup-token expired 1 days ago\n   Next step: Run claude setup-token", text)
-        self.assertIn(f"   Next step: Sign in on this host: CLAUDE_CONFIG_DIR={claude_credentials.path(claude_credentials.USAGE).parent} "
-                      "claude auth login", text)
+        self.assertIn("   Next step: Sign in on this host: tauceti-fleet claude-usage-login;", text)
         attention.prepare(store.host_config())
         self.assertEqual(attention.prepared()["kinds"], {"credential": 2})
         claude_credentials.install(claude_credentials.TOKEN, "sk-ant-oat01-token", now)

@@ -6,10 +6,11 @@ own. The token's scope cannot read subscription usage; the worker reads usage th
 named by `TAUCETI_CLAUDE_USAGE_CREDENTIALS` and renews that login under `auto_refresh`.
 """
 
-import contextlib
 import hashlib
 import json
-import shlex
+import os
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -69,26 +70,27 @@ def validate(kind, secret):
 
 
 def fingerprint(secret):
-    return hashlib.sha256(secret.strip().encode()).hexdigest()
+    """A usage login's identity: its refresh token, unchanged by formatting or metadata edits."""
+    validate(USAGE, secret)
+    return hashlib.sha256(block(secret)["refreshToken"].encode()).hexdigest()
 
 
-@contextlib.contextmanager
-def handed_to(machine_id, secret, names):
-    """On the operator's machine: refuse a usage login already transferred to another host, and
-    record the host once the body succeeds. Each host renews its own copy of a single-use refresh
-    token, so a login shared by two hosts stops working on one of them at the first renewal."""
+def reserve(machine_id, secret, names):
+    """On the operator's machine: refuse a usage login already sent to another host, else record
+    this host before the login is sent. Each host renews its own copy of a single-use refresh
+    token, so a login shared by two hosts stops working on one of them at the first renewal.
+    The record stays when the send fails, since a lost reply may follow a completed transfer."""
     path = config_dir() / "claude-usage-hosts.json"
     with locked(path.with_suffix(".lock")):
         owners = read(path, {})
-        owner = owners.get(fingerprint(secret), machine_id)
+        owner = owners.setdefault(fingerprint(secret), machine_id)
         if owner != machine_id:
             raise FleetError(
                 f"The usage login in claude_usage_credentials_file was transferred to {names.get(owner, owner)}. "
                 "Sign in once per host: give this host a profile whose claude_usage_credentials_file holds its own "
                 "claude auth login, or names a file this machine does not hold, then sign in on the host as doctor shows"
             )
-        yield
-        atomic(path, dict(owners, **{fingerprint(secret): machine_id}))
+        atomic(path, owners)
 
 
 def install(kind, secret, since=None):
@@ -141,6 +143,38 @@ def signed_in(target, *, wait=True):
     return since if type(since) in (int, float) else None
 
 
+def sign_in(command=("claude", "auth", "login")):
+    """On the host: sign in the usage login and record when, so its lifetime counts from now.
+
+    The sign-in is made in a scratch directory and moved into place under the worker's renewal
+    lock, so a renewal of the old login in flight cannot write over it.
+    """
+    if not (read(config_dir() / "host.json", {}) or {}).get(USAGE):
+        raise FleetError("This host's profile names no claude_usage_credentials_file")
+    target = path(USAGE)
+    for directory in (target.parent.parent, target.parent):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    started = time.time()
+    with tempfile.TemporaryDirectory(prefix=".claude-usage-", dir=target.parent.parent) as scratch:
+        try:
+            result = subprocess.run(list(command), env=dict(os.environ, CLAUDE_CONFIG_DIR=scratch))
+        except FileNotFoundError:
+            raise FleetError(f"Required executable {command[0]} is missing; run tauceti-fleet doctor") from None
+        signed = Path(scratch) / ".credentials.json"
+        try:
+            secret = signed.read_text() if result.returncode == 0 else ""
+        except OSError:
+            secret = ""
+        if not block(secret).get("refreshToken"):
+            raise FleetError("claude auth login left no login; the usage login is unchanged")
+        validate(USAGE, secret)
+        signed.chmod(0o600)
+        marker = target.with_name("transferred.json")
+        with refresh_lock(target):
+            os.replace(signed, target)
+            atomic(marker, dict(read(marker, {}), signed_in=started))
+
+
 def worker_env(config):
     """Environment pointing each worker at the stored credentials; empty when the profile names none."""
     token, usage = config.get(TOKEN), config.get(USAGE)
@@ -169,7 +203,7 @@ def report(config, *, now=None, wait=True):
         if remedy is None and kind == TOKEN:
             remedy = "Run claude setup-token, save the token in the profile's claude_token_file (chmod 600), and repeat add"
         elif remedy is None:
-            remedy = (f"Sign in on this host: CLAUDE_CONFIG_DIR={shlex.quote(str(path(USAGE).parent))} claude auth login; "
+            remedy = ("Sign in on this host: tauceti-fleet claude-usage-login; "
                       "or sign in where the profile's claude_usage_credentials_file is kept and repeat add")
         name = "claude-setup-token" if kind == TOKEN else "claude-usage-login"
         entries.append(dict(name=name, status=status, evidence=evidence, remedy="" if status == "ok" else remedy))

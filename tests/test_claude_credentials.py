@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -99,6 +100,11 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
         token = json.loads((held.parent.parent / "claude/.credentials.json").read_text())["claudeAiOauth"]
         self.assertEqual((token["accessToken"], token["subscriptionType"]), ("sk-ant-oat01-next", "max"))
+        # The same login in other formatting, or with other metadata, is not a new sign-in.
+        store.atomic(held, login("refresh-3"))
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in", rateLimitTier="x"), indent=4))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-3"))
         self.files["usage"].unlink()
         self.add()
         self.assertTrue(held.is_file())
@@ -153,7 +159,8 @@ class ClaudeCredentials(unittest.TestCase):
             machine = "machine-" + target
             self.assertIn(expected_machine_id, (None, machine))
             if payload["action"] == "configure" and target in failing:
-                raise store.FleetError("offline")
+                # The host may have installed the login before its reply was lost.
+                raise store.FleetError("Remote host did not return a fleet response")
             return dict(machine_id=machine, profile="p", ci_enrolled=False)
 
         def add(target):
@@ -164,15 +171,54 @@ class ClaudeCredentials(unittest.TestCase):
             add("a")
             with self.assertRaisesRegex(store.FleetError, "transferred to a. Sign in once per host"):
                 add("b")
+            self.write("usage", json.dumps(login(), indent=2, sort_keys=True))
+            with self.assertRaisesRegex(store.FleetError, "transferred to a"):
+                add("b")
             self.write("usage", json.dumps(login("refresh-of-a-sign-in-for-b")))
             failing.add("c")
-            with self.assertRaisesRegex(store.FleetError, "offline"):
+            with self.assertRaisesRegex(store.FleetError, "did not return"):
                 add("c")
+            with self.assertRaisesRegex(store.FleetError, "transferred to machine-c"):
+                add("b")
+            self.write("usage", json.dumps(login("refresh-of-a-second-sign-in-for-b")))
             add("b")
             with self.assertRaisesRegex(store.FleetError, "transferred to b"):
                 add("a")
             self.files["usage"].unlink()
             add("a")
+
+    def test_signing_in_on_the_host_survives_a_renewal_before_any_report(self):
+        now = time.time()
+        os.utime(self.files["usage"], (now - 30 * DAY, now - 30 * DAY))
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        script = "import json, os, sys; open(os.environ['CLAUDE_CONFIG_DIR'] + '/.credentials.json', 'w').write(sys.argv[1])"
+        with self.assertRaisesRegex(store.FleetError, "left no login"):
+            claude_credentials.sign_in([sys.executable, "-c", "raise SystemExit(1)"])
+        self.assertEqual(json.loads(held.read_text()), login())
+        claude_credentials.sign_in([sys.executable, "-c", script, json.dumps(login("refresh-of-a-host-sign-in"))])
+        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-host-sign-in"))
+        self.assertEqual(held.stat().st_mode & 0o077, 0)
+        # A worker renews before Fleet reports: the login, then its success marker.
+        store.atomic(held, login("refresh-2"))
+        store.atomic(held.with_name(".credentials.json.refresh.last-success"), {"at": now})
+        entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
+        self.assertEqual((entry["status"], entry["evidence"]), ("ok", "usage login renews for another 28 days"))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+
+    def test_status_does_not_wait_for_a_renewal_in_progress(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        replies = []
+        with held.with_name(".credentials.json.refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            reading = threading.Thread(target=lambda: replies.append(host.rpc(dict(action="status"))))
+            reading.start()
+            reading.join(5)
+            self.assertFalse(reading.is_alive())
+        entries = {e["name"]: e["status"] for e in replies[0]["claude_credentials"]}
+        self.assertEqual(entries, {"claude-setup-token": "ok", "claude-usage-login": "ok"})
 
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
@@ -221,7 +267,7 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertEqual((usage["status"], usage["evidence"], usage["remedy"]), ("ok", "usage login renews for another 8 days", ""))
         usage = report(25, signed_in)["claude-usage-login"]
         self.assertEqual((usage["status"], usage["evidence"]), ("warning", "usage login renews for another 3 days"))
-        self.assertIn(f"CLAUDE_CONFIG_DIR={directory} claude auth login", usage["remedy"])
+        self.assertIn("tauceti-fleet claude-usage-login", usage["remedy"])
         self.assertEqual(report(30, signed_in)["claude-usage-login"]["status"], "blocked")
         store.atomic(directory / ".credentials.json", login(refreshTokenExpiresAt=int((signed_in + 40 * DAY) * 1000)))
         self.assertEqual(report(30, signed_in)["claude-usage-login"]["evidence"], "usage login renews for another 10 days")
