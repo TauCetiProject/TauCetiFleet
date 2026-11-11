@@ -114,9 +114,13 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(report["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         self.assertEqual(report["areas"], dict(MeasureTheory=dict(done=1, inflight=1, eligible=0, blocked=0),
                                                Probability=dict(done=0, inflight=1, eligible=0, blocked=1)))
-        for state in ("verifying", "working"):
-            verifying = [dict(id="w1", state=state, roadmap_target="MeasureTheory/kolmogorov-zero-one")]
-            self.assertEqual(targets.summarize(targets.parse(EXAMPLE), verifying)["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
+        held = [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")]
+        for state in ("verifying", "working", "verification-pending", "verification-incomplete"):
+            verifying = dict(id="w1", state=state, roadmap_target="MeasureTheory/kolmogorov-zero-one", next_action_at=None)
+            self.assertEqual(targets.summarize(targets.parse(EXAMPLE), [verifying])["rounds"], held, state)
+            # A continuation between rounds keeps the retry time the ended round left.
+            background = dict(verifying, next_action_at=1.0)
+            self.assertEqual(targets.summarize(targets.parse(EXAMPLE), [background])["rounds"], [], state)
         ticked = EXAMPLE.replace("[~] `truncation", "[x] `truncation")
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
         mixed = targets.parse(EXAMPLE.replace("`borel-cantelli`, `truncation-bounds`", "borel-cantelli, `truncation-bounds`"))
@@ -243,6 +247,8 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         workers.mkdir(parents=True)
         for row in ROUNDS:
             (workers / (row["id"] + ".json")).write_text(json.dumps(row))
+        (workers / "w4.json").write_text(json.dumps(dict(id="w4", state="verification-pending", next_action_at=None,
+                                                         roadmap_target="Probability/strong-law")))
 
         def one_pass():
             written.clear()
@@ -263,7 +269,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         result = targets.configure(dict(text=EXAMPLE), [])
         self.assertIn("controller's next pass", result["notes"][-1])
         report = one_pass()["roadmap_targets"]
-        self.assertEqual((report["inflight"], report["rounds"]), (2, [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")]))
+        self.assertEqual((report["inflight"], sorted(r["worker"] for r in report["rounds"])), (3, ["w1", "w4"]))
         self.assertEqual({w["roadmap_targets"] for w in tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]},
                          {str(targets.stored())})
         targets.stored().write_text("no marker")

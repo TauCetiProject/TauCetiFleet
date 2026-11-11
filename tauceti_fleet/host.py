@@ -543,7 +543,7 @@ def worker_statuses():
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
             if value.get("roadmap_target"):
-                status["roadmap_target"] = value["roadmap_target"]
+                status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
     return values
 
