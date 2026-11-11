@@ -193,6 +193,52 @@ class Attention(unittest.TestCase):
         self.assertEqual(store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]["observed"],
                          at + 10)
 
+    def test_an_answer_from_an_earlier_request_does_not_replace_a_later_one(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 7, summary="A")
+        clock = [at + 10]
+
+        def answer(path, **_):
+            if clock[0] == at + 10:
+                clock[0] = at + 20
+                self.listed(lookup=True)
+                return dict(state="closed", merged_at=None, head=dict(sha="a" * 40))
+            return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+
+        self.github.side_effect = answer
+        with patch.object(attention.time, "time", side_effect=lambda: clock[0]):
+            value = self.listed(lookup=True)
+        self.assertEqual([i["id"] for i in value["items"]], ["7"])
+        kept = store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]
+        self.assertEqual((kept["state"], kept["observed"]), ("OPEN", at + 20))
+
+    def test_overlapping_lookups_merge_their_answers_one_after_the_other(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 7, summary="A")
+        clock, write, done = [at + 10], attention.atomic, {}
+
+        def answer(path, **_):
+            state = "closed" if clock[0] == at + 10 else "open"
+            return dict(state=state, merged_at=None, head=dict(sha="a" * 40))
+
+        def paused(path, value):
+            if Path(path).parent == attention.notes_path("x").parent and "thread" not in done:
+                clock[0] = at + 20
+                done["thread"] = threading.Thread(target=lambda: self.listed(lookup=True))
+                done["thread"].start()
+                done["thread"].join(timeout=1)
+            write(path, value)
+
+        self.github.side_effect = answer
+        with (patch.object(attention.time, "time", side_effect=lambda: clock[0]),
+              patch.object(attention, "atomic", side_effect=paused)):
+            self.listed(lookup=True)
+            done["thread"].join()
+        kept = store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]
+        self.assertEqual((kept["state"], kept["observed"]), ("OPEN", at + 20))
+
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")

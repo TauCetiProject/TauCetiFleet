@@ -347,8 +347,27 @@ def incident_lookup(config, items):
         if (key := (item["origin"], item["repository"], number, named)) in answers:
             fresh.setdefault(item["record"], {})[f"{item['repository']}#{number}"] = answers[key]
     for record, values in fresh.items():
-        atomic(notes_path(record), dict(version=1, prs={**notes(record), **values}))
+        merge_notes(record, values)
     return dict(asked=asked, error=error)
+
+
+def merge_notes(record, values):
+    """Add answers to a record's notes, keeping per pull request the answer whose request started last.
+    Lookups can overlap and finish in any order, so the read and the write share one lock."""
+    lock = notes_path(record).parent / ".notes.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        kept = notes(record)
+        for key, value in values.items():
+            old = kept.get(key)
+            if not (isinstance(old, dict) and isinstance(old.get("observed"), int | float)
+                    and old["observed"] > value["observed"]):
+                kept[key] = value
+        atomic(notes_path(record), dict(version=1, prs=kept))
+    finally:
+        os.close(fd)
 
 
 # name -> how to list its items, and optionally how to acknowledge one and how to ask the forges about them.
