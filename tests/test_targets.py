@@ -160,6 +160,13 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         shared.unlink()
         self.assertIn("Cannot read target list", targets.status(store.host_config(), [])["error"])
 
+    def test_a_path_outside_the_basic_plane_is_valid_in_the_definitions(self):
+        shared = self.root / "lists/goal-\U0001d6fc\x7f.md"
+        shared.parent.mkdir()
+        shared.write_text(EXAMPLE)
+        targets.configure(dict(path=str(shared)), [])
+        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(shared)})
+
     def test_refused_lists_change_nothing(self):
         self.mirror("TauCetiRoadmap/MeasureTheory", "Completed/Probability")
         repeated = EXAMPLE.replace("`strong-law`", "`borel-cantelli`")
@@ -170,6 +177,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
             (dict(text=EXAMPLE.replace("## Probability", "## Probabilty")), "No roadmap directory for Probabilty"),
             (dict(text="x" * (targets.LIMIT + 1)), "at most 256 KiB"),
             (dict(path="list.md"), "absolute path"),
+            (dict(path="/lists/\ud835.md"), "valid UTF-8"),
             (dict(path=str(self.root / "absent.md")), "Cannot read target list"),
             (dict(text=EXAMPLE, path="/list.md"), "not both"),
         ):

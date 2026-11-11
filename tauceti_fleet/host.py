@@ -276,6 +276,12 @@ def write_slices(config, caps):
     return worker
 
 
+def toml_value(value):
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = dict(
@@ -305,7 +311,7 @@ def worker_config(config):
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         for key, value in fields.items():
             if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+                lines.append(key + " = " + ("true" if value is True else toml_value(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")

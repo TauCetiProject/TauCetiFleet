@@ -309,6 +309,10 @@ def configure(payload, workers):
         if path is not None:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise FleetError("A target list on the host is named by its absolute path")
+            try:
+                path.encode()
+            except UnicodeEncodeError:
+                raise FleetError("A target list's path must be valid UTF-8") from None
             text = load(path)
         elif not isinstance(text, str) or len(text.encode()) > LIMIT:
             raise FleetError(f"A transferred target list is text of at most {LIMIT // 1024} KiB")
