@@ -50,12 +50,27 @@ def validate(slots, timezone=None):
     return dict(slots=names, timezone=timezone)
 
 
-def occurrences(slots, tz, now):
-    """Epoch (start, end, slot) for each slot in the weeks around `now`.
+def instant(wall, tz):
+    """The first epoch second at which the clock in `tz` (None: host local time) reads `wall` or later.
 
-    Slot times are wall-clock times: a naive datetime converts by the host's
-    local rules and an aware one by its zone's, daylight saving included.
+    A time skipped by daylight saving maps to the end of the gap. The map never
+    decreases, so slots that overlap on the wall clock still overlap as instants.
     """
+
+    def reads(at):
+        return datetime.fromtimestamp(at, tz).replace(tzinfo=None)
+
+    early, late = sorted(int(wall.replace(tzinfo=tz, fold=fold).timestamp()) for fold in (0, 1))
+    if reads(early) >= wall:
+        return early
+    while late - early > 1:
+        middle = (early + late) // 2
+        early, late = (early, middle) if reads(middle) >= wall else (middle, late)
+    return late
+
+
+def occurrences(slots, tz, now):
+    """Epoch (start, end, slot) for each slot in the weeks around `now`; slot times are wall-clock times."""
     local = datetime.fromtimestamp(now, tz)
     monday = datetime(local.year, local.month, local.day) - timedelta(days=local.weekday())
     for week in range(-1, 3):
@@ -63,7 +78,7 @@ def occurrences(slots, tz, now):
             start, end = parse(slot)
             end += 7 * 1440 if end < start else 0
             yield (
-                *((monday + timedelta(weeks=week, minutes=m)).replace(tzinfo=tz).timestamp() for m in (start, end)),
+                *(instant(monday + timedelta(weeks=week, minutes=m), tz) for m in (start, end)),
                 slot,
             )
 
@@ -71,7 +86,7 @@ def occurrences(slots, tz, now):
 def state(config, now=None):
     """What the controller enforces at `now`; empty when the host has no schedule."""
     saved = config.get("worker_schedule")
-    if not saved:
+    if saved is None:
         return {}
     now = time.time() if now is None else now
     try:

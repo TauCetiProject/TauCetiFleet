@@ -842,7 +842,8 @@ a timer unit.
 Slot times are wall-clock times in the host's local time zone, the zone its
 controller runs in. `--timezone` names an IANA zone to use instead and is saved
 with the slots; setting slots without it returns to host local time. Across a
-daylight-saving change a slot is an hour shorter or longer. Days are English
+daylight-saving change a slot is an hour shorter or longer, and a time the
+change skips counts as the end of the skipped hour. Days are English
 names or their first three letters and times are 24-hour. A slot whose end is
 earlier in the week than its start runs past Sunday midnight, and slots that
 touch or overlap count as one. Several slots are separate arguments or one
