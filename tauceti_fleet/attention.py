@@ -269,6 +269,24 @@ def incident_sweep(config, items):
             continue
 
 
+# What to put right before clearing a halt, by the worker's reason and the forge it names.
+HALT_REMEDY = {
+    "identity-mismatch": dict(
+        github="Give the host a GitHub credential of the account github_account names, or correct github_account",
+        forgejo="Write a token of the Forgejo user TAUCETI_FORGEJO_USER_ID names to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host, or correct the user ID"),
+    "invalid-credentials": dict(
+        github="Replace the host's GitHub token (github_token_file, or the stored gh credential)",
+        forgejo="Issue a new Forgejo token for the worker's user and write it to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host"),
+    "account-halt": dict(
+        github="Have GitHub lift the suspension or lock on the worker's account",
+        forgejo="Have the Forgejo instance's administrator reinstate the worker's user, "
+                "or give its token the read:user scope"),
+}
+FORGE_NAMES = dict(github="GitHub", forgejo="Forgejo")
+
+
 def halt_items(config):
     from . import host  # host imports this module
 
@@ -276,11 +294,16 @@ def halt_items(config):
     for worker in host.worker_statuses():
         if worker.get("state") == "halted":
             wid = printable(worker["id"], 100)
-            reason = ": ".join(str(v) for v in (worker.get("halt_reason"), worker.get("failure_reason")) if v)
+            reason = str(worker.get("halt_reason") or "")
+            # A worker release before Forgejo identity checks names GitHub's reasons without the forge.
+            forge, _, bare = reason.rpartition(":") if ":" in reason else ("github", "", reason)
+            remedy = HALT_REMEDY.get(bare, {}).get(forge)
+            head = " ".join(v for v in (FORGE_NAMES.get(forge, forge) if reason else "", bare) if v)
+            text = ": ".join(str(v) for v in (head, worker.get("failure_reason")) if v) or "reason not recorded"
             items.append(dict(
-                source="halt", id=wid, kind="halted", command=["clear-halt", wid],
-                text=printable(reason or "reason not recorded", 1000)
-                + "\nThe worker stays stopped; clear the halt once the account is in order.",
+                source="halt", id=wid, kind="halted", forge=forge if reason else None, command=["clear-halt", wid],
+                text=printable(text, 1000) + "\n" + (f"{remedy}, then clear the halt; the worker stays stopped until then."
+                                                     if remedy else "The worker stays stopped; clear the halt once the account is in order."),
             ))
     return items
 

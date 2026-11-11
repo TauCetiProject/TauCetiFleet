@@ -883,8 +883,11 @@ tauceti-fleet attention --json
 The list is built from three sources
 ([`attention.py`](tauceti_fleet/attention.py)):
 
-- Halted workers: each worker reporting `halted`, with its reason and the
-  `clear-halt` command for it.
+- Halted workers: each worker reporting `halted`, with the forge and the reason
+  it names (`github:invalid-credentials`, `forgejo:identity-mismatch` and so on;
+  an unqualified reason from an older worker release is GitHub's), what to put
+  right on that forge, and the `clear-halt` command. A Forgejo token is replaced
+  in the file the worker's `TAUCETI_FORGEJO_TOKEN_FILE` names on the host.
 - Claude credentials: a profile's setup-token or usage login inside its notice
   period, lapsed or missing, with the sign-in that replaces it.
 - The worker's incident records: a `rebase`, `fix` or `fix-ci` round that ended

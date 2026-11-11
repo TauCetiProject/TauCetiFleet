@@ -401,6 +401,28 @@ class Attention(unittest.TestCase):
         self.assertEqual((acked / f"{path.name}.1").read_text(), text)
         self.assertEqual(json.loads((acked / path.name).read_text())["summary"], "again")
 
+    def test_the_sweep_archives_a_forgejo_record_merged_on_its_own_forge_and_not_its_github_namesake(self):
+        config = self.on()
+        origin = "https://forge.example"
+        github_record = self.record("declined", "fix", 412, summary="github")
+        on_forgejo = self.record("declined", "fix", 412, forge=dict(kind="forgejo", url=origin), repository_id=1,
+                                 suffix=".0123456789ab", summary="forgejo")
+        self.record("declined", "fix", 412, forge=dict(kind="forgejo", url=origin), repository_id=1,
+                    suffix=".0123456789ab", acked=True, summary="earlier")
+        self.observe(412, "OPEN", "a" * 40, attention.epoch("2026-01-15T09:30:00Z") + 60)
+        self.forgejo.side_effect = lambda at, path: dict(state="closed", merged=True, merged_at="2026-01-16T00:00:00Z",
+                                                         head=dict(sha="a" * 40))
+        self.github.side_effect = lambda path, **_: dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+        self.listed(lookup=True)
+        attention.prepare(config)
+        acked = attention.incidents_dir() / "acked"
+        self.assertTrue(github_record.exists())
+        self.assertFalse(on_forgejo.exists())
+        swept = json.loads((acked / on_forgejo.name).read_text())
+        self.assertEqual((swept["summary"], swept["overtaken"]["by"]), ("forgejo", "merged"))
+        self.assertEqual(json.loads((acked / f"{on_forgejo.name}.1").read_text())["summary"], "earlier")
+        self.assertFalse((acked / github_record.name).exists())
+
     def test_a_failing_forge_leaves_the_other_forges_lookups_to_go_ahead(self):
         self.on()
         self.record("declined", "fix", 7, forge=dict(kind="forgejo", url="https://forge.example"), suffix=".0123456789ab")
@@ -516,6 +538,19 @@ class Attention(unittest.TestCase):
         self.assertEqual((status["error"], status["active_worker_limit"]), (None, 1))
         self.assertIn("unreadable", attention.prepared()["error"])
 
+    def test_a_forgejo_halt_is_listed_with_its_forge_and_the_forgejo_remedy(self):
+        store.update_host(workers_enabled=True, max_workers=1)
+        store.atomic(store.state_dir() / "workers/w1.json", dict(
+            id="w1", state="halted", alive=False, halt_reason="forgejo:invalid-credentials",
+            failure_reason="Forgejo https://forge.example rejected the credential for user 3 (HTTP 401); issue a new token"))
+        self.assertEqual([(i["id"], i["forge"]) for i in self.listed()["items"]], [("w1", "forgejo")])
+        code, text = self.cli("attention", "box")
+        self.assertIn("== w1  (halted)\n   Forgejo invalid-credentials: Forgejo https://forge.example rejected", text)
+        self.assertIn("   Issue a new Forgejo token for the worker's user and write it to the file "
+                      "TAUCETI_FORGEJO_TOKEN_FILE names on the host, then clear the halt", text)
+        self.assertIn("   Next step: tauceti-fleet clear-halt box w1\n", text)
+        self.assertNotIn("gh auth", text)
+
     def test_a_halted_worker_is_listed_with_its_reason_and_command_on_a_host_with_nothing_set(self):
         store.update_host(workers_enabled=True, max_workers=2)
         halted = dict(id="w2", state="halted", alive=False, detail="rc=84", halt_reason="account-halt",
@@ -527,7 +562,8 @@ class Attention(unittest.TestCase):
         self.assertEqual([(i["source"], i["id"], i["kind"], i["command"]) for i in value["items"]],
                          [("halt", "w2", "halted", ["clear-halt", "w2"])])
         code, text = self.cli("attention", "box")
-        self.assertIn("== w2  (halted)\n   account-halt: GitHub reports the account suspended [2J\n", text)
+        self.assertIn("== w2  (halted)\n   GitHub account-halt: GitHub reports the account suspended [2J\n"
+                      "   Have GitHub lift the suspension or lock on the worker's account, then clear the halt", text)
         self.assertIn("   Next step: tauceti-fleet clear-halt box w2\n", text)
         self.assertNotIn("Acknowledge with", text)
         self.assertEqual(self.listed(ack="all")["acknowledged"], [])
