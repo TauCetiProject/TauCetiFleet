@@ -12,8 +12,16 @@ LEASE = 15
 
 
 def problem(directory):
-    if not isinstance(directory, str) or not Path(directory).is_absolute() or not Path(directory).is_dir():
-        return "shared_host_dir must name an existing directory by its absolute path"
+    missing = "shared_host_dir must name an existing directory by its absolute path"
+    if not isinstance(directory, str) or not Path(directory).is_absolute():
+        return missing
+    try:
+        if not stat.S_ISDIR(os.stat(directory).st_mode):
+            return missing
+    except FileNotFoundError:
+        return missing
+    except OSError as exc:
+        return f"this account cannot reach {directory}: {type(exc).__name__}"
     if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
         return f"this account cannot read and write {directory}"
     return None

@@ -94,6 +94,14 @@ class SharedHost(unittest.TestCase):
             self.directory.chmod(0o500)
             self.addCleanup(self.directory.chmod, 0o700)
             self.assertIn("cannot read and write", self.step()["error"])
+            # Beneath another account's private home the directory cannot even be inspected.
+            parent = self.root / "private"
+            (parent / "shared").mkdir(parents=True)
+            parent.chmod(0)
+            self.addCleanup(parent.chmod, 0o700)
+            value = shared_host.step(str(parent / "shared"), "own", workers=8, ci_busy=False)
+            self.assertEqual((value["error"], value["share"], value["peers"]),
+                             (f"this account cannot reach {parent / 'shared'}: PermissionError", 1, 0))
 
     def run_controller_once(self, available, cgroup):
         handlers = {}
