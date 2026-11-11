@@ -264,9 +264,27 @@ def incident_items(config):
 
 
 def incident_ack(config, item):
-    acked = incidents_dir() / "acked"
+    """Move the live record to `acked/<name>`, the one name the worker's hold reads there. An earlier
+    record of that name stays as `acked/<name>.<n>`, which the worker does not read."""
+    source, acked = incidents_dir() / item["record"], incidents_dir() / "acked"
+    target = acked / item["record"]
     acked.mkdir(mode=0o700, exist_ok=True)
-    os.replace(incidents_dir() / item["record"], acked / item["record"])
+    aside = None
+    if target.exists() and source.exists():
+        n = 1
+        while True:
+            try:
+                os.link(target, acked / f"{item['record']}.{n}")
+                aside = acked / f"{item['record']}.{n}"
+                break
+            except FileExistsError:
+                n += 1
+    try:
+        os.replace(source, target)
+    except OSError:
+        if aside is not None:
+            aside.unlink(missing_ok=True)
+        raise
     if item.get("ruling_record"):
         with suppress(FileNotFoundError):
             os.replace(incidents_dir() / item["ruling_record"], acked / item["ruling_record"])

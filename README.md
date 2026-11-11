@@ -819,7 +819,10 @@ leaves the host as it was.
 `--ack` moves the matching live records into `incidents/acked/` and deletes
 nothing. An acknowledged `declined` record still holds its head, and an
 acknowledged `budget-spent` record is not written again for that head; delete
-the file to release either. `--ack` needs an explicit host.
+the file to release either. When `acked/` already holds a record of the same
+name, that one is kept as `<name>.1`, `<name>.2` and so on, which the worker
+does not read, so only the latest acknowledged record holds a head. `--ack`
+needs an explicit host.
 
 An item leaves the list by itself once its pull request is merged, closed or at
 a different head than the record names. The evidence is pull request state
