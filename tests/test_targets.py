@@ -194,10 +194,13 @@ class TargetLists(unittest.TestCase):
         machine = store.host_config()["machine_id"]
         listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1)\n- [~] `item-2` — text (in flight: #2)\n"
                                  "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [ ] no slug\n\n## Notes")
-        path = self.root / "list.md"
+        path = self.root / "checkout/list.md"
+        path.parent.mkdir()
         path.write_text(listed)
         path.chmod(0o640)
-        store.update_host(roadmap_targets=str(path))
+        link = self.root / "list.md"
+        link.symlink_to(path)
+        store.update_host(roadmap_targets=str(link))
         prs = [dict(scope=machine, repo=targets.REPOSITORY, number=n, state=state, landed=landed)
                for n, state, landed in ((1, "MERGED", 5.0), (2, "CLOSED", None), (3, "OPEN", None), (1234, "CLOSED", 9.0))]
         prs.append(dict(scope=machine, repo="TauCetiProject/TauCetiRoadmap", number=4, state="MERGED", landed=1.0))
@@ -222,7 +225,8 @@ class TargetLists(unittest.TestCase):
         self.assertFalse(any("item-3" in d or "item-4" in d for d in details))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             targets.display(targets.configure(dict(audit=True, apply=True), rounds))
-        self.assertIn(f"2 line(s) rewritten in {path}", out.getvalue())
+        self.assertIn(f"2 line(s) rewritten in {link}", out.getvalue())
+        self.assertEqual(link.resolve(), path.resolve())
         after = path.read_text()
         self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234)\n", after)
         self.assertIn("- [ ] `item-1` — text (partial: #1)\n", after)

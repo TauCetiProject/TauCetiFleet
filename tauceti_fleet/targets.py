@@ -259,7 +259,9 @@ def configure(payload, workers):
         findings, corrected = audit(config, text, workers)
         applied = bool(payload.get("apply")) and corrected != text
         if applied:
-            write(before, corrected, stat.S_IMODE(Path(before).stat().st_mode))
+            # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
+            destination = Path(before).resolve()
+            write(destination, corrected, stat.S_IMODE(destination.stat().st_mode))
         return dict(roadmap_targets=before, transferred=Path(before) == stored(), findings=findings,
                     corrections=sum("correction" in f for f in findings), applied=applied)
     notes = []
