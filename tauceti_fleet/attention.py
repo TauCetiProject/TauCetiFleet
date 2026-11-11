@@ -217,7 +217,17 @@ def incident_lookup(config, items):
     """Ask GitHub about each listed item's pull request and the ones it names; answers go to Fleet's notes."""
     asked, answers, error = 0, {}, None
     deadline = time.monotonic() + 40
-    for item in items:
+
+    def checked(item):
+        """When this item's pull requests were last asked about, so a bounded call starts where the last one stopped."""
+        if "pr" not in item:
+            return 0
+        own = notes(item["record"]).get(f"{item['repository']}#{item['pr']}")
+        times = [own.get("observed") if isinstance(own, dict) else None] + [
+            n.get("observed") for n in item["named"] if n.get("state") in (None, "OPEN")]
+        return min(t if isinstance(t, int | float) else 0 for t in times)
+
+    for item in sorted(items, key=checked):
         if error or "pr" not in item:
             continue
         cached = notes(item["record"])
