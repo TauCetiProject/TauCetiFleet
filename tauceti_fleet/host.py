@@ -1,5 +1,6 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
+import hashlib
 import json
 import os
 import signal
@@ -359,7 +360,8 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
+    token = Path(config["github_token_file"]).read_text().strip()
+    os.environ["GH_TOKEN"] = token
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
@@ -370,8 +372,12 @@ def run_workers():
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
-    atomic(state_dir() / "worker-manager.json", dict(binary=binary))
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary, github_token_sha256=token_digest(token)))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def manager_process():
@@ -389,7 +395,7 @@ def manager_process():
 
 
 def running_manager():
-    """The runtime the running manager started with."""
+    """The runtime and token digest the running manager started with."""
     recorded = read(state_dir() / "worker-manager.json", {})
     if recorded:
         return recorded
@@ -397,9 +403,9 @@ def running_manager():
     process = manager_process()
     if process is None:
         return {}
-    argv, _ = process
+    argv, environ = process
     binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
-    return dict(binary=binary)
+    return dict(binary=binary, github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else None)
 
 
 RESTART_MANAGER = (
@@ -424,6 +430,14 @@ def clear_halt(worker=None):
     binary = manager.get("binary")
     if not binary:
         raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
+    # Restarted workers inherit GH_TOKEN from the manager, which read the token file once.
+    token_file = host_config().get("github_token_file")
+    try:
+        current = token_file and token_digest(Path(token_file).read_text().strip())
+    except OSError as exc:
+        raise FleetError(f"Cannot read {token_file}: {type(exc).__name__}; repair it before clearing a halt") from None
+    if current and manager.get("github_token_sha256") != current:
+        raise FleetError(f"{token_file} differs from the token the worker manager started with; " + RESTART_MANAGER)
     env = dict(os.environ, **manager_environment())
     workers_config = config_dir() / "workers.toml"
     managed = run([binary, "workers", "clear-halt", "--help"], env=env, check=False).returncode == 0

@@ -175,7 +175,8 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
-        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"), dict(binary=launch.call_args.args[0]))
+        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"),
+                         dict(binary=launch.call_args.args[0], github_token_sha256=host.token_digest("fake-selected-token")))
 
     def write_workers(self, **states):
         for name, state in states.items():
@@ -324,6 +325,29 @@ class Isolated(unittest.TestCase):
         self.assertEqual(environ["GH_TOKEN"], "token-a")
         with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, "0\n")):
             self.assertIsNone(host.manager_process())
+
+    def test_clear_halt_refuses_until_the_manager_has_read_a_replaced_token(self):
+        self.write_workers(w1="halted")
+        secret = self.root / "token"
+        secret.write_text("token-a")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        secret.write_text("token-b")
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        with patch.object(host, "run", side_effect=fake):
+            with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*systemctl --user restart"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual([c[0] for c in calls], ["systemctl"])
+            with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+                host.run_workers()
+                self.assertEqual(os.environ["GH_TOKEN"], "token-b")
+            self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], ["w1"])
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
