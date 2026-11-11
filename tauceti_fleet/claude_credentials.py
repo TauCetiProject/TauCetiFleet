@@ -6,6 +6,7 @@ own. The token's scope cannot read subscription usage; the worker reads usage th
 named by `TAUCETI_CLAUDE_USAGE_CREDENTIALS` and renews that login under `auto_refresh`.
 """
 
+import contextlib
 import hashlib
 import json
 import shlex
@@ -65,6 +66,29 @@ def validate(kind, secret):
         raise FleetError("claude_usage_credentials_file is not the .credentials.json of a claude auth login")
 
 
+def fingerprint(secret):
+    return hashlib.sha256(secret.strip().encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def handed_to(machine_id, secret, names):
+    """On the operator's machine: refuse a usage login already transferred to another host, and
+    record the host once the body succeeds. Each host renews its own copy of a single-use refresh
+    token, so a login shared by two hosts stops working on one of them at the first renewal."""
+    path = config_dir() / "claude-usage-hosts.json"
+    with locked(path.with_suffix(".lock")):
+        owners = read(path, {})
+        owner = owners.get(fingerprint(secret), machine_id)
+        if owner != machine_id:
+            raise FleetError(
+                f"The usage login in claude_usage_credentials_file was transferred to {names.get(owner, owner)}. "
+                "Sign in once per host: give this host a profile whose claude_usage_credentials_file holds its own "
+                "claude auth login, or names a file this machine does not hold, then sign in on the host as doctor shows"
+            )
+        yield
+        atomic(path, dict(owners, **{fingerprint(secret): machine_id}))
+
+
 def install(kind, secret, since=None):
     """Store a validated credential; `since` is when the operator saved or signed in to it."""
     now = time.time()
@@ -80,7 +104,7 @@ def install(kind, secret, since=None):
         return
     # Refresh tokens are single-use: once a worker has renewed this login, the operator's copy is
     # dead, and writing it again on a repeated add would end the chain the host now holds.
-    digest = hashlib.sha256(secret.strip().encode()).hexdigest()
+    digest = fingerprint(secret)
     marker = target.with_name("transferred.json")
     # A worker renewing under this lock writes back a rotation of the login it read before the wait.
     with refresh_lock(target):

@@ -145,6 +145,35 @@ class ClaudeCredentials(unittest.TestCase):
         self.add()
         self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
 
+    def test_a_usage_login_goes_to_one_host(self):
+        self.add()
+        failing = set()
+
+        def call(target, payload, expected_machine_id=None, **_):
+            machine = "machine-" + target
+            self.assertIn(expected_machine_id, (None, machine))
+            if payload["action"] == "configure" and target in failing:
+                raise store.FleetError("offline")
+            return dict(machine_id=machine, profile="p", ci_enrolled=False)
+
+        def add(target):
+            return remote.add(target, profile_name="p")
+
+        with patch.object(remote, "deploy"), patch.object(remote, "call", side_effect=call):
+            add("a")
+            add("a")
+            with self.assertRaisesRegex(store.FleetError, "transferred to a. Sign in once per host"):
+                add("b")
+            self.write("usage", json.dumps(login("refresh-of-a-sign-in-for-b")))
+            failing.add("c")
+            with self.assertRaisesRegex(store.FleetError, "offline"):
+                add("c")
+            add("b")
+            with self.assertRaisesRegex(store.FleetError, "transferred to b"):
+                add("a")
+            self.files["usage"].unlink()
+            add("a")
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [

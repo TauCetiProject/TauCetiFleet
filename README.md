@@ -171,7 +171,7 @@ account needs none of its own:
 | Key | Holds | Lasts |
 | --- | --- | --- |
 | `claude_token_file` | The token `claude setup-token` prints. Every Claude agent on the host runs on it; it never rotates, so the workers share it | A year from when the file was saved |
-| `claude_usage_credentials_file` | The `.credentials.json` of an ordinary sign-in to the same account, made for the fleet alone: `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login`. A setup-token cannot read subscription usage, so workers read their quota windows through this login and renew it themselves (`auto_refresh`). Requires `claude_token_file` | About four weeks from the sign-in |
+| `claude_usage_credentials_file` | The `.credentials.json` of an ordinary sign-in to the same account, made for one host's fleet alone: `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login`. A setup-token cannot read subscription usage, so workers read their quota windows through this login and renew it themselves (`auto_refresh`). Requires `claude_token_file` | About four weeks from the sign-in |
 
 Both files must be private and are transferred like the other credentials. On
 the host they are stored under `secrets/claude/` and `secrets/claude-usage/` in
@@ -184,12 +184,17 @@ command that replaces it; a lapsed one blocks worker activation.
 Renewing a login replaces its refresh token, so once a worker has renewed the
 usage login the operator's copy no longer works. A repeated `add` therefore
 leaves the host's login in place unless the profile's file holds a different
-sign-in. When the login is due, either sign in again on the operator's machine
-and repeat `add`, or run the command `doctor` prints on the host, from which
-`doctor` counts the four weeks again; a profile may name a file the operator's
-machine does not hold when the host is signed in that way. Adding or removing either key takes a drained `add`; replacing a
-credential does not. A worker slot keeps the Claude credential directory it
-first ran with, so give a host these keys before its workers first start.
+sign-in. For the same reason a usage login renews on one host only: the
+setup-token may go to every host, but `add` records in
+`claude-usage-hosts.json` which host each usage login went to and refuses it to
+any other, so give each host its own profile and sign-in. When the login is
+due, either sign in again on the operator's machine and repeat `add`, or run
+the command `doctor` prints on the host, from which `doctor` counts the four
+weeks again; a profile may name a file the operator's machine does not hold
+when the host is signed in that way. Adding or removing either key takes a
+drained `add`; replacing a credential does not. A worker slot keeps the Claude
+credential directory it first ran with, so give a host these keys before its
+workers first start.
 
 ## Protected roadmap capacity
 
