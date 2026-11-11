@@ -269,6 +269,33 @@ class SlotGroups(unittest.TestCase):
         policies = self.daemon_passes(lambda: running(2, "codex", ["progress"]), lambda: running(2, "claude", []))
         self.assertEqual([numbers(policy) for policy in policies], [[1], [1], [1, 2]])
 
+    def test_an_auto_full_rotation_worker_is_held_when_reassigned(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
+
+        def running(n, agent, only):
+            # The worker's applied_spec leaves out agent "auto" and an empty phase list.
+            applied = dict(id=f"{prefix}{n}", enabled=True, **({} if agent == "auto" else dict(agent=agent)),
+                           **(dict(only=only) if only else {}))
+            store.atomic(store.state_dir() / "workers" / f"{prefix}{n}.json", dict(
+                id=f"{prefix}{n}", alive=True, state="waiting-capacity", agent=agent, only=only, applied_spec=applied))
+
+        def admitted():
+            return [int(wid.rsplit("-", 1)[1]) for wid in self.daemon_pass()["workers"]]
+
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:auto")]))
+        self.assertEqual(admitted(), [1, 2])
+        running(1, "auto", [])
+        running(2, "auto", [])
+        self.assertEqual(admitted(), [1, 2])
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:auto")]))
+        self.assertEqual(admitted(), [1])
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:auto"), slot_groups.parse("1:codex:progress")]))
+        self.assertEqual(admitted(), [1])
+        self.assertEqual(admitted(), [1])
+        running(2, "codex", ["progress"])
+        self.assertEqual(admitted(), [1, 2])
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (

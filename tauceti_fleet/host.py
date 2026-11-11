@@ -429,9 +429,11 @@ def unapplied_workers():
     held = set()
     for wid, wanted in written_roles().items():
         status = read(state_dir() / "workers" / f"{wid}.json", {})
-        # Workers older than applied_spec publish agent and only beside it.
-        applied = status.get("applied_spec") if isinstance(status.get("applied_spec"), dict) else status
-        known = "agent" in applied or "only" in applied
+        # applied_spec omits agent "auto" and an empty phase list; workers older
+        # than it publish both fields beside it, and the oldest neither.
+        applied = status.get("applied_spec")
+        known = isinstance(applied, dict) or "agent" in status or "only" in status
+        applied = applied if isinstance(applied, dict) else status
         running = (applied.get("agent", "auto"), applied.get("only", []))
         if status.get("alive") and (running == wanted or not known):
             pending.discard(wid)
