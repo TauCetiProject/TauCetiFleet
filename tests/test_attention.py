@@ -576,6 +576,18 @@ class Attention(unittest.TestCase):
         self.assertTrue((attention.incidents_dir() / "acked/ruling-declined-fix-5.json.1").exists())
         self.assertEqual(self.listed()["rulings"], {"escalate": 2})
 
+    def test_an_unreadable_archive_is_reported_and_not_counted_as_no_rulings(self):
+        config = self.on()
+        acked = self.ruling("declined", "fix", 5, "escalate", acked=True).parent
+        acked.chmod(0o300)
+        self.addCleanup(acked.chmod, 0o700)
+        if os.access(acked, os.R_OK):
+            self.skipTest("permissions do not apply to this user")
+        with self.assertRaisesRegex(store.FleetError, "acked could not be listed"):
+            self.listed()
+        attention.prepare(config)
+        self.assertIn("could not be listed", attention.prepared()["error"])
+
     def test_lookup_covers_the_pull_requests_a_ruling_names(self):
         self.on()
         self.record("declined", "rebase", 3, acked=True, summary="conflicts")

@@ -184,9 +184,12 @@ def recent_rulings():
     counts = {}
     for folder in (incidents_dir(), incidents_dir() / "acked"):
         try:
-            paths = [p for p in folder.glob(RULING + "-*.json*") if re.fullmatch(r".*\.json(\.\d+)?", p.name)]
-        except OSError:
+            with os.scandir(folder) as entries:
+                paths = [folder / e.name for e in entries if re.fullmatch(RULING + r"-.*\.json(\.\d+)?", e.name)]
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise FleetError(f"{folder} could not be listed: {exc.strerror or exc}") from None
         for path in paths:
             with suppress(OSError):
                 record = load(path) if path.stat().st_mtime >= cutoff else None
