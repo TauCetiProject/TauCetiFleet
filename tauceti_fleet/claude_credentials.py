@@ -67,7 +67,9 @@ def validate(kind, secret):
 
 
 def fingerprint(secret):
-    return hashlib.sha256(secret.strip().encode()).hexdigest()
+    """A usage login's identity: its refresh token, unchanged by formatting or metadata edits."""
+    validate(USAGE, secret)
+    return hashlib.sha256(block(secret)["refreshToken"].encode()).hexdigest()
 
 
 @contextlib.contextmanager

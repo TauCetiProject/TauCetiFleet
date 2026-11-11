@@ -99,6 +99,11 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
         token = json.loads((held.parent.parent / "claude/.credentials.json").read_text())["claudeAiOauth"]
         self.assertEqual((token["accessToken"], token["subscriptionType"]), ("sk-ant-oat01-next", "max"))
+        # The same login in other formatting, or with other metadata, is not a new sign-in.
+        store.atomic(held, login("refresh-3"))
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in", rateLimitTier="x"), indent=4))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-3"))
         self.files["usage"].unlink()
         self.add()
         self.assertTrue(held.is_file())
@@ -163,6 +168,9 @@ class ClaudeCredentials(unittest.TestCase):
             add("a")
             add("a")
             with self.assertRaisesRegex(store.FleetError, "transferred to a. Sign in once per host"):
+                add("b")
+            self.write("usage", json.dumps(login(), indent=2, sort_keys=True))
+            with self.assertRaisesRegex(store.FleetError, "transferred to a"):
                 add("b")
             self.write("usage", json.dumps(login("refresh-of-a-sign-in-for-b")))
             failing.add("c")
