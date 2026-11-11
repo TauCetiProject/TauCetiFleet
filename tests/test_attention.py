@@ -754,7 +754,7 @@ class Attention(unittest.TestCase):
             code, output = self.cli("attention", "box", "--show-roadmap", which)
             self.assertEqual((code, output), (0, f"box:\n{text}"))
         code, output = self.cli("attention", "box", "--show-roadmap", "forge.example/Other/Repo#412")
-        self.assertIn("No ruling on this host names forge.example/Other/Repo#412", output)
+        self.assertIn("No roadmap change has been drafted for pull request forge.example/Other/Repo#412", output)
         here = self.root / "checkout"
         here.mkdir()
         self.addCleanup(os.chdir, os.getcwd())
@@ -770,6 +770,35 @@ class Attention(unittest.TestCase):
         self.assertEqual(json.loads((acked / "ruling-declined-fix-412.0123456789ab.json.1").read_text())["blocked_on"], [431])
         self.assertEqual(self.listed()["rulings"], {"roadmap": 2, "wait": 2})
         self.assertEqual(self.cli("attention", "box", "--show-roadmap", ident)[1], "box:\nforgejo draft\n")
+
+    def test_a_draft_is_found_by_the_ruling_that_names_it_on_either_forge(self):
+        self.on()
+        origin, ident = "https://forge.example", "forge.example/TauCetiProject/TauCeti#7"
+        on_forgejo = dict(forge=dict(kind="forgejo", url=origin), repository_id=1, suffix=".0123456789ab")
+        drafts = attention.incidents_dir() / "drafts"
+        drafts.mkdir(parents=True)
+        self.ruling("declined", "fix", 7, "roadmap", at="2026-01-15T10:00:00Z", area="A",
+                    draft=str(drafts / "roadmap-declined-fix-7.md"))
+        self.ruling("declined", "rebase", 7, "roadmap", acked=True, at="2026-01-15T09:00:00Z", area="A",
+                    draft=str(drafts / "roadmap-declined-rebase-7.md"))
+        self.ruling("declined", "fix", 7, "roadmap", area="A", draft=str(self.root / "elsewhere.md"), **on_forgejo)
+        (self.root / "elsewhere.md").write_text("outside\n")
+        (drafts / "roadmap-declined-rebase-7.md").write_text("github rebase\n")
+        (drafts / "roadmap-declined-fix-7.0123456789ab.md").write_text("forgejo fix\n")
+        self.assertEqual(attention.roadmap_draft("7")["text"], "github rebase\n")
+        (drafts / "roadmap-declined-fix-7.md").write_text("github fix\n")
+        self.assertEqual(attention.roadmap_draft(7)["text"], "github fix\n")
+        value = attention.roadmap_draft(ident)
+        self.assertEqual((value["text"], Path(value["path"]).name), ("forgejo fix\n", "roadmap-declined-fix-7.0123456789ab.md"))
+        here = self.root / "checkout"
+        here.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(here)
+        self.assertEqual(self.cli("attention", "box", "--file-roadmap", ident)[0], 0)
+        self.assertEqual((here / "roadmap-declined-fix-7.0123456789ab.md").read_text(), "forgejo fix\n")
+        (drafts / "roadmap-declined-fix-7.0123456789ab.md").unlink()
+        with self.assertRaisesRegex(store.FleetError, "No roadmap change has been drafted"):
+            attention.roadmap_draft(ident)
 
     def test_a_drafted_roadmap_change_is_shown_or_copied_and_nothing_else_is_done(self):
         self.on()

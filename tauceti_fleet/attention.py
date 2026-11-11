@@ -363,45 +363,63 @@ def records_lock(config):
             os.close(fd)
 
 
-DRAFT = re.compile(r"roadmap-\d+(\.[0-9a-f]{12})?\.md")
+DRAFT = re.compile(r"roadmap-[A-Za-z0-9_-][A-Za-z0-9_.-]{0,200}\.md")
 
 
-def draft_suffix(ident, number):
-    """The key suffix of the ruling record whose ack id is `ident`, which the worker also puts on its draft."""
-    pattern = re.compile(RULING + rf"-.+-{number}(\.[0-9a-f]{{12}})\.json")
+def drafted_by(ident):
+    """The `roadmap` ruling records whose ack id is `ident`, live then archived, newest first in each folder."""
+    found = []
     for folder in (incidents_dir(), incidents_dir() / "acked"):
         try:
             with os.scandir(folder) as entries:
-                names = sorted(e.name for e in entries if pattern.fullmatch(e.name))
+                names = [e.name for e in entries if e.name.startswith(RULING + "-") and e.name.endswith(".json")]
         except FileNotFoundError:
             continue
         except OSError as exc:
             raise FleetError(f"{folder} could not be listed: {exc.strerror or exc}") from None
+        records = []
         for name in names:
             with suppress(OSError):
-                target = target_of(load(folder / name) or {})
+                record = load(folder / name)
+                target = target_of(record) if is_ruling(record) and record["ruling"] == "roadmap" else None
                 if target and target["id"] == ident:
-                    return pattern.fullmatch(name).group(1)
-    raise FleetError(f"No ruling on this host names {ident}")
+                    records.append((name, record))
+        found += sorted(records, key=lambda r: str(r[1].get("last_at") or ""), reverse=True)
+    return found
+
+
+def draft_names(name, record):
+    """Where a ruling's draft may be under `drafts/`: the file its `draft` field names, then
+    `roadmap-<case>.md` after the ruling's own name, then `roadmap-<PR><suffix>.md` as earlier workers named it.
+    Only a file name is taken from the record, so nothing outside `drafts/` is read."""
+    case = name[len(RULING) + 1:-len(".json")]
+    suffix = re.fullmatch(rf".*-{record['pr']}(\.[0-9a-f]{{12}})?", case)
+    names = [Path(record["draft"]).name if isinstance(record.get("draft"), str) else "", f"roadmap-{case}.md",
+             f"roadmap-{record['pr']}{suffix.group(1) or ''}.md" if suffix else ""]
+    return [n for n in dict.fromkeys(names) if DRAFT.fullmatch(n)]
 
 
 def roadmap_draft(which):
-    """The roadmap change a `roadmap` ruling drafted, from the worker's `drafts/` folder: by number for the
-    workers' own GitHub repository, by ack id for any other repository or forge."""
+    """The roadmap change a `roadmap` ruling drafted, from the worker's `drafts/` folder, for the item whose
+    ack id is `which`: the bare number for the workers' own GitHub repository."""
     which = str(which) if type(which) is int else which
     number = which.rpartition("#")[2] if isinstance(which, str) and len(which) <= 200 else ""
     if not (number.isdecimal() and 0 < int(number) < 10**9):
         raise FleetError("Name the pull request number or ack id whose drafted roadmap change to read")
-    suffix = "" if which == number else draft_suffix(which, int(number))
-    path = incidents_dir() / "drafts" / f"roadmap-{int(number)}{suffix}.md"
-    try:
-        if path.stat().st_size > 256 * 1024:
-            raise FleetError(f"{path} is larger than a drafted roadmap change")
-        return dict(pr=int(number), id=which, path=str(path), text=path.read_text())
-    except FileNotFoundError:
-        raise FleetError(f"No roadmap change has been drafted for pull request {which} on this host") from None
-    except (OSError, ValueError) as exc:
-        raise FleetError(f"{path} could not be read: {exc}") from None
+    names = [n for name, record in drafted_by(which) for n in draft_names(name, record)]
+    if which == number:
+        names.append(f"roadmap-{int(number)}.md")
+    for name in dict.fromkeys(names):
+        path = incidents_dir() / "drafts" / name
+        try:
+            if path.stat().st_size > 256 * 1024:
+                raise FleetError(f"{path} is larger than a drafted roadmap change")
+            return dict(pr=int(number), id=which, path=str(path), text=path.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise FleetError(f"{path} could not be read: {exc}") from None
+    raise FleetError(f"No roadmap change has been drafted for pull request {which} on this host")
 
 
 def ask(config, repository, number, *, named, forge="github", origin=GITHUB):

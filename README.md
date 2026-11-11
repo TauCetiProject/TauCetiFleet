@@ -904,9 +904,12 @@ Rulings in the last 24h: 1 close, 2 escalate, 3 wait
 ```
 
 A `roadmap` ruling leaves a proposed roadmap change in
-`incidents/drafts/roadmap-<PR>.md` on the host, with the record's key suffix
-after the number for a pull request outside the workers' own GitHub repository.
-Fleet opens nothing on any forge; it shows the draft, or copies it to your
+`incidents/drafts/` on the host, in the file the ruling record's `draft` names
+(`roadmap-<incident kind>-<incident key>.md`, for example
+`roadmap-declined-fix-412.md`). Fleet reads only that file name inside
+`drafts/`, and falls back to `roadmap-<PR>.md`, the name earlier workers used.
+Where several rulings on one pull request drafted a change, the newest live one
+is shown. Fleet opens nothing on any forge; it shows the draft, or copies it to your
 machine for you to file. Name the pull request by its ack id, which is the bare
 number for the workers' own GitHub repository:
 
