@@ -6,7 +6,6 @@ own. The token's scope cannot read subscription usage; the worker reads usage th
 named by `TAUCETI_CLAUDE_USAGE_CREDENTIALS` and renews that login under `auto_refresh`.
 """
 
-import contextlib
 import hashlib
 import json
 import shlex
@@ -72,23 +71,22 @@ def fingerprint(secret):
     return hashlib.sha256(block(secret)["refreshToken"].encode()).hexdigest()
 
 
-@contextlib.contextmanager
-def handed_to(machine_id, secret, names):
-    """On the operator's machine: refuse a usage login already transferred to another host, and
-    record the host once the body succeeds. Each host renews its own copy of a single-use refresh
-    token, so a login shared by two hosts stops working on one of them at the first renewal."""
+def reserve(machine_id, secret, names):
+    """On the operator's machine: refuse a usage login already sent to another host, else record
+    this host before the login is sent. Each host renews its own copy of a single-use refresh
+    token, so a login shared by two hosts stops working on one of them at the first renewal.
+    The record stays when the send fails, since a lost reply may follow a completed transfer."""
     path = config_dir() / "claude-usage-hosts.json"
     with locked(path.with_suffix(".lock")):
         owners = read(path, {})
-        owner = owners.get(fingerprint(secret), machine_id)
+        owner = owners.setdefault(fingerprint(secret), machine_id)
         if owner != machine_id:
             raise FleetError(
                 f"The usage login in claude_usage_credentials_file was transferred to {names.get(owner, owner)}. "
                 "Sign in once per host: give this host a profile whose claude_usage_credentials_file holds its own "
                 "claude auth login, or names a file this machine does not hold, then sign in on the host as doctor shows"
             )
-        yield
-        atomic(path, dict(owners, **{fingerprint(secret): machine_id}))
+        atomic(path, owners)
 
 
 def install(kind, secret, since=None):

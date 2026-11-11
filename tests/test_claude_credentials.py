@@ -158,7 +158,8 @@ class ClaudeCredentials(unittest.TestCase):
             machine = "machine-" + target
             self.assertIn(expected_machine_id, (None, machine))
             if payload["action"] == "configure" and target in failing:
-                raise store.FleetError("offline")
+                # The host may have installed the login before its reply was lost.
+                raise store.FleetError("Remote host did not return a fleet response")
             return dict(machine_id=machine, profile="p", ci_enrolled=False)
 
         def add(target):
@@ -174,8 +175,11 @@ class ClaudeCredentials(unittest.TestCase):
                 add("b")
             self.write("usage", json.dumps(login("refresh-of-a-sign-in-for-b")))
             failing.add("c")
-            with self.assertRaisesRegex(store.FleetError, "offline"):
+            with self.assertRaisesRegex(store.FleetError, "did not return"):
                 add("c")
+            with self.assertRaisesRegex(store.FleetError, "transferred to machine-c"):
+                add("b")
+            self.write("usage", json.dumps(login("refresh-of-a-second-sign-in-for-b")))
             add("b")
             with self.assertRaisesRegex(store.FleetError, "transferred to b"):
                 add("a")

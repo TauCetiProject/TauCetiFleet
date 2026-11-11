@@ -186,8 +186,9 @@ usage login the operator's copy no longer works. A repeated `add` therefore
 leaves the host's login in place unless the profile's file holds a different
 sign-in. For the same reason a usage login renews on one host only: the
 setup-token may go to every host, but `add` records in
-`claude-usage-hosts.json` which host each usage login went to and refuses it to
-any other, so give each host its own profile and sign-in. When the login is
+`claude-usage-hosts.json` which host each usage login is sent to, before
+sending it and whether or not `add` then succeeds, and refuses it to any other,
+so give each host its own profile and sign-in. When the login is
 due, either sign in again on the operator's machine and repeat `add`, or run
 the command `doctor` prints on the host, from which `doctor` counts the four
 weeks again; a profile may name a file the operator's machine does not hold
