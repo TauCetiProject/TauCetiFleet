@@ -1,9 +1,11 @@
+import fcntl
 import io
 import json
 import os
 import signal
 import sqlite3
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -422,6 +424,39 @@ f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
         self.assertIn("Nothing needs you.\n\nUnder a ruling that waits for nobody:\n\n== PR #3 ", text)
         self.assertEqual(attention.prepared()["count"], 0)
         self.assertEqual([d["record"] for d in self.listed(ack="3")["acknowledged"]], [waiting.name])
+
+    def test_ack_all_holds_the_record_lock_so_a_ruling_written_meanwhile_stays_live(self):
+        self.on()
+        incident = self.record("declined", "fix", 5, at="2026-01-15T12:00:00Z", summary="declined again")
+        self.ruling("declined", "fix", 5, "retry", at="2026-01-15T11:30:00Z")
+        version = json.loads(incident.read_text())
+
+        def decide():
+            fd = os.open(attention.incidents_dir() / attention.LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                self.ruling("declined", "fix", 5, "wait", incident_at="2026-01-15T12:00:00Z", blocked_on=[431])
+            finally:
+                os.close(fd)
+
+        writer, gather = threading.Thread(target=decide), attention.gather
+
+        def classified(config):
+            items = gather(config)
+            if writer.ident is None:
+                writer.start()
+                writer.join(0.3)
+            return items
+
+        with patch.object(attention, "gather", classified):
+            value = self.listed(ack="all")
+        writer.join()
+        self.assertEqual([d["record"] for d in value["acknowledged"]], ["declined-fix-5.json"])
+        self.assertEqual(json.loads((attention.incidents_dir() / "acked/ruling-declined-fix-5.json").read_text())["ruling"],
+                         "retry")
+        self.assertEqual((json.loads((attention.incidents_dir() / "acked/declined-fix-5.json").read_text())), version)
+        self.assertEqual([(i["id"], i.get("rank"), i["ruling"]["ruling"]) for i in self.listed()["items"]],
+                         [("5", 2, "wait")])
 
     def test_a_ruling_archived_again_keeps_the_earlier_one_beside_it(self):
         self.on()

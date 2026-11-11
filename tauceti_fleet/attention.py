@@ -5,13 +5,14 @@ records (its docs/incidents.md): Fleet names the directory, the workers write in
 A worker's decide phase (its docs/decide.md) adds `ruling` records there, shown on the item they rule on.
 """
 
+import fcntl
 import json
 import os
 import re
 import sqlite3
 import time
 from calendar import timegm
-from contextlib import closing, suppress
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
 from . import activity, github
@@ -23,6 +24,7 @@ MAX_LOOKUPS = 100
 RULING = "ruling"
 NEEDS_PERSON = ("escalate", "roadmap")
 RECENT = 24 * 3600
+LOCK = ".records.lock"
 
 
 def enabled(config):
@@ -294,6 +296,23 @@ def incident_ack(config, item):
             archive(item["ruling_record"])
 
 
+@contextmanager
+def records_lock(config):
+    """Hold the lock a worker with the decide phase takes to write or archive a live record, so that
+    what `--ack` archives is what it classified. A worker without that phase moves no record."""
+    fd = None
+    if enabled(config):
+        with suppress(OSError):
+            fd = os.open(incidents_dir() / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def roadmap_draft(number):
     """The roadmap change a `roadmap` ruling drafted for a pull request, from the worker's `drafts/` folder."""
     if type(number) is not int or not 0 < number < 10**9:
@@ -386,14 +405,15 @@ def listing(config):
 
 def acknowledge(config, which):
     done = []
-    for item in gather(config):
-        ack = SOURCES[item["source"]].get("ack")
-        if ack and (which == item["id"] or (which == "all" and (item.get("rank") != 2 or item.get("cleared")))):
-            try:
-                ack(config, item)
-            except FileNotFoundError:
-                continue
-            done.append({k: item.get(k) for k in ("source", "id", "kind", "record")})
+    with records_lock(config):
+        for item in gather(config):
+            ack = SOURCES[item["source"]].get("ack")
+            if ack and (which == item["id"] or (which == "all" and (item.get("rank") != 2 or item.get("cleared")))):
+                try:
+                    ack(config, item)
+                except FileNotFoundError:
+                    continue
+                done.append({k: item.get(k) for k in ("source", "id", "kind", "record")})
     return done
 
 

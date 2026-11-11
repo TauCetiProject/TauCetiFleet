@@ -872,6 +872,9 @@ those two wait for a person. Items under a standing `retry`, `wait`,
 out of the count in `status`. `--ack all` leaves those in place, because the
 phase looks again only at a live `wait` or `prerequisite` ruling; `--ack` with
 the pull request number archives one anyway, together with its incident record.
+`--ack` holds the directory's `.records.lock`, which the phase takes to write a
+ruling or archive a record, from listing the items to moving the last file, so
+it never archives a ruling written after it looked.
 
 `status` adds one line counting the ruling records written in the last 24
 hours, live or archived:
