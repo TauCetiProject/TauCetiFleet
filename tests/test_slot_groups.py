@@ -75,8 +75,8 @@ class SlotGroups(unittest.TestCase):
         })
         for worker in workers.values():
             self.assertEqual((worker["github_account"], worker["claude_billing"]), ("operator", "subscription"))
-        # Each prefix stays within one slot of every group's share; the default ceiling of 8 leaves out the progress slot.
-        self.assertEqual(order, [1, 2, 7, 3, 4, 8, 5, 6, 9])
+        # Each group is spread through the admission order, so the default ceiling of 8 drops one of the six.
+        self.assertEqual(order, [1, 2, 7, 3, 9, 4, 5, 8, 6])
         self.assertEqual({w.rsplit("-", 1)[1] for w in host.maintenance_workers(store.host_config())}, set("789"))
         with (
             patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
@@ -184,8 +184,8 @@ class SlotGroups(unittest.TestCase):
             return [int(wid.rsplit("-", 1)[1]) for wid in ids]
 
         policy = self.daemon_pass()
-        self.assertEqual(numbers(policy["workers"]), [1, 2, 7, 3, 4])
-        self.assertEqual(numbers(policy["roadmap_focus"]["workers"]), [1, 2, 3, 4])
+        self.assertEqual(numbers(policy["workers"]), [1, 2, 7, 3, 9])
+        self.assertEqual(numbers(policy["roadmap_focus"]["workers"]), [1, 2, 3])
         store.update_host(max_workers=32)
         self.assertEqual(len(self.daemon_pass()["workers"]), 9)
         self.assertEqual(host.rpc(dict(action="slots"))["slots"][0]["count"], 6)

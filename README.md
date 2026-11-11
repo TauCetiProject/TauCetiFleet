@@ -860,8 +860,8 @@ before any is added.
 The counts say how many slots exist; `workers --max` remains the admission
 ceiling, so raise it when the groups total more. A ceiling below the total
 admits each group within one slot of its proportional share, and raising the
-ceiling only adds slots: a ceiling of five on the profile above admits four
-`auto` slots and one reviewer, and the progress slot is the ninth admitted. [Roadmap focus](#roadmap-focus)
+ceiling only adds slots: a ceiling of five on the profile above admits three
+`auto` slots, one reviewer, and the progress slot. [Roadmap focus](#roadmap-focus)
 takes its share from the admitted slots whose phases include `roadmap`.
 
 ## Public operations telemetry
