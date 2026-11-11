@@ -291,17 +291,24 @@ def write_slices(config, caps):
 
 
 WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
-# What run_workers() sets besides TAUCETI_FLEET_*. The worker manager lays a
-# definition's env over its own environment, so these must stay out of env.
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
 FLEET_OWNED_ENV = {
     "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
     "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
 }
 # Profile key -> (the variable the worker reads it from, accepted form, its description).
 PROGRESS_SOURCE = {
     "progress_repo": ("TAUCETI_PROGRESS_REPO", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "OWNER/NAME"),
     "progress_ref": ("TAUCETI_PROGRESS_REF", r"[0-9a-f]{40}", "a full commit id"),
 }
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
 
 
 def pace_curve(spec):
@@ -336,6 +343,11 @@ def worker_fields(config):
         raise FleetError("sandbox must be host or bubble")
     if pace and not (isinstance(pace, str) and pace_curve(pace)):
         raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    if isinstance(env, dict) and CREDENTIAL_SOURCE_ENV & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(CREDENTIAL_SOURCE_ENV & set(env)))
+            + ": workers sign in from the host account's own claude and codex logins"
+        )
     # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
     valid = isinstance(env, dict) and all(
         isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
@@ -445,9 +457,11 @@ def unapplied_workers():
     held = set()
     for wid, wanted in written_roles().items():
         status = read(state_dir() / "workers" / f"{wid}.json", {})
-        # Workers older than applied_spec publish agent and only beside it.
-        applied = status.get("applied_spec") if isinstance(status.get("applied_spec"), dict) else status
-        known = "agent" in applied or "only" in applied
+        # applied_spec omits agent "auto" and an empty phase list; workers older
+        # than it publish both fields beside it, and the oldest neither.
+        applied = status.get("applied_spec")
+        known = isinstance(applied, dict) or "agent" in status or "only" in status
+        applied = applied if isinstance(applied, dict) else status
         running = (applied.get("agent", "auto"), applied.get("only", []))
         if status.get("alive") and (running == wanted or not known):
             pending.discard(wid)
