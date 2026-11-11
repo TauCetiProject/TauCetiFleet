@@ -24,6 +24,8 @@ SLUG = re.compile(r"`([^`]+)`")
 CLAUSES = re.compile(r"\(([^()]*)\)\s*$")
 MARKS = {" ": "open", "~": "inflight", "x": "done", "X": "done"}
 STATES = ("done", "inflight", "eligible", "blocked")
+# A round's verification reports `verifying`, then `working`, while the round still holds its item.
+ACTIVE = ("running", "surveying", "verifying", "working")
 # A transferred list travels inside the 1 MiB host request, where JSON escapes can double its size.
 LIMIT = 256 * 1024
 REPOSITORY = "TauCetiProject/TauCeti"
@@ -92,7 +94,7 @@ def parse(text):
 def holders(workers):
     """Rounds in progress under the list; a waiting or backing-off slot keeps its last item in its status file."""
     return [dict(worker=w.get("id"), item=w["roadmap_target"]) for w in workers or []
-            if w.get("state") in ("running", "surveying") and isinstance(w.get("roadmap_target"), str) and w["roadmap_target"]]
+            if w.get("state") in ACTIVE and isinstance(w.get("roadmap_target"), str) and w["roadmap_target"]]
 
 
 def summarize(listing, workers):

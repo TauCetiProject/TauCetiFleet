@@ -87,6 +87,9 @@ class TargetLists(unittest.TestCase):
         self.assertEqual(report["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         self.assertEqual(report["areas"], dict(MeasureTheory=dict(done=1, inflight=1, eligible=0, blocked=0),
                                                Probability=dict(done=0, inflight=1, eligible=0, blocked=1)))
+        for state in ("verifying", "working"):
+            verifying = [dict(id="w1", state=state, roadmap_target="MeasureTheory/kolmogorov-zero-one")]
+            self.assertEqual(targets.summarize(targets.parse(EXAMPLE), verifying)["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         ticked = EXAMPLE.replace("[~] `truncation", "[x] `truncation")
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
         undefined = EXAMPLE.replace("needs: none", "needs: no-such-slug")
