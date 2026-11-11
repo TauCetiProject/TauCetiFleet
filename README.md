@@ -880,38 +880,44 @@ target-list items a `prerequisite` waits on and added, the merged pull requests
 of a `close`, the roadmap of a `roadmap` change, and for an `escalate` the
 ruling the model recommends, with the reasoning beneath. `earlier ruling` marks
 one that no longer stands: its record is archived, or the incident was written
-again after it. The pull requests a `wait` or `close` names are listed with the
-item as `waits on` and `subsumed by`, and `--lookup` asks about them as it does
-about the ones the agent named.
+again after it. A ruling belongs to the incident record of the same name, so a
+Forgejo pull request and a GitHub one of the same number keep their own. The
+pull requests a `wait` or `close` names are on the ruling's own forge and
+repository; they are listed with the item as `waits on` and `subsumed by`, and
+`--lookup` asks that forge about them as it does about the ones the agent named.
 
 Items under a standing `escalate` or `roadmap` ruling are listed first, since
 those two wait for a person. Items under a standing `retry`, `wait`,
 `prerequisite` or `close` are listed last under their own heading and are left
 out of the count in `status`. `--ack all` leaves those in place, because the
 phase looks again only at a live `wait` or `prerequisite` ruling; `--ack` with
-the pull request number archives one anyway, together with its incident record.
+the item's ack id archives one anyway, together with its incident record.
 `--ack` holds the directory's `.records.lock`, which the phase takes to write a
 ruling or archive a record, from listing the items to moving the last file, so
 it never archives a ruling written after it looked.
 
 `status` adds one line counting the ruling records written in the last 24
-hours, live or archived, including those kept as `<name>.<n>`:
+hours on every forge, live or archived, including those kept as `<name>.<n>`:
 
 ```text
 Rulings in the last 24h: 1 close, 2 escalate, 3 wait
 ```
 
 A `roadmap` ruling leaves a proposed roadmap change in
-`incidents/drafts/roadmap-<PR>.md` on the host. Fleet opens nothing on GitHub;
-it shows the draft, or copies it to your machine for you to file:
+`incidents/drafts/roadmap-<PR>.md` on the host, with the record's key suffix
+after the number for a pull request outside the workers' own GitHub repository.
+Fleet opens nothing on any forge; it shows the draft, or copies it to your
+machine for you to file. Name the pull request by its ack id, which is the bare
+number for the workers' own GitHub repository:
 
 ```sh
 tauceti-fleet attention server1 --show-roadmap 412   # print the draft
 tauceti-fleet attention server1 --file-roadmap 412   # copy it to ./roadmap-412.md
+tauceti-fleet attention server1 --show-roadmap forge.example/TauCetiProject/TauCeti#412
 ```
 
-`--file-roadmap` writes into the current directory and does not replace a file
-that is already there. Acknowledge the item once the change is filed or
+`--file-roadmap` writes into the current directory under the draft's name on
+the host and does not replace a file that is already there. Acknowledge the item once the change is filed or
 dropped.
 
 A `close` ruling closes one of the account's own pull requests when merged pull

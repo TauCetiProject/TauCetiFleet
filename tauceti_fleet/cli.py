@@ -75,8 +75,8 @@ def parser():
     needs.add_argument("--ack", metavar="PR|ID|all", help="archive the records of this pull request or ack id, or every record; needs a host")
     needs.add_argument("--lookup", action="store_true", help="ask each pull request's forge for its state and that of the ones it names")
     draft = needs.add_mutually_exclusive_group()
-    draft.add_argument("--show-roadmap", metavar="PR", type=int, help="print the roadmap change a ruling drafted for this pull request; needs a host")
-    draft.add_argument("--file-roadmap", metavar="PR", type=int, help="copy that draft to roadmap-PR.md in the current directory for you to file; needs a host")
+    draft.add_argument("--show-roadmap", metavar="PR|ID", help="print the roadmap change a ruling drafted for this pull request or ack id; needs a host")
+    draft.add_argument("--file-roadmap", metavar="PR|ID", help="copy that draft to the current directory for you to file; needs a host")
     needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
@@ -246,7 +246,9 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "attention":
-                payload.update(ack=args.ack, lookup=args.lookup, draft=drafted)
+                # A bare number goes as an integer, which a host on an earlier release also reads.
+                draft = int(drafted) if drafted is not None and drafted.isdecimal() else drafted
+                payload.update(ack=args.ack, lookup=args.lookup, draft=draft)
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
@@ -263,7 +265,7 @@ def main(argv=None, *, _status_results=None):
                 if drafted is not None and "draft" not in value:
                     raise FleetError("The Fleet release on this host does not read drafted roadmap changes; update it")
                 if drafted is not None and args.file_roadmap is not None:
-                    value["draft"]["saved"] = attention.save_draft(drafted, value["draft"]["text"])
+                    value["draft"]["saved"] = attention.save_draft(value["draft"])
                 if args.command == "status":
                     atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:

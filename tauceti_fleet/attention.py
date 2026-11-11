@@ -352,17 +352,43 @@ def records_lock(config):
             os.close(fd)
 
 
-def roadmap_draft(number):
-    """The roadmap change a `roadmap` ruling drafted for a pull request, from the worker's `drafts/` folder."""
-    if type(number) is not int or not 0 < number < 10**9:
-        raise FleetError("Name the pull request whose drafted roadmap change to read")
-    path = incidents_dir() / "drafts" / f"roadmap-{number}.md"
+DRAFT = re.compile(r"roadmap-\d+(\.[0-9a-f]{12})?\.md")
+
+
+def draft_suffix(ident, number):
+    """The key suffix of the ruling record whose ack id is `ident`, which the worker also puts on its draft."""
+    pattern = re.compile(RULING + rf"-.+-{number}(\.[0-9a-f]{{12}})\.json")
+    for folder in (incidents_dir(), incidents_dir() / "acked"):
+        try:
+            with os.scandir(folder) as entries:
+                names = sorted(e.name for e in entries if pattern.fullmatch(e.name))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise FleetError(f"{folder} could not be listed: {exc.strerror or exc}") from None
+        for name in names:
+            with suppress(OSError):
+                target = target_of(load(folder / name) or {})
+                if target and target["id"] == ident:
+                    return pattern.fullmatch(name).group(1)
+    raise FleetError(f"No ruling on this host names {ident}")
+
+
+def roadmap_draft(which):
+    """The roadmap change a `roadmap` ruling drafted, from the worker's `drafts/` folder: by number for the
+    workers' own GitHub repository, by ack id for any other repository or forge."""
+    which = str(which) if type(which) is int else which
+    number = which.rpartition("#")[2] if isinstance(which, str) and len(which) <= 200 else ""
+    if not (number.isdecimal() and 0 < int(number) < 10**9):
+        raise FleetError("Name the pull request number or ack id whose drafted roadmap change to read")
+    suffix = "" if which == number else draft_suffix(which, int(number))
+    path = incidents_dir() / "drafts" / f"roadmap-{int(number)}{suffix}.md"
     try:
         if path.stat().st_size > 256 * 1024:
             raise FleetError(f"{path} is larger than a drafted roadmap change")
-        return dict(pr=number, path=str(path), text=path.read_text())
+        return dict(pr=int(number), id=which, path=str(path), text=path.read_text())
     except FileNotFoundError:
-        raise FleetError(f"No roadmap change has been drafted for pull request {number} on this host") from None
+        raise FleetError(f"No roadmap change has been drafted for pull request {which} on this host") from None
     except (OSError, ValueError) as exc:
         raise FleetError(f"{path} could not be read: {exc}") from None
 
@@ -569,16 +595,18 @@ def ruling_lines(name, item):
     lines = [f"   {'ruling' if ruling['stands'] else 'earlier ruling'}: {what}  ({ruling['by']}, {ruling['at']})"]
     lines += ["      " + text for text in (ruling["note"] + "\n" + ruling["evidence"]).splitlines() if text]
     if ruling["drafted"] and "pr" in item:
-        lines.append(f"      draft: tauceti-fleet attention {name} --show-roadmap {item['pr']}")
+        lines.append(f"      draft: tauceti-fleet attention {name} --show-roadmap {item['id']}")
     return lines
 
 
-def save_draft(number, text):
-    """Copy a draft into the current directory for the operator to file. An existing file is left alone."""
-    path = Path.cwd() / f"roadmap-{number}.md"
+def save_draft(draft):
+    """Copy a draft into the current directory, under the name it has on the host, for the operator to file.
+    An existing file is left alone."""
+    name = Path(str(draft.get("path"))).name
+    path = Path.cwd() / (name if DRAFT.fullmatch(name) else f"roadmap-{int(draft['pr'])}.md")
     try:
         with open(path, "x") as out:
-            out.write(text)
+            out.write(draft["text"])
     except FileExistsError:
         raise FleetError(f"{path} already exists; move it aside to copy the draft again") from None
     return str(path)

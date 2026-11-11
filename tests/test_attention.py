@@ -688,6 +688,71 @@ class Attention(unittest.TestCase):
         self.assertIn("   subsumed by: #398  MERGED", output)
         self.assertIn("   subsumed by: #399  MERGED  2026-01-14  Title 399  (b)\n   ruling: close", output)
 
+    def test_a_forgejo_ruling_beside_a_github_one_of_the_same_number_stays_on_its_own_forge(self):
+        self.on()
+        origin, ident = "https://forge.example", "forge.example/TauCetiProject/TauCeti#412"
+        on_forgejo = dict(forge=dict(kind="forgejo", url=origin), repository_id=1, suffix=".0123456789ab")
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.record("declined", "fix", 412, summary="github words")
+        self.ruling("declined", "fix", 412, "roadmap", at=now, area="Probability", draft="/elsewhere/a.md")
+        self.record("declined", "fix", 412, acked=True, summary="forgejo words", **on_forgejo)
+        self.ruling("declined", "fix", 412, "wait", at=now, blocked_on=[431], **on_forgejo)
+        self.record("declined", "rebase", 412, acked=True, summary="forgejo rebase", **on_forgejo)
+        self.ruling("declined", "rebase", 412, "roadmap", at=now, area="Algebra", draft="/elsewhere/b.md", **on_forgejo)
+        drafts = attention.incidents_dir() / "drafts"
+        drafts.mkdir()
+        (drafts / "roadmap-412.md").write_text("github draft\n")
+        (drafts / "roadmap-412.0123456789ab.md").write_text("forgejo draft\n")
+        value = self.listed()
+        self.assertEqual([(i["id"], i["text"], i["ruling"]["ruling"], i.get("rank")) for i in value["items"]], [
+            ("412", "github words", "roadmap", 0), (ident, "forgejo rebase", "roadmap", 0),
+            (ident, "forgejo words", "wait", 2)])
+        self.assertEqual(value["items"][0]["ruling_record"], "ruling-declined-fix-412.json")
+        self.assertEqual([(n["pr"], n["relation"]) for n in value["items"][2]["named"]], [(431, "blocked_on")])
+        self.assertEqual(value["rulings"], {"roadmap": 2, "wait": 1})
+        code, output = self.cli("attention", "box")
+        self.assertIn(f"   waits on: #431  {origin}/TauCetiProject/TauCeti/pulls/431  (--lookup", output)
+        self.assertIn(f"      draft: tauceti-fleet attention box --show-roadmap {ident}", output)
+        self.assertIn("      draft: tauceti-fleet attention box --show-roadmap 412\n", output)
+
+        def from_github(path, *, token_file=None):
+            return dict(state="open", merged_at=None, head=dict(sha="a" * 40), title="Own", user=dict(login="a"))
+
+        def from_forgejo(at, path):
+            self.assertEqual(at, origin)
+            if path.endswith("issues/431"):
+                return dict(state="closed", title="Blocker", user=dict(login="b"),
+                            pull_request=dict(merged=True, merged_at="2026-01-14T10:00:00Z"))
+            return dict(state="open", merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+        self.github.side_effect, self.forgejo.side_effect = from_github, from_forgejo
+        code, output = self.cli("attention", "box", "--lookup")
+        self.assertEqual([c.args[0] for c in self.github.call_args_list], [f"repos/{REPOSITORY}/pulls/412"])
+        self.assertEqual(sorted(c.args[1] for c in self.forgejo.call_args_list),
+                         [f"repos/{REPOSITORY}/issues/431", f"repos/{REPOSITORY}/pulls/412"])
+        self.assertIn("   waits on: #431  MERGED  2026-01-14  Blocker  (b)\n   ruling: wait on #431", output)
+
+        for which, text in (("412", "github draft\n"), (ident, "forgejo draft\n")):
+            code, output = self.cli("attention", "box", "--show-roadmap", which)
+            self.assertEqual((code, output), (0, f"box:\n{text}"))
+        code, output = self.cli("attention", "box", "--show-roadmap", "forge.example/Other/Repo#412")
+        self.assertIn("No ruling on this host names forge.example/Other/Repo#412", output)
+        here = self.root / "checkout"
+        here.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(here)
+        self.assertEqual(self.cli("attention", "box", "--file-roadmap", ident)[0], 0)
+        self.assertEqual((here / "roadmap-412.0123456789ab.md").read_text(), "forgejo draft\n")
+
+        acked = attention.incidents_dir() / "acked"
+        self.assertEqual(sorted(d["record"] for d in self.listed(ack=ident)["acknowledged"]),
+                         ["ruling-declined-fix-412.0123456789ab.json", "ruling-declined-rebase-412.0123456789ab.json"])
+        self.ruling("declined", "fix", 412, "wait", at=now, blocked_on=[432], **on_forgejo)
+        self.listed(ack=ident)
+        self.assertEqual(json.loads((acked / "ruling-declined-fix-412.0123456789ab.json.1").read_text())["blocked_on"], [431])
+        self.assertEqual(self.listed()["rulings"], {"roadmap": 2, "wait": 2})
+        self.assertEqual(self.cli("attention", "box", "--show-roadmap", ident)[1], "box:\nforgejo draft\n")
+
     def test_a_drafted_roadmap_change_is_shown_or_copied_and_nothing_else_is_done(self):
         self.on()
         self.ruling("declined", "fix", 412, "roadmap", area="Probability", draft="/elsewhere/roadmap-412.md")
