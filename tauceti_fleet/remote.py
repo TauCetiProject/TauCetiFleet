@@ -148,10 +148,10 @@ def profile(name):
         raise FleetError(f"Profile {name!r} does not exist; define it in {config_dir() / 'profiles.json'}")
     if value.get("ci_broker_url") or value.get("ci_broker_token_file"):
         raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
-    allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
+    allowed = {"github_account", "max_open_prs", "runner_group_id", "github_state_url"}
     result = {k: v for k, v in value.items() if k in allowed}
     # Always sent, so removing one of these keys from a profile returns the host to its default.
-    for key in ("agent", "claude_billing", "sandbox", "pace", "env"):
+    for key in ("author_model", "author_effort", "agent", "claude_billing", "sandbox", "pace", "env"):
         result[key] = value.get(key)
     # Sent only when the profile names it, so groups edited on the host outlive a repeated add.
     if "slots" in value:
