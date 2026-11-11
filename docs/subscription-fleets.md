@@ -384,15 +384,19 @@ exists, under `incidents/` or `incidents/acked/` on the host. When `acked/` alre
 keeps the earlier one as `<name>.1`, `<name>.2` and so on, which the worker does
 not read, so only the file under the record's own name holds the head.
 
-**Halts.** A worker halts when GitHub says its credential belongs to another
-login (`identity-mismatch`), rejects it (`invalid-credentials`) or reports the
-account suspended or locked (`account-halt`). `status` shows it as
-`halted (<reason>)` and the worker manager does not start it again. It keeps its
-admission place, so the host runs one fewer round until `clear-halt`. Put the
-account right first: a worker whose account is still wrong halts again. A
-restarted worker takes its GitHub token from the worker manager, which read the
-token file when it started, so after a new token reaches the host `clear-halt`
-refuses until the manager has been restarted with the command it names
+**Halts.** A worker halts when a forge says its credential belongs to another
+account (`identity-mismatch`), rejects it (`invalid-credentials`) or refuses the
+account (`account-halt`); the worker records the reason with its forge, as in
+`github:identity-mismatch` or `forgejo:invalid-credentials`. `status` shows it as
+`halted (<forge> <reason>)`, for example `halted (GitHub identity-mismatch)`,
+and the worker manager does not start it again. It keeps its admission place,
+so the host runs one fewer round until `clear-halt`. Put the account right
+first: a worker whose account is still wrong halts again. A Forgejo halt needs
+only `clear-halt` once the token file the worker names holds the new token,
+since the worker reads that file at every check. A restarted worker takes its
+GitHub token from the worker manager, which read the token file when it
+started, so after a new GitHub token reaches the host `clear-halt` refuses for
+a GitHub halt until the manager has been restarted with the command it names
 (`systemctl --user restart tauceti-fleet-workers.service` on Linux). That
 restart leaves workers in their own scopes running, with the token they started
 with; a worker whose status shows degraded isolation runs inside the manager's
