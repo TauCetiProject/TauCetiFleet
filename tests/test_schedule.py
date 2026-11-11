@@ -85,7 +85,7 @@ class Slots(unittest.TestCase):
         for empty in ({}, dict(worker_schedule=None)):
             self.assertEqual(schedule.state(empty), {})
             self.assertIsNone(schedule.seconds_until_slot_ends(empty))
-        for saved in ("Mon 23:00 -> Thu 07:00", dict(slots=[]), dict(slots=["Mon"]), dict(slots=["Mon 01:00 -> Tue 01:00"], timezone="Nowhere/Zone")):
+        for saved in ({}, [], "", 0, False, "Mon 23:00 -> Thu 07:00", dict(slots=[]), dict(slots=["Mon"]), dict(slots=["Mon 01:00 -> Tue 01:00"], timezone="Nowhere/Zone")):
             with self.subTest(saved=saved):
                 unreadable = schedule.state(dict(worker_schedule=saved))
                 self.assertFalse(unreadable["active"])

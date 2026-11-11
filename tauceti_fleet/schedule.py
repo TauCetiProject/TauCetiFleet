@@ -86,7 +86,7 @@ def occurrences(slots, tz, now):
 def state(config, now=None):
     """What the controller enforces at `now`; empty when the host has no schedule."""
     saved = config.get("worker_schedule")
-    if not saved:
+    if saved is None:
         return {}
     now = time.time() if now is None else now
     try:
