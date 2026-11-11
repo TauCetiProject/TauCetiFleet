@@ -58,18 +58,25 @@ class Store(unittest.TestCase):
         cls.addClassCleanup(temporary.cleanup)
         cls.template = Path(temporary.name)
         mathlib, tauceti = cls.template / "mathlib", cls.template / "tauceti"
-        for repository in (mathlib, tauceti):
+        for repository, branch in ((mathlib, "master"), (tauceti, "main")):
             repository.mkdir()
-            git(repository, "init", "-q", "-b", "main")
+            git(repository, "init", "-q", "-b", branch)
             for key in ("allowFilter", "allowAnySHA1InWant"):
                 git(repository, "config", "uploadpack." + key, "true")
         pinned = json.dumps(dict(packages=[dict(name="batteries", type="git", rev="b" * 40)]))
         cls.old = commit(mathlib, {"lean-toolchain": TOOLCHAIN + "\n", "lake-manifest.json": pinned, "Mathlib": "old"})
         cls.new = commit(mathlib, {"Mathlib": "new"})
+        # A commit served by the upstream remote but on no trusted branch, as a fork's pull request is.
+        git(mathlib, "checkout", "-q", "--detach")
+        cls.fork = commit(mathlib, {"Mathlib": "fork"})
+        git(mathlib, "update-ref", "refs/pull/1/head", cls.fork)
+        git(mathlib, "checkout", "-q", "master")
         commit(tauceti, {"lake-manifest.json": manifest(cls.new), "lean-toolchain": TOOLCHAIN + "\n"})
         git(tauceti, "checkout", "-q", "--detach")
         cls.head = commit(tauceti, {"lake-manifest.json": manifest(cls.old)})
         git(tauceti, "update-ref", "refs/pull/7/head", cls.head)
+        git(tauceti, "update-ref", "refs/pull/12/head", cls.head)
+        git(tauceti, "update-ref", "refs/pull/11/head", commit(tauceti, {"lake-manifest.json": manifest(cls.fork)}))
         git(tauceti, "checkout", "-q", "main")
 
     def setUp(self):
@@ -294,6 +301,17 @@ class Store(unittest.TestCase):
         self.assertEqual(state["needed"][self.old]["pinned_by"], ["#7"])
         self.assertTrue(state["error"].startswith("some pull request heads could not be fetched"))
         self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+
+    def test_a_revision_outside_trusted_mathlib_history_is_never_built(self):
+        self.inventory(dict(number=7, state="OPEN", head=self.head), dict(number=11, state="OPEN", head="e" * 40))
+        state = mathlib_store.warm(self.configure(), now=1000)
+        self.assertEqual(state["needed"][self.fork]["pinned_by"], ["#11"])
+        self.assertEqual(state["failures"], {self.fork: "untrusted: not in the history of Mathlib master"})
+        self.assertEqual(sorted(p.name for p in self.mounted.iterdir()), sorted([self.new, self.old]))
+        self.assertNotIn(self.fork, (self.bin / "lake.log").read_text())
+        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["staging", "store"])
+        self.assertIn(f"{self.fork[:10]} ({TOOLCHAIN}; #11): untrusted: not in the history of Mathlib master",
+                      self.line(1000))
 
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})

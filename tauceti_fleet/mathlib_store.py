@@ -22,6 +22,8 @@ READY = ".tauceti-store-ready"
 REPOSITORY = "TauCetiProject/TauCeti"
 SOURCE = "https://github.com/" + REPOSITORY + ".git"
 MATHLIB = "https://github.com/leanprover-community/mathlib4.git"
+# Building runs Lake code from the pinned commit; GitHub serves fork commits through MATHLIB too.
+TRUSTED = ("master",)
 INTERVAL = 1800
 ROUND_TIMEOUT = 5400
 MIN_FREE = 20 * 1024**3
@@ -157,6 +159,26 @@ def pins(config, known=None):
     return needed, "; ".join(notes) or None, not notes
 
 
+def trusted_history():
+    """Commits of the TRUSTED Mathlib branches, from a local commits-only clone.
+
+    Membership is decided on fetched history alone; asking the server for a commit would also
+    find one that only a fork's pull request contains.
+    """
+    cache = data_dir() / "mathlib-store" / "mathlib.git"
+    repo = functools.partial(git, "--git-dir", cache)
+    if not (cache / "HEAD").exists():
+        git("init", "-q", "--bare", cache)
+        repo("remote", "add", "origin", MATHLIB)
+    refs = ["refs/trusted/" + branch for branch in TRUSTED]
+    try:
+        repo("fetch", "-q", "--filter=tree:0", "--no-tags", "--no-write-fetch-head", "origin",
+             *(f"+refs/heads/{branch}:refs/trusted/{branch}" for branch in TRUSTED), timeout=1800)
+    except FleetError:
+        raise FleetError("not built: cannot fetch Mathlib " + ", ".join(TRUSTED) + " to check the revision") from None
+    return set(repo("rev-list", *refs, timeout=600).split())
+
+
 def ready(store, revision):
     return (store / revision / READY).is_file()
 
@@ -234,10 +256,21 @@ def warm(config=None, now=None):
                 if complete and expired:
                     shutil.rmtree(store / name)
                     state["unpinned"].pop(name, None)
+            history, untrusted = None, set()
             for revision, entry in needed.items():
                 if not ready(store, revision):
+                    if not (store / revision).exists() and history is None:
+                        try:
+                            history = trusted_history()
+                        except FleetError as exc:
+                            history = exc
                     if (store / revision).exists():
                         failures[revision] = "marker withdrawn; rebuilt once its last rounds have ended"
+                    elif isinstance(history, FleetError):
+                        failures[revision] = str(history)
+                    elif revision not in history:
+                        untrusted.add(revision)
+                        failures[revision] = "untrusted: not in the history of Mathlib " + ", ".join(TRUSTED)
                     elif shutil.disk_usage(store).free < MIN_FREE:
                         failures[revision] = f"not built: under {MIN_FREE // 1024**3} GiB free"
                     else:
@@ -253,7 +286,7 @@ def warm(config=None, now=None):
                 built = (store / revision / "lean-toolchain").read_text().strip()
                 if built != entry["toolchain"]:
                     failures[revision] = f"built with {built}, pinned with {entry['toolchain']}"
-            if all(ready(store, revision) for revision in needed):
+            if all(ready(store, revision) or revision in untrusted for revision in needed):
                 shutil.rmtree(root / "downloads", ignore_errors=True)
         except OSError as exc:
             state["error"] = f"{directory}: {exc.strerror or type(exc).__name__}"
