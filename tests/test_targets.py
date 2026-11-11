@@ -271,7 +271,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
     def test_audit_corrects_only_what_the_host_can_see(self):
         self.mirror("TauCetiRoadmap/MeasureTheory")
         machine = store.host_config()["machine_id"]
-        listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1; partial: #9)\n- [~] `item-2` — text (in flight: #2)\n"
+        listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #01; partial: #9)\n- [~] `item-2` — text (in flight: #2)\n"
                                  "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [~] `item-5` — text (in flight: #5)\n"
                                  "- [~] `item-6` — text (in flight: https://forge.example/o/r/pulls/1234)\n"
                                  "- [ ] no slug\n\n## Notes")
@@ -312,7 +312,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(link.resolve(), path.resolve())
         after = path.read_text()
         self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234; partial: https://forge.example/o/r/pulls/1)\n", after)
-        self.assertIn("- [ ] `item-1` — text (partial: #1; partial: #9)\n", after)
+        self.assertIn("- [ ] `item-1` — text (partial: #01; partial: #9)\n", after)
         self.assertEqual(after.count("\n- [~]"), 5)
         self.assertIn("(in flight: https://forge.example/o/r/pulls/1234)\n", after)
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)

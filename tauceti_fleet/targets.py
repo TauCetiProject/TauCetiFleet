@@ -259,7 +259,7 @@ def audit(config, text, workers):
             note("closed", f"{name}: #{number} closed with no landing on record (a recent merge may not be recorded yet); "
                  "mark it [ ] to author it again or [x] if main has it", item=name, line=item["line"])
             continue
-        partial = f"#{number}" in re.findall(r"#\d+", item["clauses"].get("partial", ""))
+        partial = number in {int(n) for n in re.findall(r"#(\d+)", item["clauses"].get("partial", ""))}
         new = rewritten(old, " ") if partial else rewritten(old, "x", f"landed: #{number}")
         detail = (f"{name}: #{number} landed and the item records it as partial -> [ ]" if partial else
                   f"{name}: #{number} landed -> [x] (this host cannot read whether its marker said partial; "
