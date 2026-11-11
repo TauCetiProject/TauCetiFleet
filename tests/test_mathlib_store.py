@@ -373,6 +373,21 @@ class Store(unittest.TestCase):
         self.assertIn("not observed in the last 30 min: #7", state["error"])
         self.assertTrue(mathlib_store.ready(self.mounted, self.old))
 
+    def test_retained_downloads_are_reclaimed_when_they_leave_too_little_space_to_build(self):
+        config = self.configure()
+        (self.bin / "lake.fail").touch()
+        with patch("sys.stderr", new=io.StringIO()):
+            mathlib_store.warm(config, now=1000)
+        (self.bin / "lake.fail").unlink()
+        downloads = self.directory / "downloads"
+        downloads.mkdir()
+        (downloads / "Mathlib.ltar").write_text("archive\n")
+        free = Mock(side_effect=lambda _: Mock(free=mathlib_store.MIN_FREE - (downloads / "Mathlib.ltar").exists()))
+        with patch.object(mathlib_store.shutil, "disk_usage", free):
+            state = mathlib_store.warm(config, now=1001)
+        self.assertEqual(state["failures"], {})
+        self.assertTrue(mathlib_store.ready(self.mounted, self.new))
+
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
         state = mathlib_store.warm(self.configure(), now=1000)

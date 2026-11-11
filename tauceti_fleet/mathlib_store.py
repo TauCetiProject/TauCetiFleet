@@ -224,6 +224,16 @@ def build(root, revision):
         shutil.rmtree(checkout, ignore_errors=True)
 
 
+def room(root, store):
+    """Whether a build may start, after reclaiming downloads a failed attempt left if that is short."""
+    if shutil.disk_usage(store).free >= MIN_FREE:
+        return True
+    if not (root / "downloads").exists():
+        return False
+    shutil.rmtree(root / "downloads", ignore_errors=True)
+    return shutil.disk_usage(store).free >= MIN_FREE
+
+
 def record(directory):
     try:
         state = read(state_file(), {})
@@ -291,7 +301,7 @@ def warm(config=None, now=None):
                     elif revision not in history:
                         untrusted.add(revision)
                         failures[revision] = "untrusted: not in the history of Mathlib " + ", ".join(TRUSTED)
-                    elif shutil.disk_usage(store).free < MIN_FREE:
+                    elif not room(root, store):
                         failures[revision] = f"not built: under {MIN_FREE // 1024**3} GiB free"
                     else:
                         state["building"] = revision
