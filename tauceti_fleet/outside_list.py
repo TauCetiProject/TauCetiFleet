@@ -106,13 +106,13 @@ def burn(readings):
     return max(0.0, readings[-1][1] - readings[0][1]) * 3600 / (readings[-1][0] - readings[0][0])
 
 
-def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, ceiling, paused=False):
+def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, ceiling, paused=None):
     """The control law: one move of the cap toward spending `left` exactly in `hours`.
 
     `left` and `session_left` are percentages of their windows; `listed` and
     `outside` are what list work and outside-list work spend, in percent of the
     weekly window per hour. `cutting` says a lower cap has something to act on,
-    `paused` that the workers' pacing curve starts no round now, so a higher one has nothing to act on.
+    `paused` says why the workers start no round now, so a higher one has nothing to act on.
     """
     reserve = listed * hours * (1 + RESERVE_MARGIN)
     surplus = left - reserve
@@ -133,14 +133,15 @@ def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, cei
     elif session_left is not None and session_left < SESSION_LOW:
         reason = "spending under plan, session window nearly exhausted"
     elif paused:
-        reason = "spending under plan, the workers' pacing curve starts no round now"
+        reason = "spending under plan, " + paused
     else:
         reason = "spending under plan"
         cap += move
     return dict(cap=min(ceiling, max(floor, cap)), reason=reason, reserve=reserve, projected=100 - left + (listed + outside) * hours)
 
 
-def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds, curve, missing="no usage reading yet", session=None):
+def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds, curve, missing="no usage reading yet", session=None,
+            limit_reached=False):
     """The pacer's state after one step, from plain inputs.
 
     `reading` is the weekly window as dict(fetched_at, used, resets_at), or None
@@ -149,9 +150,10 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     average numbers of running (list, outside-list, other) rounds since the last
     step, `curve` the workers' pacing curve from `pace_points`. Only what that
     curve lets the workers spend by the horizon is planned for. `session` is the
-    session window as dict(used, resets_at) or None. The cap holds whenever the
-    inputs cannot support a decision, and is not raised while the curve lets no
-    round start in either window. Rounds are recorded through every hold but the
+    session window as dict(used, resets_at) or None, and `limit_reached` the
+    provider's own verdict that the account is blocked. The cap holds whenever the
+    inputs cannot support a decision, and is not raised while that verdict is set
+    or while the curve lets no round start in either window. Rounds are recorded through every hold but the
     schedule's and a disabled host's, and the split takes those within the span
     the spending rate is measured over.
     """
@@ -194,13 +196,14 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     # The worker starts a round only while every open window is under the curve; an unopened one does not hold it.
     session_paused = bool(session) and session["used"] is not None and session["resets_at"] is not None and (
         session["used"] >= budget(curve, 100 - (session["resets_at"] - now) / subscription_usage.SESSION * 100))
+    paused = "the provider reports its limit reached" if limit_reached else ("the workers' pacing curve starts no round now" if session_paused else None)
     if idle:
         # Nothing opens the window but a model call, so with nothing spent the cap climbs until a round runs.
         ends_at, ends = now + subscription_usage.WEEK, "weekly window"
         if slot_seconds is not None and slot_seconds < subscription_usage.WEEK:
             ends_at, ends = now + slot_seconds, "slot"
         result.update(step(cap, left=100.0, hours=(ends_at - now) / 3600, listed=0.0, outside=0.0, cutting=False,
-                           session_left=session_left, floor=floor, ceiling=ceiling, paused=session_paused),
+                           session_left=session_left, floor=floor, ceiling=ceiling, paused=paused),
                       left=100.0, rate=0.0, outside_share=None, ends=ends, ends_at=ends_at)
         result["reason"] = "the weekly window is not open yet, " + result["reason"]
         return result
@@ -217,7 +220,7 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     hours = max(MIN_HOURS, (ends_at - now) / 3600)
     result.update(step(cap, left=spendable, hours=hours, listed=rate * (1 - share), outside=rate * share,
                        cutting=rounds[1] > 0, session_left=session_left, floor=floor, ceiling=ceiling,
-                       paused=session_paused or reading["used"] >= budget(curve, elapsed[0])),
+                       paused=paused or ("the workers' pacing curve starts no round now" if reading["used"] >= budget(curve, elapsed[0]) else None)),
                   left=left, rate=rate, outside_share=share, ends=ends, ends_at=ends_at)
     result["projected"] = reading["used"] + rate * hours
     return result
@@ -288,6 +291,7 @@ class Pacer:
             session_left=(windows.get("session") or {}).get("left"),
             session={key: windows["session"][key] for key in ("used", "resets_at")} if windows.get("session") else None,
             rounds=[count / self.passes for count in self.seen], curve=pace_points(config),
+            limit_reached=bool(usage.get("limit_reached")),
             missing=f"{several} credentials have current usage readings and the active one cannot be told" if several else "no usage reading yet",
         )
         state["provider"] = provider

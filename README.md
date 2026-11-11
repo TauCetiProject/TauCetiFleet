@@ -1006,8 +1006,9 @@ when the reading is over 30 minutes old
 or gives no weekly figure, for the first two hours of readings after the window
 resets or the measurement restarts, outside every schedule slot, and while
 workers are not enabled. It is not raised while less than 10% of the session
-window is left or while the weekly or the session window's usage is at the
-pacing curve, since no round starts then, and it is not lowered for spending
+window is left, while the weekly or the session window's usage is at the
+pacing curve, or while Codex reports its limit reached, since no round starts
+then, and it is not lowered for spending
 over plan while no outside-list round is running, because a cap already below
 the open pull requests admits nothing and would only take longer to return.
 Rounds are still counted while the reading holds the cap, and the split takes

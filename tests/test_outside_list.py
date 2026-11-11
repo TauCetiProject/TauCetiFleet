@@ -434,6 +434,27 @@ class Wiring(unittest.TestCase):
         self.assertEqual(pacer.keys, outside_list.worker_keys(store.host_config()))
         self.assertEqual(outside_list.cap_file().read_text(), "4\n")
 
+    def test_a_reached_codex_limit_does_not_raise_the_cap(self):
+        store.update_host(agent="codex")
+        self.pace()
+        now = 1_800_000_000.0
+        cache = self.root / "data/worker-runtimes" / ("a" * 40) / "lib/python3.12/site-packages/tauceti_worker/state/w1/cache/quota-codex.json"
+        cache.parent.mkdir(parents=True)
+        config = dict(store.host_config(), workers_enabled=True)
+        caps = {}
+        for reached in (False, True):
+            limits = dict(limit_reached=reached,
+                          primary_window=dict(used_percent=5, limit_window_seconds=5 * HOUR, reset_after_seconds=4 * HOUR),
+                          secondary_window=dict(used_percent=10, limit_window_seconds=7 * 24 * HOUR, reset_after_seconds=80 * HOUR))
+            cache.write_text(json.dumps(dict(fetched_at=now - 60, payload=dict(rate_limit=limits))))
+            store.atomic(store.state_dir() / "outside-list-cap.json", dict(
+                version=1, at=now - 901, cap=12, previous=12, floor=0, ceiling=40, resets_at=now - 60 + 80 * HOUR,
+                readings=[[now - 3 * HOUR, 9.4]], rounds=[], held=True, reason="no usage reading yet"))
+            with contextlib.redirect_stderr(io.StringIO()):
+                caps[reached] = outside_list.Pacer().tick(config, list, now=now)
+        self.assertEqual((caps[False]["cap"], caps[False]["reason"]), (13, "spending under plan"))
+        self.assertEqual((caps[True]["cap"], caps[True]["reason"]), (12, "spending under plan, the provider reports its limit reached"))
+
     def test_step_reads_the_weekly_and_session_windows_the_workers_cached(self):
         self.pace()
         now = 1_800_000_000.0
