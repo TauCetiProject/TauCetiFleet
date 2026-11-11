@@ -247,6 +247,8 @@ def warm(config=None, now=None):
             if complete:
                 state["unpinned"] = {name: state["unpinned"].get(name, now) for name in held
                                      if name not in needed and ready(store, name)}
+            else:
+                state["unpinned"] = {name: at for name, at in state["unpinned"].items() if name not in needed}
             for name in held:
                 if ready(store, name):
                     expired = now - state["unpinned"].get(name, now) >= hold(config)

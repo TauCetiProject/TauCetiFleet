@@ -313,6 +313,19 @@ class Store(unittest.TestCase):
         self.assertIn(f"{self.fork[:10]} ({TOOLCHAIN}; #11): untrusted: not in the history of Mathlib master",
                       self.line(1000))
 
+    def test_a_pin_seen_by_a_partial_check_cancels_the_unpinned_clock(self):
+        config = self.configure()
+        mathlib_store.warm(config, now=1000)
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        self.assertEqual(mathlib_store.warm(config, now=2000)["unpinned"], {self.old: 2000})
+        self.inventory(dict(number=7, state="OPEN", head=self.head), dict(number=9, state="OPEN", head="f" * 40))
+        state = mathlib_store.warm(config, now=12500)
+        self.assertIn("could not be fetched", state["error"])
+        self.assertEqual(state["unpinned"], {})
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        self.assertEqual(mathlib_store.warm(config, now=12800)["unpinned"], {self.old: 12800})
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
         state = mathlib_store.warm(self.configure(), now=1000)
