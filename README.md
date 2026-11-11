@@ -7,6 +7,8 @@ server, enrollment token, or SSH connection from CI to the hosts.
 Installation is inactive by default. It does not enable production CI, start paid
 workers, change existing worker definitions, or copy budget grants.
 
+To run workers on Claude or Codex subscriptions, see [subscription fleets](docs/subscription-fleets.md).
+
 ## Install and inspect
 
 For a volunteer contributing CI without AI workers, use [host enrollment](services/ci-broker/README.md):
