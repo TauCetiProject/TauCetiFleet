@@ -357,6 +357,20 @@ class Store(unittest.TestCase):
         mathlib_store.warm(config, now=4000 + hold)
         self.assertFalse((self.mounted / self.old).exists())
 
+    def test_a_pass_interrupted_after_readmitting_an_entry_does_not_leave_its_old_clock(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        mathlib_store.warm(config, now=2000)
+        # #11 pins a revision that is missing, so the pass goes on to fetch Mathlib history after readmitting.
+        self.inventory(dict(number=7, state="OPEN", head=self.head), dict(number=11, state="OPEN", head="e" * 40))
+        with patch.object(mathlib_store, "trusted_history", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            mathlib_store.warm(config, now=2000 + hold)
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        self.assertEqual(mathlib_store.warm(config, now=2300 + hold)["unpinned"], {self.old: 2300 + hold})
+        self.assertTrue((self.mounted / self.old).is_dir())
+
     def test_a_stale_inventory_observation_is_fetched_and_makes_the_check_incomplete(self):
         config, hold = self.configure(), 2 * 5400
         mathlib_store.warm(config, now=1000)

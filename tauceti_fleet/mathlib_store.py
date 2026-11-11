@@ -274,8 +274,10 @@ def warm(config=None, now=None):
             for name in held:
                 if name in unpinned:
                     if name in needed:
-                        (store / name / READY).write_text(name + "\n")
+                        # A clock left on disk beside a restored marker would remove an entry in use.
                         del unpinned[name]
+                        atomic(state_file(), state)
+                        (store / name / READY).write_text(name + "\n")
                     elif complete and now - unpinned[name] >= hold(config):
                         shutil.rmtree(store / name)
                         del unpinned[name]
