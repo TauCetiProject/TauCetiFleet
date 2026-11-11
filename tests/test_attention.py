@@ -254,6 +254,19 @@ class Attention(unittest.TestCase):
         self.assertEqual(value["lookup"], dict(asked=1, error="GitHub request unavailable"))
         self.assertEqual(value["items"][0]["named"][0]["state"], "MERGED")
 
+    def test_repeated_bounded_lookups_reach_every_record(self):
+        self.on()
+        for pr in range(1, 6):
+            self.record("declined", "fix", pr, summary="no")
+        self.github.side_effect = lambda path, **_: dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+        asked = []
+        with patch.object(attention, "MAX_LOOKUPS", 2):
+            for _ in range(3):
+                self.github.reset_mock()
+                self.assertEqual(self.listed(lookup=True)["lookup"]["asked"], 2)
+                asked.append([int(c.args[0].split("/")[-1]) for c in self.github.call_args_list])
+        self.assertEqual(asked, [[1, 2], [3, 4], [5, 1]])
+
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()
         self.record("declined", "fix", 7, summary="see #8", mentions=[8])
