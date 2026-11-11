@@ -415,8 +415,34 @@ RESTART_MANAGER = (
 )
 
 
+# What to put right before clearing a halt, by the worker's reason and the forge it names.
+HALT_REMEDY = {
+    "identity-mismatch": dict(
+        github="Give the host a GitHub credential of the account github_account names, or correct github_account",
+        forgejo="Write a token of the Forgejo user TAUCETI_FORGEJO_USER_ID names to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host, or correct the user ID"),
+    "invalid-credentials": dict(
+        github="Replace the host's GitHub token (github_token_file, or the stored gh credential)",
+        forgejo="Issue a new Forgejo token for the worker's user and write it to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host"),
+    "account-halt": dict(
+        github="Have GitHub lift the suspension or lock on the worker's account",
+        forgejo="Have the Forgejo instance's administrator reinstate the worker's user, "
+                "or give its token the read:user scope"),
+}
+FORGE_NAMES = dict(github="GitHub", forgejo="Forgejo")
+
+
+def halt_forge(reason):
+    """The forge and verdict of a halt reason such as `forgejo:invalid-credentials`."""
+    # A worker release before Forgejo identity checks names GitHub's reasons without the forge.
+    forge, _, verdict = str(reason or "").rpartition(":")
+    return forge or "github", verdict
+
+
 def clear_halt(worker=None):
-    halted = [w["id"] for w in worker_statuses() if w.get("state") == "halted"]
+    reasons = {w["id"]: w.get("halt_reason") for w in worker_statuses() if w.get("state") == "halted"}
+    halted = list(reasons)
     if worker is not None and worker not in halted:
         raise FleetError(f"Worker {worker} is not halted")
     cleared = [worker] if worker else halted
@@ -431,14 +457,17 @@ def clear_halt(worker=None):
     binary = manager.get("binary")
     if not binary:
         raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
-    # Restarted workers inherit GH_TOKEN from the manager, which read the token file once.
-    token_file = host_config().get("github_token_file")
+    # Restarted workers inherit GH_TOKEN from the manager, which read the token file once. A Forgejo
+    # source reads TAUCETI_FORGEJO_TOKEN_FILE at every identity check, so the worker's restart suffices.
+    github = [wid for wid in cleared if halt_forge(reasons[wid])[0] == "github"]
+    token_file = host_config().get("github_token_file") if github else None
     try:
         current = token_file and token_digest(Path(token_file).read_text().strip())
     except OSError as exc:
         raise FleetError(f"Cannot read {token_file}: {type(exc).__name__}; repair it before clearing a halt") from None
     if current and manager.get("github_token_sha256") != current:
-        raise FleetError(f"{token_file} differs from the token the worker manager started with; " + RESTART_MANAGER)
+        raise FleetError(f"{token_file} differs from the token the worker manager started with, which "
+                         f"{', '.join(github)} would restart with; " + RESTART_MANAGER)
     env = dict(os.environ, **manager_environment())
     workers_config = config_dir() / "workers.toml"
     managed = run([binary, "workers", "clear-halt", "--help"], env=env, check=False).returncode == 0
@@ -580,7 +609,8 @@ def worker_statuses():
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
             if value.get("state") == "halted":
-                status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"))
+                status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"),
+                              halt_forge=halt_forge(value["halt_reason"])[0] if value.get("halt_reason") else None)
             values.append(status)
     return values
 

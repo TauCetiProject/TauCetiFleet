@@ -416,15 +416,20 @@ def main(argv=None, *, _status_results=None):
                         )
                     if status.get("workers"):
                         print()
-                    groups = {}
+                    groups, remedies = {}, {}
                     for worker in status.get("workers", []):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
                         detail = worker.get("detail") or ""
                         if state == "halted":
-                            state = f"halted ({worker.get('halt_reason') or 'reason not recorded'})"
+                            reason = worker.get("halt_reason")
+                            forge, verdict = host.halt_forge(reason)
+                            state = f"halted ({host.FORGE_NAMES.get(forge, forge)} {verdict})" if reason else "halted (reason not recorded)"
                             detail = worker.get("failure_reason") or detail
+                            remedy = host.HALT_REMEDY.get(verdict, {}).get(forge) if reason else None
+                            remedies[state] = (f"{remedy}, then clear the halt" if remedy
+                                               else "The worker stays stopped; clear the halt once the account is in order")
                         error = worker.get("isolation_error")
                         key = (state, detail, error, worker["id"] if error else None)
                         groups.setdefault(key, []).append(worker["id"])
@@ -433,8 +438,9 @@ def main(argv=None, *, _status_results=None):
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
-                    if any(w.get("state") == "halted" for w in status.get("workers", [])):
-                        print(f"  Halted workers stay stopped. Once the account is in order: tauceti-fleet clear-halt {name} [WORKER]")
+                        if state in remedies:
+                            print(f"    {remedies[state]}: tauceti-fleet clear-halt {name} "
+                                  + (workers[0] if len(workers) == 1 else "[WORKER]"))
                     print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
