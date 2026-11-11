@@ -98,7 +98,9 @@ def parse(text):
             clauses = {}
             for clause in group.group(1).split(";") if group else []:
                 key, _, value = clause.partition(":")
-                clauses[key.strip().lower()] = value.strip()
+                # The worker reads every `partial:` clause, so a repeated key keeps all its values.
+                key = key.strip().lower()
+                clauses[key] = "; ".join(filter(None, (clauses.get(key), value.strip())))
             needs = clauses.get("needs", "none")
             needs = [] if needs.lower() == "none" else [s.strip().strip("`").strip() for s in needs.split(",") if s.strip("` \t")]
             items.append(dict(area=area, slug=slug.group(1).strip(), status=MARKS[match.group(2)], needs=needs,
