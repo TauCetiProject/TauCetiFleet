@@ -422,6 +422,33 @@ class Attention(unittest.TestCase):
         with self.assertRaises(store.FleetError):
             FORGEJO_REQUEST("https://forge.example/evil?", "x")
 
+    def test_a_repository_its_forge_will_not_show_leaves_the_rest_of_that_forge_to_be_asked(self):
+        self.on()
+        origin = "https://forge.example"
+        for pr, repository in ((1, "private/project"), (2, "public/project")):
+            self.record("declined", "fix", pr, repository=repository, forge=dict(kind="forgejo", url=origin),
+                        suffix=f".{pr:012d}")
+
+        def answer(at, path):
+            if path.startswith("repos/private/"):
+                error = store.FleetError(f"{origin} GET returned HTTP 404")
+                error.status = 404
+                raise error
+            return dict(state="closed", merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+        self.forgejo.side_effect = answer
+        for _ in range(2):
+            self.forgejo.reset_mock()
+            value = self.listed(lookup=True)
+            self.assertEqual(sorted(c.args[1] for c in self.forgejo.call_args_list),
+                             ["repos/private/project/pulls/1", "repos/public/project/pulls/2"])
+        self.assertEqual(value["lookup"]["error"], f"{origin} answered HTTP 404 for private/project#1")
+        self.assertEqual([i["id"] for i in value["items"]], ["forge.example/private/project#1"])
+        self.assertEqual(value["items"][0]["observed_at"], None)
+        self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/public/project#2"])
+        code, output = self.cli("attention", "box")
+        self.assertIn("   its forge answered HTTP 404 for this pull request; --lookup reads Forgejo anonymously", output)
+
     def test_an_interrupted_response_is_a_fleet_error_on_both_forges(self):
         class Interrupted:
             status = 200

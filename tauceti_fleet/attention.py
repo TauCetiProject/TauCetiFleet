@@ -17,6 +17,10 @@ from .store import FleetError, atomic, host_config, read, state_dir
 
 SCHEMA = "tauceti-incident/v1"
 GITHUB = "https://github.com"
+# Answers about one repository or number, not the forge: a request that gets one is not repeated in that call
+# but the rest of its forge still is. GitHub's 403 is also its rate limit, so it stops the forge.
+UNREADABLE_GITHUB = (404, 410, 451)
+UNREADABLE_FORGEJO = (403, 404, 410, 451)
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MAX_LOOKUPS = 100
 
@@ -182,13 +186,16 @@ def incident_items(config):
             cached = notes(name)
             written = epoch(record.get("last_at")) or float("inf")
             local = prepared.get((repository, number)) if target["forge"] == "github" else None
-            seen = [o for o in (local, cached.get(f"{repository}#{number}"))
-                    if isinstance(o, dict) and o.get("state") and isinstance(o.get("observed"), int | float)
-                    and o["observed"] >= written]
+            own = cached.get(f"{repository}#{number}")
+            seen = [o for o in (local, own)
+                    if isinstance(o, dict) and o.get("state") in ("OPEN", "CLOSED", "MERGED")
+                    and isinstance(o.get("observed"), int | float) and o["observed"] >= written]
             observation = max(seen, key=lambda o: o["observed"], default=None)
             item.update(repository=repository, pr=number, forge=target["forge"], origin=target["origin"],
                         cleared=overtaken(record, observation),
                         observed_at=observation["observed"] if observation else None, named=[])
+            if isinstance(own, dict) and own.get("state") == "UNREADABLE":
+                item["unreadable"] = own.get("status")
             for relation in ("subsumed_by", "mentions"):
                 numbers = record.get(relation) if isinstance(record.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
@@ -240,9 +247,13 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
         if not named:
             value["head"] = data["head"]["sha"]
     except FleetError as error:
-        if not named or getattr(error, "status", None) != 404:
+        status = getattr(error, "status", None)
+        if named and status == 404:
+            value = dict(state="NOT FOUND")
+        elif status in (UNREADABLE_GITHUB if forge == "github" else UNREADABLE_FORGEJO):
+            value = dict(state="UNREADABLE", status=status)
+        else:
             raise
-        value = dict(state="NOT FOUND")
     except (KeyError, TypeError, AttributeError):
         raise FleetError(f"{origin} returned an unexpected answer for {repository}#{number}") from None
     return dict(value, observed=time.time())
@@ -257,7 +268,7 @@ def incident_lookup(config, items):
         """A cleared item's own pull request may reopen at the record's head; what it names matters only once it does."""
         if item.get("cleared"):
             return []
-        return [n for n in item["named"] if n.get("state") in (None, "OPEN") and n["pr"] != item["pr"]]
+        return [n for n in item["named"] if n.get("state") in (None, "OPEN", "UNREADABLE") and n["pr"] != item["pr"]]
 
     def observed(value):
         return value["observed"] if isinstance(value, dict) and isinstance(value.get("observed"), int | float) else 0
@@ -270,7 +281,7 @@ def incident_lookup(config, items):
         requests.append((observed(own), item, item["pr"], False))
         requests += [(observed(n), item, n["pr"], True) for n in open_named(item)]
     requests.sort(key=lambda r: r[0])
-    failed = {}
+    failed, unreadable = {}, []
     for _, item, number, named in requests:
         key = (item["origin"], item["repository"], number, named)
         if key in answers or item["origin"] in failed:
@@ -282,10 +293,13 @@ def incident_lookup(config, items):
             asked += 1
             answers[key] = ask(config, item["repository"], number, named=named,
                                forge=item["forge"], origin=item["origin"])
+            if answers[key]["state"] == "UNREADABLE":
+                unreadable.append(f"{item['origin']} answered HTTP {answers[key]['status']} "
+                                  f"for {item['repository']}#{number}")
         except FleetError as exc:
             # One forge that fails leaves the other's requests to go ahead.
             failed[item["origin"]] = str(exc)
-    error = "; ".join([*failed.values(), *([error] if error else [])]) or None
+    error = "; ".join([*failed.values(), *unreadable, *([error] if error else [])]) or None
     fresh = {}
     for _, item, number, named in requests:
         if (key := (item["origin"], item["repository"], number, named)) in answers:
@@ -430,6 +444,9 @@ def display(name, value):
                 else:
                     detail = f"{pr_url(item, named['pr'])}  (--lookup for state and title)"
                 print(f"   {label}: #{named['pr']}  {detail}")
+        if item.get("unreadable"):
+            print(f"   its forge answered HTTP {item['unreadable']} for this pull request"
+                  + ("" if item["forge"] == "github" else "; --lookup reads Forgejo anonymously"))
         if item.get("transcript"):
             print("   transcript: " + item["transcript"])
         print()
