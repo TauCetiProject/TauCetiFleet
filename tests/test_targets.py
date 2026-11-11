@@ -311,6 +311,31 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         with self.assertRaisesRegex(FleetError, "no target list"):
             targets.configure(dict(audit=True), [])
 
+    def test_apply_keeps_edits_made_while_the_audit_ran(self):
+        machine = store.host_config()["machine_id"]
+        path = self.root / "list.md"
+        path.write_text(EXAMPLE)
+        store.update_host(roadmap_targets=str(path))
+        self.worker_inventory([dict(scope=machine, repo=targets.REPOSITORY, number=1234, state="MERGED", landed=9.0)])
+        lookup = targets.landings
+
+        def edited(text):
+            def landings(machine):
+                targets.write(path, text)
+                return lookup(machine)
+            return patch.object(targets, "landings", side_effect=landings)
+
+        added = EXAMPLE.replace("> A line", "- [ ] `added-meanwhile` — new\n> A line")
+        with edited(added):
+            self.assertTrue(targets.configure(dict(audit=True, apply=True), [])["applied"])
+        self.assertIn("`added-meanwhile`", path.read_text())
+        self.assertIn("[x] `truncation-bounds`", path.read_text())
+        path.write_text(EXAMPLE)
+        clashing = EXAMPLE.replace("(needs: none; in flight: #1234)", "(needs: none; in flight: #1235)")
+        with edited(clashing), self.assertRaisesRegex(FleetError, "changed on the corrected lines"):
+            targets.configure(dict(audit=True, apply=True), [])
+        self.assertEqual(path.read_text(), clashing)
+
     def test_cli_requests_and_focus_say_when_a_list_overrides_focus(self):
         entry = dict(target="machine", machine_id="one")
         source = self.root / "list.md"

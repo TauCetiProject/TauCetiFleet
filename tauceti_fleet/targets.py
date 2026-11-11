@@ -267,6 +267,17 @@ def audit(config, text, workers):
     return findings, "".join(lines)
 
 
+def merge3(base, ours, theirs):
+    """Two edits of `base` merged by `git merge-file`, or None when they touch the same lines."""
+    with tempfile.TemporaryDirectory() as directory:
+        files = []
+        for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+            (Path(directory) / name).write_text(text)
+            files.append(Path(directory) / name)
+        merged = run(["git", "merge-file", "-p", "-q", *files], check=False)
+    return merged.stdout if merged.returncode == 0 else None
+
+
 def describe(config, workers):
     path = config.get("roadmap_targets")
     notes = []
@@ -283,13 +294,20 @@ def configure(payload, workers):
     if payload.get("audit"):
         if not before:
             raise FleetError("This host has no target list; set one with targets HOST --file PATH")
-        text = load(before)
+        # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
+        destination = Path(before).resolve()
+        text = load(destination)
         findings, corrected = audit(config, text, workers)
         applied = bool(payload.get("apply")) and corrected != text
         if applied:
-            # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
-            destination = Path(before).resolve()
-            write(destination, corrected, stat.S_IMODE(destination.stat().st_mode))
+            if Path(before).resolve() != destination:
+                raise FleetError(f"{before} named another file when the audit ended; nothing written, audit again")
+            # The inventory lookup takes a while; keep an edit made meanwhile, as the worker's own curation does.
+            current = load(destination)
+            merged = corrected if current == text else merge3(text, corrected, current)
+            if merged is None:
+                raise FleetError(f"{before} changed on the corrected lines during the audit; nothing written, audit again")
+            write(destination, merged, stat.S_IMODE(destination.stat().st_mode))
         return dict(roadmap_targets=before, transferred=Path(before) == stored(), findings=findings,
                     corrections=sum("correction" in f for f in findings), applied=applied)
     notes = []
