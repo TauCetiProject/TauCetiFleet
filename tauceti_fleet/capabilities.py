@@ -182,9 +182,9 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
     return values
 
 
-def worker_protocol():
-    """The installed worker's `_fleet-protocol` reply; {} when it is missing or speaks another version."""
-    worker = executable("tauceti")
+def worker_protocol(worker=None):
+    """The `_fleet-protocol` reply of a worker runtime, the installed one by default; {} when it is missing or speaks another version."""
+    worker = worker or executable("tauceti")
     if worker:
         try:
             result = run([worker, "_fleet-protocol"], check=False)

@@ -32,6 +32,20 @@ LIMIT = 256 * 1024
 REPOSITORY = "TauCetiProject/TauCeti"
 ROADMAP = "TauCetiProject/TauCetiRoadmap"
 FILE_ONLY = "Counted from the file's marks and this host's rounds; workers also count open and merged pull requests"
+RESTART_MANAGER = (
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, which ends every worker's "
+    "current round, then set the list again"
+)
+
+
+def running_manager():
+    """The runtime the active worker manager started from: None when no manager runs, "" when it cannot be told."""
+    from . import host
+
+    # A live update installs a new runtime but leaves a running manager on the one it started with.
+    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False).returncode:
+        return None
+    return host.running_manager().get("binary") or ""
 
 
 def stored():
@@ -286,6 +300,12 @@ def configure(payload, workers):
         if capabilities.worker_protocol().get("roadmap_targets") != 1:
             raise FleetError("The installed TauCetiWorker has no target-list support, and its manager loads no worker from "
                              "definitions that name a list; install a release with roadmap_targets protocol support first")
+        manager = running_manager()
+        if manager == "":
+            raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
+        if manager and capabilities.worker_protocol(manager).get("roadmap_targets") != 1:
+            raise FleetError("The running worker manager started from a TauCetiWorker without target-list support and would "
+                             "reject definitions that name a list; " + RESTART_MANAGER)
         if path is not None:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise FleetError("A target list on the host is named by its absolute path")

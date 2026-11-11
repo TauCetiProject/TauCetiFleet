@@ -56,9 +56,16 @@ class TargetLists(unittest.TestCase):
         environ.start()
         self.addCleanup(environ.stop)
         self.protocol = dict(version=1, roadmap_focus=1, roadmap_targets=1)
-        probe = patch.object(capabilities, "worker_protocol", side_effect=lambda: self.protocol)
+        self.manager_protocol = None
+        probe = patch.object(capabilities, "worker_protocol",
+                             side_effect=lambda worker=None: self.protocol if worker is None else self.manager_protocol)
         probe.start()
         self.addCleanup(probe.stop)
+        self.find_manager = targets.running_manager
+        manager = patch.object(targets, "running_manager", side_effect=lambda: self.manager)
+        self.manager = None
+        manager.start()
+        self.addCleanup(manager.stop)
         store.update_host(github_account="operator", ci_allowed=False)
 
     def mirror(self, *directories):
@@ -173,6 +180,29 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         with self.assertRaisesRegex(FleetError, "no target-list support"):
             targets.configure(dict(text=done), [])
         self.assertIsNone(store.host_config()["roadmap_targets"])
+
+    def test_a_running_manager_without_list_support_refuses_the_list(self):
+        self.manager, self.manager_protocol = "/old/bin/tauceti", dict(version=1, roadmap_focus=1)
+        with self.assertRaisesRegex(FleetError, "running worker manager started from a TauCetiWorker without target-list support"):
+            targets.configure(dict(text=EXAMPLE), [])
+        self.manager = ""
+        with self.assertRaisesRegex(FleetError, "Cannot tell which worker runtime the running manager uses; on the host run"):
+            targets.configure(dict(text=EXAMPLE), [])
+        self.assertIsNone(store.host_config().get("roadmap_targets"))
+        self.assertFalse(targets.stored().exists())
+        self.manager, self.manager_protocol = "/new/bin/tauceti", self.protocol
+        self.assertEqual(targets.configure(dict(text=EXAMPLE), [])["roadmap_targets"], str(targets.stored()))
+        self.assertIsNone(targets.configure(dict(clear=True), [])["roadmap_targets"])
+
+    def test_the_running_manager_is_the_runtime_it_started_from(self):
+        active = []
+        with patch.object(targets, "run", side_effect=lambda argv, **_: subprocess.CompletedProcess(argv, 0 if active else 3)):
+            self.assertIsNone(self.find_manager())
+            active.append(True)
+            with patch.object(host, "manager_process", return_value=None):
+                self.assertEqual(self.find_manager(), "")
+            store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/old/bin/tauceti"))
+            self.assertEqual(self.find_manager(), "/old/bin/tauceti")
 
     def test_controller_rewrites_definitions_and_reports_the_list(self):
         store.update_host(workers_enabled=True, max_workers=2)
