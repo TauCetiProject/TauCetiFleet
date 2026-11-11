@@ -93,7 +93,7 @@ class ActivityTests(unittest.TestCase):
             if line.startswith(("Attributed landed Lean LOC", "Estimated $ / attributed LOC")):
                 self.assertNotIn("~", line)
                 self.assertIn("—", line)
-        self.assertIn("unavailable until backfill finishes", warming_output.getvalue())
+        self.assertNotIn("Attribution ", warming_output.getvalue())
         del second["summary"]["costs"]["windows"]["24h"]["attribution_version"]
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertIsNone(row["attributed_loc"])
