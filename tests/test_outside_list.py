@@ -154,6 +154,20 @@ class ControlLaw(unittest.TestCase):
         self.assertEqual(advance(reading=idle, session_left=5.0)["cap"], 10)
         self.assertEqual(advance(reading=dict(idle, fetched_at=now - 1900))["reason"], "the usage reading is 31 minutes old")
 
+    def test_session_window_over_its_pacing_curve_does_not_raise_the_cap(self):
+        now, resets = 50 * HOUR, 70 * HOUR
+        state = dict(cap=12, resets_at=resets, readings=[[now - 3 * HOUR, 69.4], [now - 900, 69.9]], rounds=[[now - 900, 0, 0, 0]])
+        values = dict(now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, reading=dict(fetched_at=now - 60, used=70.0, resets_at=resets),
+                      session_left=20.0, rounds=(0, 0, 0), curve=outside_list.pace_points({}))
+        self.assertEqual(outside_list.advance(state, **values)["cap"], 13)
+        # One hour into a five-hour session at 80% used, the default curve allows 13.3%.
+        session = dict(used=80.0, resets_at=now + 4 * HOUR)
+        held = outside_list.advance(state, **values, session=session)
+        self.assertEqual((held["cap"], held["reason"]), (12, "spending under plan, the workers' pacing curve starts no round now"))
+        self.assertEqual(outside_list.advance(state, **values, session=dict(used=0.0, resets_at=None))["cap"], 13)
+        opening = outside_list.advance(state, **dict(values, reading=dict(fetched_at=now - 60, used=0.0, resets_at=None)), session=session)
+        self.assertEqual(opening["cap"], 12)
+
     def test_simulated_weeks(self):
         for name, simulation, quiet_from in WEEKS:
             with self.subTest(name):
@@ -413,6 +427,7 @@ class Wiring(unittest.TestCase):
         self.assertEqual((seen["reading"], seen["session_left"], seen["slot_seconds"], seen["rounds"]),
                          (dict(fetched_at=now - 120, used=30.0, resets_at=now + 100 * HOUR), 5.0, None, [0.0, 0.0, 0.0]))
         self.assertEqual(seen["curve"], [(0.0, 0.0), (60.0, 40.0), (100.0, 100.0)])
+        self.assertEqual(seen["session"], dict(used=95.0, resets_at=now + HOUR))
         other = cache.with_name("quota-claude-other.json")
         other.write_text(json.dumps(dict(fetched_at=now - 60, fp="other", payload=windows)))
         pacer.state["at"] = now - outside_list.EVERY
