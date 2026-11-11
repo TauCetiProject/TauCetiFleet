@@ -33,8 +33,8 @@ def tail(path, limit=TAIL):
     return lines[1:] if size > limit else lines
 
 
-def log_facts(path):
-    """The last message in a worker's console log and when its latest round opened."""
+def log_facts(path, opening=None):
+    """The last message in a worker's console log, and when its latest round opened if that round is `opening`."""
     last = started = None
     # open() would take an integer as a file descriptor of this process.
     if isinstance(path, str) and path:
@@ -48,6 +48,9 @@ def log_facts(path):
                 continue
             last = last or text(match[2], 200)
             if ROUND_OPENING.match(match[2]):
+                # A closure after spent repair attempts reports a fix without logging an opening line.
+                if not opening or match[2] != opening and not match[2].startswith(opening + "   ["):
+                    break
                 try:
                     started = time.mktime(time.strptime(match[1], "%Y-%m-%d %H:%M:%S"))
                 except (ValueError, OverflowError):
@@ -58,9 +61,10 @@ def log_facts(path):
 
 def row(value):
     """View fields for one worker, from its status and the end of its console log."""
-    detail, target = value.get("detail"), value.get("target")
-    line, started = log_facts(value.get("log_file"))
-    in_round = bool(value.get("phase")) and value.get("state") in IN_ROUND
+    detail, target, phase = value.get("detail"), value.get("target"), value.get("phase")
+    in_round = bool(phase) and value.get("state") in IN_ROUND
+    opening = f"→ {phase.upper()}: {target}" if isinstance(phase, str) and isinstance(target, str) else None
+    line, started = log_facts(value.get("log_file"), opening)
     provider = re.match(r"provider=([\w.-]{1,40})", detail) if in_round and isinstance(detail, str) else None
     pr = re.match(r"PR #(\d{1,10})\b", target) if isinstance(target, str) else None
     return dict(

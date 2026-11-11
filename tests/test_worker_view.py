@@ -74,6 +74,14 @@ class WorkerView(unittest.TestCase):
         idle = worker_view.row(dict(state="running", phase=None, log_file=log))
         self.assertIsNone(idle["round_started_at"])
 
+    def test_a_round_whose_opening_line_is_not_the_latest_has_no_start(self):
+        log = self.log("w1", (OPENED, "→ REVIEW: PR #3  https://github.com/o/r/pull/3   [provider=claude]"),
+                       (OPENED + 3600, "  #7: closing after spent repair attempts"))
+        for opened in (log, self.log("w2", (OPENED, "→ FIX: PR #7  https://github.com/o/r/pull/7   [provider=codex]"))):
+            row = worker_view.row(dict(state="running", phase="fix", target="PR #7", log_file=opened,
+                                       detail="closing owned PR after spent repair attempts"))
+            self.assertEqual((row["pr"], row["round_started_at"]), (7, None))
+
     def test_only_the_end_of_a_long_log_is_read_and_an_opening_outside_it_is_unknown(self):
         log = self.log("w1", (OPENED, "→ ROADMAP: new PR (area: any)   [provider=claude]"),
                        *[(OPENED + n, "build output " + "y" * 90) for n in range(1, 1000)],

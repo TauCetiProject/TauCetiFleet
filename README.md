@@ -635,7 +635,9 @@ prepares them with each report, about every five seconds, from the worker
 status files, the last 64 KiB of each worker's console log and the last 128 KiB
 of `worker-events.jsonl`; it makes no GitHub request. A round's start is the
 time on its opening log line, read in the controller's time zone, and is
-unknown once that line lies before the part of the log that is read. Stage,
+unknown once that line lies before the part of the log that is read or when
+the latest opening line names another stage or target (a worker closing a PR
+after spent repair attempts logs none). Stage,
 target and round time appear while a worker reports `running`, `verifying` or
 `working`; stage and target also during the back-off after a failed round.
 GitHub writes that are neither a reply nor a closure, such as label changes,
