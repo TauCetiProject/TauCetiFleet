@@ -1054,10 +1054,11 @@ class StatusExport:
                    dict(status_report(config), exported_at=now), mode=0o644)
             self.error = None
         except Exception as exc:
-            message = f"status export failed: {exc}"
-            if message != self.error:
-                print("tauceti-fleet: " + message, file=sys.stderr, flush=True)
-                self.error = message
+            # An OSError from mkstemp names a fresh temporary file on every attempt.
+            key = (directory, type(exc), exc.errno) if isinstance(exc, OSError) and exc.errno else (directory, str(exc))
+            if key != self.error:
+                print(f"tauceti-fleet: status export failed: {exc}", file=sys.stderr, flush=True)
+                self.error = key
 
 
 def budget(payload):

@@ -110,14 +110,17 @@ class Export(unittest.TestCase):
             # An absent directory is left for the operator to create with the access they intend.
             self.assertFalse(self.directory.exists())
             self.directory.mkdir()
-            with patch.object(store.tempfile, "mkstemp", side_effect=PermissionError(13, "Permission denied")):
-                export.step(config, 1060)
+            denied = [PermissionError(13, "Permission denied", str(self.directory / f".fleet-{n}")) for n in range(3)]
+            with patch.object(store.tempfile, "mkstemp", side_effect=denied):
+                for now in (1060, 1090, 1120):
+                    export.step(config, now)
             self.assertEqual(log.getvalue().count("status export failed"), 2)
+            self.assertIn(".fleet-0", log.getvalue())
             with patch.object(host, "status_report", side_effect=TypeError("mixed-version report")):
-                export.step(config, 1090)
+                export.step(config, 1150)
             self.assertEqual(log.getvalue().count("status export failed"), 3)
-            export.step(config, 1120)
-        self.assertEqual(json.loads(self.target.read_text())["exported_at"], 1120)
+            export.step(config, 1180)
+        self.assertEqual(json.loads(self.target.read_text())["exported_at"], 1180)
 
     def run_controller_once(self, **patches):
         handlers = {}
