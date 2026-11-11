@@ -881,7 +881,7 @@ ruling or archive a record, from listing the items to moving the last file, so
 it never archives a ruling written after it looked.
 
 `status` adds one line counting the ruling records written in the last 24
-hours, live or archived:
+hours, live or archived, including those kept as `<name>.<n>`:
 
 ```text
 Rulings in the last 24h: 1 close, 2 escalate, 3 wait

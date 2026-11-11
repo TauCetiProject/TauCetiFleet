@@ -528,6 +528,17 @@ class Attention(unittest.TestCase):
         self.assertEqual((acked / "ruling-declined-fix-5.json.1").read_text(), texts[0])
         self.assertEqual(sorted(p.name for p in acked.glob("*.json")), ["declined-fix-5.json", "ruling-declined-fix-5.json"])
 
+    def test_the_daily_count_keeps_a_ruling_archived_beside_a_newer_one(self):
+        self.on()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for head in ("a" * 40, "b" * 40):
+            self.record("declined", "fix", 5, head=head, at=now, summary="declined")
+            self.ruling("declined", "fix", 5, "escalate", head=head, at=now, incident_at=now)
+            self.assertEqual(self.listed()["rulings"], {"escalate": 2 if head == "b" * 40 else 1})
+            self.listed(ack="5")
+        self.assertTrue((attention.incidents_dir() / "acked/ruling-declined-fix-5.json.1").exists())
+        self.assertEqual(self.listed()["rulings"], {"escalate": 2})
+
     def test_lookup_covers_the_pull_requests_a_ruling_names(self):
         self.on()
         self.record("declined", "rebase", 3, acked=True, summary="conflicts")

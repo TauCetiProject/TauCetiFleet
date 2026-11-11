@@ -174,13 +174,13 @@ def ruling_facts(record, *, live, incident=None):
 
 
 def recent_rulings():
-    """Rulings written in the last day, counted by name. Archiving renames a record, which keeps its
-    modification time, so older files are not opened."""
+    """Rulings written in the last day, counted by name, including the earlier ones `archive` keeps as
+    `<name>.<n>`. Archiving renames a record, which keeps its modification time, so older files are not opened."""
     cutoff = time.time() - RECENT
     counts = {}
     for folder in (incidents_dir(), incidents_dir() / "acked"):
         try:
-            paths = list(folder.glob(RULING + "-*.json"))
+            paths = [p for p in folder.glob(RULING + "-*.json*") if re.fullmatch(r".*\.json(\.\d+)?", p.name)]
         except OSError:
             continue
         for path in paths:
