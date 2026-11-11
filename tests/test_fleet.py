@@ -287,21 +287,28 @@ class Isolated(unittest.TestCase):
         self.assertEqual(store.read(store.state_dir() / "worker-manager.json"),
                          dict(binary=launch.call_args.args[0], github_token_sha256=host.token_digest("fake-selected-token")))
 
-    def write_workers(self, **states):
+    FORGEJO_HALT = dict(halt_reason="forgejo:invalid-credentials",
+                        failure_reason="Forgejo https://git.example.org rejected the credential for user 3 (HTTP 401)")
+
+    def write_workers(self, forgejo=(), **states):
+        # A halt without `forgejo` uses the unqualified reason of a worker release before Forgejo checks.
         for name, state in states.items():
             row = dict(id=name, state=state, alive=state != "halted", detail="authoring", halt_reason=None)
             if state == "halted":
                 row.update(halt_reason="account-halt", failure_reason="GitHub reports the account suspended", detail="rc=84")
+                if name in forgejo:
+                    row.update(self.FORGEJO_HALT)
             store.atomic(store.state_dir() / "workers" / f"{name}.json", row)
 
     def test_status_shows_a_halted_worker_with_its_reason_and_the_command_that_clears_it(self):
         self.write_workers(w1="running")
         unhalted = host.worker_statuses()
         self.assertNotIn("halt_reason", unhalted[0])
-        self.write_workers(w2="halted")
+        self.write_workers(w2="halted", w3="halted", forgejo=("w3",))
         workers = sorted(host.worker_statuses(), key=lambda w: w["id"])
-        self.assertEqual((workers[1]["halt_reason"], workers[1]["failure_reason"]),
-                         ("account-halt", "GitHub reports the account suspended"))
+        self.assertEqual((workers[1]["halt_reason"], workers[1]["halt_forge"], workers[1]["failure_reason"]),
+                         ("account-halt", "github", "GitHub reports the account suspended"))
+        self.assertEqual((workers[2]["halt_reason"], workers[2]["halt_forge"]), ("forgejo:invalid-credentials", "forgejo"))
         self.assertEqual(workers[0], unhalted[0])
         entry = dict(machine_id="a", target="big")
 
@@ -317,8 +324,13 @@ class Isolated(unittest.TestCase):
             return output.getvalue()
 
         text = status(workers)
-        self.assertIn("  w2: halted (account-halt) — GitHub reports the account suspended\n", text)
-        self.assertIn("tauceti-fleet clear-halt big [WORKER]", text)
+        self.assertIn("  w2: halted (GitHub account-halt) — GitHub reports the account suspended\n"
+                      "    Have GitHub lift the suspension or lock on the worker's account, then clear the halt: "
+                      "tauceti-fleet clear-halt big w2\n", text)
+        self.assertIn("  w3: halted (Forgejo invalid-credentials) — " + self.FORGEJO_HALT["failure_reason"] + "\n"
+                      "    Issue a new Forgejo token for the worker's user and write it to the file "
+                      "TAUCETI_FORGEJO_TOKEN_FILE names on the host, then clear the halt: tauceti-fleet clear-halt big w3\n",
+                      text)
         self.assertNotIn("halt", status(unhalted))
         self.assertEqual(json.loads(status(workers, "--json"))["big"]["status"]["workers"][1]["halt_reason"], "account-halt")
 
@@ -458,6 +470,19 @@ class Isolated(unittest.TestCase):
                 host.run_workers()
                 self.assertEqual(os.environ["GH_TOKEN"], "token-b")
             self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], ["w1"])
+
+    def test_clear_halt_of_a_forgejo_halt_needs_no_manager_restart_for_a_replaced_github_token(self):
+        self.write_workers(w1="halted", w2="halted", forgejo=("w2",))
+        secret = self.root / "token"
+        secret.write_text("token-a")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        secret.write_text("token-b")
+        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(store.FleetError, "which w1 would restart with"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual(host.rpc(dict(action="clear-halt", worker="w2"))["cleared"], ["w2"])
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
