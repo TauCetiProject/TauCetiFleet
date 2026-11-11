@@ -4,13 +4,14 @@ A source lists items and may acknowledge one. The first source is the worker's i
 records (its docs/incidents.md): Fleet names the directory, the workers write into it.
 """
 
+import fcntl
 import json
 import os
 import re
 import sqlite3
 import time
 from calendar import timegm
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 from . import activity, forgejo, github
 from .store import FleetError, atomic, host_config, read, state_dir
@@ -206,28 +207,41 @@ def incident_items(config):
     return items
 
 
+@contextmanager
+def records_lock():
+    """The incident directory's `.records.lock`, held across keeping an archived record aside and replacing it,
+    so overlapping acknowledgements cannot both keep the same record and drop the one between them."""
+    fd = os.open(incidents_dir() / ".records.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def incident_ack(config, item):
     """Move the live record to `acked/<name>`, the one name the worker's hold reads there. An earlier
     record of that name stays as `acked/<name>.<n>`, which the worker does not read."""
     source, acked = incidents_dir() / item["record"], incidents_dir() / "acked"
     target = acked / item["record"]
     acked.mkdir(mode=0o700, exist_ok=True)
-    aside = None
-    if target.exists() and source.exists():
-        n = 1
-        while True:
-            try:
-                os.link(target, acked / f"{item['record']}.{n}")
-                aside = acked / f"{item['record']}.{n}"
-                break
-            except FileExistsError:
-                n += 1
-    try:
-        os.replace(source, target)
-    except OSError:
-        if aside is not None:
-            aside.unlink(missing_ok=True)
-        raise
+    with records_lock():
+        aside = None
+        if target.exists() and source.exists():
+            n = 1
+            while True:
+                try:
+                    os.link(target, acked / f"{item['record']}.{n}")
+                    aside = acked / f"{item['record']}.{n}"
+                    break
+                except FileExistsError:
+                    n += 1
+        try:
+            os.replace(source, target)
+        except OSError:
+            if aside is not None:
+                aside.unlink(missing_ok=True)
+            raise
 
 
 def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
