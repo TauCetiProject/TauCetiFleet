@@ -400,6 +400,13 @@ def written_roles():
 
 
 def worker_config(config):
+    # enable() writes definitions beside the controller; the lock keeps a hold
+    # it records from being dropped by a concurrent unapplied_workers().
+    with locked(state_dir() / "worker-definitions.lock"):
+        return write_worker_config(config)
+
+
+def write_worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     definitions, ids = worker_plan(config)
     before = written_roles()
@@ -436,6 +443,11 @@ def unapplied_workers():
     polling admission with, the previous ones; an id whose agent or phases
     were rewritten stays out until its live status shows the new ones.
     """
+    with locked(state_dir() / "worker-definitions.lock"):
+        return acknowledge_workers()
+
+
+def acknowledge_workers():
     path = state_dir() / "unapplied-workers.json"
     pending = set(read(path, {}).get("workers", []))
     held = set()

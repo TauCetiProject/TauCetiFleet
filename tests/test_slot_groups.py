@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -295,6 +296,40 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(admitted(), [1])
         running(2, "codex", ["progress"])
         self.assertEqual(admitted(), [1, 2])
+
+    def test_a_hold_recorded_while_holds_are_acknowledged_is_kept(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
+        self.definitions()
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+        acknowledging, writing = threading.Event(), threading.Event()
+        status = host.read
+
+        def paused(path, default=None):
+            # The acknowledgment stops after its first status read until enable() is under way.
+            if Path(path).parent.name == "workers" and not acknowledging.is_set():
+                acknowledging.set()
+                writing.wait(5)
+                time.sleep(0.3)
+            return status(path, default)
+
+        def enable():
+            acknowledging.wait(5)
+            writing.set()
+            host.enable(workers=True)
+
+        writer = threading.Thread(target=enable)
+        with (
+            patch.object(host, "read", side_effect=paused),
+            patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready", workers="ready"), checks=[])),
+            patch.object(host, "write_slices"),
+            patch.object(host, "resources", return_value={}),
+        ):
+            writer.start()
+            host.unapplied_workers()
+            writer.join(10)
+        self.assertEqual(self.shape(self.definitions()[1])[2], ("codex", "progress"))
+        self.assertEqual([wid.rsplit("-", 1)[1] for wid in host.unapplied_workers()], ["2"])
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
