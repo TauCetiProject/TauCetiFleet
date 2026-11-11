@@ -190,15 +190,16 @@ def cpu_sample():
 class Scaler:
     """Count each worker as WORKER_MEMORY of free memory.
 
-    The target never exceeds what total memory holds, and grows past the
-    rounds already in progress only while free memory holds another worker.
+    Admission is the prefix ``workers[:target]``. The target never exceeds
+    what total memory holds, and the prefix takes in idle workers only while
+    free memory holds another; workers with a round in progress cost nothing.
     """
 
     def __init__(self):
         self.target = 0
         self.decision = {}
 
-    def step(self, *, enabled, available, reserve, maximum, pause_reason=None, **_):
+    def step(self, *, enabled, available, reserve, maximum, workers=(), pause_reason=None, **_):
         each = f"{WORKER_MEMORY // GIB} GiB each"
         if not enabled or available < reserve:
             self.target = 0
@@ -206,9 +207,13 @@ class Scaler:
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
         else:
-            busy = sum(w.get("state") in ("running", "surveying") for w in host.worker_statuses())
-            holds = (memory_total() - reserve) // WORKER_MEMORY
-            self.target = max(0, min(maximum, holds, busy + (available - reserve) // WORKER_MEMORY))
+            busy = {w.get("id") for w in host.worker_statuses() if w.get("state") in ("running", "surveying")}
+            room = (available - reserve) // WORKER_MEMORY
+            limit = min(maximum, len(workers), (memory_total() - reserve) // WORKER_MEMORY)
+            self.target = 0
+            while self.target < limit and (workers[self.target] in busy or room > 0):
+                room -= workers[self.target] not in busy
+                self.target += 1
             if self.target < maximum:
                 reason = f"{self.target} of {maximum} workers fit in free memory at {each}"
             elif maximum:

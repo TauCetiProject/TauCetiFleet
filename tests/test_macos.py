@@ -200,6 +200,7 @@ class MacOS(unittest.TestCase):
 
     def test_admission_counts_workers_against_free_memory(self):
         reserve = 4 * GIB
+        ids = [f"w{n}" for n in range(1, 9)]
         workers = []
         scaler = host.Scaler()
         self.assertIsInstance(scaler, macos.Scaler)
@@ -207,13 +208,20 @@ class MacOS(unittest.TestCase):
         def step(available_gib, maximum=8, **extra):
             with patch.object(host, "worker_statuses", return_value=workers):
                 return scaler.step(now=0, ci_busy=False, idle=0, enabled=True, available=available_gib * GIB,
-                                   reserve=reserve, maximum=maximum, **extra)
+                                   reserve=reserve, maximum=maximum, workers=ids, **extra)
 
         self.assertEqual(step(13), (2, "2 of 8 workers fit in free memory at 4 GiB each"))
         self.assertEqual(scaler.decision["policy"], "memory-count")
-        workers[:] = [dict(state="running"), dict(state="surveying"), dict(state="idle")]
+        workers[:] = [dict(id="w1", state="running"), dict(id="w2", state="surveying"), dict(id="w3", state="idle")]
         self.assertEqual(step(13)[0], 4)
         self.assertEqual(step(5)[0], 2)
+        # Admission is a prefix of the worker list: idle workers ahead of the
+        # running ones would each be a new round.
+        workers[:] = [dict(id="w3", state="running"), dict(id="w4", state="running")]
+        self.assertEqual(step(5, maximum=4)[0], 0)
+        self.assertEqual(step(9, maximum=4)[0], 1)
+        self.assertEqual(step(13, maximum=4)[0], 4)
+        workers[:] = [dict(id="w1", state="running"), dict(id="w2", state="surveying"), dict(id="w3", state="idle")]
         # 32 GiB less the reserve holds seven, however much is free.
         self.assertEqual(step(31)[0], 7)
         self.assertEqual(step(31, maximum=3), (3, "all configured workers fit in free memory at 4 GiB each"))
@@ -223,6 +231,34 @@ class MacOS(unittest.TestCase):
                          "worker admission lease expired")
         with patch.object(host, "worker_statuses", return_value=[]):
             self.assertEqual(scaler.step(enabled=False, available=31 * GIB, reserve=reserve, maximum=8)[0], 0)
+
+    def test_controller_admits_no_idle_worker_ahead_of_running_ones_beyond_free_memory(self):
+        machine = store.update_host(ci_allowed=False, workers_enabled=True, max_workers=4)["machine_id"]
+        ids = [f"fleet-{machine[:8]}-{n}" for n in range(1, 5)]
+        running = [dict(id=wid, state="running", alive=True) for wid in ids[2:]]
+        admitted = []
+        caps = dict(cpus=8.0, memory_total=32 * GIB, memory_available=5 * GIB, cgroup=None)
+
+        def sleep(_):
+            admitted.append(store.read(store.state_dir() / "admission.json")["workers"])
+            host.signal.getsignal(host.signal.SIGTERM)()
+
+        handlers = {s: host.signal.getsignal(s) for s in (host.signal.SIGTERM, host.signal.SIGINT, host.signal.SIGHUP)}
+        self.addCleanup(lambda: [host.signal.signal(s, h) for s, h in handlers.items()])
+        with (
+            patch.object(host, "worker_statuses", return_value=running),
+            patch.object(host, "resources", return_value=caps),
+            patch.object(host, "worker_headroom", return_value=4 * GIB),
+            patch.object(host, "cpu_sample", return_value=(0, 0)),
+            patch.object(host, "collect_ci_results"),
+            patch.object(host.time, "sleep", sleep),
+        ):
+            host.daemon()
+        self.assertEqual(admitted, [[]])
+        status = store.read(store.state_dir() / "status.json")
+        self.assertIsNone(status["error"])
+        self.assertEqual(status["active_worker_limit"], 0)
+        self.assertIn(macos.WORKERS, self.loaded)
 
     def test_doctor_reports_only_the_workers_role(self):
         config = store.update_host(ci_allowed=False)

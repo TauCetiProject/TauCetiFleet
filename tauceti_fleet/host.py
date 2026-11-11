@@ -675,7 +675,7 @@ class Scaler:
         )
         return self.target, reason
 
-    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None):
+    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, workers=(), pause_reason=None):
         if not enabled or available < reserve:
             self.target = 0
             reason = pause_reason or (
@@ -930,6 +930,7 @@ def daemon():
                     reserve=reserve,
                     idle=idle,
                     maximum=maximum,
+                    workers=ids,
                     pause_reason=pause_reason,
                 )
                 roadmap_focus = focus.policy(config, ids[:target])
