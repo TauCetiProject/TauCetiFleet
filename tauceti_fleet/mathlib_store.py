@@ -193,6 +193,14 @@ def trusted_history():
     return set(repo("rev-list", *refs, timeout=600).split())
 
 
+def remove(root, store, name):
+    """Delete an entry after renaming it out of the store, which every pass's staging cleanup finishes."""
+    removed = root / "staging" / ("removed-" + name)
+    removed.parent.mkdir(parents=True, exist_ok=True)
+    (store / name).rename(removed)
+    shutil.rmtree(removed)
+
+
 def ready(store, revision):
     return (store / revision / READY).is_file()
 
@@ -279,7 +287,7 @@ def warm(config=None, now=None):
                         atomic(state_file(), state)
                         (store / name / READY).write_text(name + "\n")
                     elif complete and now - unpinned[name] >= hold(config):
-                        shutil.rmtree(store / name)
+                        remove(root, store, name)
                         del unpinned[name]
                 elif ready(store, name):
                     if complete and name not in needed:
@@ -287,7 +295,7 @@ def warm(config=None, now=None):
                         unpinned[name] = now
                 # Someone else deleted its marker, which is when the directory last changed.
                 elif complete and now - (store / name).stat().st_mtime >= hold(config):
-                    shutil.rmtree(store / name)
+                    remove(root, store, name)
             history, untrusted = None, set()
             for revision, entry in needed.items():
                 if not ready(store, revision):

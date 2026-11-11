@@ -371,6 +371,28 @@ class Store(unittest.TestCase):
         self.assertEqual(mathlib_store.warm(config, now=2300 + hold)["unpinned"], {self.old: 2300 + hold})
         self.assertTrue((self.mounted / self.old).is_dir())
 
+    def test_an_interrupted_removal_leaves_nothing_in_the_store_to_readmit(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        mathlib_store.warm(config, now=2000)
+        rmtree = shutil.rmtree
+
+        def interrupted(path, *args, **kwargs):
+            if Path(path).name.endswith(self.old):
+                (Path(path) / "lean-toolchain").unlink()
+                raise KeyboardInterrupt
+            return rmtree(path, *args, **kwargs)
+
+        with patch.object(mathlib_store.shutil, "rmtree", interrupted), self.assertRaises(KeyboardInterrupt):
+            mathlib_store.warm(config, now=2000 + hold)
+        self.inventory(dict(number=7, state="OPEN", head=self.head))
+        state = mathlib_store.warm(config, now=2100 + hold)
+        self.assertEqual((state["unpinned"], state["failures"], state["error"]), ({}, {}, None))
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.assertTrue((self.mounted / self.old / "lean-toolchain").is_file())
+        self.assertIn(f"{self.old} exe cache get", (self.bin / "lake.log").read_text().splitlines()[-2])
+
     def test_a_stale_inventory_observation_is_fetched_and_makes_the_check_incomplete(self):
         config, hold = self.configure(), 2 * 5400
         mathlib_store.warm(config, now=1000)

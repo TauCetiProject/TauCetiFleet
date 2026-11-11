@@ -514,7 +514,9 @@ tauceti-fleet mathlib-store big-server --clear   # stop maintaining it
 The host saves this as `mathlib_store` in `host.json`, unset by default.
 Saving it needs no drain. `DIR` holds three directories on one filesystem:
 `DIR/store`, the store itself, which is all that containers see; `DIR/staging`,
-where an entry is built; and `DIR/downloads`, for Mathlib's archives.
+where an entry is built, and where an entry being removed is moved before it is
+deleted, so an interrupted removal leaves nothing in the store; and
+`DIR/downloads`, for Mathlib's archives.
 
 While the setting is present, a background pass runs when the setting is saved,
 when the controller starts and every 30 minutes after that. The pass is its own
