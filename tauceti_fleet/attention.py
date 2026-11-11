@@ -132,9 +132,8 @@ def target_of(record):
         return None
     if forge is None or isinstance(forge, dict) and forge.get("kind") == "github" and forge.get("url") == GITHUB:
         kind, origin = "github", GITHUB
-    elif (isinstance(forge, dict) and forge.get("kind") == "forgejo" and isinstance(forge.get("url"), str)
-          and forgejo.ORIGIN.fullmatch(forge["url"].rstrip("/"))):
-        kind, origin = "forgejo", forge["url"].rstrip("/")
+    elif isinstance(forge, dict) and forge.get("kind") == "forgejo" and forgejo.origin(forge.get("url")):
+        kind, origin = "forgejo", forge["url"]
     else:
         return None
     if kind == "github" and record["key"].endswith(f"-{number}"):

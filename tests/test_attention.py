@@ -441,6 +441,28 @@ class Attention(unittest.TestCase):
                 with self.assertRaises(store.FleetError):
                     call()
 
+    def test_forgejo_origins_are_the_ones_the_worker_writes(self):
+        self.on()
+        for pr, url in ((5, "http://[::1]:3000"), (6, "http://forge.example"), (7, "https://Forge.example:443")):
+            self.record("declined", "fix", pr, forge=dict(kind="forgejo", url=url), suffix=f".{pr:012d}")
+        value = self.listed()
+        self.assertEqual([i["id"] for i in value["items"]], ["[::1]:3000/TauCetiProject/TauCeti#5", "fix-6.000000000006",
+                                                            "fix-7.000000000007"])
+        self.forgejo.side_effect = lambda at, path: dict(state="open", merged=False, merged_at=None,
+                                                         head=dict(sha="a" * 40))
+        self.listed(lookup=True)
+        self.assertEqual([c.args for c in self.forgejo.call_args_list],
+                         [("http://[::1]:3000", f"repos/{REPOSITORY}/pulls/5")])
+        seen = []
+
+        def opened(request, timeout):
+            seen.append(request.full_url)
+            raise OSError("refused")
+
+        with patch("urllib.request.urlopen", side_effect=opened), self.assertRaises(store.FleetError):
+            FORGEJO_REQUEST("http://[::1]:3000", "repos/O/R/pulls/5")
+        self.assertEqual(seen, ["http://[::1]:3000/api/v1/repos/O/R/pulls/5"])
+
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()
         self.record("declined", "fix", 7, summary="see #8", mentions=[8])

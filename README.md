@@ -791,13 +791,15 @@ that has used its attempts on a pull request head (`budget-spent`). The format
 is TauCetiWorker's `docs/incidents.md`. A worker release without incident
 records ignores the setting, and the list stays empty.
 
-A record names its pull request's forge, GitHub or a Forgejo instance. A
-Forgejo item is listed as `PR #412 on Forgejo <origin>` with its Forgejo link and
-an `ack id` such as `git.example.org/TauCetiProject/TauCeti#412`; so is a record
-of a GitHub repository other than the workers' own, with an id such as
+A record names its pull request's forge, GitHub or a Forgejo instance. A Forgejo
+item, whose origin is the one the worker writes (HTTPS, or HTTP on a loopback
+host, IPv6 in brackets), is listed as `PR #412 on Forgejo <origin>` with its
+Forgejo link and an `ack id` such as
+`git.example.org/TauCetiProject/TauCeti#412`; so is a record of a GitHub
+repository other than the workers' own, with an id such as
 `TauCetiProject/TauCetiRoadmap#12`. `--ack` takes that id, and the bare number
-acknowledges only the workers' own GitHub repository. A record of any other forge
-is listed under its key and never looked up.
+acknowledges only the workers' own GitHub repository. A record of any other
+forge is listed under its key and never looked up.
 
 Records are off until the host's profile sets `incidents`:
 
