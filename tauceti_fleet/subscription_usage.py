@@ -30,21 +30,50 @@ def claude_login(config):
     return Path.home() / ".claude"
 
 
+def worker_roots(config):
+    env = config.get("env") or {}
+    # Worker state stays inside the runtime that created it, so an earlier runtime can hold the newest reading.
+    roots = list((data_dir() / "worker-runtimes").glob("*/lib/python*/site-packages/tauceti_worker"))
+    if env.get("TAUCETI_LEGACY_DATA_ROOT"):
+        roots.append(Path(env["TAUCETI_LEGACY_DATA_ROOT"]))
+    return roots
+
+
+def recorded_source(marker):
+    try:
+        with marker.open() as stream:
+            value = stream.read(4097).strip()
+    except (OSError, UnicodeError):
+        return None
+    return Path(value) if value and len(value) <= 4096 and Path(value).is_absolute() else None
+
+
+def claude_logins(config):
+    """claude_login, then each login a worker recorded as the source of its isolated copy.
+
+    A worker launched with CLAUDE_CONFIG_DIR in the launcher's environment copies
+    that login instead and keeps its Claude usage cache beside it.
+    """
+    markers = [path for root in worker_roots(config) for path in root.glob("state/*/home/.claude/.tauceti-creds-source")]
+    markers += (Path.home() / ".tauceti").glob("*/.claude/.tauceti-creds-source")
+    logins = [claude_login(config)]
+    for login in map(recorded_source, markers):
+        if login is not None and login not in logins:
+            logins.append(login)
+    return logins
+
+
 def reading_files(config, provider):
     """Every place the worker's pacer may have cached this provider's last usage response.
 
     Codex readings are kept per worker. Claude readings are shared beside the
     login the workers copy, or under the worker state when that is read-only.
     """
-    env = config.get("env") or {}
-    # Worker state stays inside the runtime that created it, so an earlier runtime can hold the newest reading.
-    roots = list((data_dir() / "worker-runtimes").glob("*/lib/python*/site-packages/tauceti_worker"))
-    if env.get("TAUCETI_LEGACY_DATA_ROOT"):
-        roots.append(Path(env["TAUCETI_LEGACY_DATA_ROOT"]))
+    roots = worker_roots(config)
     if provider == "codex":
         return [path for root in roots for path in root.glob("state/*/cache/quota-codex.json")]
     return [
-        *claude_login(config).glob(".tauceti-quota/usage/quota-claude-*.json"),
+        *(path for login in claude_logins(config) for path in login.glob(".tauceti-quota/usage/quota-claude-*.json")),
         *(path for root in roots for path in root.glob("state/.quota-usage/*/quota-claude-*.json")),
     ]
 

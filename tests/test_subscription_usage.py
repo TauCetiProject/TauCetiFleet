@@ -236,6 +236,27 @@ class SubscriptionUsage(unittest.TestCase):
         self.assertEqual(output.getvalue().splitlines()[2],
                          f"  credential {label('one')}: limit reached; 5h 70% left, resets in 1h45m (read 15m ago)")
 
+    def test_claude_readings_are_found_beside_the_login_each_worker_recorded_as_its_source(self):
+        hour = 3600
+        payload = flat(dict(utilization=25, resets_at=iso(NOW + hour)), None)
+        # A login chosen in the launcher's environment is recorded in each worker's isolated home.
+        chosen = self.root / "chosen-login"
+        marker = self.runtime("a" * 40) / "state/fleet-1/home/.claude/.tauceti-creds-source"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(f"{chosen}\n")
+        self.cache(chosen / ".tauceti-quota/usage/quota-claude-0123456789abcdef.json", payload, 60)
+        self.assertEqual(subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]["fetched_at"], NOW - 60)
+        # macOS keeps isolated worker homes under the login user's ~/.tauceti instead.
+        other = self.root / "other-login"
+        marker = self.root / "home/.tauceti/fleet-2/.claude/.tauceti-creds-source"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(str(other))
+        self.cache(other / ".tauceti-quota/usage/quota-claude-0123456789abcdef.json", payload, 30)
+        self.assertEqual(subscription_usage.readings(dict(claude_billing="subscription"), NOW)["claude"]["fetched_at"], NOW - 30)
+        marker.write_text("relative/login")
+        self.assertEqual(subscription_usage.claude_logins(dict(claude_billing="subscription")),
+                         [self.root / "home/.claude", chosen])
+
 
 if __name__ == "__main__":
     unittest.main()

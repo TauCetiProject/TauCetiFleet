@@ -724,8 +724,10 @@ These are the responses the workers' pacer last cached on the host. Fleet sends
 no usage request, so a line ages while no worker is checking its quota, and a
 window that has reset since the reading shows no figure. When Codex reported its
 limit reached, the line says so before the percentages, and the JSON reading has
-`limit_reached`. The caches are kept per
-credential, and Fleet does not read credentials, so it cannot tell which one is
+`limit_reached`. Claude readings are looked for beside `~/.claude` and beside
+every login a worker recorded as the source of its isolated copy, which is where
+a worker started with `CLAUDE_CONFIG_DIR` in its launcher's environment keeps
+them. The caches are kept per credential, and Fleet does not read credentials, so it cannot tell which one is
 active. A reading is current while the worker would still use it (an hour for
 Claude, ten minutes for Codex) or while a window it shows spent has not reset.
 While more than one credential has a current reading, each is printed on its own
