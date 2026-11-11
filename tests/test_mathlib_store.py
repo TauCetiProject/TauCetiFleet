@@ -288,6 +288,13 @@ class Store(unittest.TestCase):
         mathlib_store.warm(config, now=60000 + hold)
         self.assertFalse((self.mounted / self.old).exists())
 
+    def test_an_unavailable_ref_does_not_keep_other_pull_requests_from_being_fetched(self):
+        self.inventory(dict(number=7, state="OPEN", head=self.head), dict(number=9, state="OPEN", head="f" * 40))
+        state = mathlib_store.warm(self.configure(), now=1000)
+        self.assertEqual(state["needed"][self.old]["pinned_by"], ["#7"])
+        self.assertTrue(state["error"].startswith("some pull request heads could not be fetched"))
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
         state = mathlib_store.warm(self.configure(), now=1000)

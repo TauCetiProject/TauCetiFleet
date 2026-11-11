@@ -111,17 +111,26 @@ def pins(config, known=None):
     except (FleetError, ValueError, KeyError, TypeError, AttributeError):
         prs = {name: head for name, head in held.items() if name != "main"}
         notes.append("open pull requests unavailable from the worker's activity inventory; keeping the last known ones")
-    fetch = ("fetch", "-q", "--depth=1", "--filter=blob:none", "--no-tags", "--no-write-fetch-head", "origin",
-             "+refs/heads/main:refs/pins/main")
+    fetch = ("fetch", "-q", "--depth=1", "--filter=blob:none", "--no-tags", "--no-write-fetch-head", "origin")
+    main = "+refs/heads/main:refs/pins/main"
     moved = [f"+refs/pull/{name}/head:refs/pins/{name}" for name, head in prs.items() if held.get(name) != head]
-    for refspecs in (moved, []) if moved else ([],):
+    try:
+        repo(*fetch, main, *moved, timeout=600)
+    except FleetError:
+        if not moved:
+            raise FleetError("Cannot fetch TauCeti main to read its Mathlib pin") from None
         try:
-            repo(*fetch, *refspecs, timeout=600)
-            break
+            repo(*fetch, main, timeout=600)
         except FleetError:
-            if not refspecs:
-                raise FleetError("Cannot fetch TauCeti main to read its Mathlib pin") from None
-            # A single pull request ref the remote no longer has fails the whole fetch.
+            raise FleetError("Cannot fetch TauCeti main to read its Mathlib pin") from None
+        # A single pull request ref the remote no longer has fails the whole fetch.
+        unfetched = 0
+        for refspec in moved:
+            try:
+                repo(*fetch, refspec, timeout=600)
+            except FleetError:
+                unfetched += 1
+        if unfetched:
             notes.append("some pull request heads could not be fetched")
     last = {who: (revision, entry.get("toolchain")) for revision, entry in (known or {}).items()
             for who in entry.get("pinned_by", [])}
