@@ -437,10 +437,16 @@ tauceti-fleet clear-halt big-server                    # every halted worker on 
 tauceti-fleet clear-halt big-server fleet-1a2b3c4d-2   # one worker
 ```
 
-For each worker this runs `tauceti work --worker-id ID --clear-halt` and
-`tauceti workers restart ID` on the host, with the worker runtime the running
-manager was started from; it requires that manager to be running. A worker whose
-account is still wrong halts again. Worker releases without identity halts never
+For each worker this runs `tauceti workers clear-halt ID` (`tauceti work
+--worker-id ID --clear-halt` with a worker release that lacks it) and `tauceti
+workers restart ID` on the host, with the worker runtime the running manager was
+started from; it requires that manager to be running. A restarted worker gets its
+GitHub token from the manager, which reads `github_token_file` when it starts, so
+after that file is replaced `clear-halt` refuses until
+`systemctl --user restart tauceti-fleet-workers.service` has run on the host. That
+restart leaves scoped workers running (see below); a worker whose status shows
+degraded isolation runs inside the manager's service and its round ends with it.
+A worker whose account is still wrong halts again. Worker releases without identity halts never
 report the state, and `clear-halt` then finds nothing to clear.
 
 Each worker runs in an independent systemd scope inside the same worker slice;

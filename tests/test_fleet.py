@@ -450,7 +450,8 @@ class Isolated(unittest.TestCase):
             return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
 
         with patch.object(host, "run", side_effect=fake):
-            with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*systemctl --user restart"):
+            with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*"
+                                        "systemctl --user restart.*Workers in their own scopes keep running"):
                 host.rpc(dict(action="clear-halt"))
             self.assertEqual([c[0] for c in calls], ["systemctl"])
             with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
