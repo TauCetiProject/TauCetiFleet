@@ -184,7 +184,8 @@ def incident_items(config):
         if target:
             repository, number = target["repository"], target["pr"]
             cached = notes(name)
-            written = epoch(record.get("last_at")) or float("inf")
+            # `last_at` is whole seconds, so an observation inside that second may predate the write.
+            written = (epoch(record.get("last_at")) or float("inf")) + 1
             local = prepared.get((repository, number)) if target["forge"] == "github" else None
             own = cached.get(f"{repository}#{number}")
             seen = [o for o in (local, own)

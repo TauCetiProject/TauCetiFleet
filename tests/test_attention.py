@@ -171,6 +171,16 @@ class Attention(unittest.TestCase):
         (self.root / "activity/activity.sqlite").write_text("not a database")
         self.assertEqual(len(self.listed()["items"]), 6)
 
+    def test_an_observation_inside_the_records_write_second_is_not_newer(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        for pr, observed in ((1, at + 0.1), (2, at + 0.999), (3, at + 1), (4, at - 1)):
+            self.record("declined", "fix", pr, head="b" * 40, summary="no")
+            self.observe(pr, "OPEN", "a" * 40, observed)
+        value = self.listed()
+        self.assertEqual({c["id"]: c["cleared"] for c in value["cleared"]}, {"3": "new head"})
+        self.assertEqual([(i["id"], i["observed_at"]) for i in value["items"]], [("1", None), ("2", None), ("4", None)])
+
     def test_ack_moves_records_and_an_acked_decline_keeps_its_file_for_the_hold(self):
         self.on()
         live = self.record("declined", "fix", 7, summary="no")
@@ -437,7 +447,7 @@ class Attention(unittest.TestCase):
             return dict(state="closed", merged=False, merged_at=None, head=dict(sha="a" * 40))
 
         self.forgejo.side_effect = answer
-        for _ in range(2):
+        for _ in range(3):
             self.forgejo.reset_mock()
             value = self.listed(lookup=True)
             self.assertEqual(sorted(c.args[1] for c in self.forgejo.call_args_list),
