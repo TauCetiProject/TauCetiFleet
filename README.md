@@ -909,13 +909,15 @@ The list is built from three sources
 The first two need no setting and leave the list by themselves, once the halt
 is cleared or the credential replaced; `--ack` applies to incident records only.
 
-A record names its pull request's forge, GitHub or a Forgejo instance. A
-Forgejo item is listed as `PR #412 on Forgejo <origin>` with its Forgejo link and
-an `ack id` such as `git.example.org/TauCetiProject/TauCeti#412`; so is a record
-of a GitHub repository other than the workers' own, with an id such as
+A record names its pull request's forge, GitHub or a Forgejo instance. A Forgejo
+item, whose origin is the one the worker writes (HTTPS, or HTTP on a loopback
+host, IPv6 in brackets), is listed as `PR #412 on Forgejo <origin>` with its
+Forgejo link and an `ack id` such as
+`git.example.org/TauCetiProject/TauCeti#412`; so is a record of a GitHub
+repository other than the workers' own, with an id such as
 `TauCetiProject/TauCetiRoadmap#12`. `--ack` takes that id, and the bare number
-acknowledges only the workers' own GitHub repository. A record of any other forge
-is listed under its key and never looked up.
+acknowledges only the workers' own GitHub repository. A record of any other
+forge is listed under its key and never looked up.
 
 Records are off until the host's profile sets `incidents`:
 
@@ -952,19 +954,22 @@ needs an explicit host.
 An item leaves the list by itself once its pull request is merged, closed or at
 a different head than the record names. The evidence is pull request state
 already on the host, read from the worker's prepared activity database, and only
-an observation newer than the record counts. That database covers GitHub pull
-requests this host's workers opened, and is never matched against a Forgejo
-record. For the rest, `--lookup` asks the record's forge: GitHub with the host's
-credential, a Forgejo instance anonymously through its REST API, so a private
-Forgejo repository cannot be looked up. It asks once per listed pull request,
-once per pull request an item names until that one is known to be merged or
-closed, and once per dropped record whose pull request has not merged, since it
-can reopen at the same head. That is at most 100 requests a call, each pull
-request asked about least recently first, so repeated calls reach every one; a
-forge that fails leaves the other's requests to go ahead. The answers are kept
-in `~/.local/state/tauceti-fleet/attention/`; the worker's live record files
-are never rewritten. Nothing else in `attention` or `status` contacts a forge.
-`--ack all` also archives the records the list had already dropped.
+an observation from a later second than the record's `last_at`, which has
+whole-second resolution, counts. That database covers GitHub pull requests this
+host's workers opened, and is never matched against a Forgejo record. For the
+rest, `--lookup` asks the record's forge: GitHub with the host's credential, a
+Forgejo instance anonymously through its REST API, so a private Forgejo
+repository cannot be looked up. It asks once per listed pull request, once per
+pull request an item names until that one is known to be merged or closed, and
+once per dropped record whose pull request has not merged, since it can reopen
+at the same head. That is at most 100 requests a call, each pull request asked
+about least recently first, so repeated calls reach every one. A forge that
+fails leaves the other's requests to go ahead, and a pull request its forge will
+not show (HTTP 404, or 403 on Forgejo) is reported and asked again in turn
+without stopping the rest of that forge. The answers are kept in
+`~/.local/state/tauceti-fleet/attention/`; the worker's live record files are
+never rewritten. Nothing else in `attention` or `status` contacts a forge. `--ack all`
+also archives the records the list had already dropped.
 
 Once a minute the host controller moves the records whose pull request has
 merged into `incidents/acked/`, each with an `overtaken` field giving the time
