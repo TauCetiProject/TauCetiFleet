@@ -54,8 +54,7 @@ class SlotGroups(unittest.TestCase):
         def record(path, value):
             if Path(path).name == "admission.json":
                 written.append(value)
-            else:
-                atomic(path, value)
+            atomic(path, value)
 
         def sleep(_):
             # A pass ends in ten half-second sleeps.
@@ -391,6 +390,79 @@ class SlotGroups(unittest.TestCase):
             writer.join(10)
         self.assertEqual(self.shape(self.definitions()[1])[2], ("codex", "progress"))
         self.assertEqual([wid.rsplit("-", 1)[1] for wid in host.unapplied_workers()], ["2"])
+
+    def worker_status(self, n, agent, only):
+        prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
+        store.atomic(store.state_dir() / "workers" / f"{prefix}{n}.json", dict(
+            id=f"{prefix}{n}", alive=True, state="waiting-capacity", agent=agent, only=only,
+            applied_spec=dict(id=f"{prefix}{n}", enabled=True, agent=agent, only=only)))
+
+    def ready(self):
+        return (
+            patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready", workers="ready"), checks=[])),
+            patch.object(host, "write_slices"),
+            patch.object(host, "resources", return_value={}),
+        )
+
+    def test_an_enable_that_read_older_groups_writes_the_saved_ones(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
+        self.worker_status(1, "claude", ["review"])
+        self.worker_status(2, "claude", ["review"])
+        self.daemon_pass()
+        ready, slices, resources = self.ready()
+
+        def readiness(config):
+            # A newer edit is saved and applied while enable() is in its readiness checks.
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+            self.daemon_pass()
+            return dict(readiness=dict(ci="ready", workers="ready"), checks=[])
+
+        with patch.object(host, "doctor", side_effect=readiness), slices, resources:
+            host.enable(workers=True)
+        with open(store.config_dir() / "workers.toml", "rb") as stream:
+            self.assertEqual(self.shape({n + 1: w for n, w in enumerate(tomllib.load(stream)["workers"])})[2], ("codex", "progress"))
+        self.assertEqual([wid.rsplit("-", 1)[1] for wid in self.daemon_pass()["workers"]], ["1"])
+
+    def test_a_definition_written_beside_a_publication_is_not_admitted(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
+        self.worker_status(1, "claude", ["review"])
+        self.worker_status(2, "claude", ["review"])
+        self.daemon_pass()
+        publishing, writing = threading.Event(), threading.Event()
+        policy = host.focus.policy
+
+        def paused(config, workers):
+            # Between the controller's acknowledgment and its publication.
+            if not publishing.is_set():
+                publishing.set()
+                writing.wait(5)
+                time.sleep(0.3)
+            return policy(config, workers)
+
+        def edit():
+            publishing.wait(5)
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+            writing.set()
+            host.enable(workers=True)
+
+        def numbers(ids):
+            return [wid.rsplit("-", 1)[1] for wid in ids]
+
+        between = []
+
+        def settled():
+            writer.join(10)
+            between.append(store.read(store.state_dir() / "admission.json")["workers"])
+
+        writer = threading.Thread(target=edit)
+        ready, slices, resources = self.ready()
+        with patch.object(host.focus, "policy", side_effect=paused), ready, slices, resources:
+            writer.start()
+            policies = self.daemon_passes(settled)
+        self.assertEqual(numbers(host.unapplied_workers()), ["2"])
+        self.assertEqual([numbers(ids) for ids in between + [policies[1]["workers"]]], [["1"], ["1"]])
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
