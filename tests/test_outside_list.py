@@ -374,7 +374,10 @@ class Wiring(unittest.TestCase):
             steps = Mock(wraps=pacer.pace)
             pacer.pace = steps
             for offset, kinds in enumerate((["list", "list"], ["list", "outside-list"], [None, "outside-list"], ["list", "list"])):
-                pacer.tick(config, lambda kinds=kinds: [dict(state="running", roadmap_work=kind) for kind in kinds], now=1300.0 + offset)
+                states = ("running", "verifying") if offset % 2 else ("working", "running")
+                pacer.tick(config, lambda kinds=kinds, states=states: [
+                    dict(state=state, roadmap_work=kind) for state, kind in zip(states, kinds, strict=True)
+                ] + [dict(state="waiting-capacity", roadmap_work="list")], now=1300.0 + offset)
             steps.assert_not_called()
             self.assertEqual((pacer.passes, pacer.seen), (4, [5, 2, 1]))
             pacer.tick(config, lambda: [], now=1900.0)

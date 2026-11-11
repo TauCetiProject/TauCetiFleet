@@ -240,7 +240,7 @@ class Pacer:
                 self.keys, self.checked = {} if self.why else worker_keys(config), (now, *basis)
             if not self.keys:
                 return dict(active=False, reason=self.why)
-            kinds = [w.get("roadmap_work") for w in statuses() if w.get("state") == "running"]
+            kinds = [w.get("roadmap_work") for w in statuses() if w.get("state") in targets.ACTIVE]
             self.passes += 1
             for index, kind in enumerate(("list", "outside-list")):
                 self.seen[index] += kinds.count(kind)
