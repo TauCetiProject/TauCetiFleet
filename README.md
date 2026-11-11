@@ -851,7 +851,8 @@ in a group that still describes it and rewrites only the definitions that
 change group: going from the profile above to the command above rewrites two of
 the nine. The worker manager holds a changed `agent` or `only` until that
 worker's round ends; this needs a TauCetiWorker release that defers those two
-edits, and an older one restarts the changed workers at once. A group that
+edits, and an older one restarts the changed workers at once. Fleet admits a
+rewritten worker only once its status shows the new agent and phases. A group that
 shrinks gives up admissions and keeps its definitions, as lowering
 `workers --max` does, and a group that grows later takes those definitions
 before any is added.

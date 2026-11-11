@@ -194,6 +194,35 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(numbers(policy["workers"]), [1, 2, 3])
         self.assertEqual(policy["roadmap_focus"]["workers"], policy["workers"])
 
+    def test_a_reassigned_worker_waits_for_its_new_definition_before_admission(self):
+        store.update_host(workers_enabled=True, max_workers=8)
+        prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
+
+        def running(n, agent, only, alive=True):
+            store.atomic(store.state_dir() / "workers" / f"{prefix}{n}.json", dict(
+                id=f"{prefix}{n}", alive=alive, state="waiting-capacity", agent=agent, only=only,
+                applied_spec=dict(id=f"{prefix}{n}", enabled=True, agent=agent, only=only)))
+
+        def admitted():
+            return [int(wid.rsplit("-", 1)[1]) for wid in self.daemon_pass()["workers"]]
+
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
+        running(1, "claude", ["review"])
+        running(2, "claude", ["review"])
+        self.assertEqual(admitted(), [1, 2])
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review")]))
+        self.assertEqual(admitted(), [1])
+        # Worker 2 is rewritten for the new group while its old loop still polls for admission.
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+        self.assertEqual(self.shape(self.definitions()[1])[2], ("codex", "progress"))
+        self.assertEqual(admitted(), [1])
+        self.assertEqual(host.rpc(dict(action="slots"))["slots"][1]["admitted"], 0)
+        running(2, "codex", ["progress"])
+        self.assertEqual(admitted(), [1, 2])
+        # A stopped worker starts on whatever definition is written.
+        running(2, "claude", ["review"], alive=False)
+        self.assertEqual(admitted(), [1, 2])
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (
