@@ -232,11 +232,27 @@ class Pacer:
             for index, kind in enumerate(("list", "outside-list")):
                 self.seen[index] += kinds.count(kind)
             self.seen[2] += sum(kind not in ("list", "outside-list") for kind in kinds)
+            bounds = settings(config)
             if not 0 <= now - self.state.get("at", 0) < EVERY:
                 self.pace(config, now)
+            elif type(self.state.get("cap")) is int and (self.state.get("floor"), self.state.get("ceiling")) != (bounds["floor"], bounds["ceiling"]):
+                self.rebound(bounds)
         except (FleetError, OSError, ValueError, KeyError, TypeError) as exc:
             return dict(active=False, reason=f"pacing failed ({type(exc).__name__}: {exc})"[:200])
         return dict({k: v for k, v in self.state.items() if k not in ("readings", "rounds")}, active=True)
+
+    def rebound(self, bounds):
+        """Brings the last step's cap within changed bounds at once; the next step stays due when it was."""
+        cap = min(bounds["ceiling"], max(bounds["floor"], self.state["cap"]))
+        self.save(dict(self.state, cap=cap, previous=self.state["cap"], floor=bounds["floor"], ceiling=bounds["ceiling"],
+                       reason=f"bounds changed to {bounds['floor']}-{bounds['ceiling']}"))
+
+    def save(self, state):
+        targets.write(cap_file(), f"{state['cap']}\n")
+        atomic(state_dir() / "outside-list-cap.json", state)
+        if state["cap"] != state["previous"]:
+            print(f"tauceti-fleet: outside-list cap {state['previous']} -> {state['cap']} ({state['reason']})", file=sys.stderr, flush=True)
+        self.state = state
 
     def pace(self, config, now):
         provider = subscription_usage.providers(config)[0]
@@ -251,11 +267,8 @@ class Pacer:
             rounds=[count / self.passes for count in self.seen], curve=pace_points(config),
         )
         state["provider"] = provider
-        targets.write(cap_file(), f"{state['cap']}\n")
-        atomic(state_dir() / "outside-list-cap.json", state)
-        if state["cap"] != state["previous"]:
-            print(f"tauceti-fleet: outside-list cap {state['previous']} -> {state['cap']} ({state['reason']})", file=sys.stderr, flush=True)
-        self.state, self.passes, self.seen = state, 0, [0, 0, 0]
+        self.save(state)
+        self.passes, self.seen = 0, [0, 0, 0]
 
 
 def describe(value, now=None):
@@ -272,8 +285,8 @@ def describe(value, now=None):
             text += f"; at this rate the weekly window is spent {span(early)} before {end}"
         else:
             text += f"; {value['projected']:.0f}% of the weekly window projected spent when {end}"
-    if value["held"]:
-        move = "held, "
+    if value["cap"] != value["previous"]:
+        move = f"{value['previous']} -> {value['cap']}, "
     else:
-        move = "unchanged, " if value["cap"] == value["previous"] else f"{value['previous']} -> {value['cap']}, "
+        move = "held, " if value["held"] else "unchanged, "
     return text + f"; last step {span(now - value['at'])} ago: {move}{value['reason']}"

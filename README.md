@@ -1007,7 +1007,9 @@ divided in the same proportion. Fleet also cannot count the open pull requests
 outside the list, so a cap below that count changes nothing until it has
 stepped past it; set `start` near the number already open. The key changes like
 the other profile keys, with a drain before repeating `add`, and turning it on
-changes every worker definition once.
+changes every worker definition once. New bounds apply to the cap file on the
+controller's next pass, before the definitions are rewritten, without waiting
+for the next step.
 
 ## Public operations telemetry
 

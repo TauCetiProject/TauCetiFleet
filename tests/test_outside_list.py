@@ -380,6 +380,22 @@ class Wiring(unittest.TestCase):
         store.update_host(pace="0:10,50:70")
         self.assertEqual(outside_list.pace_points(store.host_config()), [(0.0, 10.0), (50.0, 70.0), (100.0, 100.0)])
 
+    def test_changed_bounds_reach_the_cap_file_before_the_next_step(self):
+        self.pace()
+        now = 1_800_000_000.0
+        store.atomic(store.state_dir() / "outside-list-cap.json", dict(
+            version=1, at=now - 60, cap=40, previous=40, floor=0, ceiling=40, held=True, reason="no usage reading yet"))
+        self.pace(ceiling=5, start=0)
+        pacer = outside_list.Pacer()
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            block = pacer.tick(store.host_config(), list, now=now)
+        self.assertEqual((block["cap"], block["previous"], block["ceiling"], block["at"]), (5, 40, 5, now - 60))
+        self.assertEqual(outside_list.cap_file().read_text(), "5\n")
+        self.assertIn("outside-list cap 40 -> 5 (bounds changed to 0-5)", log.getvalue())
+        self.assertTrue(outside_list.describe(block, now).endswith("last step 1m ago: 40 -> 5, bounds changed to 0-5"))
+        # Unchanged bounds leave the last step alone until the next one is due.
+        self.assertEqual(pacer.tick(store.host_config(), list, now=now + 60)["previous"], 40)
+
     def test_an_unopened_weekly_window_raises_a_zero_cap_until_a_round_opens_it(self):
         self.pace(start=0)
         now = 1_800_000_000.0
