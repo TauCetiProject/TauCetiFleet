@@ -191,12 +191,15 @@ def sign_in(command=("claude", "auth", "login")):
         validate(USAGE, secret)
         marker = target.with_name("transferred.json")
         with refresh_lock(target):
-            # The identity of what was transferred stays, so a repeated add leaves this sign-in alone.
+            # The identity of what was transferred stays, here and in the marker, so a repeated add
+            # leaves this sign-in and its time alone.
+            recorded = dict(read(marker, {}), signed_in=started)
             if identity := transferred(target):
                 atomic(signed, dict(json.loads(secret), **{TRANSFER: identity}))
+                recorded["sha256"] = identity
             signed.chmod(0o600)
             os.replace(signed, target)
-            atomic(marker, dict(read(marker, {}), signed_in=started))
+            atomic(marker, recorded)
 
 
 def worker_env(config):
