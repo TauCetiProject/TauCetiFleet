@@ -337,17 +337,17 @@ def configure(payload, workers):
         if path is not None:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise FleetError("A target list on the host is named by its absolute path")
+            # Workers resolve the path once when they start, so save and check what it names now; a
+            # definition that changes with the link's destination is what restarts them onto the new file.
             try:
-                path.encode()
+                resolved = str(Path(path).resolve())
+                resolved.encode()
             except UnicodeEncodeError:
                 raise FleetError("A target list's path must be valid UTF-8") from None
             # The worker strips the path it is given, so it would read a different file.
-            if path != path.strip():
+            if resolved != resolved.strip():
                 raise FleetError("A target list's path begins or ends with whitespace; rename the file")
-            text = load(path)
-            # Workers resolve the path once when they start, so save what it names now; a definition
-            # that changes with the link's destination is what restarts them onto the new file.
-            resolved = str(Path(path).resolve())
+            text = load(resolved)
             if resolved != path:
                 notes.append(f"{path} resolves to {resolved}; workers read that file, so set the list again after repointing the link")
             path = resolved

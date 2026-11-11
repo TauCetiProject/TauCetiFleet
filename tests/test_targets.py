@@ -190,6 +190,25 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(targets.configure(dict(path=str(link)), [])["list"]["done"], 2)
         self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(two.resolve())})
 
+    def test_a_link_is_checked_by_the_file_it_names(self):
+        link = self.root / "current.md"
+        (self.root / "goal.md ").write_text(EXAMPLE)
+        link.symlink_to(self.root / "goal.md ")
+        with self.assertRaisesRegex(FleetError, "begins or ends with whitespace"):
+            targets.configure(dict(path=str(link)), [])
+        undecodable = os.fsdecode(bytes(self.root / "goal") + b"\xff.md")
+        try:
+            Path(undecodable).write_text(EXAMPLE)
+            link.unlink()
+            link.symlink_to(undecodable)
+            resolving = contextlib.nullcontext()
+        except OSError:
+            # A file system that takes only UTF-8 names: stand in for the link's resolution.
+            resolving = patch.object(Path, "resolve", return_value=Path(undecodable))
+        with resolving, self.assertRaisesRegex(FleetError, "valid UTF-8"):
+            targets.configure(dict(path=str(link)), [])
+        self.assertIsNone(store.host_config().get("roadmap_targets"))
+
     def test_refused_lists_change_nothing(self):
         self.mirror("TauCetiRoadmap/MeasureTheory", "Completed/Probability")
         (self.root / "list.md ").write_text(EXAMPLE)
