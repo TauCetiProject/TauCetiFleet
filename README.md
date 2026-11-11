@@ -126,8 +126,9 @@ tauceti-fleet enable mac-studio --workers
   `reserve-staging` and `doctor --smoke` are refused, and `doctor` lists no CI checks.
 - **No CPU or memory limits.** macOS has no slices, so admission counts each
   worker as 4 GiB of memory. The controller admits at most as many workers as
-  total memory less the OS reserve holds, and beyond the rounds already in
-  progress only as many as free memory less the reserve holds. As on Linux, no
+  total memory less the OS reserve holds, and admits an idle worker only while
+  free memory less the reserve holds another; a worker with a round in progress
+  costs nothing. As on Linux, no
   new round starts while available memory is below the reserve. `status` shows
   the count and its reason and has no worker memory section.
 - **Sandbox.** Rounds run on the host, the worker's default `host` sandbox.
