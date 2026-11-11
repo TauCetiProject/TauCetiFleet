@@ -19,6 +19,7 @@ from .store import FleetError, atomic, config_dir, locked, read, try_lock
 TOKEN = "claude_token_file"
 USAGE = "claude_usage_credentials_file"
 KINDS = (TOKEN, USAGE)
+TRANSFER = "taucetiFleetTransfer"
 DAY = 86400
 # A setup-token is valid for a year. A login is renewable for about four weeks after its sign-in;
 # the credential's own refreshTokenExpiresAt is used when it has one.
@@ -112,10 +113,30 @@ def install(kind, secret, since=None):
     marker = target.with_name("transferred.json")
     # A worker renewing under this lock writes back a rotation of the login it read before the wait.
     with refresh_lock(target):
-        if target.is_file() and read(marker, {}).get("sha256") == digest:
+        held, recorded = transferred(target), read(marker, {})
+        if held is not None and (held or recorded.get("sha256")) == digest:
+            if recorded.get("sha256") != digest:
+                atomic(marker, dict(sha256=digest, signed_in=since))
             return
-        atomic(target, json.loads(secret))
+        atomic(target, dict(json.loads(secret), **{TRANSFER: digest}))
         atomic(marker, dict(sha256=digest, signed_in=since))
+
+
+def transferred(target):
+    """The fingerprint the stored login was transferred under; "" when it carries none, and None
+    when there is no login.
+
+    It is written into the credential file with the login, and a worker's renewal keeps the file's
+    other keys, so it stays right when the transfer marker beside the file could not be written.
+    """
+    try:
+        value = json.loads(target.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return ""
+    identity = value.get(TRANSFER) if isinstance(value, dict) else None
+    return identity if isinstance(identity, str) else ""
 
 
 def signed_in(target, *, wait=True):
@@ -168,9 +189,12 @@ def sign_in(command=("claude", "auth", "login")):
         if not block(secret).get("refreshToken"):
             raise FleetError("claude auth login left no login; the usage login is unchanged")
         validate(USAGE, secret)
-        signed.chmod(0o600)
         marker = target.with_name("transferred.json")
         with refresh_lock(target):
+            # The identity of what was transferred stays, so a repeated add leaves this sign-in alone.
+            if identity := transferred(target):
+                atomic(signed, dict(json.loads(secret), **{TRANSFER: identity}))
+            signed.chmod(0o600)
             os.replace(signed, target)
             atomic(marker, dict(read(marker, {}), signed_in=started))
 
@@ -187,8 +211,8 @@ def worker_env(config):
         env["CLAUDE_CONFIG_DIR"] = str(Path(token).parent)
     if usage:
         env["TAUCETI_CLAUDE_USAGE_CREDENTIALS"] = usage
-    if set(env) & set(config.get("env") or {}):
-        raise FleetError("env must not set " + " or ".join(sorted(env)) + " beside the profile's Claude credential files")
+    if clash := set(env) & set(config.get("env") or {}):
+        raise FleetError("env must not set " + " or ".join(sorted(clash)) + " beside the profile's Claude credential files")
     return env
 
 

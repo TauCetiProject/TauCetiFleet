@@ -309,12 +309,19 @@ def write_slices(config, caps):
 
 
 WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
-# What run_workers() sets besides TAUCETI_FLEET_*. The worker manager lays a
-# definition's env over its own environment, so these must stay out of env.
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
 FLEET_OWNED_ENV = {
     "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
     "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
 }
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
 
 
 def pace_curve(spec):
@@ -349,6 +356,11 @@ def worker_fields(config):
         raise FleetError("sandbox must be host or bubble")
     if pace and not (isinstance(pace, str) and pace_curve(pace)):
         raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    if isinstance(env, dict) and CREDENTIAL_SOURCE_ENV & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(CREDENTIAL_SOURCE_ENV & set(env)))
+            + ": workers sign in from the host account's own claude and codex logins"
+        )
     # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
     valid = isinstance(env, dict) and all(
         isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
@@ -375,6 +387,8 @@ def worker_fields(config):
         raise FleetError("env must not set " + " or ".join(sorted(incident_env)) + " beside the profile's incidents key")
     if fleet_env := {**claude_credentials.worker_env(config), **incident_env}:
         fields["env"] = dict(fields.get("env", {}), **fleet_env)
+        if sum(len(k) + len(v) + 2 for k, v in fields["env"].items()) > 16 * 1024:
+            raise FleetError("env and the paths Fleet adds to it exceed 16 KB; shorten env")
     if config.get(claude_credentials.USAGE):
         # Nothing else on the host uses the stored usage login, so the workers may renew it.
         fields["auto_refresh"] = True
