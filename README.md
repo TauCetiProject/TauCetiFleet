@@ -531,8 +531,20 @@ starts it and never waits for it. One pass:
   either file the cache has not seen costs one more fetch. If a head is no longer
   on the remote, `main` and each moved head are fetched separately. A pull
   request whose pin files cannot be read keeps the revision the last pass found
-  for it. The pass makes no GitHub API requests.
-- Publishes each pinned revision that is missing as `DIR/store/<revision>/`, an
+  for it. A pull request the inventory lists without an observed state or head
+  is read from its pull-request ref as if open, and makes the check incomplete.
+  The pass makes no GitHub API requests.
+- Builds only trusted revisions. Building runs code from the Mathlib checkout
+  (its Lake configuration and the `cache` program) as the Fleet account, and
+  GitHub serves commits of forks' pull requests through the Mathlib repository
+  too, so a revision is trusted only if it is in the history of Mathlib's
+  `master` branch (an ancestor of it, or its tip), the branch TauCeti's
+  `lakefile.toml` names. This is decided on a local commits-only clone of
+  `master` under Fleet's data directory, fetched when a revision is missing,
+  never by asking the server for the pinned commit. A revision that is not
+  trusted is not built and is listed in `status` as untrusted with the pull
+  requests that pin it; it does not hold up or remove other entries.
+- Publishes each trusted pinned revision that is missing as `DIR/store/<revision>/`, an
   entry of the worker's
   [read-only Mathlib store](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/mathlib-store.md):
   a shallow Mathlib checkout made under `DIR/staging`, in which it runs
@@ -545,15 +557,16 @@ starts it and never waits for it. One pass:
   the value the profile's `env` gives its workers if that is larger, since a
   round that started while the revision was pinned may still be linked to it.
   The three hours start at the first check that finds it unpinned and start
-  over if it is pinned again. Only a complete check, one that read the pins of
-  `main` and every open pull request, starts the three hours or removes
-  anything; after any failed read the pass removes nothing. An entry whose
+  over whenever any check finds it pinned again. Only a complete check, one
+  that read the pins of `main` and every open pull request, starts the three
+  hours or removes anything; after any failed read the pass removes nothing. An entry whose
   marker someone deleted is removed that long after the deletion, by a complete
   check, and, if still pinned, built again.
 
 An entry takes about 7 GB. No build starts while the filesystem has less than
-20 GiB free. Downloaded archives stay in `DIR/downloads` until every pinned
-revision is published and are then deleted. One controller maintains a given
+20 GiB free. Downloaded archives stay in `DIR/downloads` until every trusted
+pinned revision is published and are then deleted. The commits-only clone of
+Mathlib `master` holds commits and no files. One controller maintains a given
 directory.
 
 The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for workers
