@@ -251,22 +251,26 @@ def warm(config=None, now=None):
                 state["error"], complete = str(exc), False
             needed, failures = state["needed"], state["failures"]
             held = [p.name for p in store.iterdir() if REVISION.fullmatch(p.name)]
-            # Only a check that read every open pull request's pins says what is unpinned: after any
-            # failed read no clock starts and nothing is removed.
-            if complete:
-                state["unpinned"] = {name: state["unpinned"].get(name, now) for name in held
-                                     if name not in needed and ready(store, name)}
-            else:
-                state["unpinned"] = {name: at for name, at in state["unpinned"].items() if name not in needed}
+            # `unpinned` holds the entries this builder withdrew, by when. Withdrawing deletes the marker so
+            # no new round links the entry; the wait is for rounds that linked it before. Only a check
+            # that read every open pull request's pins withdraws or removes; any check that sees a
+            # withdrawn entry pinned restores its marker.
+            unpinned = state["unpinned"] = {name: at for name, at in state["unpinned"].items() if name in held}
             for name in held:
-                if ready(store, name):
-                    expired = now - state["unpinned"].get(name, now) >= hold(config)
-                else:
-                    # Its marker was deleted to withdraw it, which is when the directory last changed.
-                    expired = now - (store / name).stat().st_mtime >= hold(config)
-                if complete and expired:
+                if name in unpinned:
+                    if name in needed:
+                        (store / name / READY).write_text(name + "\n")
+                        del unpinned[name]
+                    elif complete and now - unpinned[name] >= hold(config):
+                        shutil.rmtree(store / name)
+                        del unpinned[name]
+                elif ready(store, name):
+                    if complete and name not in needed:
+                        (store / name / READY).unlink()
+                        unpinned[name] = now
+                # Someone else deleted its marker, which is when the directory last changed.
+                elif complete and now - (store / name).stat().st_mtime >= hold(config):
                     shutil.rmtree(store / name)
-                    state["unpinned"].pop(name, None)
             history, untrusted = None, set()
             for revision, entry in needed.items():
                 if not ready(store, revision):

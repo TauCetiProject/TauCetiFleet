@@ -109,7 +109,7 @@ class Store(unittest.TestCase):
 
     def inventory(self, *rows):
         """What the worker prepared: these TauCeti pull requests among rows that are not candidates."""
-        rows = [dict(repo=mathlib_store.REPOSITORY, scope=self.machine, **row) for row in rows]
+        rows = [dict(repo=mathlib_store.REPOSITORY, scope=self.machine) | row for row in rows]
         rows += [dict(repo="TauCetiProject/TauCetiRoadmap", number=7, state="OPEN", head="c" * 40),
                  dict(repo=mathlib_store.REPOSITORY, number=8, state="MERGED", head="d" * 40)]
         (self.bin / "inventory.json").write_text(json.dumps(dict(version=1, prs=rows)))
@@ -212,14 +212,14 @@ class Store(unittest.TestCase):
         mathlib_store.warm(config, now=50000 + hold)
         (self.root / "unreachable").rename(self.tauceti)
         mathlib_store.warm(config, now=50000 + hold - 1)
-        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
-        # Pinned again, the entry starts over; unpinned for the whole wait, it goes.
+        self.assertTrue((self.mounted / self.old).is_dir())
+        # Pinned again, the entry is readmitted and starts over; unpinned for the whole wait, it goes.
         self.inventory(dict(number=7, state="OPEN", head=self.head))
         self.assertEqual(mathlib_store.warm(config, now=50000 + hold)["unpinned"], {})
         self.inventory(dict(number=7, state="CLOSED", head=self.head))
         mathlib_store.warm(config, now=60000 + hold)
         mathlib_store.warm(config, now=60000 + 2 * hold - 1)
-        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.assertTrue((self.mounted / self.old).is_dir())
         state = mathlib_store.warm(config, now=60000 + 2 * hold)
         self.assertEqual((state["unpinned"], state["failures"]), ({}, {}))
         self.assertEqual(sorted(p.name for p in self.mounted.iterdir()), sorted([self.new, "notes"]))
@@ -290,7 +290,7 @@ class Store(unittest.TestCase):
         (self.bin / "tauceti").write_text("#!/bin/sh\nexit 1\n")
         state = mathlib_store.warm(config, now=60000 + hold)
         self.assertIn("activity inventory", state["error"])
-        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.assertTrue((self.mounted / self.old).is_dir())
         (self.bin / "tauceti").write_text(TAUCETI)
         mathlib_store.warm(config, now=60000 + hold)
         self.assertFalse((self.mounted / self.old).exists())
@@ -324,7 +324,7 @@ class Store(unittest.TestCase):
         self.assertEqual(state["unpinned"], {})
         self.inventory(dict(number=7, state="CLOSED", head=self.head))
         self.assertEqual(mathlib_store.warm(config, now=12800)["unpinned"], {self.old: 12800})
-        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.assertTrue((self.mounted / self.old).is_dir())
 
     def test_a_pull_request_of_unobserved_state_is_read_and_makes_the_check_incomplete(self):
         config, hold = self.configure(), 2 * 5400
@@ -335,6 +335,26 @@ class Store(unittest.TestCase):
             self.assertEqual((state["needed"][self.old]["pinned_by"], state["unpinned"]), (["#12"], {}))
             self.assertIn("unobserved state or head: #12", state["error"])
         self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+
+    def test_an_unpinned_entry_stops_admitting_rounds_at_once_and_is_readmitted_when_pinned_again(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        self.assertEqual(mathlib_store.warm(config, now=2000)["unpinned"], {self.old: 2000})
+        self.assertFalse(mathlib_store.ready(self.mounted, self.old))
+        self.assertTrue((self.mounted / self.old / ".lake/build/lib/Mathlib.olean").is_file())
+        (self.bin / "lake.log").unlink()
+        self.inventory(dict(number=7, state="OPEN", head=self.head))
+        state = mathlib_store.warm(config, now=3000)
+        self.assertEqual((state["unpinned"], state["failures"]), ({}, {}))
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+        self.assertFalse((self.bin / "lake.log").exists())
+        self.inventory(dict(number=7, state="CLOSED", head=self.head))
+        mathlib_store.warm(config, now=4000)
+        mathlib_store.warm(config, now=4000 + hold - 1)
+        self.assertTrue((self.mounted / self.old).is_dir())
+        mathlib_store.warm(config, now=4000 + hold)
+        self.assertFalse((self.mounted / self.old).exists())
 
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
