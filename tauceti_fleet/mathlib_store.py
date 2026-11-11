@@ -25,6 +25,7 @@ MATHLIB = "https://github.com/leanprover-community/mathlib4.git"
 # Building runs Lake code from the pinned commit; GitHub serves fork commits through MATHLIB too.
 TRUSTED = ("master",)
 INTERVAL = 1800
+OBSERVED_WITHIN = 1800
 ROUND_TIMEOUT = 5400
 MIN_FREE = 20 * 1024**3
 REVISION = re.compile(r"[0-9a-f]{40}")
@@ -75,10 +76,11 @@ def git(*args, timeout=120):
                timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}).stdout
 
 
-def open_prs(config):
+def open_prs(config, now):
     """Open pull requests of this host's workers and their heads, as the worker last prepared them.
 
-    A pull request whose state or head the worker has not observed is included with head None.
+    A pull request whose state or head the worker has not observed within OBSERVED_WITHIN of
+    `now` is included with head None: after failed observations the worker keeps the last values.
     """
     binary = executable("tauceti")
     if not binary:
@@ -88,13 +90,15 @@ def open_prs(config):
     for p in rows["prs"]:
         if p.get("repo") != REPOSITORY or type(p.get("number")) is not int:
             continue
-        head = p.get("head") if isinstance(p.get("head"), str) and REVISION.fullmatch(p["head"]) else None
+        observed = p.get("observed")
+        fresh = isinstance(observed, (int, float)) and now - observed <= OBSERVED_WITHIN
+        head = p.get("head") if fresh and isinstance(p.get("head"), str) and REVISION.fullmatch(p["head"]) else None
         if p.get("state") == "OPEN" or p.get("state") not in ("CLOSED", "MERGED"):
             prs[p["number"]] = head if p.get("state") == "OPEN" else None
     return prs
 
 
-def pins(config, known=None):
+def pins(config, known, now):
     """Mathlib revision and toolchain pinned by main and by each open pull request of this host's workers.
 
     The pull requests come from the worker's prepared inventory. One fetch brings main and
@@ -113,11 +117,12 @@ def pins(config, known=None):
         line.split() for line in repo("for-each-ref", "--format=%(refname:lstrip=2) %(objectname)", "refs/pins/").splitlines()
     )
     try:
-        prs = {str(number): head for number, head in open_prs(config).items()}
+        prs = {str(number): head for number, head in open_prs(config, now).items()}
         for name in held.keys() - prs.keys() - {"main"}:
             repo("update-ref", "-d", "refs/pins/" + name)
         if unobserved := sorted((name for name, head in prs.items() if head is None), key=int):
-            notes.append("pull requests of unobserved state or head: " + ", ".join("#" + n for n in unobserved))
+            notes.append(f"pull requests not observed in the last {OBSERVED_WITHIN // 60} min: "
+                         + ", ".join("#" + n for n in unobserved))
     except (FleetError, ValueError, KeyError, TypeError, AttributeError):
         prs = {name: head for name, head in held.items() if name != "main"}
         notes.append("open pull requests unavailable from the worker's activity inventory; keeping the last known ones")
@@ -245,7 +250,7 @@ def warm(config=None, now=None):
             store.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(root / "staging", ignore_errors=True)
             try:
-                state["needed"], state["error"], complete = pins(config, state["needed"])
+                state["needed"], state["error"], complete = pins(config, state["needed"], now)
                 state["checked_at"] = now
             except FleetError as exc:
                 state["error"], complete = str(exc), False

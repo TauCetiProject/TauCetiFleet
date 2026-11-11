@@ -29,6 +29,7 @@ echo "$*" > "$here/tauceti.args"
 cat "$here/inventory.json"
 """
 TOOLCHAIN = "leanprover/lean4:v4.1.0"
+OBSERVED = 10**6
 
 
 def git(directory, *args):
@@ -109,7 +110,7 @@ class Store(unittest.TestCase):
 
     def inventory(self, *rows):
         """What the worker prepared: these TauCeti pull requests among rows that are not candidates."""
-        rows = [dict(repo=mathlib_store.REPOSITORY, scope=self.machine) | row for row in rows]
+        rows = [dict(repo=mathlib_store.REPOSITORY, scope=self.machine, observed=OBSERVED) | row for row in rows]
         rows += [dict(repo="TauCetiProject/TauCetiRoadmap", number=7, state="OPEN", head="c" * 40),
                  dict(repo=mathlib_store.REPOSITORY, number=8, state="MERGED", head="d" * 40)]
         (self.bin / "inventory.json").write_text(json.dumps(dict(version=1, prs=rows)))
@@ -333,7 +334,7 @@ class Store(unittest.TestCase):
         for now in (2000, 2000 + hold):
             state = mathlib_store.warm(config, now=now)
             self.assertEqual((state["needed"][self.old]["pinned_by"], state["unpinned"]), (["#12"], {}))
-            self.assertIn("unobserved state or head: #12", state["error"])
+            self.assertIn("not observed in the last 30 min: #12", state["error"])
         self.assertTrue(mathlib_store.ready(self.mounted, self.old))
 
     def test_an_unpinned_entry_stops_admitting_rounds_at_once_and_is_readmitted_when_pinned_again(self):
@@ -355,6 +356,22 @@ class Store(unittest.TestCase):
         self.assertTrue((self.mounted / self.old).is_dir())
         mathlib_store.warm(config, now=4000 + hold)
         self.assertFalse((self.mounted / self.old).exists())
+
+    def test_a_stale_inventory_observation_is_fetched_and_makes_the_check_incomplete(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        git(self.tauceti, "checkout", "-q", "--detach", self.head)
+        moved = commit(self.tauceti, {"lake-manifest.json": manifest(self.new)})
+        git(self.tauceti, "update-ref", "refs/pull/7/head", moved)
+        git(self.tauceti, "checkout", "-q", "main")
+        self.inventory(dict(number=7, state="OPEN", head=moved, observed=1990))
+        self.assertEqual(mathlib_store.warm(config, now=2000)["unpinned"], {self.old: 2000})
+        # The pull request pins the old revision again while the worker cannot observe it.
+        git(self.tauceti, "update-ref", "refs/pull/7/head", self.head)
+        state = mathlib_store.warm(config, now=2000 + hold)
+        self.assertEqual((state["needed"][self.old]["pinned_by"], state["unpinned"]), (["#7"], {}))
+        self.assertIn("not observed in the last 30 min: #7", state["error"])
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
 
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
