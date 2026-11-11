@@ -150,12 +150,12 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
 | `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
-| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
 | `outside_list_cap` | `{"ceiling": N}`, optionally with `floor` and `start`: pace [authoring outside a target list](#authoring-outside-the-list) by the subscription's weekly window | off |
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
-login into its own home. Like a model change, changing any of these keys on an
+login into its own home once and keeps following that location. Like a model change, changing any of these keys on an
 active host requires a drain before repeating `add`. A key removed from the
 profile returns to its default.
 
@@ -722,7 +722,9 @@ Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 1
 
 These are the responses the workers' pacer last cached on the host. Fleet sends
 no usage request, so a line ages while no worker is checking its quota, and a
-window that has reset since the reading shows no figure. The caches are kept per
+window that has reset since the reading shows no figure. When Codex reported its
+limit reached, the line says so before the percentages, and the JSON reading has
+`limit_reached`. The caches are kept per
 credential, and Fleet does not read credentials, so it cannot tell which one is
 active. A reading is current while the worker would still use it (an hour for
 Claude, ten minutes for Codex) or while a window it shows spent has not reset.

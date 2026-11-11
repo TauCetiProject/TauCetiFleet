@@ -25,6 +25,11 @@ def providers(config):
     return names
 
 
+def claude_login(config):
+    """The Claude login directory the profile's workers copy; a profile's env may not move it."""
+    return Path.home() / ".claude"
+
+
 def reading_files(config, provider):
     """Every place the worker's pacer may have cached this provider's last usage response.
 
@@ -38,9 +43,8 @@ def reading_files(config, provider):
         roots.append(Path(env["TAUCETI_LEGACY_DATA_ROOT"]))
     if provider == "codex":
         return [path for root in roots for path in root.glob("state/*/cache/quota-codex.json")]
-    login = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     return [
-        *login.glob(".tauceti-quota/usage/quota-claude-*.json"),
+        *claude_login(config).glob(".tauceti-quota/usage/quota-claude-*.json"),
         *(path for root in roots for path in root.glob("state/.quota-usage/*/quota-claude-*.json")),
     ]
 
@@ -135,10 +139,15 @@ def cached(path, now):
                 valid_until=valid_until)
 
 
+def limit_reached(payload):
+    """Codex's own verdict that the account is blocked; the worker treats every window as spent while it is set."""
+    limits = payload.get("rate_limit")
+    return isinstance(limits, dict) and bool(limits.get("limit_reached"))
+
+
 def exhausted(payload, windows, now):
     """Whether the reading shows a spent window that has not reset, which a worker keeps acting on after the reading expires."""
-    limits = payload.get("rate_limit")
-    reached = isinstance(limits, dict) and limits.get("limit_reached") is True
+    reached = limit_reached(payload)
     return any(item["resets_at"] is not None and item["resets_at"] > now and (reached or (item["used"] or 0) >= 100)
                for item in windows.values())
 
@@ -147,7 +156,8 @@ def readings(config, now=None):
     """The cached readings per provider the profile uses, as plain data.
 
     {provider: None before any reading, or {credential, other_credentials, fetched_at,
-    windows: {session | weekly: {seconds, used, left, resets_at}}}}. Times are epoch
+    windows: {session | weekly: {seconds, used, left, resets_at}}}}, and for Codex
+    limit_reached as the response gave it. Times are epoch
     seconds, used and left are percentages; both are None when the response gave no
     usable figure or the window has reset since. A reading is current while a worker
     would still serve it or while a spent window in it has not reset. While more than
@@ -166,7 +176,10 @@ def readings(config, now=None):
             payload, fetched_at = entry["payload"], entry["fetched_at"]
             windows = claude_windows(payload, now) if provider == "claude" else codex_windows(payload, fetched_at, now)
             served = now - fetched_at <= SERVED[provider] and (entry["valid_until"] is None or now < entry["valid_until"])
-            found.append((served or exhausted(payload, windows, now), dict(credential=entry["credential"], fetched_at=fetched_at, windows=windows)))
+            reading = dict(credential=entry["credential"], fetched_at=fetched_at, windows=windows)
+            if provider == "codex":
+                reading["limit_reached"] = limit_reached(payload)
+            found.append((served or exhausted(payload, windows, now), reading))
         current = [reading for is_current, reading in found if is_current]
         if len(current) > 1:
             result[provider] = dict(credentials=current)
@@ -202,6 +215,8 @@ def windows_text(reading, now):
         else:
             reset = f", resets in {span(resets_at - now)}" if resets_at is not None else "" if item["used"] else ", no window open"
             parts.append(f"{length} {item['left']:.0f}% left{reset}")
+    if reading.get("limit_reached") and any(item["resets_at"] is None or item["resets_at"] > now for item in reading["windows"].values()):
+        parts.insert(0, "limit reached")
     return ("; ".join(parts) or "unreadable response") + f" (read {span(now - reading['fetched_at'])} ago)"
 
 

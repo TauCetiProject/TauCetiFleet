@@ -81,14 +81,17 @@ class SubscriptionUsage(unittest.TestCase):
             claude=dict(credential=account, other_credentials=0, fetched_at=NOW - 600, windows=dict(
                 session=dict(seconds=5 * hour, used=37.5, left=62.5, resets_at=NOW + 2 * hour),
                 weekly=dict(seconds=7 * 24 * hour, used=59.0, left=41.0, resets_at=NOW + 80 * hour))),
-            codex=dict(credential=account, other_credentials=0, fetched_at=NOW - 120, windows=dict(
+            codex=dict(credential=account, other_credentials=0, limit_reached=False, fetched_at=NOW - 120, windows=dict(
                 weekly=dict(seconds=7.0 * 24 * hour, used=12.0, left=88.0, resets_at=NOW - 120 + 100 * hour),
                 session=dict(seconds=5.0 * hour, used=40.0, left=60.0, resets_at=NOW - 120 + hour))),
         )
         self.assertEqual(subscription_usage.readings(SUBSCRIPTION, NOW), expected)
         self.assertEqual(subscription_usage.readings(dict(SUBSCRIPTION, agent="claude"), NOW), dict(claude=expected["claude"]))
-        elsewhere = dict(SUBSCRIPTION, env=dict(CLAUDE_CONFIG_DIR=str(self.root / "other"), TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
-        self.assertEqual(subscription_usage.readings(elsewhere, NOW)["claude"]["fetched_at"], NOW - 900)
+        elsewhere = dict(SUBSCRIPTION, env=dict(TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
+        host.worker_fields(elsewhere)
+        self.cache(self.root / "kept/state/.quota-usage/0011223344556677/quota-claude-0123456789abcdef.json",
+                   flat(dict(utilization=50, resets_at=iso(NOW + hour)), None), 5)
+        self.assertEqual(subscription_usage.readings(elsewhere, NOW)["claude"]["fetched_at"], NOW - 5)
         self.codex(self.root / "kept/state/fleet-1/cache/quota-codex.json", 5, (3, 5 * hour, hour))
         self.assertEqual(subscription_usage.readings(elsewhere, NOW)["codex"]["windows"]["session"]["left"], 97.0)
 
@@ -226,7 +229,12 @@ class SubscriptionUsage(unittest.TestCase):
             900, fp="one")
         self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour), fp="two")
         codex = subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["credentials"]
-        self.assertEqual([each["credential"] for each in codex], [label("two"), label("one")])
+        self.assertEqual([(each["credential"], each["limit_reached"]) for each in codex], [(label("two"), False), (label("one"), True)])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            subscription_usage.display(dict(codex=dict(credentials=codex)), NOW)
+        self.assertEqual(output.getvalue().splitlines()[2],
+                         f"  credential {label('one')}: limit reached; 5h 70% left, resets in 1h45m (read 15m ago)")
 
 
 if __name__ == "__main__":
