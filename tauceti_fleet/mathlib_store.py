@@ -76,16 +76,22 @@ def git(*args, timeout=120):
 
 
 def open_prs(config):
-    """Open pull requests of this host's workers and their heads, as the worker last prepared them."""
+    """Open pull requests of this host's workers and their heads, as the worker last prepared them.
+
+    A pull request whose state or head the worker has not observed is included with head None.
+    """
     binary = executable("tauceti")
     if not binary:
         raise FleetError("TauCetiWorker is missing; run prepare")
     rows = json.loads(run([binary, "activity", "--inventory", "--group", config["machine_id"]], timeout=60).stdout)
-    return {
-        p["number"]: p["head"]
-        for p in rows["prs"]
-        if p.get("repo") == REPOSITORY and p.get("state") == "OPEN" and type(p.get("number")) is int
-    }
+    prs = {}
+    for p in rows["prs"]:
+        if p.get("repo") != REPOSITORY or type(p.get("number")) is not int:
+            continue
+        head = p.get("head") if isinstance(p.get("head"), str) and REVISION.fullmatch(p["head"]) else None
+        if p.get("state") == "OPEN" or p.get("state") not in ("CLOSED", "MERGED"):
+            prs[p["number"]] = head if p.get("state") == "OPEN" else None
+    return prs
 
 
 def pins(config, known=None):
@@ -110,12 +116,15 @@ def pins(config, known=None):
         prs = {str(number): head for number, head in open_prs(config).items()}
         for name in held.keys() - prs.keys() - {"main"}:
             repo("update-ref", "-d", "refs/pins/" + name)
+        if unobserved := sorted((name for name, head in prs.items() if head is None), key=int):
+            notes.append("pull requests of unobserved state or head: " + ", ".join("#" + n for n in unobserved))
     except (FleetError, ValueError, KeyError, TypeError, AttributeError):
         prs = {name: head for name, head in held.items() if name != "main"}
         notes.append("open pull requests unavailable from the worker's activity inventory; keeping the last known ones")
     fetch = ("fetch", "-q", "--depth=1", "--filter=blob:none", "--no-tags", "--no-write-fetch-head", "origin")
     main = "+refs/heads/main:refs/pins/main"
-    moved = [f"+refs/pull/{name}/head:refs/pins/{name}" for name, head in prs.items() if held.get(name) != head]
+    moved = [f"+refs/pull/{name}/head:refs/pins/{name}" for name, head in prs.items()
+             if head is None or held.get(name) != head]
     try:
         repo(*fetch, main, *moved, timeout=600)
     except FleetError:

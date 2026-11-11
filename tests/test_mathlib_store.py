@@ -326,6 +326,16 @@ class Store(unittest.TestCase):
         self.assertEqual(mathlib_store.warm(config, now=12800)["unpinned"], {self.old: 12800})
         self.assertTrue(mathlib_store.ready(self.mounted, self.old))
 
+    def test_a_pull_request_of_unobserved_state_is_read_and_makes_the_check_incomplete(self):
+        config, hold = self.configure(), 2 * 5400
+        mathlib_store.warm(config, now=1000)
+        self.inventory(dict(number=7, state="CLOSED", head=self.head), dict(number=12, state=None, head=None))
+        for now in (2000, 2000 + hold):
+            state = mathlib_store.warm(config, now=now)
+            self.assertEqual((state["needed"][self.old]["pinned_by"], state["unpinned"]), (["#12"], {}))
+            self.assertIn("unobserved state or head: #12", state["error"])
+        self.assertTrue(mathlib_store.ready(self.mounted, self.old))
+
     def test_toolchain_of_the_pinning_head_is_compared_with_the_build(self):
         commit(self.tauceti, {"lean-toolchain": "leanprover/lean4:v4.2.0\n"})
         state = mathlib_store.warm(self.configure(), now=1000)
