@@ -34,8 +34,9 @@ def tail(path, limit=TAIL):
 
 
 def log_facts(path, opening=None):
-    """The last message in a worker's console log, and when its latest round opened if that round is `opening`."""
-    last = started = None
+    """The last message in a worker's console log, and the time and text of its latest round's opening line
+    if that round is `opening`."""
+    last = started = opened = None
     # open() would take an integer as a file descriptor of this process.
     if isinstance(path, str) and path:
         try:
@@ -51,12 +52,13 @@ def log_facts(path, opening=None):
                 # A closure after spent repair attempts reports a fix without logging an opening line.
                 if not opening or match[2] != opening and not match[2].startswith(opening + "   ["):
                     break
+                opened = match[2]
                 try:
                     started = time.mktime(time.strptime(match[1], "%Y-%m-%d %H:%M:%S"))
                 except (ValueError, OverflowError):
                     pass
                 break
-    return last, started
+    return last, started, opened
 
 
 def row(value):
@@ -64,8 +66,10 @@ def row(value):
     detail, target, phase = value.get("detail"), value.get("target"), value.get("phase")
     in_round = bool(phase) and value.get("state") in IN_ROUND
     opening = f"→ {phase.upper()}: {target}" if isinstance(phase, str) and isinstance(target, str) else None
-    line, started = log_facts(value.get("log_file"), opening)
-    provider = re.match(r"provider=([\w.-]{1,40})", detail) if in_round and isinstance(detail, str) else None
+    line, started, opened = log_facts(value.get("log_file"), opening)
+    # A Claude API session replaces `detail` mid-round; the opening line keeps the round's settings.
+    settings = detail if isinstance(detail, str) and detail.startswith("provider=") else (opened or "").rpartition("   [")[2]
+    provider = re.match(r"provider=([\w.-]{1,40})", settings) if in_round else None
     pr = re.match(r"PR #(\d{1,10})\b", target) if isinstance(target, str) else None
     return dict(
         agent=text(value.get("agent"), 40),

@@ -74,6 +74,16 @@ class WorkerView(unittest.TestCase):
         idle = worker_view.row(dict(state="running", phase=None, log_file=log))
         self.assertIsNone(idle["round_started_at"])
 
+    def test_provider_survives_a_claude_api_session_replacing_the_detail(self):
+        target = "PR #41  https://github.com/o/r/pull/41"
+        log = self.log("w1", (OPENED, f"→ FIX: {target}   [provider=claude, model=m-1, effort=high, sandbox=host]"))
+        status = dict(state="running", phase="fix", target=target, agent="auto", log_file=log)
+        for detail in ("provider=claude, model=m-1, effort=high, sandbox=host", "Claude API session running"):
+            row = worker_view.row(dict(status, detail=detail))
+            self.assertEqual((row["provider"], row["round_started_at"]), ("claude", OPENED))
+        other = self.log("w2", (OPENED, "→ REVIEW: PR #3  https://github.com/o/r/pull/3   [provider=codex]"))
+        self.assertIsNone(worker_view.row(dict(status, log_file=other, detail="Claude API session running"))["provider"])
+
     def test_a_round_whose_opening_line_is_not_the_latest_has_no_start(self):
         log = self.log("w1", (OPENED, "→ REVIEW: PR #3  https://github.com/o/r/pull/3   [provider=claude]"),
                        (OPENED + 3600, "  #7: closing after spent repair attempts"))
