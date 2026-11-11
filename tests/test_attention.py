@@ -193,6 +193,20 @@ class Attention(unittest.TestCase):
                          ["budget-spent-fix-7.json", "declined-fix-7.json", "declined-rebase-8.json", "declined-rebase-9.json"])
         self.assertEqual(list(attention.incidents_dir().glob("*.json")), [])
 
+    def test_a_second_ack_keeps_the_earlier_archive_under_a_name_the_worker_does_not_read(self):
+        self.on()
+        acked = attention.incidents_dir() / "acked"
+        texts = []
+        for head in ("a" * 40, "b" * 40, "c" * 40):
+            texts.append(self.record("declined", "fix", 7, head=head, summary=head[0]).read_text())
+            self.assertEqual(len(self.listed(ack="7")["acknowledged"]), 1)
+        self.assertEqual((acked / "declined-fix-7.json").read_text(), texts[2])
+        self.assertEqual((acked / "declined-fix-7.json.1").read_text(), texts[0])
+        self.assertEqual((acked / "declined-fix-7.json.2").read_text(), texts[1])
+        self.assertEqual([p.name for p in acked.glob("*.json")], ["declined-fix-7.json"])
+        self.assertEqual(self.listed(ack="7")["acknowledged"], [])
+        self.assertEqual(len(list(acked.iterdir())), 3)
+
     def test_lookup_is_the_only_github_read_and_its_answers_stay_out_of_the_workers_record(self):
         config = self.on()
         token = self.root / "token"
