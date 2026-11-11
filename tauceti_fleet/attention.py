@@ -6,13 +6,14 @@ two read what the host already reports: workers stopped by an identity halt, and
 credentials that are due or have lapsed.
 """
 
+import fcntl
 import json
 import os
 import re
 import sqlite3
 import time
 from calendar import timegm
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 from . import activity, claude_credentials, forgejo, github
 from .store import FleetError, atomic, host_config, read, state_dir
@@ -208,9 +209,22 @@ def incident_items(config):
     return items
 
 
+@contextmanager
+def records_lock():
+    """The incident directory's `.records.lock`, held across keeping an archived record aside and replacing it,
+    so overlapping acknowledgements cannot both keep the same record and drop the one between them."""
+    fd = os.open(incidents_dir() / ".records.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def archive(name):
     """Move the live record to `acked/<name>`, the one name the worker's hold reads there, and return
-    where an earlier record of that name was kept, as `acked/<name>.<n>`, which the worker does not read."""
+    where an earlier record of that name was kept, as `acked/<name>.<n>`, which the worker does not read.
+    The caller holds `records_lock()`."""
     source, acked = incidents_dir() / name, incidents_dir() / "acked"
     target = acked / name
     acked.mkdir(mode=0o700, exist_ok=True)
@@ -234,7 +248,8 @@ def archive(name):
 
 
 def incident_ack(config, item):
-    archive(item["record"])
+    with records_lock():
+        archive(item["record"])
 
 
 def incident_sweep(config, items):
@@ -243,37 +258,43 @@ def incident_sweep(config, items):
     for item in items:
         if item.get("cleared") != "merged":
             continue
-        source, target = incidents_dir() / item["record"], incidents_dir() / "acked" / item["record"]
+        # The lock covers the put-back too: it restores the archived name an acknowledgement would set aside.
+        with records_lock():
+            sweep_one(item)
+
+
+def sweep_one(item):
+    source, target = incidents_dir() / item["record"], incidents_dir() / "acked" / item["record"]
+    try:
+        aside = archive(item["record"])
+    except OSError:
+        return
+    try:
+        record = json.loads(target.read_text())
+        unchanged = (printable(record.get("last_at"), 20), printable(record.get("head"), 64)) == (item["at"], item["head"])
+    except (OSError, ValueError):
+        record, unchanged = None, False
+    if unchanged:
+        record["overtaken"] = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), by=item["cleared"])
         try:
-            aside = archive(item["record"])
-        except OSError:
-            continue
-        try:
-            record = json.loads(target.read_text())
-            unchanged = (printable(record.get("last_at"), 20), printable(record.get("head"), 64)) == (item["at"], item["head"])
+            atomic(target, record)
         except (OSError, ValueError):
-            record, unchanged = None, False
-        if unchanged:
-            record["overtaken"] = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), by=item["cleared"])
-            try:
-                atomic(target, record)
-            except (OSError, ValueError):
-                pass
-            notes_path(item["record"]).unlink(missing_ok=True)
-            continue
-        # The worker rewrote the record for a later round since it was judged: put it back unless an
-        # even later write has taken the live name, which supersedes it as the worker's own replace would.
+            pass
+        notes_path(item["record"]).unlink(missing_ok=True)
+        return
+    # The worker rewrote the record for a later round since it was judged: put it back unless an
+    # even later write has taken the live name, which supersedes it as the worker's own replace would.
+    try:
         try:
-            try:
-                os.link(target, source)
-            except FileExistsError:
-                pass
-            if aside is not None:
-                os.replace(aside, target)
-            else:
-                target.unlink()
-        except OSError:
-            continue
+            os.link(target, source)
+        except FileExistsError:
+            pass
+        if aside is not None:
+            os.replace(aside, target)
+        else:
+            target.unlink()
+    except OSError:
+        return
 
 
 # What to put right before clearing a halt, by the worker's reason and the forge it names.
@@ -328,6 +349,9 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
     """One read from the pull request's own forge, GitHub with the host's credential or Forgejo anonymously.
     The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
     path = f"repos/{repository}/{'issues' if named else 'pulls'}/{number}"
+    # The answer may describe the pull request as of any moment after the request starts, so it counts only
+    # from then: a record rewritten while the request is in flight is newer than the answer.
+    started = time.time()
     try:
         if forge == "github":
             data = github.request(path, token_file=config.get("github_token_file"))
@@ -351,7 +375,7 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
             raise
     except (KeyError, TypeError, AttributeError):
         raise FleetError(f"{origin} returned an unexpected answer for {repository}#{number}") from None
-    return dict(value, observed=time.time())
+    return dict(value, observed=started)
 
 
 def origins_path():
