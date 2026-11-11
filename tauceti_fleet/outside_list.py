@@ -27,6 +27,8 @@ RESERVE_MARGIN = 0.25
 DEADBAND = 0.2
 SESSION_LOW = 10.0
 MIN_HOURS = 0.25
+# TauCetiWorker's pacing curve when neither the profile's `pace` nor TAUCETI_PACE sets one.
+DEFAULT_PACE = "60:40"
 
 
 def settings(config):
@@ -62,6 +64,29 @@ def worker_keys(config):
     return dict(targets_fallback_max_open=max(1, bounds["start"]), targets_fallback_cap_file=str(cap_file()))
 
 
+def pace_points(config):
+    """The workers' pacing curve as sorted (time %, budget %) points, with the ends the worker fills in."""
+    spec = config.get("pace") or (config.get("env") or {}).get("TAUCETI_PACE") or DEFAULT_PACE
+    points = {}
+    for token in filter(str.strip, spec.split(",")):
+        at, budget = token.split(":")
+        points[float(at)] = float(budget)
+    points.setdefault(0.0, 0.0)
+    points.setdefault(100.0, 100.0)
+    return sorted(points.items())
+
+
+def budget(curve, elapsed):
+    """The usage in percent below which a worker starts a round at `elapsed` percent of the window."""
+    elapsed = max(0.0, min(100.0, elapsed))
+    before = curve[0]
+    for point in curve:
+        if elapsed <= point[0]:
+            return point[1] if point[0] == before[0] else before[1] + (elapsed - before[0]) / (point[0] - before[0]) * (point[1] - before[1])
+        before = point
+    return curve[-1][1]
+
+
 def burn(readings):
     """Percent of the weekly window used per hour across [fetched_at, used] readings; None under MIN_SPAN of them."""
     if len(readings) < 2 or readings[-1][0] - readings[0][0] < MIN_SPAN:
@@ -69,19 +94,20 @@ def burn(readings):
     return max(0.0, readings[-1][1] - readings[0][1]) * 3600 / (readings[-1][0] - readings[0][0])
 
 
-def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, ceiling):
+def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, ceiling, paused=False):
     """The control law: one move of the cap toward spending `left` exactly in `hours`.
 
     `left` and `session_left` are percentages of their windows; `listed` and
     `outside` are what list work and outside-list work spend, in percent of the
-    weekly window per hour. `cutting` says a lower cap has something to act on.
+    weekly window per hour. `cutting` says a lower cap has something to act on,
+    `paused` that the workers' pacing curve starts no round now, so a higher one has nothing to act on.
     """
     reserve = listed * hours * (1 + RESERVE_MARGIN)
     surplus = left - reserve
     allowed = max(surplus, 0.0) / hours
     move = max(1, round(cap / 10))
     if surplus <= 0:
-        reason = "list work is projected to use all that is left"
+        reason = "list work is projected to use all that may still be spent"
         cap -= move
     elif outside > (1 + DEADBAND) * allowed:
         reason = "spending over plan"
@@ -94,19 +120,24 @@ def step(cap, *, left, hours, listed, outside, cutting, session_left, floor, cei
         reason = "on plan"
     elif session_left is not None and session_left < SESSION_LOW:
         reason = "spending under plan, session window nearly exhausted"
+    elif paused:
+        reason = "spending under plan, the workers' pacing curve starts no round now"
     else:
         reason = "spending under plan"
         cap += move
     return dict(cap=min(ceiling, max(floor, cap)), reason=reason, reserve=reserve, projected=100 - left + (listed + outside) * hours)
 
 
-def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds):
+def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left, rounds, curve):
     """The pacer's state after one step, from plain inputs.
 
     `reading` is the weekly window as dict(fetched_at, used, resets_at) or None,
     `slot_seconds` what `schedule.seconds_until_slot_ends` returned, `rounds` the
     average numbers of running (list, outside-list, other) rounds since the last
-    step. The cap holds whenever the inputs cannot support a decision.
+    step, `curve` the workers' pacing curve from `pace_points`. Only what that
+    curve lets the workers spend by the horizon is planned for. The cap holds
+    whenever the inputs cannot support a decision, and is not raised while the
+    curve lets no round start.
     """
     floor, ceiling = bounds["floor"], bounds["ceiling"]
     cap = min(ceiling, max(floor, state["cap"] if type(state.get("cap")) is int else bounds["start"]))
@@ -160,9 +191,14 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     # Rounds that report neither kind are divided as the authoring rounds are; with none of either, nothing is reserved.
     share = authoring[1] / sum(authoring) if sum(authoring) else 1.0
     left = max(0.0, 100 - reading["used"])
-    result.update(step(cap, left=left, hours=max(MIN_HOURS, (ends_at - now) / 3600), listed=rate * (1 - share), outside=rate * share,
-                       cutting=rounds[1] > 0, session_left=session_left, floor=floor, ceiling=ceiling),
+    elapsed = [100 - (reading["resets_at"] - at) / subscription_usage.WEEK * 100 for at in (now, ends_at)]
+    spendable = max(0.0, min(100.0, budget(curve, elapsed[1])) - reading["used"])
+    hours = max(MIN_HOURS, (ends_at - now) / 3600)
+    result.update(step(cap, left=spendable, hours=hours, listed=rate * (1 - share), outside=rate * share,
+                       cutting=rounds[1] > 0, session_left=session_left, floor=floor, ceiling=ceiling,
+                       paused=reading["used"] >= budget(curve, elapsed[0])),
                   left=left, rate=rate, outside_share=share, ends=ends, ends_at=ends_at)
+    result["projected"] = reading["used"] + rate * hours
     return result
 
 
@@ -212,7 +248,7 @@ class Pacer:
             slot_seconds=schedule.seconds_until_slot_ends(config, now),
             reading=dict(fetched_at=usage["fetched_at"], used=weekly["used"], resets_at=weekly["resets_at"]) if weekly else None,
             session_left=(windows.get("session") or {}).get("left"),
-            rounds=[count / self.passes for count in self.seen],
+            rounds=[count / self.passes for count in self.seen], curve=pace_points(config),
         )
         state["provider"] = provider
         targets.write(cap_file(), f"{state['cap']}\n")

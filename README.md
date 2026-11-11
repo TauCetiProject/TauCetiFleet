@@ -965,27 +965,31 @@ Every 15 minutes the controller takes one step:
    providers is paced by its Claude window.
 2. The horizon is the end of the weekly window, or of the current
    [schedule](#weekly-schedule) slot when that comes first. The rate times the
-   hours left is the projected spend at the end.
+   hours left is the projected spend at the end. What may still be spent is
+   what the workers' pacing curve (the profile's `pace`, else `TAUCETI_PACE` in
+   its `env`, else TauCetiWorker's default `60:40`) allows at the horizon, less
+   what is used: a worker starts no round while usage is at the curve.
 3. The rate is divided between list work and outside-list work in the proportion
    of running rounds that reported `roadmap_work` `list` and `outside-list` over
    the same six hours. Rounds that report neither, such as reviews and repairs,
    are divided in that proportion too; while no authoring round of either kind
    has run, nothing counts as list work.
 4. List work's part of the rate, continued to the horizon and raised by a
-   quarter, is reserved. What is left after the reserve, divided by the hours
-   left, is the rate planned for outside-list work.
+   quarter, is reserved. What may still be spent beyond the reserve, divided by
+   the hours left, is the rate planned for outside-list work.
 5. The cap rises by a tenth (at least 1) when outside-list work spends less than
    80% of that plan, falls by a tenth when it spends more than 120%, and falls
-   whenever the reserve alone exceeds what is left. It stays between `floor`
-   and `ceiling`.
+   whenever the reserve alone exceeds what may still be spent. It stays between
+   `floor` and `ceiling`.
 
 The cap holds when there is no reading, when the reading is over 30 minutes old
 or gives no weekly figure, for the first two hours of readings after the window
 resets or the measurement restarts, outside every schedule slot, and while
 workers are not enabled. It is not raised while less than 10% of the session
-window is left, and it is not lowered for spending over plan while no
-outside-list round is running, because a cap already below the open pull
-requests admits nothing and would only take longer to return.
+window is left or while usage is at the pacing curve, since no round starts
+then, and it is not lowered for spending over plan while no outside-list round
+is running, because a cap already below the open pull requests admits nothing
+and would only take longer to return.
 
 A weekly window that is not open yet, which the reading reports with no usage
 and no reset time, counts as nothing spent with the whole week ahead: the cap

@@ -21,26 +21,30 @@ HOUR = 3600
 BOUNDS = dict(floor=0, ceiling=40, start=4)
 
 
-def simulate(*, demand, cost=0.07, hours=168, slot=None, used=0.0, blind=(0, 0), session=lambda t: 60.0, bounds=BOUNDS):
-    """A toy fleet under the pacer, one row per 15-minute step.
+def simulate(*, demand, cost=0.07, hours=168, begin=0, slot=None, used=0.0, blind=(0, 0), session=lambda t: 60.0, bounds=BOUNDS,
+             pace="0:0,100:100"):
+    """A toy fleet under the pacer, one row per 15-minute step from hour `begin` of a weekly window.
 
     Twelve workers. `demand(t)` of them have list work at hour t; an outside-list
     round takes 1.5 h and leaves a pull request open for a day, authoring stops
     at the cap as a worker's cutoff does, and every six open pull requests keep
     one worker on maintenance. Each running round costs `cost` percent of the
     week per hour, usage is read in whole percent five minutes late and not at
-    all during the `blind` hours, and no round runs once the week is spent.
+    all during the `blind` hours, no round starts while usage is at the `pace`
+    curve's budget, and no round runs once the week is spent.
     """
     state, opened, authoring, rows, reading = {}, [], [], [], None
+    curve = outside_list.pace_points(dict(pace=pace))
     end = hours if slot is None else slot
-    for index in range(end * 4):
+    for index in range(begin * 4, end * 4):
         t = index / 4
         opened = [merged for merged in opened if merged > t] + [t + 24 for done in authoring if done <= t]
         authoring = [done for done in authoring if done > t]
-        listed = min(12, demand(t))
-        other = min(12 - listed, round(len(opened) / 6))
+        starting = used < outside_list.budget(curve, t / hours * 100)
+        listed = min(12, demand(t)) if starting else 0
+        other = min(12 - listed, round(len(opened) / 6)) if starting else 0
         cap = state.get("cap", bounds["start"])
-        while len(authoring) + len(opened) < cap and listed + other + len(authoring) < 12:
+        while starting and len(authoring) + len(opened) < cap and listed + other + len(authoring) < 12:
             authoring.append(t + 1.5)
         running = (listed, len(authoring), other) if used < 100 else (0, 0, 0)
         used = min(100.0, used + sum(running) * cost / 4)
@@ -48,21 +52,22 @@ def simulate(*, demand, cost=0.07, hours=168, slot=None, used=0.0, blind=(0, 0),
             reading = dict(fetched_at=t * HOUR - 300, used=float(int(used)), resets_at=hours * HOUR)
         state = outside_list.advance(
             state, now=t * HOUR, bounds=bounds, enabled=True, slot_seconds=None if slot is None else (slot - t) * HOUR,
-            reading=reading, session_left=session(t), rounds=running,
+            reading=reading, session_left=session(t), rounds=running, curve=curve,
         )
         rows.append(dict(t=t, used=used, cap=state["cap"], outside=running[1], reason=state["reason"]))
     return rows
 
 
-# name, simulation, hour from which no outside-list round may run (None: the week must be spent, and not early)
+# name, simulation, hour from which no outside-list round may run (None: the week must be spent, and not early).
+# Workers paced on the line used% < elapsed%, except where the list alone would outrun the week, which a pacing curve forbids.
 WEEKS = [
     ("a list that keeps three workers busy", dict(demand=lambda t: 3), None),
     ("no list work at all", dict(demand=lambda t: 0), None),
     ("list work that dries up on the third day", dict(demand=lambda t: 8 if t < 72 else 1), None),
-    ("a slot ending two days before the window", dict(demand=lambda t: 3, cost=0.12, slot=60, used=40.0), None),
+    ("a slot ending four hours before the window", dict(demand=lambda t: 3, cost=0.12, begin=100, slot=164, used=30.0), None),
     ("no reading for ten hours", dict(demand=lambda t: 3, blind=(30, 40)), None),
-    ("list work that alone outruns the week", dict(demand=lambda t: 10), 12),
-    ("list work that arrives on the third day", dict(demand=lambda t: 0 if t < 72 else 9), 80),
+    ("list work that alone outruns the week", dict(demand=lambda t: 10, pace="0:100"), 12),
+    ("list work that arrives on the third day", dict(demand=lambda t: 0 if t < 72 else 9, pace="0:100"), 80),
 ]
 
 
@@ -86,8 +91,8 @@ class ControlLaw(unittest.TestCase):
             (20, 0.6, dict(cutting=False), 20, "spending over plan, no outside-list round running to cut"),
             (3, 0.6, {}, 2, "spending over plan"),
             (2, 0.6, {}, 2, "spending over plan"),
-            (20, 0.0, dict(left=25.0), 18, "list work is projected to use all that is left"),
-            (20, 0.0, dict(left=20.0, cutting=False), 18, "list work is projected to use all that is left"),
+            (20, 0.0, dict(left=25.0), 18, "list work is projected to use all that may still be spent"),
+            (20, 0.0, dict(left=20.0, cutting=False), 18, "list work is projected to use all that may still be spent"),
         ]:
             with self.subTest(cap=cap, outside=outside, **changes):
                 result = step(cap, outside, **changes)
@@ -102,7 +107,8 @@ class ControlLaw(unittest.TestCase):
                        rounds=[[now - 900, 3, 1, 2]])
 
         def advance(state=history, **changes):
-            values = dict(now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, reading=fresh, session_left=60.0, rounds=(3, 1, 2))
+            values = dict(now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, reading=fresh, session_left=60.0, rounds=(3, 1, 2),
+                          curve=outside_list.pace_points(dict(pace="0:100")))
             return outside_list.advance(state, **dict(values, **changes))
 
         moving = advance()
@@ -133,6 +139,12 @@ class ControlLaw(unittest.TestCase):
         self.assertEqual(advance(reading=dict(fresh, used=2.0, resets_at=336 * HOUR))["rounds"], [[now, 3, 1, 2]])
         self.assertEqual(advance(slot_seconds=0.0)["readings"], [])
         self.assertEqual(advance(reading=dict(fresh, fetched_at=now - 1900))["readings"], history["readings"])
+        # 40% used 60 h into the window: the default curve allows 23.8% and the slot ends before it allows 40%.
+        late = dict(fresh, used=40.0, fetched_at=now + 10 * HOUR - 60)
+        state = dict(history, readings=[[now + 7 * HOUR, 39.4], [now + 10 * HOUR - 900, 39.9]], resets_at=168 * HOUR)
+        curved = advance(state=state, now=now + 10 * HOUR, reading=late, slot_seconds=HOUR, curve=outside_list.pace_points({}))
+        self.assertEqual((curved["cap"], curved["reason"]), (9, "list work is projected to use all that may still be spent"))
+        self.assertEqual(outside_list.budget(outside_list.pace_points(dict(pace="0:10,50:70")), 25), 40)
         self.assertEqual(advance(state=dict(history, cap=90))["previous"], 40)
         idle = dict(fresh, used=0.0, resets_at=None)
         opening = advance(reading=idle)
@@ -154,6 +166,14 @@ class ControlLaw(unittest.TestCase):
                 else:
                     self.assertEqual({row["outside"] for row in rows if row["t"] >= quiet_from}, {0})
                     self.assertEqual(rows[-1]["cap"], BOUNDS["floor"])
+
+    def test_simulated_week_under_the_default_pacing_curve_does_not_raise_a_cap_it_cannot_use(self):
+        rows = simulate(demand=lambda t: 3, pace=outside_list.DEFAULT_PACE)
+        paused = "spending under plan, the workers' pacing curve starts no round now"
+        self.assertIn(paused, {row["reason"] for row in rows})
+        self.assertTrue(all(after["cap"] == before["cap"] for before, after in pairwise(rows) if after["reason"] == paused))
+        # The curve allows 40% by hour 100.8, so the rest is spent at the fleet's full rate and the week is not quite used up.
+        self.assertGreater(rows[-1]["used"], 90)
 
     def test_simulated_week_holds_through_a_blind_spell_and_a_spent_session(self):
         blind = simulate(demand=lambda t: 3, blind=(30, 40))
@@ -291,14 +311,14 @@ class Wiring(unittest.TestCase):
         now = time.time()
         reading = {"claude": dict(fetched_at=now - 60, windows=dict(
             session=dict(seconds=18000.0, used=40.0, left=60.0, resets_at=now + HOUR),
-            weekly=dict(seconds=604800.0, used=30.0, left=70.0, resets_at=now + 100 * HOUR),
+            weekly=dict(seconds=604800.0, used=20.0, left=80.0, resets_at=now + 100 * HOUR),
         ))}
         running = [dict(id="w1", state="running", roadmap_work="list"), dict(id="w2", state="running", roadmap_work="outside-list"),
                    dict(id="w3", state="running"), dict(id="w4", state="waiting-capacity", roadmap_work="list")]
         saved = store.read(store.state_dir() / "outside-list-cap.json")
         self.assertEqual(self.controller_pass(reading, running)[0]["at"], saved["at"])
         store.atomic(store.state_dir() / "outside-list-cap.json", dict(
-            saved, at=now - 901, cap=20, resets_at=now + 100 * HOUR, readings=[[now - 3 * HOUR, 29.0]], rounds=[]))
+            saved, at=now - 901, cap=20, resets_at=now + 100 * HOUR, readings=[[now - 3 * HOUR, 19.0]], rounds=[]))
         block, log = self.controller_pass(reading, running)
         self.assertEqual((block["held"], block["previous"], block["cap"], block["reason"]), (False, 20, 22, "spending under plan"))
         self.assertEqual((block["provider"], block["ends"], block["outside_share"]), ("claude", "weekly window", 0.5))
@@ -356,6 +376,9 @@ class Wiring(unittest.TestCase):
         seen = advance.call_args.kwargs
         self.assertEqual((seen["reading"], seen["session_left"], seen["slot_seconds"], seen["rounds"]),
                          (dict(fetched_at=now - 120, used=30.0, resets_at=now + 100 * HOUR), 5.0, None, [0.0, 0.0, 0.0]))
+        self.assertEqual(seen["curve"], [(0.0, 0.0), (60.0, 40.0), (100.0, 100.0)])
+        store.update_host(pace="0:10,50:70")
+        self.assertEqual(outside_list.pace_points(store.host_config()), [(0.0, 10.0), (50.0, 70.0), (100.0, 100.0)])
 
     def test_an_unopened_weekly_window_raises_a_zero_cap_until_a_round_opens_it(self):
         self.pace(start=0)
@@ -388,11 +411,11 @@ class Wiring(unittest.TestCase):
             "Outside-list cap: 14 (bounds 0-40); 91% of the weekly window projected spent when the slot ends in 14h00m; "
             "last step 12m ago: 13 -> 14, spending under plan",
         )
-        short = dict(moving, cap=13, projected=130.0, ends="weekly window", reason="list work is projected to use all that is left")
+        short = dict(moving, cap=13, projected=130.0, ends="weekly window", reason="list work is projected to use all that may still be spent")
         self.assertEqual(
             outside_list.describe(short, now),
             "Outside-list cap: 13 (bounds 0-40); at this rate the weekly window is spent 4h12m before the weekly window ends in 14h00m; "
-            "last step 12m ago: unchanged, list work is projected to use all that is left",
+            "last step 12m ago: unchanged, list work is projected to use all that may still be spent",
         )
         held = dict(active=True, held=True, cap=14, previous=14, floor=0, ceiling=40, at=now - 180, reason="no usage reading yet")
         self.assertEqual(outside_list.describe(held, now), "Outside-list cap: 14 (bounds 0-40); last step 3m ago: held, no usage reading yet")
