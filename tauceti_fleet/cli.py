@@ -70,11 +70,17 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    mathlib = sub.add_parser("mathlib-store", help="keep one read-only Mathlib build per pinned revision for sandboxed rounds")
+    mathlib.add_argument("host")
+    choice = mathlib.add_mutually_exclusive_group()
+    choice.add_argument("--dir", dest="directory", help="absolute path on the host; created if missing")
+    choice.add_argument("--clear", action="store_true", help="stop maintaining the store; its contents stay")
+    mathlib.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
-    for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
+    for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status", "warm-mathlib-store"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
 
@@ -164,6 +170,11 @@ def main(argv=None, *, _status_results=None):
         if args.command == "run-workers":
             host.run_workers()
             return 0
+        if args.command == "warm-mathlib-store":
+            from . import mathlib_store
+
+            mathlib_store.warm()
+            return 0
         if args.command in ("add", "enroll"):
             value = remote.enroll(args.target, url=args.broker, token_file=args.token_file, replace_machine=args.replace_machine) if args.command == "enroll" else remote.add(args.target, profile_name=args.profile, no_ci=args.no_ci)
             print("Installed " + value["host"] + "; existing workload activation and budget settings were preserved.")
@@ -219,6 +230,11 @@ def main(argv=None, *, _status_results=None):
                 payload.update(maximum=args.maximum)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "mathlib-store":
+                if args.directory is not None:
+                    payload["directory"] = args.directory
+                if args.clear:
+                    payload["clear"] = True
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -408,6 +424,10 @@ def main(argv=None, *, _status_results=None):
                             + " at the current admission limit); "
                             + ", ".join(focus["areas"])
                         )
+                    if value.get("mathlib_store"):
+                        from . import mathlib_store
+
+                        print("Mathlib store: " + mathlib_store.describe(value["mathlib_store"]))
                     if status.get("workers"):
                         print()
                     groups = {}

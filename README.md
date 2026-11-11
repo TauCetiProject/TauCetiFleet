@@ -499,6 +499,74 @@ worker ceiling remains under the ordinary controller and budget checks. Queue
 overload, an OOM kill, disabled workers, or lost observations can explicitly
 pause new work. Stopping the experiment itself preserves the current ceiling.
 
+## Mathlib store
+
+A host whose workers run rounds in the `bubble` sandbox can keep one built
+Mathlib per pinned revision for every container to mount read-only, in place of
+each round unpacking its own copy:
+
+```sh
+tauceti-fleet mathlib-store big-server --dir /srv/fleet/mathlib-store
+tauceti-fleet mathlib-store big-server           # show the saved setting
+tauceti-fleet mathlib-store big-server --clear   # stop maintaining it
+```
+
+The host saves this as `mathlib_store` in `host.json`, unset by default.
+Saving it needs no drain. `DIR` holds three directories on one filesystem:
+`DIR/store`, the store itself, which is all that containers see; `DIR/staging`,
+where an entry is built; and `DIR/downloads`, for Mathlib's archives.
+
+While the setting is present, a background pass runs when the setting is saved,
+when the controller starts and every 30 minutes after that. The pass is its own
+user unit, `tauceti-fleet-mathlib-store.service`, placed in `tauceti-fleet.slice`
+beside the CI and worker slices with a CPU weight of 10; the controller loop
+starts it and never waits for it. One pass:
+
+- Finds the Mathlib revision and Lean toolchain pinned by TauCeti `main` and by
+  each open pull request of this host's workers. The pull requests come from the
+  worker's prepared inventory (`tauceti activity --inventory`), a local read. One
+  `git fetch` then brings `main` and the pull-request heads that moved since the
+  last pass into a shallow, blobless cache under Fleet's data directory, and
+  `lake-manifest.json` and `lean-toolchain` are read from it; a version of
+  either file the cache has not seen costs one more fetch. The pass makes no
+  GitHub API requests.
+- Publishes each pinned revision that is missing as `DIR/store/<revision>/`, an
+  entry of the worker's
+  [read-only Mathlib store](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/mathlib-store.md):
+  a shallow Mathlib checkout made under `DIR/staging`, in which it runs
+  `lake exe cache get` and `lake build --no-build Mathlib` with
+  `LAKE_ARTIFACT_CACHE` unset, writes `.tauceti-store-ready` last and renames the
+  checkout into the store. A failed attempt publishes nothing and is retried by
+  the next pass.
+- Removes an entry once successful pin checks have found its revision unpinned
+  for three hours: twice the worker's default `TAUCETI_ROUND_TIMEOUT`, or twice
+  the value the profile's `env` gives its workers if that is larger, since a
+  round that started while the revision was pinned may still be linked to it.
+  The three hours start at the first check that finds it unpinned and start
+  over if it is pinned again. A pass whose pin check failed removes nothing.
+  An entry whose marker someone deleted is removed that long after the deletion
+  and, if still pinned, built again.
+
+An entry takes about 7 GB. No build starts while the filesystem has less than
+20 GiB free. Downloaded archives stay in `DIR/downloads` until every pinned
+revision is published and are then deleted. One controller maintains a given
+directory.
+
+The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for workers
+whose `sandbox` is `bubble`. It reads the setting when it starts, so a running
+manager keeps what it had. `--clear` stops the passes and leaves the directory
+and its contents in place.
+
+While the setting is present, `status` adds one line:
+
+```text
+Mathlib store: 1 of 2 pinned revisions ready (checked 4 min ago); building 0493595ecd (leanprover/lean4:v4.25.0; #1812, #1820)
+```
+
+A revision that could not be published is listed with the reason, as is one whose
+entry was built with a different toolchain from the head that pins it, which the
+worker does not link.
+
 ## GitHub CI setup
 
 The controller reconciles each guest with the existing GitHub runner inventory.
