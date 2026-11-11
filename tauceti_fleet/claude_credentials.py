@@ -90,6 +90,30 @@ def install(kind, secret, since=None):
         atomic(marker, dict(sha256=digest, signed_in=since))
 
 
+def signed_in(target):
+    """When the stored login was signed in: at the transfer, or later on the host itself.
+
+    A login newer than both the transfer record and the worker's last renewal was written by
+    neither, so it is a sign-in on the host. Its time is recorded before a renewal hides it.
+    """
+    marker = target.with_name("transferred.json")
+    renewed = target.with_name(f".{target.name.lstrip('.')}.refresh.last-success")
+    try:
+        with refresh_lock(target):
+            recorded = read(marker, {})
+            written = target.stat().st_mtime
+            if all(written > p.stat().st_mtime for p in (marker, renewed) if p.exists()):
+                recorded = dict(recorded, signed_in=written)
+                atomic(marker, recorded)
+    except (OSError, FleetError):
+        try:
+            recorded = read(marker, {})
+        except FleetError:
+            return None
+    since = recorded.get("signed_in") if isinstance(recorded, dict) else None
+    return since if type(since) in (int, float) else None
+
+
 def worker_env(config):
     """Environment pointing each worker at the stored credentials; empty when the profile names none."""
     token, usage = config.get(TOKEN), config.get(USAGE)
@@ -146,11 +170,9 @@ def report(config, *, now=None):
         expiry = login.get("refreshTokenExpiresAt")
         if type(expiry) in (int, float) and expiry > 0:
             expiry /= 1000
-        else:
-            try:
-                expiry = read(Path(usage).with_name("transferred.json"), {})["signed_in"] + LIFETIME[USAGE]
-            except (FleetError, KeyError, TypeError):
-                expiry = None
+        elif login.get("refreshToken"):
+            since = signed_in(Path(usage))
+            expiry = None if since is None else since + LIFETIME[USAGE]
         if not login.get("refreshToken"):
             add(USAGE, "blocked", "usage login missing, readable by other users, or without a refresh token")
         elif expiry is None:

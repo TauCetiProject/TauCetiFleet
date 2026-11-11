@@ -185,9 +185,9 @@ Renewing a login replaces its refresh token, so once a worker has renewed the
 usage login the operator's copy no longer works. A repeated `add` therefore
 leaves the host's login in place unless the profile's file holds a different
 sign-in. When the login is due, either sign in again on the operator's machine
-and repeat `add`, or run the command `doctor` prints on the host; a profile may
-name a file the operator's machine does not hold when the host is signed in
-that way. Adding or removing either key takes a drained `add`; replacing a
+and repeat `add`, or run the command `doctor` prints on the host, from which
+`doctor` counts the four weeks again; a profile may name a file the operator's
+machine does not hold when the host is signed in that way. Adding or removing either key takes a drained `add`; replacing a
 credential does not. A worker slot keeps the Claude credential directory it
 first ran with, so give a host these keys before its workers first start.
 

@@ -121,6 +121,30 @@ class ClaudeCredentials(unittest.TestCase):
         replacing.join(10)
         self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
 
+    def test_a_sign_in_on_the_host_restarts_the_login_lifetime(self):
+        now = time.time()
+        os.utime(self.files["usage"], (now - 30 * DAY, now - 30 * DAY))
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+
+        def usage():
+            entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
+            return entry["status"], entry["evidence"]
+
+        self.assertEqual(usage(), ("blocked", "usage login stopped renewing 2 days ago"))
+        store.atomic(held, login("refresh-of-a-host-sign-in"))
+        os.utime(held, (now + 5, now + 5))
+        self.assertEqual(usage(), ("ok", "usage login renews for another 28 days"))
+        # A later renewal by a worker writes its success marker after the login.
+        store.atomic(held, login("refresh-2"))
+        renewed = held.with_name(".credentials.json.refresh.last-success")
+        store.atomic(renewed, {"at": now + 10})
+        for path in (held, renewed):
+            os.utime(path, (now + 10, now + 10))
+        self.assertEqual(usage(), ("ok", "usage login renews for another 28 days"))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [
