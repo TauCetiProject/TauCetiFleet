@@ -51,14 +51,26 @@ def cap_file():
     return state_dir() / "outside-list-cap"
 
 
-def worker_keys(config):
-    """What every worker definition gains while the cap is paced; nothing without a list or worker support.
+def unsupported():
+    """Why the workers cannot read the paced cap, or None when they can.
 
-    A worker manager that does not know these keys loads no worker at all, so
-    they are written only for a worker whose protocol reply names the feature.
+    A worker manager that does not know the keys loads no worker at all, so both
+    the installed runtime and the one a running manager started from must name the feature.
     """
+    if capabilities.worker_protocol().get("targets_fallback") != 1:
+        return "the installed worker cannot author outside a list"
+    manager = targets.running_manager()
+    if manager == "":
+        return "cannot tell which worker runtime the running manager uses; " + targets.RESTART_MANAGER
+    if manager and capabilities.worker_protocol(manager).get("targets_fallback") != 1:
+        return "the running worker manager started from a TauCetiWorker that cannot author outside a list; " + targets.RESTART_MANAGER
+    return None
+
+
+def worker_keys(config):
+    """What every worker definition gains while the cap is paced; nothing without a list or worker support."""
     bounds = settings(config)
-    if not bounds or not config.get("roadmap_targets") or capabilities.worker_protocol().get("targets_fallback") != 1:
+    if not bounds or not config.get("roadmap_targets") or unsupported():
         return {}
     # The worker rejects 0 here; the cap file carries the real figure, 0 included.
     return dict(targets_fallback_max_open=max(1, bounds["start"]), targets_fallback_cap_file=str(cap_file()))
@@ -208,7 +220,7 @@ class Pacer:
 
     def __init__(self):
         self.state = None
-        self.keys = None
+        self.keys = self.why = None
         self.checked = None
         self.passes, self.seen = 0, [0, 0, 0]
 
@@ -224,10 +236,10 @@ class Pacer:
                 self.state = saved if isinstance(saved, dict) and saved.get("version") == 1 else {}
             basis = (config[KEY], config.get("roadmap_targets"))
             if self.checked is None or self.checked[1:] != basis or not 0 <= now - self.checked[0] < EVERY:
-                self.keys, self.checked = worker_keys(config), (now, *basis)
+                self.why = unsupported() if config.get("roadmap_targets") else "no target list is set"
+                self.keys, self.checked = {} if self.why else worker_keys(config), (now, *basis)
             if not self.keys:
-                listed = config.get("roadmap_targets")
-                return dict(active=False, reason="the installed worker cannot author outside a list" if listed else "no target list is set")
+                return dict(active=False, reason=self.why)
             kinds = [w.get("roadmap_work") for w in statuses() if w.get("state") == "running"]
             self.passes += 1
             for index, kind in enumerate(("list", "outside-list")):

@@ -12,7 +12,7 @@ from itertools import pairwise
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import capabilities, host, outside_list, pool_activity, remote, store, subscription_usage
+from tauceti_fleet import capabilities, host, outside_list, pool_activity, remote, store, subscription_usage, targets
 from tauceti_fleet.status_follow import render_with_cli
 from tauceti_fleet.store import FleetError
 
@@ -196,9 +196,14 @@ class Wiring(unittest.TestCase):
         environ.start()
         self.addCleanup(environ.stop)
         self.protocol = dict(version=1, roadmap_targets=1, targets_fallback=1)
-        probe = patch.object(capabilities, "worker_protocol", side_effect=lambda: self.protocol)
+        self.manager, self.manager_protocol = None, None
+        probe = patch.object(capabilities, "worker_protocol",
+                             side_effect=lambda worker=None: self.protocol if worker is None else self.manager_protocol)
         probe.start()
         self.addCleanup(probe.stop)
+        manager = patch.object(targets, "running_manager", side_effect=lambda: self.manager)
+        manager.start()
+        self.addCleanup(manager.stop)
         store.update_host(github_account="operator", ci_allowed=False, max_workers=2, claude_billing="subscription")
 
     def pace(self, **bounds):
@@ -287,6 +292,34 @@ class Wiring(unittest.TestCase):
             self.protocol["targets_fallback"] = 1
             ready = {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}["outside-list-cap"]
         self.assertEqual((check["status"], ready["status"]), ("warning", "ok"))
+
+    def test_a_running_manager_without_fallback_support_gets_no_cap_keys(self):
+        self.pace()
+        self.manager, self.manager_protocol = "/old/bin/tauceti", dict(version=1, roadmap_targets=1)
+        store.update_host(outside_list_cap=dict(ceiling=40, start=4))
+        self.assertNotIn("targets_fallback", self.definitions())
+        pacer = outside_list.Pacer()
+        block = pacer.tick(store.host_config(), list, now=1000.0)
+        self.assertEqual(block, dict(active=False, reason=(
+            "the running worker manager started from a TauCetiWorker that cannot author outside a list; " + targets.RESTART_MANAGER)))
+        self.assertFalse(outside_list.cap_file().exists())
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * GIB, memory_available=64 * GIB)),
+            patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+            patch.object(capabilities, "executable", return_value=None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            check = {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}["outside-list-cap"]
+        self.assertEqual(check["status"], "warning")
+        self.assertTrue(check["evidence"].startswith("The running worker manager started from a TauCetiWorker that cannot"))
+        self.manager = ""
+        self.assertTrue(outside_list.unsupported().startswith("cannot tell which worker runtime the running manager uses; on the host run"))
+        self.assertNotIn("targets_fallback", self.definitions())
+        # Restarted on the installed runtime, the manager takes the keys from the next check on.
+        self.manager, self.manager_protocol = "/new/bin/tauceti", self.protocol
+        self.assertIn("targets_fallback_cap_file", self.definitions())
+        self.assertFalse(pacer.tick(store.host_config(), list, now=1500.0)["active"])
+        self.assertTrue(pacer.tick(store.host_config(), list, now=1000.0 + outside_list.EVERY)["active"])
 
     def test_controller_writes_the_cap_file_and_publishes_each_step(self):
         import time

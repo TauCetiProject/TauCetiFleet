@@ -957,9 +957,12 @@ first step, to the floor. Without the key nothing below happens. With it, and
 with a target list set, every worker definition gains
 `targets_fallback_cap_file`, a file in the controller's state directory holding
 the current cap, and `targets_fallback_max_open`, which applies only if that
-file cannot be read. The installed TauCetiWorker must report `targets_fallback`
-in its Fleet protocol; otherwise the definitions stay as they are and `status`
-and `doctor` say the cap is not paced.
+file cannot be read. The installed TauCetiWorker, and the one a running worker
+manager started from, must report `targets_fallback` in their Fleet protocol;
+otherwise the definitions stay as they are and `status` and `doctor` say the
+cap is not paced. A live update leaves a running manager on its old runtime,
+so after one `status` names the manager restart, which ends every worker's
+current round; the controller checks again within 15 minutes.
 
 Every 15 minutes the controller takes one step:
 
