@@ -26,6 +26,9 @@ WORKER_MEMORY = 4 * GIB
 CONTROLLER = "org.tauceti.fleet"
 OBSERVER = "org.tauceti.fleet.observe"
 WORKERS = "org.tauceti.fleet.workers"
+# A worker's wrapper refreshes heartbeat_at every two seconds while its round
+# runs; a status file older than this may be left by a worker that has died.
+HEARTBEAT_FRESH = 30
 
 
 def domain():
@@ -197,7 +200,7 @@ class Scaler:
 
     Admission is the prefix ``workers[:target]``. The target never exceeds
     what total memory holds, and the prefix takes in idle workers only while
-    free memory holds another; workers with a round in progress cost nothing.
+    free memory holds another; workers with a live round in progress cost nothing.
     """
 
     def __init__(self):
@@ -212,7 +215,12 @@ class Scaler:
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
         else:
-            busy = {w.get("id") for w in host.worker_statuses() if w.get("state") in ("running", "surveying")}
+            now = time.time()
+            busy = {
+                w.get("id") for w in host.worker_statuses()
+                if w.get("state") in ("running", "surveying") and w.get("alive") is True
+                and now - (w.get("heartbeat_at") or 0) < HEARTBEAT_FRESH
+            }
             room = (available - reserve) // WORKER_MEMORY
             limit = min(maximum, len(workers), (memory_total() - reserve) // WORKER_MEMORY)
             self.target = 0

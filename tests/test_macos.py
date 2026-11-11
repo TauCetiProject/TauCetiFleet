@@ -211,6 +211,9 @@ class MacOS(unittest.TestCase):
         scaler = host.Scaler()
         self.assertIsInstance(scaler, macos.Scaler)
 
+        def live(wid, state, **extra):
+            return dict(dict(id=wid, state=state, alive=True, heartbeat_at=time.time()), **extra)
+
         def step(available_gib, maximum=8, **extra):
             with patch.object(host, "worker_statuses", return_value=workers):
                 return scaler.step(now=0, ci_busy=False, idle=0, enabled=True, available=available_gib * GIB,
@@ -218,16 +221,20 @@ class MacOS(unittest.TestCase):
 
         self.assertEqual(step(13), (2, "2 of 8 workers fit in free memory at 4 GiB each"))
         self.assertEqual(scaler.decision["policy"], "memory-count")
-        workers[:] = [dict(id="w1", state="running"), dict(id="w2", state="surveying"), dict(id="w3", state="idle")]
+        workers[:] = [live("w1", "running"), live("w2", "surveying"), live("w3", "idle")]
         self.assertEqual(step(13)[0], 4)
         self.assertEqual(step(5)[0], 2)
         # Admission is a prefix of the worker list: idle workers ahead of the
         # running ones would each be a new round.
-        workers[:] = [dict(id="w3", state="running"), dict(id="w4", state="running")]
+        workers[:] = [live("w3", "running"), live("w4", "running")]
         self.assertEqual(step(5, maximum=4)[0], 0)
         self.assertEqual(step(9, maximum=4)[0], 1)
         self.assertEqual(step(13, maximum=4)[0], 4)
-        workers[:] = [dict(id="w1", state="running"), dict(id="w2", state="surveying"), dict(id="w3", state="idle")]
+        # A status file left by a worker that has since died costs as a new worker.
+        workers[:] = [live("w1", "running", heartbeat_at=time.time() - 86400), live("w2", "running", alive=False)]
+        self.assertEqual(step(5, maximum=2)[0], 0)
+        self.assertEqual(step(9, maximum=2)[0], 1)
+        workers[:] = [live("w1", "running"), live("w2", "surveying"), live("w3", "idle")]
         # 32 GiB less the reserve holds seven, however much is free.
         self.assertEqual(step(31)[0], 7)
         self.assertEqual(step(31, maximum=3), (3, "all configured workers fit in free memory at 4 GiB each"))
@@ -241,7 +248,7 @@ class MacOS(unittest.TestCase):
     def test_controller_admits_no_idle_worker_ahead_of_running_ones_beyond_free_memory(self):
         machine = store.update_host(ci_allowed=False, workers_enabled=True, max_workers=4)["machine_id"]
         ids = [f"fleet-{machine[:8]}-{n}" for n in range(1, 5)]
-        running = [dict(id=wid, state="running", alive=True) for wid in ids[2:]]
+        running = [dict(id=wid, state="running", alive=True, heartbeat_at=time.time()) for wid in ids[2:]]
         admitted = []
         caps = dict(cpus=8.0, memory_total=32 * GIB, memory_available=5 * GIB, cgroup=None)
 
