@@ -1,7 +1,9 @@
 """Slot groups: an agent and a set of work phases for each share of a host's worker slots."""
 
 import functools
+import heapq
 import re
+from collections import Counter
 from fractions import Fraction
 
 from .store import FleetError
@@ -128,6 +130,49 @@ def place(wanted, prior):
     return placed
 
 
+class _Slack:
+    """Range add and range maximum over prefixes 0..size."""
+
+    def __init__(self, values):
+        self.size = len(values)
+        self.top = [0] * (4 * self.size)
+        self.add = [0] * (4 * self.size)
+        self._build(1, 0, self.size - 1, values)
+
+    def _build(self, node, low, high, values):
+        if low == high:
+            self.top[node] = values[low]
+            return
+        middle = (low + high) // 2
+        self._build(2 * node, low, middle, values)
+        self._build(2 * node + 1, middle + 1, high, values)
+        self.top[node] = max(self.top[2 * node], self.top[2 * node + 1])
+
+    def update(self, first, last, delta, node=1, low=0, high=None):
+        high = self.size - 1 if high is None else high
+        if last < low or high < first or first > last:
+            return
+        if first <= low and high <= last:
+            self.top[node] += delta
+            self.add[node] += delta
+            return
+        middle = (low + high) // 2
+        self.update(first, last, delta, 2 * node, low, middle)
+        self.update(first, last, delta, 2 * node + 1, middle + 1, high)
+        self.top[node] = self.add[node] + max(self.top[2 * node], self.top[2 * node + 1])
+
+    def maximum(self, first, node=1, low=0, high=None):
+        high = self.size - 1 if high is None else high
+        if high < first:
+            return None
+        if first <= low:
+            return self.top[node]
+        middle = (low + high) // 2
+        values = [v for v in (self.maximum(first, 2 * node, low, middle),
+                              self.maximum(first, 2 * node + 1, middle + 1, high)) if v is not None]
+        return self.add[node] + max(values)
+
+
 @functools.cache
 def sequence(counts):
     """The group of each admission in turn, for groups of these sizes.
@@ -135,31 +180,53 @@ def sequence(counts):
     Still's quota-divisor method with Webster priorities: member j of a group
     of n ranks at (2j + 1) / 2n, among the groups that stay within the upper
     quota of this prefix and leave this and every later prefix able to reach
-    each group's lower quota. Every prefix then holds each group's share of it to within one
-    slot, and a higher ceiling only adds.
+    each group's lower quota. Every prefix then holds each group's share of it
+    to within one slot, and a higher ceiling only adds.
+
+    A group holding t is ahead of its lower quota at prefixes below
+    ceil(t * total / n), and a prefix L can carry as many groups ahead as the
+    sum of its fractional shares, r(L). `slack` keeps (groups ahead - r) per
+    prefix, so trying a group is a range add and one range maximum.
     """
     total = sum(counts)
-    taken = [0] * len(counts)
-
-    def reachable(prefix):
-        for later in range(prefix, total + 1):
-            floors = [later * count // total for count in counts]
-            if sum(max(t, f) for t, f in zip(taken, floors, strict=True)) > later:
-                return False
-            if all(t <= f for t, f in zip(taken, floors, strict=True)):
-                return True
-        return True
-
+    sizes = Counter(counts)
+    slack = _Slack([sum(m * (later * n // total) for n, m in sizes.items()) - later for later in range(total + 1)])
+    # Groups of one size holding as many are interchangeable but for index, so
+    # each (size, held) class is tried once per prefix, by its lowest index.
+    members = {}
+    for group, count in enumerate(counts):
+        members.setdefault((count, 0), []).append(group)
+    heap = [(Fraction(1, count), groups[0], count, 0) for (count, _), groups in members.items()]
+    heapq.heapify(heap)
     result = []
     for prefix in range(1, total + 1):
-        ranked = sorted((g for g, count in enumerate(counts) if taken[g] * total < prefix * count),
-                        key=lambda g: (Fraction(2 * taken[g] + 1, counts[g]), g))
-        for group in ranked:
-            taken[group] += 1
-            if reachable(prefix):
-                break
-            taken[group] -= 1
-        result.append(group)
+        skipped = []
+        while True:
+            entry = heapq.heappop(heap)
+            _, lowest, count, held = entry
+            if members.get((count, held), [None])[0] != lowest:
+                continue
+            if held * total < prefix * count:
+                first, last = -(-held * total // count), -(-(held + 1) * total // count) - 1
+                slack.update(first, last, 1)
+                if slack.maximum(prefix) <= 0:
+                    break
+                slack.update(first, last, -1)
+            skipped.append(entry)
+        heapq.heappop(members[count, held])
+        if members[count, held]:
+            group = members[count, held][0]
+            heapq.heappush(heap, (Fraction(2 * held + 1, count), group, count, held))
+        else:
+            del members[count, held]
+        if held + 1 < count:
+            moved = members.setdefault((count, held + 1), [])
+            heapq.heappush(moved, lowest)
+            if moved[0] == lowest:
+                heapq.heappush(heap, (Fraction(2 * held + 3, count), lowest, count, held + 1))
+        for entry in skipped:
+            heapq.heappush(heap, entry)
+        result.append(lowest)
     return tuple(result)
 
 

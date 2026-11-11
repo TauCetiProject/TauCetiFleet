@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -42,16 +43,33 @@ class SlotGroups(unittest.TestCase):
 
     def daemon_pass(self):
         """One controller iteration; returns the admission policy it published."""
-        handlers, written = {}, []
+        return self.daemon_passes()[0]
+
+    def daemon_passes(self, *between):
+        """Controller iterations, each of `between` run before the next; the admission policy of each."""
+        handlers, written, steps, sleeps = {}, [], list(between), []
+        atomic = store.atomic
 
         def record(path, value):
             if Path(path).name == "admission.json":
                 written.append(value)
+            else:
+                atomic(path, value)
+
+        def sleep(_):
+            # A pass ends in ten half-second sleeps.
+            sleeps.append(1)
+            if len(sleeps) % 10:
+                return
+            if steps:
+                steps.pop(0)()
+            else:
+                handlers[signal.SIGTERM]()
 
         gib = 1024**3
         with (
             patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
-            patch.object(host.time, "sleep", side_effect=lambda _: handlers[signal.SIGTERM]()),
+            patch.object(host.time, "sleep", side_effect=sleep),
             patch.object(host, "cpu_sample", return_value=(1, 1)),
             patch.object(host, "resources", return_value=dict(cpus=8, memory_total=64 * gib, memory_available=64 * gib)),
             patch.object(host, "worker_memory", return_value=None),
@@ -59,7 +77,7 @@ class SlotGroups(unittest.TestCase):
             patch.object(host, "atomic", side_effect=record),
         ):
             host.daemon()
-        return written[0]
+        return [policy for policy in written if policy["reason"] != "controller stopped"]
 
     def test_profile_groups_become_per_worker_agent_and_phases(self):
         store.atomic(store.config_dir() / "profiles.json", {
@@ -100,6 +118,20 @@ class SlotGroups(unittest.TestCase):
                     self.assertLess(abs(admitted.count(group) - ceiling * count / sum(counts)), 1, (counts, ceiling))
                     members = [position for position in order[:ceiling] if placed[position] == group]
                     self.assertEqual(members, [p for p in range(len(placed)) if placed[p] == group][:len(members)])
+
+    def test_the_largest_shapes_order_within_the_bound_in_well_under_a_lease(self):
+        for counts in ((4067,) + (1,) * 29, (1,) * 2048 + (2048,), (1, 1, 1, 4093), tuple(range(1, 91))):
+            slot_groups.sequence.cache_clear()
+            began = time.monotonic()
+            sequence = slot_groups.sequence(counts)
+            self.assertLess(time.monotonic() - began, 5, counts[:3])
+            total, held = sum(counts), [0] * len(counts)
+            for prefix, group in enumerate(sequence, 1):
+                held[group] += 1
+                checked = range(len(counts)) if len(counts) <= 100 else (group, len(counts) - 1)
+                for g in checked:
+                    self.assertLessEqual(prefix * counts[g] // total, held[g])
+                    self.assertLessEqual(held[g], -(-prefix * counts[g] // total))
 
     def test_an_edit_rewrites_only_the_definitions_that_change_group(self):
         store.update_host(workers_enabled=True, max_workers=16)
@@ -190,6 +222,11 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(len(self.daemon_pass()["workers"]), 9)
         self.assertEqual(host.rpc(dict(action="slots"))["slots"][0]["count"], 6)
         store.update_host(slots=None, max_workers=3)
+        # Every definition changed agent or phases, so each waits until it runs the new one.
+        self.assertEqual(self.daemon_pass()["workers"], [])
+        prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
+        for n in range(1, 10):
+            store.atomic(store.state_dir() / "workers" / f"{prefix}{n}.json", dict(alive=True, applied_spec=dict(agent="claude")))
         policy = self.daemon_pass()
         self.assertEqual(numbers(policy["workers"]), [1, 2, 3])
         self.assertEqual(policy["roadmap_focus"]["workers"], policy["workers"])
@@ -256,7 +293,7 @@ class SlotGroups(unittest.TestCase):
                          dict(count=1, progress_strategy="threshold", progress_max_open="x"))
 
     def test_a_reassigned_worker_waits_for_its_new_definition_before_admission(self):
-        store.update_host(workers_enabled=True, max_workers=8)
+        store.update_host(workers_enabled=True, max_workers=2)
         prefix = "fleet-" + store.host_config()["machine_id"][:8] + "-"
 
         def running(n, agent, only, alive=True):
@@ -264,8 +301,11 @@ class SlotGroups(unittest.TestCase):
                 id=f"{prefix}{n}", alive=alive, state="waiting-capacity", agent=agent, only=only,
                 applied_spec=dict(id=f"{prefix}{n}", enabled=True, agent=agent, only=only)))
 
+        def numbers(policy):
+            return [int(wid.rsplit("-", 1)[1]) for wid in policy["workers"]]
+
         def admitted():
-            return [int(wid.rsplit("-", 1)[1]) for wid in self.daemon_pass()["workers"]]
+            return numbers(self.daemon_pass())
 
         host.rpc(dict(action="slots", groups=[slot_groups.parse("2:claude:review")]))
         running(1, "claude", ["review"])
@@ -280,9 +320,15 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(host.rpc(dict(action="slots"))["slots"][1]["admitted"], 0)
         running(2, "codex", ["progress"])
         self.assertEqual(admitted(), [1, 2])
-        # A stopped worker starts on whatever definition is written.
-        running(2, "claude", ["review"], alive=False)
-        self.assertEqual(admitted(), [1, 2])
+        # Clearing the groups rewrites both definitions; each waits until it runs the profile's.
+        host.rpc(dict(action="slots", clear=True))
+        self.assertEqual(admitted(), [])
+        running(1, "claude", [])
+        self.assertEqual(admitted(), [1])
+        # A manager pass that read the old definitions can still launch them after the rewrite.
+        running(2, "codex", ["progress"], alive=False)
+        policies = self.daemon_passes(lambda: running(2, "codex", ["progress"]), lambda: running(2, "claude", []))
+        self.assertEqual([numbers(policy) for policy in policies], [[1], [1], [1, 2]])
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
