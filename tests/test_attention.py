@@ -14,11 +14,12 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
-from tauceti_fleet import attention, github, host, remote, store
+from tauceti_fleet import attention, forgejo, github, host, remote, store
 from tauceti_fleet.cli import main
 
 REPOSITORY = "TauCetiProject/TauCeti"
 REQUEST = github.request
+FORGEJO_REQUEST = forgejo.request
 
 
 class Attention(unittest.TestCase):
@@ -37,16 +38,19 @@ class Attention(unittest.TestCase):
         offline = patch.object(github, "request", side_effect=AssertionError("GitHub request"))
         self.github = offline.start()
         self.addCleanup(offline.stop)
+        forge = patch.object(forgejo, "request", side_effect=AssertionError("Forgejo request"))
+        self.forgejo = forge.start()
+        self.addCleanup(forge.stop)
         store.host_config()
 
     def on(self, **settings):
         store.update_host(incidents=True, **settings)
         return store.host_config()
 
-    def record(self, kind, stage, pr, *, head="a" * 40, at="2026-01-15T09:30:00Z", acked=False, **fields):
-        value = dict(schema="tauceti-incident/v1", kind=kind, key=f"{stage}-{pr}", worker="w1", first_at=at,
+    def record(self, kind, stage, pr, *, head="a" * 40, at="2026-01-15T09:30:00Z", acked=False, suffix="", **fields):
+        value = dict(schema="tauceti-incident/v1", kind=kind, key=f"{stage}-{pr}{suffix}", worker="w1", first_at=at,
                      last_at=at, count=1, repository=REPOSITORY, stage=stage, pr=pr, head=head) | fields
-        path = attention.incidents_dir() / ("acked" if acked else "") / f"{kind}-{stage}-{pr}.json"
+        path = attention.incidents_dir() / ("acked" if acked else "") / f"{kind}-{stage}-{pr}{suffix}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, indent=1, sort_keys=True) + "\n")
         return path
@@ -139,7 +143,7 @@ class Attention(unittest.TestCase):
         self.assertIn("   mentions: #400", text)
         self.assertIn("   transcript: /home/worker/logs/agent.log", text)
         self.assertIn("   changes requested; 3 of 3 attempts used", text)
-        self.assertIn("Acknowledge with: tauceti-fleet attention box --ack <PR number> | all", text)
+        self.assertIn("Acknowledge with: tauceti-fleet attention box --ack <PR number> | <ack id> | all", text)
         self.assertNotIn("handled earlier", text)
         self.assertNotIn("\x1b", text)
         code, text = self.cli("attention", "--json")
@@ -248,7 +252,7 @@ class Attention(unittest.TestCase):
         self.github.reset_mock()
         code, output = self.cli("attention", "box", "--lookup")
         self.assertEqual(sorted(c.args[0].split("/")[-1] for c in self.github.call_args_list), ["400", "412", "413"])
-        self.assertIn("Asked GitHub about 3 pull requests", output)
+        self.assertIn("Looked up 3 pull requests", output)
         self.assertIn("   subsumed by: #398  MERGED  2026-01-14  Title 398  (someone)", output)
         self.github.side_effect = store.FleetError("GitHub request unavailable")
         value = self.listed(lookup=True)
@@ -345,6 +349,80 @@ class Attention(unittest.TestCase):
         value = self.listed(lookup=True)
         self.assertEqual([c.args[0].split("/")[-1] for c in self.github.call_args_list], ["7"])
         self.assertEqual([i["id"] for i in value["items"]], ["7"])
+
+    def test_a_forgejo_record_beside_a_github_one_of_the_same_number_is_read_from_its_own_forge(self):
+        self.on()
+        origin = "https://forge.example"
+        on_forgejo = dict(forge=dict(kind="forgejo", url=origin), repository_id=1, suffix=".0123456789ab")
+        self.record("declined", "fix", 412, forge=dict(kind="github", url="https://github.com"), summary="github")
+        path = self.record("declined", "fix", 412, summary="see #398", mentions=[398], **on_forgejo)
+        self.record("declined", "fix", 413, forge=dict(kind="gitlab", url="https://gitlab.example"), suffix=".abc")
+        self.observe(412, "MERGED", "a" * 40, attention.epoch("2026-01-15T09:30:00Z") + 1)
+        value = self.listed()
+        self.assertEqual([(c["id"], c["cleared"]) for c in value["cleared"]], [("412", "merged")])
+        self.assertEqual([i["id"] for i in value["items"]], ["forge.example/TauCetiProject/TauCeti#412", "fix-413.abc"])
+        code, output = self.cli("attention", "box")
+        self.assertIn(f"== PR #412 on Forgejo {origin}  {origin}/TauCetiProject/TauCeti/pulls/412  (declined", output)
+        self.assertIn("   ack id: forge.example/TauCetiProject/TauCeti#412", output)
+        self.assertIn(f"   mentions: #398  {origin}/TauCetiProject/TauCeti/pulls/398  (--lookup", output)
+
+        states = {"412": dict(state="closed", merged=False, merged_at=None, head=dict(sha="a" * 40))}
+
+        def answer(at, path):
+            self.assertEqual(at, origin)
+            if path.endswith("issues/398"):
+                return dict(state="closed", title="Replacement", user=dict(login="someone"),
+                            pull_request=dict(merged=True, merged_at="2026-01-14T10:00:00Z"))
+            return states[path.split("/")[-1]]
+
+        self.forgejo.side_effect = answer
+        value = self.listed(lookup=True)
+        self.assertEqual([c.args for c in self.forgejo.call_args_list],
+                         [(origin, f"repos/{REPOSITORY}/pulls/412"), (origin, f"repos/{REPOSITORY}/issues/398")])
+        self.assertEqual(self.github.call_count, 0)
+        self.assertEqual(sorted((c["id"], c["cleared"]) for c in value["cleared"]),
+                         [("412", "merged"), ("forge.example/TauCetiProject/TauCeti#412", "closed")])
+        states["412"] = dict(state="open", merged=False, merged_at=None, head=dict(sha="a" * 40))
+        self.forgejo.reset_mock()
+        value = self.listed(lookup=True)
+        self.assertEqual([c.args[1] for c in self.forgejo.call_args_list], [f"repos/{REPOSITORY}/pulls/412"])
+        item = value["items"][0]
+        self.assertEqual((item["id"], item["named"][0]["state"]), ("forge.example/TauCetiProject/TauCeti#412", "MERGED"))
+
+        self.assertEqual([d["record"] for d in self.listed(ack="412")["acknowledged"]], ["declined-fix-412.json"])
+        text = path.read_text()
+        self.listed(ack="forge.example/TauCetiProject/TauCeti#412")
+        self.record("declined", "fix", 412, summary="again", **on_forgejo)
+        self.listed(ack="forge.example/TauCetiProject/TauCeti#412")
+        acked = attention.incidents_dir() / "acked"
+        self.assertEqual((acked / f"{path.name}.1").read_text(), text)
+        self.assertEqual(json.loads((acked / path.name).read_text())["summary"], "again")
+
+    def test_a_failing_forge_leaves_the_other_forges_lookups_to_go_ahead(self):
+        self.on()
+        self.record("declined", "fix", 7, forge=dict(kind="forgejo", url="https://forge.example"), suffix=".0123456789ab")
+        self.record("declined", "fix", 8, summary="no")
+        self.forgejo.side_effect = store.FleetError("https://forge.example request unavailable")
+        self.github.side_effect = lambda path, **_: dict(state="closed", merged_at=None, head=dict(sha="a" * 40))
+        value = self.listed(lookup=True)
+        self.assertEqual(value["lookup"], dict(asked=2, error="https://forge.example request unavailable"))
+        self.assertEqual([c["id"] for c in value["cleared"]], ["8"])
+
+    def test_forgejo_reads_are_anonymous_and_keep_the_http_status(self):
+        seen = []
+
+        def opened(request, timeout):
+            seen.append((request.full_url, request.headers))
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+        with patch("urllib.request.urlopen", side_effect=opened):
+            with self.assertRaises(store.FleetError) as raised:
+                FORGEJO_REQUEST("https://forge.example", "repos/O/R/issues/9")
+        self.assertEqual(raised.exception.status, 404)
+        self.assertEqual(seen[0][0], "https://forge.example/api/v1/repos/O/R/issues/9")
+        self.assertNotIn("Authorization", seen[0][1])
+        with self.assertRaises(store.FleetError):
+            FORGEJO_REQUEST("https://forge.example/evil?", "x")
 
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()

@@ -15,10 +15,11 @@ from calendar import timegm
 from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
-from . import activity, github
+from . import activity, forgejo, github
 from .store import FleetError, atomic, host_config, read, state_dir
 
 SCHEMA = "tauceti-incident/v1"
+GITHUB = "https://github.com"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MAX_LOOKUPS = 100
 RULING = "ruling"
@@ -199,18 +200,40 @@ def recent_rulings():
     return counts
 
 
+def target_of(record):
+    """The pull request a record is about, on its own forge; None for a forge this release does not read.
+    A record without `forge` predates the field and is GitHub's. Only a record of the worker's own GitHub
+    repository has a key ending in its number, and only that one is acknowledged by the bare number."""
+    repository, number, forge = record.get("repository"), record.get("pr"), record.get("forge")
+    if not (type(number) is int and number > 0 and isinstance(repository, str) and REPOSITORY.fullmatch(repository)):
+        return None
+    if forge is None or isinstance(forge, dict) and forge.get("kind") == "github" and forge.get("url") == GITHUB:
+        kind, origin = "github", GITHUB
+    elif (isinstance(forge, dict) and forge.get("kind") == "forgejo" and isinstance(forge.get("url"), str)
+          and forgejo.ORIGIN.fullmatch(forge["url"].rstrip("/"))):
+        kind, origin = "forgejo", forge["url"].rstrip("/")
+    else:
+        return None
+    if kind == "github" and record["key"].endswith(f"-{number}"):
+        ident = str(number)
+    else:
+        ident = f"{origin.split('://', 1)[1] + '/' if kind != 'github' else ''}{repository}#{number}"
+    return dict(forge=kind, origin=origin, repository=repository, pr=number, id=ident)
+
+
+def pr_url(item, number):
+    if item["forge"] == "github":
+        return f"{GITHUB}/{item['repository']}/pull/{number}"
+    return f"{item['origin']}/{item['repository']}/pulls/{number}"
+
+
 def incident_items(config):
     if not enabled(config):
         return []
     records = live_records()
-
-    def pull_request(record):
-        repository, number = record.get("repository"), record.get("pr")
-        if type(number) is int and number > 0 and isinstance(repository, str) and REPOSITORY.fullmatch(repository):
-            return repository, number
-        return None
-
-    prepared = prepared_prs({pull_request(r) for _, r in records if r and pull_request(r)})
+    # The worker's activity rows carry no forge and hold GitHub pull requests only.
+    prepared = prepared_prs({(t["repository"], t["pr"]) for t in map(target_of, (r for _, r in records if r))
+                             if t and t["forge"] == "github"})
     live = dict(records)
     items = []
     for name, record in records:
@@ -227,10 +250,10 @@ def incident_items(config):
             # The phase archives an incident as it rules on it; the agent's message stays in that file.
             with suppress(OSError):
                 words = load(incidents_dir() / "acked" / name[len(RULING) + 1:]) or {}
-        target = pull_request(record)
+        target = target_of(record)
         item = dict(
             source="incident",
-            id=str(target[1]) if target else printable(record["key"], 100),
+            id=target["id"] if target else printable(record["key"], 100),
             kind=printable(record.get("incident") or RULING if ruled else record["kind"], 40),
             record=name,
             at=printable(record.get("last_at"), 20),
@@ -255,24 +278,27 @@ def incident_items(config):
         if item.get("ruling", {}).get("stands"):
             item["rank"] = 0 if item["ruling"]["ruling"] in NEEDS_PERSON else 2
         if target:
+            repository, number = target["repository"], target["pr"]
             cached = notes(name)
             written = epoch(record.get("last_at")) or float("inf")
-            seen = [o for o in (prepared.get(target), cached.get(f"{target[0]}#{target[1]}"))
+            local = prepared.get((repository, number)) if target["forge"] == "github" else None
+            seen = [o for o in (local, cached.get(f"{repository}#{number}"))
                     if isinstance(o, dict) and o.get("state") and isinstance(o.get("observed"), int | float)
                     and o["observed"] >= written]
             observation = max(seen, key=lambda o: o["observed"], default=None)
-            item.update(repository=target[0], pr=target[1], cleared=overtaken(record, observation),
+            item.update(repository=repository, pr=number, forge=target["forge"], origin=target["origin"],
+                        cleared=overtaken(record, observation),
                         observed_at=observation["observed"] if observation else None, named=[])
             for relation in ("subsumed_by", "mentions"):
                 numbers = words.get(relation) if isinstance(words.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
-                    known = cached.get(f"{target[0]}#{number}")
+                    known = cached.get(f"{repository}#{number}")
                     item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
             ruling = item.get("ruling") or {}
             for relation in ("blocked_on", "subsumed_by"):
                 for number in ruling.get(relation, []):
-                    if number > 0 and number != target[1] and all(n["pr"] != number for n in item["named"]):
-                        known = cached.get(f"{target[0]}#{number}")
+                    if number > 0 and number != target["pr"] and all(n["pr"] != number for n in item["named"]):
+                        known = cached.get(f"{repository}#{number}")
                         item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
         items.append(item)
     return items
@@ -341,13 +367,19 @@ def roadmap_draft(number):
         raise FleetError(f"{path} could not be read: {exc}") from None
 
 
-def ask(config, repository, number, *, named):
-    """One GitHub read. The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
+def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
+    """One read from the pull request's own forge, GitHub with the host's credential or Forgejo anonymously.
+    The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
+    path = f"repos/{repository}/{'issues' if named else 'pulls'}/{number}"
     try:
-        data = github.request(f"repos/{repository}/{'issues' if named else 'pulls'}/{number}",
-                              token_file=config.get("github_token_file"))
-        merged = (data.get("pull_request") or {}).get("merged_at") if named else data.get("merged_at")
-        value = dict(state="MERGED" if merged else str(data["state"]).upper(), merged_at=merged,
+        if forge == "github":
+            data = github.request(path, token_file=config.get("github_token_file"))
+        else:
+            data = forgejo.request(origin, path)
+        meta = (data.get("pull_request") or {}) if named else data
+        merged = meta.get("merged_at") or None
+        value = dict(state="MERGED" if merged or meta.get("merged") is True else str(data["state"]).upper(),
+                     merged_at=merged,
                      title=printable(data.get("title"), 200).replace("\n", " "),
                      author=printable((data.get("user") or {}).get("login"), 60))
         if not named:
@@ -357,12 +389,12 @@ def ask(config, repository, number, *, named):
             raise
         value = dict(state="NOT FOUND")
     except (KeyError, TypeError, AttributeError):
-        raise FleetError(f"GitHub returned an unexpected answer for {repository}#{number}") from None
+        raise FleetError(f"{origin} returned an unexpected answer for {repository}#{number}") from None
     return dict(value, observed=time.time())
 
 
 def incident_lookup(config, items):
-    """Ask GitHub about each listed item's pull request and the ones it names; answers go to Fleet's notes."""
+    """Ask each listed item's forge about its pull request and the ones it names; answers go to Fleet's notes."""
     asked, answers, error = 0, {}, None
     deadline = time.monotonic() + 40
 
@@ -383,29 +415,32 @@ def incident_lookup(config, items):
         requests.append((observed(own), item, item["pr"], False))
         requests += [(observed(n), item, n["pr"], True) for n in open_named(item)]
     requests.sort(key=lambda r: r[0])
+    failed = {}
     for _, item, number, named in requests:
-        key = (item["repository"], number, named)
-        if key in answers:
+        key = (item["origin"], item["repository"], number, named)
+        if key in answers or item["origin"] in failed:
             continue
         if asked >= MAX_LOOKUPS or time.monotonic() >= deadline:
             error = f"stopped after {asked} requests; run --lookup again for the rest"
             break
         try:
             asked += 1
-            answers[key] = ask(config, item["repository"], number, named=named)
+            answers[key] = ask(config, item["repository"], number, named=named,
+                               forge=item["forge"], origin=item["origin"])
         except FleetError as exc:
-            error = str(exc)
-            break
+            # One forge that fails leaves the other's requests to go ahead.
+            failed[item["origin"]] = str(exc)
+    error = "; ".join([*failed.values(), *([error] if error else [])]) or None
     fresh = {}
     for _, item, number, named in requests:
-        if (key := (item["repository"], number, named)) in answers:
+        if (key := (item["origin"], item["repository"], number, named)) in answers:
             fresh.setdefault(item["record"], {})[f"{item['repository']}#{number}"] = answers[key]
     for record, values in fresh.items():
         atomic(notes_path(record), dict(version=1, prs={**notes(record), **values}))
     return dict(asked=asked, error=error)
 
 
-# name -> how to list its items, and optionally how to acknowledge one and how to ask GitHub about them.
+# name -> how to list its items, and optionally how to acknowledge one and how to ask the forges about them.
 # An item is a dict with `source`, `id` (what --ack takes), `kind` and `text`; `cleared` names what
 # overtook it. A source whose items only clear by themselves has no `ack`. `rank` 0 lists an item
 # first; 2 lists it last, leaves it out of the count, and keeps `--ack all` off it.
@@ -564,7 +599,7 @@ def display(name, value):
               + (": " + ", ".join(d.get("record") or d["id"] for d in done) if done else ""))
     looked = value.get("lookup")
     if looked:
-        print(f"Asked GitHub about {looked['asked']} pull request{'s' if looked['asked'] != 1 else ''}"
+        print(f"Looked up {looked['asked']} pull request{'s' if looked['asked'] != 1 else ''}"
               + (f"; {looked['error']}" if looked.get("error") else ""))
     if "acknowledged" in value or looked:
         print()
@@ -577,8 +612,11 @@ def display(name, value):
                  f"seen {item['count']}x" if item.get("count", 1) > 1 else None]
         subject = item["id"]
         if "pr" in item:
-            subject = f"PR #{item['pr']}  https://github.com/{item['repository']}/pull/{item['pr']}"
+            on = "" if item["forge"] == "github" else f" on Forgejo {item['origin']}"
+            subject = f"PR #{item['pr']}{on}  {pr_url(item, item['pr'])}"
         print(f"== {subject}  ({' · '.join(f for f in facts if f)})")
+        if "pr" in item and item["id"] != str(item["pr"]):
+            print(f"   ack id: {item['id']}")
         for line in item.get("text", "").splitlines():
             print("   " + line)
         for relation, label in (("subsumed_by", "subsumed by"), ("mentions", "mentions"), ("blocked_on", "waits on")):
@@ -588,7 +626,7 @@ def display(name, value):
                         named["state"], (named.get("merged_at") or "")[:10], named.get("title"),
                         f"({named['author']})" if named.get("author") else "") if v)
                 else:
-                    detail = f"https://github.com/{item['repository']}/pull/{named['pr']}  (--lookup for state and title)"
+                    detail = f"{pr_url(item, named['pr'])}  (--lookup for state and title)"
                 print(f"   {label}: #{named['pr']}  {detail}")
         if item.get("transcript"):
             print("   transcript: " + item["transcript"])
@@ -600,8 +638,8 @@ def display(name, value):
               "whose pull request merged, closed or moved to a new head.")
     unseen = sum("pr" in item and item.get("observed_at") is None for item in value["items"])
     if unseen and not looked:
-        print(f"This host has no pull request state newer than the record for {unseen} of these; --lookup asks GitHub.")
+        print(f"This host has no pull request state newer than the record for {unseen} of these; --lookup asks its forge.")
     if value["items"]:
-        print(f"Acknowledge with: tauceti-fleet attention {name} --ack <PR number> | all")
+        print(f"Acknowledge with: tauceti-fleet attention {name} --ack <PR number> | <ack id> | all")
     if not value.get("incidents"):
         print('Incident records are off for this host; the profile key "incidents" turns them on.')
