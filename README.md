@@ -829,10 +829,11 @@ a different head than the record names. The evidence is pull request state
 already on the host, read from the worker's prepared activity database, and only
 an observation newer than the record counts. That database covers pull requests
 this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
-credential: once per listed pull request, and once per pull request an item
-names until that one is known to be merged or closed, at most 100 requests a
-call, items asked about least recently first, so repeated calls reach every
-item. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
+credential: once per listed pull request, once per pull request an item names
+until that one is known to be merged or closed, and once per dropped record
+whose pull request has not merged, since it can reopen at the same head. That
+is at most 100 requests a call, items asked about least recently first, so
+repeated calls reach every item. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
 worker's record files are never rewritten. Nothing else in `attention` or
 `status` contacts GitHub. `--ack all` also archives the records the list had
 already dropped.
