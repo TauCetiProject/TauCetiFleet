@@ -175,6 +175,26 @@ class Attention(unittest.TestCase):
         (self.root / "activity/activity.sqlite").write_text("not a database")
         self.assertEqual(len(self.listed()["items"]), 6)
 
+    def test_an_answer_counts_from_when_its_request_started(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 7, head="a" * 40, summary="A")
+        clock = [at + 10]
+
+        def answer(path, **_):
+            clock[0] = at + 15
+            self.record("declined", "fix", 7, head="b" * 40, summary="B",
+                        at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at + 15)))
+            clock[0] = at + 20
+            return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+
+        self.github.side_effect = answer
+        with patch.object(attention.time, "time", side_effect=lambda: clock[0]):
+            value = self.listed(lookup=True)
+        self.assertEqual([(i["id"], i["head"]) for i in value["items"]], [("7", "b" * 40)])
+        self.assertEqual(store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]["observed"],
+                         at + 10)
+
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")
@@ -209,6 +229,34 @@ class Attention(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (attention.incidents_dir() / "acked").iterdir()),
                          ["budget-spent-fix-7.json", "declined-fix-7.json", "declined-rebase-8.json", "declined-rebase-9.json"])
         self.assertEqual(list(attention.incidents_dir().glob("*.json")), [])
+
+    def test_overlapping_acks_never_overwrite_an_archived_record(self):
+        self.on()
+        acked = attention.incidents_dir() / "acked"
+        self.record("declined", "fix", 7, head="a" * 40, acked=True, summary="A")
+        self.record("declined", "fix", 7, head="b" * 40, summary="B")
+        link, done = os.link, {}
+
+        def second():
+            done["acknowledged"] = self.listed(ack="7")["acknowledged"]
+
+        def paused(source, target):
+            link(source, target)
+            if "first" not in done:
+                done["first"] = True
+                overlapping = threading.Thread(target=second)
+                overlapping.start()
+                overlapping.join(timeout=1)
+                self.record("declined", "fix", 7, head="c" * 40, summary="C")
+                done["thread"] = overlapping
+
+        with patch.object(attention.os, "link", side_effect=paused):
+            first = self.listed(ack="7")["acknowledged"]
+            done["thread"].join()
+        archived = [json.loads(p.read_text())["summary"] for p in sorted(acked.iterdir())]
+        self.assertEqual(len(archived), len(set(archived)), archived)
+        self.assertEqual(len(first) + len(done["acknowledged"]), len(archived) - 1)
+        self.assertEqual(json.loads((acked / "declined-fix-7.json").read_text())["summary"], archived[0])
 
     def test_a_second_ack_keeps_the_earlier_archive_under_a_name_the_worker_does_not_read(self):
         self.on()

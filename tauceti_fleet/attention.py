@@ -347,6 +347,7 @@ def archive(name):
 
 
 def incident_ack(config, item):
+    """Archive an item's records; the caller holds `records_lock` across the whole acknowledgement."""
     archive(item["record"])
     if item.get("ruling_record"):
         with suppress(FileNotFoundError):
@@ -354,20 +355,20 @@ def incident_ack(config, item):
 
 
 @contextmanager
-def records_lock(config):
-    """Hold the lock a worker with the decide phase takes to write or archive a live record, so that
-    what `--ack` archives is what it classified. A worker without that phase moves no record."""
-    fd = None
-    if enabled(config):
-        with suppress(OSError):
-            fd = os.open(incidents_dir() / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+def records_lock():
+    """The incident directory's `.records.lock`, which a worker's decide phase also takes to write or archive
+    a live record. `--ack` holds it from listing its items to the last move, so overlapping acknowledgements
+    cannot both keep the same record aside, and what it archives is what it classified."""
     try:
-        if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        fd = os.open(incidents_dir() / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    except FileNotFoundError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        if fd is not None:
-            os.close(fd)
+        os.close(fd)
 
 
 DRAFT = re.compile(r"roadmap-[A-Za-z0-9_-][A-Za-z0-9_.-]{0,200}\.md")
@@ -433,6 +434,9 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
     """One read from the pull request's own forge, GitHub with the host's credential or Forgejo anonymously.
     The issue endpoint also answers for a number that is an issue, which an agent's `#N` may be."""
     path = f"repos/{repository}/{'issues' if named else 'pulls'}/{number}"
+    # The answer may describe the pull request as of any moment after the request starts, so it counts only
+    # from then: a record rewritten while the request is in flight is newer than the answer.
+    started = time.time()
     try:
         if forge == "github":
             data = github.request(path, token_file=config.get("github_token_file"))
@@ -456,7 +460,7 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
             raise
     except (KeyError, TypeError, AttributeError):
         raise FleetError(f"{origin} returned an unexpected answer for {repository}#{number}") from None
-    return dict(value, observed=time.time())
+    return dict(value, observed=started)
 
 
 def origins_path():
@@ -560,7 +564,7 @@ def listing(config):
 
 def acknowledge(config, which):
     done = []
-    with records_lock(config):
+    with records_lock():
         for item in gather(config):
             ack = SOURCES[item["source"]].get("ack")
             if ack and (which == item["id"] or (which == "all" and (item.get("rank") != 2 or item.get("cleared")))):
