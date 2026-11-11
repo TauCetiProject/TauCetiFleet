@@ -148,7 +148,10 @@ class Isolated(unittest.TestCase):
             dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
             dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
             *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
-            dict(env={"TAUCETI_BUDGET_DIR": "/elsewhere"}),
+            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
+                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
+            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
+              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
             dict(env={"A": "x" * 16384}),
         ]
         with patch.object(host, "install_service"):
