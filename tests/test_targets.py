@@ -4,7 +4,9 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -54,9 +56,16 @@ class TargetLists(unittest.TestCase):
         environ.start()
         self.addCleanup(environ.stop)
         self.protocol = dict(version=1, roadmap_focus=1, roadmap_targets=1)
-        probe = patch.object(capabilities, "worker_protocol", side_effect=lambda: self.protocol)
+        self.manager_protocol = None
+        probe = patch.object(capabilities, "worker_protocol",
+                             side_effect=lambda worker=None: self.protocol if worker is None else self.manager_protocol)
         probe.start()
         self.addCleanup(probe.stop)
+        self.find_manager = targets.running_manager
+        manager = patch.object(targets, "running_manager", side_effect=lambda: self.manager)
+        self.manager = None
+        manager.start()
+        self.addCleanup(manager.stop)
         store.update_host(github_account="operator", ci_allowed=False)
 
     def mirror(self, *directories):
@@ -75,6 +84,24 @@ class TargetLists(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", "--bare", str(source), str(base / "mirror.git")], check=True)
         (base / "state.json").write_text(json.dumps(dict(sha=sha, fetched=1)))
 
+    def worker_inventory(self, prs):
+        """The worker's prepared `prs` table and a stand-in for its read-only `activity --inventory` command."""
+        (self.root / "activity").mkdir()
+        with contextlib.closing(sqlite3.connect(self.root / "activity/activity.sqlite")) as db, db:
+            db.execute("CREATE TABLE prs(repo TEXT,number INTEGER,worker TEXT,scope TEXT,created REAL,state TEXT,"
+                       "landed REAL,observed REAL,checked REAL,head TEXT,source TEXT,PRIMARY KEY(repo,number))")
+            db.executemany("INSERT INTO prs(repo,number,scope,state,landed) VALUES (:repo,:number,:scope,:state,:landed)", prs)
+        worker = store.data_dir() / "bin/tauceti"
+        worker.parent.mkdir(parents=True, exist_ok=True)
+        worker.write_text(f"""#!{sys.executable}
+import json, os, sqlite3, sys
+assert sys.argv[1:4] == ["activity", "--inventory", "--group"], sys.argv
+db = sqlite3.connect(os.environ["TAUCETI_ACTIVITY_DIR"] + "/activity.sqlite")
+db.row_factory = sqlite3.Row
+print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM prs WHERE scope=?", sys.argv[4:5])])))
+""")
+        worker.chmod(0o755)
+
     def definitions(self):
         host.worker_config(store.host_config())
         return (store.config_dir() / "workers.toml").read_text()
@@ -87,8 +114,13 @@ class TargetLists(unittest.TestCase):
         self.assertEqual(report["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         self.assertEqual(report["areas"], dict(MeasureTheory=dict(done=1, inflight=1, eligible=0, blocked=0),
                                                Probability=dict(done=0, inflight=1, eligible=0, blocked=1)))
+        for state in ("verifying", "working"):
+            verifying = [dict(id="w1", state=state, roadmap_target="MeasureTheory/kolmogorov-zero-one")]
+            self.assertEqual(targets.summarize(targets.parse(EXAMPLE), verifying)["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         ticked = EXAMPLE.replace("[~] `truncation", "[x] `truncation")
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
+        mixed = targets.parse(EXAMPLE.replace("`borel-cantelli`, `truncation-bounds`", "borel-cantelli, `truncation-bounds`"))
+        self.assertEqual(mixed["items"][-1]["needs"], ["borel-cantelli", "truncation-bounds"])
         undefined = EXAMPLE.replace("needs: none", "needs: no-such-slug")
         self.assertEqual(targets.summarize(targets.parse(undefined), [])["blocked"], 1)
         with self.assertRaisesRegex(FleetError, "marker"):
@@ -151,6 +183,29 @@ class TargetLists(unittest.TestCase):
             targets.configure(dict(text=done), [])
         self.assertIsNone(store.host_config()["roadmap_targets"])
 
+    def test_a_running_manager_without_list_support_refuses_the_list(self):
+        self.manager, self.manager_protocol = "/old/bin/tauceti", dict(version=1, roadmap_focus=1)
+        with self.assertRaisesRegex(FleetError, "running worker manager started from a TauCetiWorker without target-list support"):
+            targets.configure(dict(text=EXAMPLE), [])
+        self.manager = ""
+        with self.assertRaisesRegex(FleetError, "Cannot tell which worker runtime the running manager uses; on the host run"):
+            targets.configure(dict(text=EXAMPLE), [])
+        self.assertIsNone(store.host_config().get("roadmap_targets"))
+        self.assertFalse(targets.stored().exists())
+        self.manager, self.manager_protocol = "/new/bin/tauceti", self.protocol
+        self.assertEqual(targets.configure(dict(text=EXAMPLE), [])["roadmap_targets"], str(targets.stored()))
+        self.assertIsNone(targets.configure(dict(clear=True), [])["roadmap_targets"])
+
+    def test_the_running_manager_is_the_runtime_it_started_from(self):
+        active = []
+        with patch.object(targets, "run", side_effect=lambda argv, **_: subprocess.CompletedProcess(argv, 0 if active else 3)):
+            self.assertIsNone(self.find_manager())
+            active.append(True)
+            with patch.object(host, "manager_process", return_value=None):
+                self.assertEqual(self.find_manager(), "")
+            store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/old/bin/tauceti"))
+            self.assertEqual(self.find_manager(), "/old/bin/tauceti")
+
     def test_controller_rewrites_definitions_and_reports_the_list(self):
         store.update_host(workers_enabled=True, max_workers=2)
         handlers, written = {}, {}
@@ -190,16 +245,20 @@ class TargetLists(unittest.TestCase):
         self.mirror("TauCetiRoadmap/MeasureTheory")
         machine = store.host_config()["machine_id"]
         listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1)\n- [~] `item-2` — text (in flight: #2)\n"
-                                 "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [ ] no slug\n\n## Notes")
-        path = self.root / "list.md"
+                                 "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [~] `item-5` — text (in flight: #5)\n"
+                                 "- [ ] no slug\n\n## Notes")
+        path = self.root / "checkout/list.md"
+        path.parent.mkdir()
         path.write_text(listed)
         path.chmod(0o640)
-        store.update_host(roadmap_targets=str(path))
+        link = self.root / "list.md"
+        link.symlink_to(path)
+        store.update_host(roadmap_targets=str(link))
         prs = [dict(scope=machine, repo=targets.REPOSITORY, number=n, state=state, landed=landed)
                for n, state, landed in ((1, "MERGED", 5.0), (2, "CLOSED", None), (3, "OPEN", None), (1234, "CLOSED", 9.0))]
         prs.append(dict(scope=machine, repo="TauCetiProject/TauCetiRoadmap", number=4, state="MERGED", landed=1.0))
-        (self.root / "activity").mkdir()
-        (self.root / "activity/prs.json").write_text(json.dumps(dict(prs=prs)))
+        prs.append(dict(scope="another-host", repo=targets.REPOSITORY, number=5, state="MERGED", landed=1.0))
+        self.worker_inventory(prs)
         rounds = [dict(id="w1", state="running", roadmap_target="MeasureTheory/borel-cantelli"),
                   dict(id="w2", state="surveying", roadmap_target="Probability/renamed")]
         result = targets.configure(dict(audit=True), rounds)
@@ -207,7 +266,7 @@ class TargetLists(unittest.TestCase):
         self.assertEqual((result["corrections"], result["applied"]), (2, False))
         self.assertEqual(path.read_text(), listed)
         for expected in (
-            "Line 19 is an item line without a `slug`; workers skip it",
+            "Line 20 is an item line without a `slug`; workers skip it",
             "No roadmap directory for Probability in the workers' roadmap mirror",
             "w1 is authoring MeasureTheory/borel-cantelli, which the file marks done",
             "w2 is authoring Probability/renamed, which the file does not list",
@@ -216,14 +275,15 @@ class TargetLists(unittest.TestCase):
             "Probability/truncation-bounds: #1234 landed -> [x]",
         ):
             self.assertTrue(any(d.startswith(expected) for d in details), expected)
-        self.assertFalse(any("item-3" in d or "item-4" in d for d in details))
+        self.assertFalse(any(f"item-{n}" in d for d in details for n in (3, 4, 5)))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             targets.display(targets.configure(dict(audit=True, apply=True), rounds))
-        self.assertIn(f"2 line(s) rewritten in {path}", out.getvalue())
+        self.assertIn(f"2 line(s) rewritten in {link}", out.getvalue())
+        self.assertEqual(link.resolve(), path.resolve())
         after = path.read_text()
         self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234)\n", after)
         self.assertIn("- [ ] `item-1` — text (partial: #1)\n", after)
-        self.assertEqual(after.count("\n- [~]"), 3)
+        self.assertEqual(after.count("\n- [~]"), 4)
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(targets.configure(dict(audit=True, apply=True), [])["corrections"], 0)
         store.update_host(roadmap_targets=None)

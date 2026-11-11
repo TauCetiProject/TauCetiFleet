@@ -896,10 +896,13 @@ The worker manager restarts a worker whose definition changes, so setting,
 moving or clearing a list ends the rounds in progress; workers read the file at
 the start of each roadmap round, so new contents at the same path, including
 every repeated transfer, change no definition and restart nothing. The installed
-TauCetiWorker must report `roadmap_targets` in its Fleet protocol. Fleet refuses
-to set a list otherwise, because a worker manager that does not know the key
-loads no worker from definitions that name it, and `doctor` blocks worker
-activation for the same reason or when the saved list has become unreadable.
+TauCetiWorker must report `roadmap_targets` in its Fleet protocol, and so must
+the runtime a running worker manager started from, which a live update leaves in
+place. Fleet refuses to set a list otherwise, because a worker manager that does
+not know the key loads no worker from definitions that name it; restarting
+`tauceti-fleet-workers.service` moves the manager to the installed runtime.
+`doctor` blocks worker activation for the same reason or when the saved list has
+become unreadable.
 
 `status` adds the list under the focus line:
 
@@ -922,13 +925,14 @@ per area.
 contacting GitHub: item lines workers skip, slugs defined twice, `needs:` slugs
 the list never defines, headings without a roadmap directory, rounds in
 progress on an item the file marks done or no longer lists, and `[~]` items
-whose `in flight: #N` clause names a pull request that the host's prepared pull
-request inventory records as closed. For a landed pull request the correction is
+whose `in flight: #N` clause names a pull request that the worker's prepared pull
+request inventory (`tauceti activity --inventory`) records as closed. For a landed pull request the correction is
 `[x]` with `landed: #N`, or `[ ]` when the item's own `partial:` clause names
 it; the host cannot read a pull request's marker, so check the printed line
 when the pull request may have landed only part of the item. A pull request
 closed with no landing on record is reported and left to you. `--apply` writes
-the corrections into the file the workers read; for a transferred list that is
+the corrections into the file the workers read, through a symlink if the path is
+one; for a transferred list that is
 the host's copy, so make the same edits in your own file.
 
 A worker under a target list takes no roadmap focus. With both set, `focus`,

@@ -6,6 +6,7 @@ against files already on the host, and never makes a GitHub request.
 """
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -13,8 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import activity, capabilities
-from .process import run
+from . import capabilities
+from .process import executable, run
 from .store import FleetError, config_dir, host_config, read, update_host
 
 MARKER = re.compile(r"<!--\s*tauceti-targets:v1\s*-->")
@@ -24,11 +25,27 @@ SLUG = re.compile(r"`([^`]+)`")
 CLAUSES = re.compile(r"\(([^()]*)\)\s*$")
 MARKS = {" ": "open", "~": "inflight", "x": "done", "X": "done"}
 STATES = ("done", "inflight", "eligible", "blocked")
+# A round's verification reports `verifying`, then `working`, while the round still holds its item.
+ACTIVE = ("running", "surveying", "verifying", "working")
 # A transferred list travels inside the 1 MiB host request, where JSON escapes can double its size.
 LIMIT = 256 * 1024
 REPOSITORY = "TauCetiProject/TauCeti"
 ROADMAP = "TauCetiProject/TauCetiRoadmap"
 FILE_ONLY = "Counted from the file's marks and this host's rounds; workers also count open and merged pull requests"
+RESTART_MANAGER = (
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, which ends every worker's "
+    "current round, then set the list again"
+)
+
+
+def running_manager():
+    """The runtime the active worker manager started from: None when no manager runs, "" when it cannot be told."""
+    from . import host
+
+    # A live update installs a new runtime but leaves a running manager on the one it started with.
+    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False).returncode:
+        return None
+    return host.running_manager().get("binary") or ""
 
 
 def stored():
@@ -83,7 +100,7 @@ def parse(text):
                 key, _, value = clause.partition(":")
                 clauses[key.strip().lower()] = value.strip()
             needs = clauses.get("needs", "none")
-            needs = [] if needs.lower() == "none" else [s.strip() for s in SLUG.findall(needs) or needs.split(",") if s.strip()]
+            needs = [] if needs.lower() == "none" else [s.strip().strip("`").strip() for s in needs.split(",") if s.strip("` \t")]
             items.append(dict(area=area, slug=slug.group(1).strip(), status=MARKS[match.group(2)], needs=needs,
                               line=number, clauses=clauses))
     return dict(areas=areas, items=items, malformed=malformed)
@@ -92,7 +109,7 @@ def parse(text):
 def holders(workers):
     """Rounds in progress under the list; a waiting or backing-off slot keeps its last item in its status file."""
     return [dict(worker=w.get("id"), item=w["roadmap_target"]) for w in workers or []
-            if w.get("state") in ("running", "surveying") and isinstance(w.get("roadmap_target"), str) and w["roadmap_target"]]
+            if w.get("state") in ACTIVE and isinstance(w.get("roadmap_target"), str) and w["roadmap_target"]]
 
 
 def summarize(listing, workers):
@@ -175,6 +192,17 @@ def structure_problems(listing):
             ["`needs:` names slugs the list never defines, which block nothing: " + ", ".join(undefined)] if undefined else [])
 
 
+def landings(machine):
+    """This host's pull requests as the worker's prepared activity records them, read without GitHub."""
+    worker = executable("tauceti")
+    if not worker:
+        raise FleetError("No worker runtime is installed")
+    result = run([worker, "activity", "--inventory", "--group", machine], check=False)
+    if result.returncode:
+        raise FleetError("tauceti activity --inventory failed")
+    return json.loads(result.stdout)["prs"]
+
+
 def rewritten(line, mark, clause=None):
     """An item line with a new mark and its `in flight:` clause replaced by `clause` or dropped."""
     ending = line[len(line.rstrip("\r\n")):]
@@ -211,8 +239,8 @@ def audit(config, text, workers):
             note("round", f"{held['worker']} is authoring {held['item']}, which the file "
                  + ("marks done" if item else "does not list"), item=held["item"])
     try:
-        prs = {p["number"]: p for p in activity.inventory(config["machine_id"]) if p["repo"] == REPOSITORY}
-    except (FleetError, KeyError, TypeError):
+        prs = {p["number"]: p for p in landings(config["machine_id"]) if p["repo"] == REPOSITORY}
+    except (FleetError, ValueError, KeyError, TypeError):
         prs = None
         note("pull-requests", "This host's prepared pull request inventory is unreadable; in-flight items not checked")
     lines = text.splitlines(keepends=True)
@@ -257,7 +285,9 @@ def configure(payload, workers):
         findings, corrected = audit(config, text, workers)
         applied = bool(payload.get("apply")) and corrected != text
         if applied:
-            write(before, corrected, stat.S_IMODE(Path(before).stat().st_mode))
+            # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
+            destination = Path(before).resolve()
+            write(destination, corrected, stat.S_IMODE(destination.stat().st_mode))
         return dict(roadmap_targets=before, transferred=Path(before) == stored(), findings=findings,
                     corrections=sum("correction" in f for f in findings), applied=applied)
     notes = []
@@ -270,6 +300,12 @@ def configure(payload, workers):
         if capabilities.worker_protocol().get("roadmap_targets") != 1:
             raise FleetError("The installed TauCetiWorker has no target-list support, and its manager loads no worker from "
                              "definitions that name a list; install a release with roadmap_targets protocol support first")
+        manager = running_manager()
+        if manager == "":
+            raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
+        if manager and capabilities.worker_protocol(manager).get("roadmap_targets") != 1:
+            raise FleetError("The running worker manager started from a TauCetiWorker without target-list support and would "
+                             "reject definitions that name a list; " + RESTART_MANAGER)
         if path is not None:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise FleetError("A target list on the host is named by its absolute path")
