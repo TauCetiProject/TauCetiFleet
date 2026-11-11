@@ -26,6 +26,67 @@ class ActivityTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
+    def test_attributed_output_pools_local_credit_and_keeps_status_read_only(self):
+        def host_value(cost, credit):
+            return dict(
+                available=True,
+                summary=dict(
+                    prepared_at=100,
+                    history_since=1,
+                    rounds={w: {} for w in activity.WINDOWS},
+                    pr_windows={w: dict(authored=1, landed=1) for w in activity.WINDOWS},
+                    running=0,
+                    open_prs=0,
+                    unknown_prs=0,
+                    unknown_landings=0,
+                    costs=dict(
+                        accounting_version=3,
+                        windows={
+                            w: dict(
+                                estimated_usd=str(cost),
+                                loc_basis="landed_at",
+                                landed_loc_added=15000,
+                                landed_prs=1,
+                                known_loc_prs=1,
+                                missing_loc_prs=0,
+                                attribution_version=1,
+                                attributed_loc=str(credit),
+                                attribution_known_prs=1,
+                                attribution_missing_prs=0,
+                            )
+                            for w in ("24h", "7d", "total")
+                        },
+                    ),
+                ),
+            )
+
+        first, second = host_value(17, 8000), host_value(20, 2000)
+        with (
+            patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
+            patch("subprocess.run", side_effect=AssertionError("process in status")),
+            patch("pathlib.Path.rglob", side_effect=AssertionError("archive scan in status")),
+            patch("tauceti_fleet.github.request", side_effect=AssertionError("GitHub in status")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            combined = activity.combine_status([first, second])
+            activity.display(combined)
+        row = combined["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual(row["attributed_loc"], "10000")
+        self.assertEqual(row["estimated_usd"], "37")
+        self.assertIn("Estimated $ / attributed LOC", output.getvalue())
+        self.assertIn("~$0.0037", output.getvalue())
+        self.assertIn("2/2", output.getvalue())
+        for row in second["summary"]["costs"]["windows"].values():
+            row.update(attributed_loc=None, attribution_known_prs=0, attribution_missing_prs=1)
+        with contextlib.redirect_stdout(io.StringIO()) as partial_output:
+            partial = activity.combine_status([first, second])
+            activity.display(partial)
+        self.assertEqual(partial["summary"]["costs"]["windows"]["24h"]["attributed_loc"], "8000")
+        self.assertIn("partial ~$0.0046", partial_output.getvalue())
+        del second["summary"]["costs"]["windows"]["24h"]["attribution_version"]
+        row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
+        self.assertIsNone(row["attributed_loc"])
+
     def test_table_aligns_all_rows_and_lists_zero_count_work_types(self):
         value = dict(
             available=True,
@@ -334,7 +395,6 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(total["landed_loc"], "300")
         self.assertIsNone(total["usd_per_loc"])
         self.assertIn("Some hosts have no prepared activity", combined["errors"])
-
 
     def test_cached_snapshot_prs_keep_verified_landings_without_api(self):
         p = dict(
