@@ -935,12 +935,13 @@ worker's live record files are never rewritten. Nothing else in `attention` or
 `status` contacts GitHub. `--ack all` also archives the records the list had
 already dropped.
 
-Once a minute the host controller moves the records the list has dropped into
-`incidents/acked/`, each with an `overtaken` field giving the time and `merged`,
-`closed` or `new head`; a record a person acknowledged has no such field. The
-live folder therefore holds only what still waits. The controller makes no
-GitHub request for this: a record judged from a `--lookup` answer is moved on
-the next pass.
+Once a minute the host controller moves the records whose pull request has
+merged into `incidents/acked/`, each with an `overtaken` field giving the time
+and `merged`; a record a person acknowledged has no such field. A record dropped
+because its pull request closed or moved to a new head stays live, since the
+pull request can come back to that head, and `--lookup` asks about it again.
+The controller makes no GitHub request for this: a record judged from a
+`--lookup` answer is moved on the next pass.
 
 In the same pass the controller counts the listed items, and `status` shows the
 count above the host's worker lines, with the command:

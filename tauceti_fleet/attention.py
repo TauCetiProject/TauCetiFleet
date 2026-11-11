@@ -201,8 +201,11 @@ def incident_ack(config, item):
 
 
 def incident_sweep(config, items):
-    """Archive the records events have overtaken, marked as such, so the live folder holds what still waits."""
+    """Archive the records whose pull request has merged, marked as overtaken. A closed pull request
+    can reopen and a moved one can return to the record's head, so those stay live for `--lookup`."""
     for item in items:
+        if item.get("cleared") != "merged":
+            continue
         source, target = incidents_dir() / item["record"], incidents_dir() / "acked" / item["record"]
         try:
             aside = archive(item["record"])

@@ -465,16 +465,16 @@ class Attention(unittest.TestCase):
         self.listed(ack="5")
         self.controller_pass()
         acked = attention.incidents_dir() / "acked"
-        self.assertEqual([p.name for p in attention.incidents_dir().glob("*.json")], ["declined-fix-4.json"])
+        self.assertEqual(sorted(p.name for p in attention.incidents_dir().glob("*.json")),
+                         ["declined-fix-2.json", "declined-fix-3.json", "declined-fix-4.json"])
         self.assertEqual({p.name: json.loads(p.read_text()).get("overtaken", {}).get("by") for p in acked.iterdir()},
-                         {"declined-fix-1.json": "merged", "declined-fix-2.json": "closed", "declined-fix-3.json": "new head",
-                          "declined-fix-5.json": None})
+                         {"declined-fix-1.json": "merged", "declined-fix-5.json": None})
         swept = json.loads((acked / "declined-fix-1.json").read_text())
         self.assertEqual(dict(swept, overtaken=None), dict(json.loads(text), overtaken=None))
         self.assertIsNotNone(attention.epoch(swept["overtaken"]["at"]))
         self.assertFalse(attention.notes_path("declined-fix-1.json").exists())
         self.assertEqual((attention.prepared().get("error"), attention.prepared()["count"]), (None, 1))
-        self.assertEqual(self.listed()["cleared"], [])
+        self.assertEqual(sorted(c["cleared"] for c in self.listed()["cleared"]), ["closed", "new head"])
 
         self.observe(4, "MERGED", "a" * 40, at + 120)
         judged = [i for i in attention.incident_items(config) if i.get("cleared")]
@@ -489,7 +489,7 @@ class Attention(unittest.TestCase):
         at = attention.epoch("2026-01-15T09:30:00Z")
         self.record("declined", "fix", 1, summary="old")
         self.record("declined", "fix", 1, acked=True, summary="earlier")
-        self.observe(1, "OPEN", "b" * 40, at + 60)
+        self.observe(1, "MERGED", "a" * 40, at + 60)
         judged = [i for i in attention.incident_items(config) if i.get("cleared")]
         write = store.atomic
 
@@ -502,15 +502,26 @@ class Attention(unittest.TestCase):
         acked = attention.incidents_dir() / "acked"
         live = json.loads((attention.incidents_dir() / "declined-fix-1.json").read_text())
         self.assertEqual((live["summary"], live["head"]), ("new", "b" * 40))
-        self.assertEqual(json.loads((acked / "declined-fix-1.json").read_text())["overtaken"]["by"], "new head")
+        self.assertEqual(json.loads((acked / "declined-fix-1.json").read_text())["overtaken"]["by"], "merged")
         self.assertEqual(json.loads((acked / "declined-fix-1.json.1").read_text())["summary"], "earlier")
+
+    def test_a_closed_record_stays_live_through_the_sweep_and_is_listed_when_it_reopens(self):
+        config = self.on()
+        self.record("declined", "fix", 7, summary="no")
+        state = dict(value="closed")
+        self.github.side_effect = lambda path, **_: dict(state=state["value"], merged_at=None, head=dict(sha="a" * 40))
+        self.assertEqual(self.listed(lookup=True)["items"], [])
+        attention.prepare(config)
+        self.assertTrue((attention.incidents_dir() / "declined-fix-7.json").exists())
+        state["value"] = "open"
+        self.assertEqual([i["id"] for i in self.listed(lookup=True)["items"]], ["7"])
 
     def test_sweep_puts_back_a_record_rewritten_before_it_moved_and_restores_the_earlier_one(self):
         config = self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")
         self.record("declined", "fix", 1, summary="old")
         self.record("declined", "fix", 1, acked=True, summary="earlier")
-        self.observe(1, "OPEN", "b" * 40, at + 60)
+        self.observe(1, "MERGED", "a" * 40, at + 60)
         judged = [i for i in attention.incident_items(config) if i.get("cleared")]
         self.record("declined", "fix", 1, head="b" * 40, at="2026-01-15T09:32:00Z", summary="new")
         attention.incident_sweep(config, judged)
