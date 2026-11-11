@@ -528,8 +528,10 @@ starts it and never waits for it. One pass:
   `git fetch` then brings `main` and the pull-request heads that moved since the
   last pass into a shallow, blobless cache under Fleet's data directory, and
   `lake-manifest.json` and `lean-toolchain` are read from it; a version of
-  either file the cache has not seen costs one more fetch. The pass makes no
-  GitHub API requests.
+  either file the cache has not seen costs one more fetch. If a head is no longer
+  on the remote, `main` and each moved head are fetched separately. A pull
+  request whose pin files cannot be read keeps the revision the last pass found
+  for it. The pass makes no GitHub API requests.
 - Publishes each pinned revision that is missing as `DIR/store/<revision>/`, an
   entry of the worker's
   [read-only Mathlib store](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/mathlib-store.md):
@@ -538,14 +540,16 @@ starts it and never waits for it. One pass:
   `LAKE_ARTIFACT_CACHE` unset, writes `.tauceti-store-ready` last and renames the
   checkout into the store. A failed attempt publishes nothing and is retried by
   the next pass.
-- Removes an entry once successful pin checks have found its revision unpinned
+- Removes an entry once pin checks have found its revision unpinned
   for three hours: twice the worker's default `TAUCETI_ROUND_TIMEOUT`, or twice
   the value the profile's `env` gives its workers if that is larger, since a
   round that started while the revision was pinned may still be linked to it.
   The three hours start at the first check that finds it unpinned and start
-  over if it is pinned again. A pass whose pin check failed removes nothing.
-  An entry whose marker someone deleted is removed that long after the deletion
-  and, if still pinned, built again.
+  over if it is pinned again. Only a complete check, one that read the pins of
+  `main` and every open pull request, starts the three hours or removes
+  anything; after any failed read the pass removes nothing. An entry whose
+  marker someone deleted is removed that long after the deletion, by a complete
+  check, and, if still pinned, built again.
 
 An entry takes about 7 GB. No build starts while the filesystem has less than
 20 GiB free. Downloaded archives stay in `DIR/downloads` until every pinned
