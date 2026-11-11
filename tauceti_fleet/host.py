@@ -641,7 +641,7 @@ def worker_statuses():
             for key in ("roadmap_target", "roadmap_work"):
                 if value.get(key):
                     status[key] = value[key]
-            if value.get("roadmap_target"):
+            if value.get("roadmap_target") or value.get("roadmap_work"):
                 status["next_action_at"] = value.get("next_action_at")
             values.append(status)
     return values

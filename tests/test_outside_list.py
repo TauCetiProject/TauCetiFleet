@@ -413,15 +413,25 @@ class Wiring(unittest.TestCase):
             steps = Mock(wraps=pacer.pace)
             pacer.pace = steps
             for offset, kinds in enumerate((["list", "list"], ["list", "outside-list"], [None, "outside-list"], ["list", "list"])):
-                states = ("running", "verifying") if offset % 2 else ("working", "running")
+                states = ("running", "verifying") if offset % 2 else ("working", "surveying")
                 pacer.tick(config, lambda kinds=kinds, states=states: [
-                    dict(state=state, roadmap_work=kind) for state, kind in zip(states, kinds, strict=True)
-                ] + [dict(state="waiting-capacity", roadmap_work="list")], now=1300.0 + offset)
+                    dict(state=state, roadmap_work=kind, next_action_at=None) for state, kind in zip(states, kinds, strict=True)
+                ] + [dict(state="waiting-capacity", roadmap_work="list"),
+                     dict(state="verification-pending", roadmap_work="outside-list", next_action_at=2000.0)], now=1300.0 + offset)
             steps.assert_not_called()
             self.assertEqual((pacer.passes, pacer.seen), (4, [5, 2, 1]))
             pacer.tick(config, lambda: [], now=1900.0)
             steps.assert_called_once()
             self.assertEqual((pacer.passes, pacer.seen), (0, [0, 0, 0]))
+
+    def test_worker_statuses_carry_the_retry_time_of_outside_list_work(self):
+        workers = store.state_dir() / "workers"
+        workers.mkdir(parents=True)
+        (workers / "w1.json").write_text(json.dumps(dict(id="w1", state="verifying", roadmap_work="outside-list", next_action_at=2000.0)))
+        (workers / "w2.json").write_text(json.dumps(dict(id="w2", state="running", next_action_at=2000.0)))
+        found = {w["id"]: w for w in host.worker_statuses()}
+        self.assertEqual(found["w1"]["next_action_at"], 2000.0)
+        self.assertNotIn("next_action_at", found["w2"])
 
     def test_a_list_set_while_the_controller_runs_is_paced_from_the_next_pass(self):
         store.update_host(outside_list_cap=dict(ceiling=40, start=4))
