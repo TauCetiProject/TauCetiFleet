@@ -93,7 +93,7 @@ keeps the Claude credential directory it first ran with.
 | --- | --- | --- |
 | `claude_billing` | `api` or `subscription`. Under `subscription` no API key is read or transferred and workers follow the provider's usage windows, not [grants](../README.md#grants) | `api` |
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round). `codex` and `auto` need `subscription`; `auto` excludes `author_model` and `author_effort` | `claude` |
-| `sandbox` | `host` or `bubble`; see [Hosts](#hosts) | `host` |
+| `sandbox` | `host` or `bubble`; Bubble containers run outside the worker slice's limits, see [Hosts](#hosts) | `host` |
 | `pace` | Pacing curve as `time%:budget%` points, for example `0:10,50:70,90:90` | the worker's curve |
 | `env` | Extra environment for every worker, as printable ASCII strings. Values are written to `workers.toml`, so it holds no secret | none |
 
@@ -145,9 +145,11 @@ tauceti-fleet slots big-server --group 4:auto --group 4:claude:review --group 1:
 ```
 
 An edit rewrites only the workers that change group, and the worker manager
-holds a changed agent or phase list until that worker's round ends. The counts
-say how many slots exist; `workers --max` stays the admission ceiling, and a
-ceiling below the total admits every group in proportion.
+holds a changed agent or phase list until that worker's round ends. Fleet admits
+a rewritten worker only once its status shows the new agent and phases. The
+counts say how many slots exist; `workers --max` stays the admission ceiling,
+and a ceiling below the total admits each group within one slot of its
+proportional share.
 
 ### Weekly schedule
 
@@ -341,14 +343,20 @@ leaves it when its pull request merges, closes or moves to a new head, and the
 controller then archives the record; `--ack` archives one by hand. An archived
 `declined` record still holds its head: delete the file under
 `~/.local/state/tauceti-fleet/incidents/acked/` on the host to let the stage try
-that head again.
+that head again. When `acked/` already holds a record of the same name, `--ack`
+keeps the earlier one as `<name>.1`, `<name>.2` and so on, which the worker does
+not read, so only the file under the record's own name holds the head.
 
 **Halts.** A worker halts when GitHub says its credential belongs to another
 login (`identity-mismatch`), rejects it (`invalid-credentials`) or reports the
 account suspended or locked (`account-halt`). `status` shows it as
 `halted (<reason>)` and the worker manager does not start it again. It keeps its
 admission place, so the host runs one fewer round until `clear-halt`. Put the
-account right first: a worker whose account is still wrong halts again.
+account right first: a worker whose account is still wrong halts again. A
+restarted worker takes its GitHub token from the worker manager, which read the
+token file when it started, so after a new token reaches the host `clear-halt`
+refuses until the manager has been restarted. It names the command; that
+restart ends every round in progress.
 
 ## Hosts
 
@@ -356,7 +364,11 @@ account right first: a worker whose account is still wrong halts again.
 
 `"sandbox": "bubble"` runs code-writing and review rounds in
 [Bubble](https://github.com/kim-em/bubble) containers, and `doctor` then also
-checks for `bubble` and `incus`. Incus need not make the fleet account
+checks for `bubble` and `incus`. The containers run under the Incus daemon,
+outside the worker slice, so its memory ceiling and CPU weight do not apply to
+them and host headroom at admission is their only bound. `doctor` warns of
+this: set limits on the Incus project the containers use, or choose
+`workers --max` for the host's free memory. Incus need not make the fleet account
 root-equivalent: a member of group `incus`, as opposed to `incus-admin`, is
 served by `incus-user` and gets a restricted project of its own with its own
 bridge, which other fleet accounts on the machine cannot see into. What has to
