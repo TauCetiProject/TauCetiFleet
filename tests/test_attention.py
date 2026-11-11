@@ -344,7 +344,7 @@ class Attention(unittest.TestCase):
 
     def ruling(self, incident, stage, pr, ruling, **fields):
         path = self.record("ruling", f"{incident}-{stage}", pr, incident=incident, ruling=ruling, by="model",
-                           incident_at="2026-01-15T09:30:00Z", **fields)
+                           **dict(incident_at="2026-01-15T09:30:00Z") | fields)
         path.write_text(json.dumps(json.loads(path.read_text()) | dict(stage=stage)))
         return path
 
@@ -390,7 +390,7 @@ class Attention(unittest.TestCase):
             "   earlier ruling: wait on #7  (",
             f"   ruling: wait on #431, #433  (model, {now})\n      #431 rewrites the file.",
             "   ruling: prerequisite on target borel-cantelli (added to the list: borel-cantelli)  (",
-            f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
+f"(declined · rebase · w1 · {now})\n   ruling: close as subsumed by #398  (",
             "      every declaration is in #398",
             "\nRulings in the last 24h: 1 close, 2 wait\n",
         ):
@@ -422,6 +422,18 @@ class Attention(unittest.TestCase):
         self.assertIn("Nothing needs you.\n\nUnder a ruling that waits for nobody:\n\n== PR #3 ", text)
         self.assertEqual(attention.prepared()["count"], 0)
         self.assertEqual([d["record"] for d in self.listed(ack="3")["acknowledged"]], [waiting.name])
+
+    def test_a_ruling_archived_again_keeps_the_earlier_one_beside_it(self):
+        self.on()
+        acked = attention.incidents_dir() / "acked"
+        texts = []
+        for at in ("2026-01-15T11:00:00Z", "2026-01-15T12:00:00Z"):
+            self.record("declined", "fix", 5, at=at, summary="declined")
+            texts.append(self.ruling("declined", "fix", 5, "retry", at=at, note=at).read_text())
+            self.assertEqual([d["record"] for d in self.listed(ack="5")["acknowledged"]], ["declined-fix-5.json"])
+        self.assertEqual((acked / "ruling-declined-fix-5.json").read_text(), texts[1])
+        self.assertEqual((acked / "ruling-declined-fix-5.json.1").read_text(), texts[0])
+        self.assertEqual(sorted(p.name for p in acked.glob("*.json")), ["declined-fix-5.json", "ruling-declined-fix-5.json"])
 
     def test_a_drafted_roadmap_change_is_shown_or_copied_and_nothing_else_is_done(self):
         self.on()

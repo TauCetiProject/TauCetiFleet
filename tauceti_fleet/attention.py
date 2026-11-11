@@ -263,19 +263,19 @@ def incident_items(config):
     return items
 
 
-def incident_ack(config, item):
-    """Move the live record to `acked/<name>`, the one name the worker's hold reads there. An earlier
-    record of that name stays as `acked/<name>.<n>`, which the worker does not read."""
-    source, acked = incidents_dir() / item["record"], incidents_dir() / "acked"
-    target = acked / item["record"]
+def archive(name):
+    """Move the live record `name` to `acked/<name>`, the one name the worker's hold reads there. An
+    earlier record of that name stays as `acked/<name>.<n>`, which the worker does not read."""
+    source, acked = incidents_dir() / name, incidents_dir() / "acked"
+    target = acked / name
     acked.mkdir(mode=0o700, exist_ok=True)
     aside = None
     if target.exists() and source.exists():
         n = 1
         while True:
             try:
-                os.link(target, acked / f"{item['record']}.{n}")
-                aside = acked / f"{item['record']}.{n}"
+                os.link(target, acked / f"{name}.{n}")
+                aside = acked / f"{name}.{n}"
                 break
             except FileExistsError:
                 n += 1
@@ -285,9 +285,13 @@ def incident_ack(config, item):
         if aside is not None:
             aside.unlink(missing_ok=True)
         raise
+
+
+def incident_ack(config, item):
+    archive(item["record"])
     if item.get("ruling_record"):
         with suppress(FileNotFoundError):
-            os.replace(incidents_dir() / item["ruling_record"], acked / item["ruling_record"])
+            archive(item["ruling_record"])
 
 
 def roadmap_draft(number):
