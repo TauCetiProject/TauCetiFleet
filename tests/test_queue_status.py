@@ -105,6 +105,27 @@ class QueueStatus(unittest.TestCase):
         self.assertNotIn("Lake", output)
         self.assertNotIn("0/0", output)
 
+    def test_membership_advance_keeps_live_progress_and_other_batches_fresh(self):
+        self.batch["version"] += 5
+        report = self.report()
+        self.assertEqual(len(report["value"]["batches"]), 3)
+        self.assertEqual(report["value"]["batches"][1]["active_tasks"][0]["batch_version"], 349)
+        output = self.render(report)
+        self.assertIn("worker 2: preparation (earlier membership); Lake 36,611/38,051 tasks", output)
+        self.assertIn("CI reporting results", output)
+        self.assertIn("Waiting for placement: 7 PRs", output)
+
+    def test_unclaimed_task_for_earlier_membership_waits_for_refresh(self):
+        self.batch["version"] += 5
+        self.document["claims"] = []
+        with patch.object(ci_overview, "fetch", return_value=self.document):
+            report = queue.refresh(self.manifest)
+        self.assertNotIn("error", report)
+        output = self.render(report)
+        self.assertIn("membership changed; awaiting task refresh", output)
+        self.assertNotIn("Lake", output)
+        self.assertNotIn("cached", output)
+
     def test_last_landing_and_next_head_wait_are_explained(self):
         self.document["batches"][0] = dict(self.head, state="landed", landed_at="2026-11-08T23:41:08Z")
         output = self.render()
@@ -150,7 +171,7 @@ class QueueStatus(unittest.TestCase):
                        lambda q: q.update(observed_at="2026-11-08T23:35:30"),
                        lambda q: q["batches"].append(copy.deepcopy(q["batches"][0])),
                        lambda q: q["batches"][1].update(sealed="true"),
-                       lambda q: q["batches"][1].update(version=350),
+                       lambda q: q["batches"][1]["active_tasks"][0].update(batch_version=350),
                        lambda q: q["batches"][1]["active_tasks"][0]["progress"]["build"].update(completed_tasks=True)):
             with self.subTest(mutate=mutate):
                 document = copy.deepcopy(self.document)

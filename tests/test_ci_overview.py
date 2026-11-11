@@ -30,9 +30,9 @@ class Overview(unittest.TestCase):
         self.addCleanup(orphans.stop)
         self.config = dict(store.host_config(), github_account="science", profile="ai-for-science", max_open_prs=128, workers_enabled=True)
 
-    def worker(self, slot, scope=None):
+    def worker(self, slot, scope=None, limit=128):
         identity = "fleet-" + self.config["machine_id"][:8] + "-" + str(slot)
-        store.atomic(store.state_dir() / "workers" / (identity + ".json"), dict(id=identity, alive=True, max_open_prs=128,
+        store.atomic(store.state_dir() / "workers" / (identity + ".json"), dict(id=identity, alive=True, max_open_prs=limit,
                      applied_spec=dict(github_account="science", roadmap_only=scope, roadmap_skip=[])))
 
     def snapshot(self, sources):
@@ -120,10 +120,14 @@ class Overview(unittest.TestCase):
         self.assertEqual(set(combined["pressure_accounts"]), {"one", "two"})
         self.assertEqual(combined["pressure_accounts"]["one"]["observed_at"], 300)
 
-    def survey_cache(self, name, scope, *, count=200, rows=(), numbers="", complete=True):
+    def survey_cache(self, name, scope, *, count=200, rows=(), numbers="", skip="", complete=True):
         identity = hashlib.sha256(b"https://github-state.taucetiproject.org\0").hexdigest()
+        args = dict(roadmap=scope, skip=skip, numbers=numbers,
+                    stages="bump,fix,fix-ci,lint-repair,overlap-fix,overlap-scan,progress,rebase,review")
+        if name is None:
+            name = hashlib.sha256(json.dumps([overview.REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
         path = self.root / "shared/gateway" / identity / "responses" / (name + ".json")
-        store.atomic(path, dict(query=dict(identity=identity, repository=overview.REPOSITORY, operation="survey", args=dict(roadmap=scope, skip="", numbers=numbers)),
+        store.atomic(path, dict(query=dict(identity=identity, repository=overview.REPOSITORY, operation="survey", args=args),
                                 payload=dict(status="ok", complete=complete, author_counts=dict(science=count), data=list(rows))))
         return path
 
@@ -137,7 +141,7 @@ class Overview(unittest.TestCase):
         self.survey_cache("focused", "SymplecticGeometry", rows=rows)
         self.survey_cache("partial", "Bad", complete=False)
         self.survey_cache("one-pr", "Wrong", numbers="1")
-        self.survey_cache("personal", "RepresentationTheory", count=999)
+        self.survey_cache("personal", "RepresentationTheory")
         with patch.object(overview, "fetch", side_effect=AssertionError("network pressure scan")), patch.object(github, "request", side_effect=AssertionError("network pressure scan")):
             data, _ = overview.pressure(self.config)
         scopes = {r["scope"]: r for r in data["scopes"]}
@@ -147,6 +151,32 @@ class Overview(unittest.TestCase):
         self.assertEqual(scopes["SymplecticGeometry"]["count"], 1)
         self.assertFalse(scopes["SymplecticGeometry"]["blocked"])
         self.assertEqual(data["machine_id"], self.config["machine_id"])
+
+    def test_fresh_scoped_author_count_updates_each_live_global_limit(self):
+        self.worker(1, limit=512)
+        self.worker(2, limit=1024)
+        now = time.time()
+        observations = (
+            (self.survey_cache(None, "auto", count=900), now - 36_000),
+            (self.survey_cache("newer", "PDE", count=526), now - 20),
+            (self.survey_cache("excluded", "MorseTheory", count=12, skip="PDE"), now - 15),
+            (self.survey_cache("partial", "PDE", count=12, complete=False), now - 10),
+            (self.survey_cache("targeted", "PDE", count=12, numbers="123"), now - 5),
+        )
+        for path, stamp in observations:
+            os.utime(path, (stamp, stamp))
+
+        data, stamp = overview.pressure(self.config)
+        self.assertEqual(stamp, observations[1][0].stat().st_mtime)
+        self.assertEqual(
+            [(row["scope"], row["count"], row["limit"], row["blocked"]) for row in data["scopes"]],
+            [("auto", 526, 512, True), ("auto", 526, 1024, False)],
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=stamp))))
+        self.assertIn("all roadmaps: 526/512 blocked, 526/1024 open non-draft roadmap PRs", out.getvalue())
+        self.assertNotIn("stale", out.getvalue())
 
     def test_ci_only_hosts_never_publish_default_worker_pressure(self):
         self.survey_cache("all", "auto", count=200)
