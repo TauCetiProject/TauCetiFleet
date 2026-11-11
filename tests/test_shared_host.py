@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, cli, host, remote, shared_host, store
+from tauceti_fleet import capabilities, cli, host, native_runner, remote, shared_host, store
 from tauceti_fleet.capabilities import GIB
 
 
@@ -161,30 +161,19 @@ class SharedHost(unittest.TestCase):
             status, _ = self.run_controller_once(70 * GIB, cgroup)
         self.assertEqual((status["shared_host"]["workers"], status["shared_host"]["share"]), (6, 0.2))
 
-    def test_a_running_ci_job_keeps_its_claim_while_a_cycle_waits_on_github_and_fails(self):
+    def run_controller_offline(self, clock, runners, stop):
+        """Five-second cycles on a fake clock; every runner-inventory request goes to `runners`."""
         cgroup = self.root / "cgroup"
-        cgroup.mkdir()
+        cgroup.mkdir(exist_ok=True)
         (cgroup / "memory.high").write_text("0")
         memory = dict(cgroup=str(cgroup), pinned=4 * GIB, working_set=4 * GIB, swap=0, maximum=110 * GIB)
         store.update_host(workers_enabled=True, max_workers=8, shared_host_dir=str(self.directory))
-        own = self.directory / (self.machine + ".json")
-        clock, handlers, renewed = [1000.0], {}, []
+        handlers = {}
 
         def sleep(_):
-            # Two cycles 35 s apart, so the second one asks GitHub for the runner inventory again.
-            clock[0] += 3.5
-            if clock[0] >= 1070:
+            clock[0] += 0.5
+            if clock[0] >= stop:
                 handlers[signal.SIGTERM]()
-
-        def runners(_):
-            if clock[0] < 1035:
-                return []
-            deadline = host.time.monotonic() + 5
-            while host.time.monotonic() < deadline and json.loads(own.read_text())["expires_at"] < 1050:
-                threading.Event().wait(0.01)
-            peer = shared_host.step(str(self.directory), "peer", workers=24, ci_busy=False, now=1036)
-            renewed.append((json.loads(own.read_text()), peer["ci_busy"]))
-            raise store.FleetError("runner inventory unavailable")
 
         with (
             patch.object(shared_host.Heartbeat, "interval", 0.01),
@@ -194,17 +183,56 @@ class SharedHost(unittest.TestCase):
             patch.object(host, "collect_ci_results"),
             patch.object(host, "start_workers"),
             patch.object(host, "worker_memory", return_value=memory),
-            patch.object(host.vm, "slots_in_use", return_value=[0]),
-            patch.object(host.vm, "outstanding", return_value=True),
             patch.object(host.github, "runners", side_effect=runners),
-            patch.object(host.CISlot, "step", return_value=dict(slot=0, busy=True)),
             patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
             patch.object(host.time, "time", side_effect=lambda: clock[0]),
             patch.object(host.time, "sleep", side_effect=sleep),
         ):
             host.daemon()
         self.assertEqual(store.read(store.state_dir() / "status.json")["error"], "runner inventory unavailable")
-        self.assertEqual(renewed, [(dict(version=1, expires_at=1050, workers=8, ci_busy=True), True)])
+
+    def own_claim(self):
+        return json.loads((self.directory / (self.machine + ".json")).read_text())
+
+    def peer_sees_ci(self, now):
+        return shared_host.step(str(self.directory), "peer", workers=24, ci_busy=False, now=now)["ci_busy"]
+
+    def test_a_restarted_controller_keeps_a_running_job_claimed_while_github_waits_and_fails(self):
+        # The predecessor's claim lapses at 1015; its CI job survives the restart.
+        self.claim(self.machine, now=1000, workers=8, ci_busy=True)
+        store.atomic(store.state_dir() / "vm.json", dict(busy=True, run_id=7, directory=str(self.root / "guest")))
+        clock, seen = [1005.0], []
+
+        def runners(_):
+            seen.append((clock[0], self.own_claim()))
+            if len(seen) == 1:
+                # The first request waits 20 s, beyond the lease, and then fails.
+                clock[0] += 20
+                deadline = host.time.monotonic() + 5
+                while host.time.monotonic() < deadline and self.own_claim()["expires_at"] < clock[0] + shared_host.LEASE:
+                    threading.Event().wait(0.01)
+                seen.append((clock[0], self.own_claim(), self.peer_sees_ci(clock[0] + 1)))
+            raise store.FleetError("runner inventory unavailable")
+
+        self.run_controller_offline(clock, runners, stop=1035)
+        claim = dict(version=1, workers=8, ci_busy=True)
+        self.assertEqual(seen[:3], [(1005, dict(claim, expires_at=1020)), (1025, dict(claim, expires_at=1040), True),
+                                    (1030, dict(claim, expires_at=1045))])
+
+    def test_a_native_job_start_during_a_github_outage_is_claimed_at_the_next_cycle(self):
+        guest = self.root / "guest"
+        (guest / "control").mkdir(parents=True)
+        store.atomic(store.state_dir() / "vm.json", dict(runtime=native_runner.RUNTIME, busy=False, directory=str(guest)))
+        clock, seen = [1000.0], []
+
+        def runners(_):
+            seen.append((clock[0], self.own_claim()["ci_busy"], self.peer_sees_ci(clock[0] + 1)))
+            (guest / "control/events.jsonl").write_text(json.dumps(dict(kind="ci_started", run_id=7, at=clock[0])) + "\n")
+            raise store.FleetError("runner inventory unavailable")
+
+        self.run_controller_offline(clock, runners, stop=1010)
+        self.assertEqual(seen, [(1000, False, False), (1005, True, True)])
+        self.assertEqual(store.read(store.state_dir() / "vm.json")["run_id"], 7)
 
     def test_doctor_reports_the_directory_only_when_the_setting_is_present(self):
         def check(config):

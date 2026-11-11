@@ -244,6 +244,18 @@ def host_share(config, heartbeat, *, ci_busy):
     return heartbeat.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
 
 
+def observed_ci_busy(slots, config):
+    """Whether a CI job runs in this install, from this machine's records and announcements alone."""
+    busy = []
+    for index in vm.slots_in_use():
+        try:
+            busy.append(bool(slots.setdefault(index, CISlot(index)).observe(config).get("busy")))
+        except (FleetError, OSError, ValueError, KeyError):
+            # An unreadable record may still belong to a running job.
+            busy.append(True)
+    return any(busy)
+
+
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     shared = capacity.shared_memory_bytes(caps)
@@ -742,33 +754,7 @@ class CISlot:
                     value = {}
                     self.close()
                     self.next_vm = time.time() + 5
-        if value and self.client is None:
-            try:
-                self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.client.connect(str(Path(value["directory"]) / "events.sock"))
-                self.client.setblocking(False)
-            except OSError:
-                self.close()
-        if self.client:
-            try:
-                chunk = self.client.recv(16384)
-                if not chunk:
-                    self.close()
-                else:
-                    self.buffer = (self.buffer + chunk)[-65536:]
-            except BlockingIOError:
-                pass
-            except OSError:
-                self.close()
-            while b"\n" in self.buffer:
-                line, self.buffer = self.buffer.split(b"\n", 1)
-                try:
-                    notice = json.loads(line)
-                    if notice.get("kind") == "ci_started" and not value.get("run_id") and str(notice.get("run_id", "")).isdigit():
-                        value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
-                        atomic(path, value)
-                except (ValueError, AttributeError):
-                    pass
+        self.receive(value, path)
         if refresh:
             own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
             if value and own.get("status") == "online" and not value.get("online_observed_at"):
@@ -814,6 +800,45 @@ class CISlot:
                 value = ci_priority.persist(config, before, value)
         return value
 
+    def observe(self, config):
+        """The slot's record with job starts already announced on this machine, without asking GitHub."""
+        config = dict(config, ci_slot=self.index)
+        path = vm.slot_file(config, "vm.json")
+        value = read(path, {})
+        if value:
+            value = native_runner.reconcile_events(config, value)
+            self.receive(value, path)
+        return value
+
+    def receive(self, value, path):
+        if value and self.client is None:
+            try:
+                self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.client.connect(str(Path(value["directory"]) / "events.sock"))
+                self.client.setblocking(False)
+            except OSError:
+                self.close()
+        if self.client:
+            try:
+                chunk = self.client.recv(16384)
+                if not chunk:
+                    self.close()
+                else:
+                    self.buffer = (self.buffer + chunk)[-65536:]
+            except BlockingIOError:
+                pass
+            except OSError:
+                self.close()
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                try:
+                    notice = json.loads(line)
+                    if notice.get("kind") == "ci_started" and not value.get("run_id") and str(notice.get("run_id", "")).isdigit():
+                        value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
+                        atomic(path, value)
+                except (ValueError, AttributeError):
+                    pass
+
 
 def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -850,6 +875,7 @@ def daemon():
         while not stopping:
             config = host_config()
             try:
+                shared = host_share(config, heartbeat, ci_busy=observed_ci_busy(slots, config))
                 caps = resources()
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
@@ -896,7 +922,6 @@ def daemon():
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
-                shared = host_share(config, heartbeat, ci_busy=busy)
                 host_busy = busy or bool(shared and shared["ci_busy"])
                 reserve = worker_headroom(caps, ci_busy=host_busy)
                 maximum = config["max_workers"]
