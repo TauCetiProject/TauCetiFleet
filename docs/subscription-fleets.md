@@ -361,11 +361,14 @@ under the fleet account's home.
 **Attention.** The list has three sources: halted workers, a Claude credential
 that is due, lapsed or missing, and incident records. The first two leave the
 list once the halt is cleared or the credential replaced. An incident item
-leaves it when its pull request merges, closes or moves to a new head, and the
-controller then archives the record; `--ack` archives one by hand. An archived
-`declined` record still holds its head: delete the file under
-`~/.local/state/tauceti-fleet/incidents/acked/` on the host to let the stage try
-that head again. When `acked/` already holds a record of the same name, `--ack`
+leaves it when its pull request merges, closes or moves to a new head. The
+controller archives the record of a merged pull request into
+`~/.local/state/tauceti-fleet/incidents/acked/`, and `--ack` archives one by
+hand. The record of a closed pull request or a moved head is only hidden: it
+stays live in `incidents/`, since the pull request can come back to that head,
+and `--lookup` asks about it again. A `declined` record, live or archived, still
+holds its head; to let the stage try that head again, delete the file that
+exists, under `incidents/` or `incidents/acked/` on the host. When `acked/` already holds a record of the same name, `--ack`
 keeps the earlier one as `<name>.1`, `<name>.2` and so on, which the worker does
 not read, so only the file under the record's own name holds the head.
 
