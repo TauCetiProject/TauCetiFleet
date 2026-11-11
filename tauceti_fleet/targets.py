@@ -33,8 +33,9 @@ REPOSITORY = "TauCetiProject/TauCeti"
 ROADMAP = "TauCetiProject/TauCetiRoadmap"
 FILE_ONLY = "Counted from the file's marks and this host's rounds; workers also count open and merged pull requests"
 RESTART_MANAGER = (
-    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, which ends every worker's "
-    "current round, then set the list again"
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, then set the list again. "
+    "Workers in their own scopes keep running and the new manager adopts them; a worker whose status shows "
+    "degraded isolation runs inside the manager's service and its round ends with it"
 )
 
 
@@ -98,7 +99,9 @@ def parse(text):
             clauses = {}
             for clause in group.group(1).split(";") if group else []:
                 key, _, value = clause.partition(":")
-                clauses[key.strip().lower()] = value.strip()
+                # The worker reads every `partial:` clause, so a repeated key keeps all its values.
+                key = key.strip().lower()
+                clauses[key] = "; ".join(filter(None, (clauses.get(key), value.strip())))
             needs = clauses.get("needs", "none")
             needs = [] if needs.lower() == "none" else [s.strip().strip("`").strip() for s in needs.split(",") if s.strip("` \t")]
             items.append(dict(area=area, slug=slug.group(1).strip(), status=MARKS[match.group(2)], needs=needs,
@@ -265,6 +268,17 @@ def audit(config, text, workers):
     return findings, "".join(lines)
 
 
+def merge3(base, ours, theirs):
+    """Two edits of `base` merged by `git merge-file`, or None when they touch the same lines."""
+    with tempfile.TemporaryDirectory() as directory:
+        files = []
+        for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+            (Path(directory) / name).write_text(text)
+            files.append(Path(directory) / name)
+        merged = run(["git", "merge-file", "-p", "-q", *files], check=False)
+    return merged.stdout if merged.returncode == 0 else None
+
+
 def describe(config, workers):
     path = config.get("roadmap_targets")
     notes = []
@@ -281,13 +295,20 @@ def configure(payload, workers):
     if payload.get("audit"):
         if not before:
             raise FleetError("This host has no target list; set one with targets HOST --file PATH")
-        text = load(before)
+        # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
+        destination = Path(before).resolve()
+        text = load(destination)
         findings, corrected = audit(config, text, workers)
         applied = bool(payload.get("apply")) and corrected != text
         if applied:
-            # Workers resolve the list's path when they start, so a symlink must keep pointing at the file they read.
-            destination = Path(before).resolve()
-            write(destination, corrected, stat.S_IMODE(destination.stat().st_mode))
+            if Path(before).resolve() != destination:
+                raise FleetError(f"{before} named another file when the audit ended; nothing written, audit again")
+            # The inventory lookup takes a while; keep an edit made meanwhile, as the worker's own curation does.
+            current = load(destination)
+            merged = corrected if current == text else merge3(text, corrected, current)
+            if merged is None:
+                raise FleetError(f"{before} changed on the corrected lines during the audit; nothing written, audit again")
+            write(destination, merged, stat.S_IMODE(destination.stat().st_mode))
         return dict(roadmap_targets=before, transferred=Path(before) == stored(), findings=findings,
                     corrections=sum("correction" in f for f in findings), applied=applied)
     notes = []
@@ -309,11 +330,22 @@ def configure(payload, workers):
         if path is not None:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise FleetError("A target list on the host is named by its absolute path")
+            try:
+                path.encode()
+            except UnicodeEncodeError:
+                raise FleetError("A target list's path must be valid UTF-8") from None
             text = load(path)
+            # Workers resolve the path once when they start, so save what it names now; a definition
+            # that changes with the link's destination is what restarts them onto the new file.
+            resolved = str(Path(path).resolve())
+            if resolved != path:
+                notes.append(f"{path} resolves to {resolved}; workers read that file, so set the list again after repointing the link")
+            path = resolved
         elif not isinstance(text, str) or len(text.encode()) > LIMIT:
             raise FleetError(f"A transferred target list is text of at most {LIMIT // 1024} KiB")
         listing = parse(text)
-        repeated, notes = structure_problems(listing)
+        repeated, undefined = structure_problems(listing)
+        notes += undefined
         areas = area_problems(listing)
         if repeated or areas:
             raise FleetError("; ".join(repeated + (areas or [])))

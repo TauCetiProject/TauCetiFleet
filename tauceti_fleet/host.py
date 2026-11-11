@@ -339,7 +339,7 @@ def worker_fields(config):
         raise FleetError("sandbox must be host or bubble")
     if pace and not (isinstance(pace, str) and pace_curve(pace)):
         raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
-    # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
+    # The worker rejects NUL; env values are kept to printable ASCII.
     valid = isinstance(env, dict) and all(
         isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
         and not k.startswith("TAUCETI_FLEET_") and k not in FLEET_OWNED_ENV
@@ -365,8 +365,12 @@ def worker_fields(config):
 
 def toml_value(value):
     if isinstance(value, dict):
-        return "{" + ", ".join(k + " = " + json.dumps(v) for k, v in sorted(value.items())) + "}"
-    return "true" if value is True else json.dumps(value)
+        return "{" + ", ".join(k + " = " + toml_value(v) for k, v in sorted(value.items())) + "}"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def worker_config(config):
@@ -385,7 +389,7 @@ def worker_config(config):
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
-        lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
+        lines += ["", "[[workers]]", "id = " + toml_value(wid)]
         for key, value in fields.items():
             if value is not None:
                 lines.append(key + " = " + toml_value(value))

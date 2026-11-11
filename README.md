@@ -885,7 +885,9 @@ tauceti-fleet targets big-server --clear                              # workers 
 private copy on the host at `~/.config/tauceti-fleet/roadmap-targets.md`; a later
 transfer replaces that copy. With `--on-host`, `PATH` is an absolute path on the
 host and the workers read that file in place, which suits a list kept in a git
-checkout there or shared by several installs. Either way the list must carry
+checkout there or shared by several installs. A symlink is saved as the file it
+names when the list is set, since workers resolve the path when they start; after
+repointing the link, set the list again. Either way the list must carry
 the `<!-- tauceti-targets:v1 -->` marker, define each slug once, and name only
 roadmap directories under its `## ` headings: Fleet checks the headings against
 the roadmap mirror the workers already keep on the host, and refuses a heading
@@ -904,6 +906,9 @@ the runtime a running worker manager started from, which a live update leaves in
 place. Fleet refuses to set a list otherwise, because a worker manager that does
 not know the key loads no worker from definitions that name it; restarting
 `tauceti-fleet-workers.service` moves the manager to the installed runtime.
+Workers in their own scopes keep running and the new manager adopts them; a
+worker whose status shows degraded isolation runs inside the manager's service
+and its round ends with it.
 `doctor` blocks worker activation for the same reason or when the saved list has
 become unreadable.
 
@@ -934,9 +939,10 @@ request inventory (`tauceti activity --inventory`) records as closed. For a land
 it; the host cannot read a pull request's marker, so check the printed line
 when the pull request may have landed only part of the item. A pull request
 closed with no landing on record is reported and left to you. `--apply` writes
-the corrections into the file the workers read, through a symlink if the path is
-one; for a transferred list that is
-the host's copy, so make the same edits in your own file.
+the corrections into the file the workers read; an edit made to the file while
+the audit ran is kept, and one on the corrected lines leaves the file untouched
+for another audit. For a transferred list that file is the host's copy, so make
+the same edits in your own file.
 
 A worker under a target list takes no roadmap focus. With both set, `focus`,
 `targets` and `status` say that the focus share is not applied; it applies again

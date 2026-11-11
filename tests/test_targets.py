@@ -152,13 +152,33 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         shared.parent.mkdir()
         shared.write_text(EXAMPLE)
         result = targets.configure(dict(path=str(shared)), [])
-        self.assertEqual((result["roadmap_targets"], result["transferred"]), (str(shared), False))
+        self.assertEqual((result["roadmap_targets"], result["transferred"]), (str(shared.resolve()), False))
         self.assertIn("Areas not checked: this host has no roadmap mirror yet", result["notes"])
         self.assertFalse(targets.stored().exists())
         shared.write_text(EXAMPLE.replace("[~] `truncation", "[x] `truncation"))
         self.assertEqual(targets.status(store.host_config(), [])["done"], 2)
         shared.unlink()
         self.assertIn("Cannot read target list", targets.status(store.host_config(), [])["error"])
+
+    def test_a_path_outside_the_basic_plane_is_valid_in_the_definitions(self):
+        shared = self.root / "lists/goal-\U0001d6fc\x7f.md"
+        shared.parent.mkdir()
+        shared.write_text(EXAMPLE)
+        targets.configure(dict(path=str(shared)), [])
+        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(shared.resolve())})
+
+    def test_setting_a_symlinked_list_again_follows_the_link(self):
+        one, two, link = self.root / "one.md", self.root / "two.md", self.root / "current.md"
+        one.write_text(EXAMPLE)
+        two.write_text(EXAMPLE.replace("[~] `truncation", "[x] `truncation"))
+        link.symlink_to(one)
+        result = targets.configure(dict(path=str(link)), [])
+        self.assertEqual(result["roadmap_targets"], str(one.resolve()))
+        self.assertIn(f"{link} resolves to {one.resolve()}", result["notes"][0])
+        link.unlink()
+        link.symlink_to(two)
+        self.assertEqual(targets.configure(dict(path=str(link)), [])["list"]["done"], 2)
+        self.assertEqual({w["roadmap_targets"] for w in tomllib.loads(self.definitions())["workers"]}, {str(two.resolve())})
 
     def test_refused_lists_change_nothing(self):
         self.mirror("TauCetiRoadmap/MeasureTheory", "Completed/Probability")
@@ -170,6 +190,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
             (dict(text=EXAMPLE.replace("## Probability", "## Probabilty")), "No roadmap directory for Probabilty"),
             (dict(text="x" * (targets.LIMIT + 1)), "at most 256 KiB"),
             (dict(path="list.md"), "absolute path"),
+            (dict(path="/lists/\ud835.md"), "valid UTF-8"),
             (dict(path=str(self.root / "absent.md")), "Cannot read target list"),
             (dict(text=EXAMPLE, path="/list.md"), "not both"),
         ):
@@ -244,7 +265,7 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
     def test_audit_corrects_only_what_the_host_can_see(self):
         self.mirror("TauCetiRoadmap/MeasureTheory")
         machine = store.host_config()["machine_id"]
-        listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1)\n- [~] `item-2` — text (in flight: #2)\n"
+        listed = EXAMPLE.replace("## Notes", "- [~] `item-1` — text (in flight: #1; partial: #1; partial: #9)\n- [~] `item-2` — text (in flight: #2)\n"
                                  "- [~] `item-3` — text (in flight: #3)\n- [~] `item-4` — text (in flight: #4)\n- [~] `item-5` — text (in flight: #5)\n"
                                  "- [ ] no slug\n\n## Notes")
         path = self.root / "checkout/list.md"
@@ -282,13 +303,38 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(link.resolve(), path.resolve())
         after = path.read_text()
         self.assertIn("- [x] `truncation-bounds` — variance bounds for truncated variables (needs: none; landed: #1234)\n", after)
-        self.assertIn("- [ ] `item-1` — text (partial: #1)\n", after)
+        self.assertIn("- [ ] `item-1` — text (partial: #1; partial: #9)\n", after)
         self.assertEqual(after.count("\n- [~]"), 4)
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(targets.configure(dict(audit=True, apply=True), [])["corrections"], 0)
         store.update_host(roadmap_targets=None)
         with self.assertRaisesRegex(FleetError, "no target list"):
             targets.configure(dict(audit=True), [])
+
+    def test_apply_keeps_edits_made_while_the_audit_ran(self):
+        machine = store.host_config()["machine_id"]
+        path = self.root / "list.md"
+        path.write_text(EXAMPLE)
+        store.update_host(roadmap_targets=str(path))
+        self.worker_inventory([dict(scope=machine, repo=targets.REPOSITORY, number=1234, state="MERGED", landed=9.0)])
+        lookup = targets.landings
+
+        def edited(text):
+            def landings(machine):
+                targets.write(path, text)
+                return lookup(machine)
+            return patch.object(targets, "landings", side_effect=landings)
+
+        added = EXAMPLE.replace("> A line", "- [ ] `added-meanwhile` — new\n> A line")
+        with edited(added):
+            self.assertTrue(targets.configure(dict(audit=True, apply=True), [])["applied"])
+        self.assertIn("`added-meanwhile`", path.read_text())
+        self.assertIn("[x] `truncation-bounds`", path.read_text())
+        path.write_text(EXAMPLE)
+        clashing = EXAMPLE.replace("(needs: none; in flight: #1234)", "(needs: none; in flight: #1235)")
+        with edited(clashing), self.assertRaisesRegex(FleetError, "changed on the corrected lines"):
+            targets.configure(dict(audit=True, apply=True), [])
+        self.assertEqual(path.read_text(), clashing)
 
     def test_cli_requests_and_focus_say_when_a_list_overrides_focus(self):
         entry = dict(target="machine", machine_id="one")
