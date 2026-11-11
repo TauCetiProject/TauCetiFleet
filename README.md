@@ -531,8 +531,9 @@ starts it and never waits for it. One pass:
   either file the cache has not seen costs one more fetch. If a head is no longer
   on the remote, `main` and each moved head are fetched separately. A pull
   request whose pin files cannot be read keeps the revision the last pass found
-  for it. A pull request the inventory lists without an observed state or head
-  is read from its pull-request ref as if open, and makes the check incomplete.
+  for it. A pull request the inventory lists without an observed state or head,
+  or last observed open more than 30 minutes ago, is read from its pull-request
+  ref as if open, and makes the check incomplete.
   The pass makes no GitHub API requests.
 - Builds only trusted revisions. Building runs code from the Mathlib checkout
   (its Lake configuration and the `cache` program) as the Fleet account, and
@@ -552,22 +553,24 @@ starts it and never waits for it. One pass:
   `LAKE_ARTIFACT_CACHE` unset, writes `.tauceti-store-ready` last and renames the
   checkout into the store. A failed attempt publishes nothing and is retried by
   the next pass.
-- Removes an entry once pin checks have found its revision unpinned
-  for three hours: twice the worker's default `TAUCETI_ROUND_TIMEOUT`, or twice
-  the value the profile's `env` gives its workers if that is larger, since a
-  round that started while the revision was pinned may still be linked to it.
-  The three hours start at the first check that finds it unpinned and start
-  over whenever any check finds it pinned again. Only a complete check, one
-  that read the pins of `main` and every open pull request, starts the three
-  hours or removes anything; after any failed read the pass removes nothing. An entry whose
-  marker someone deleted is removed that long after the deletion, by a complete
-  check, and, if still pinned, built again.
+- Withdraws an entry when a check finds its revision unpinned, by deleting its
+  `.tauceti-store-ready` so that no new round links it, and removes the entry
+  three hours later: twice the worker's default `TAUCETI_ROUND_TIMEOUT`, or twice
+  the value the profile's `env` gives its workers if that is larger, so that
+  rounds that linked it before the withdrawal have ended. If any check finds
+  the revision pinned again before then, the marker is written back and the
+  entry serves rounds again without a rebuild. Only a complete check, one that
+  read the pins of `main` and every open pull request, withdraws or removes
+  anything; after any failed read the pass does neither. An entry whose
+  marker someone else deleted is removed that long after the deletion, by a
+  complete check, and, if still pinned, built again.
 
 An entry takes about 7 GB. No build starts while the filesystem has less than
-20 GiB free. Downloaded archives stay in `DIR/downloads` until every trusted
-pinned revision is published and are then deleted. The commits-only clone of
-Mathlib `master` holds commits and no files. One controller maintains a given
-directory.
+20 GiB free; when `DIR/downloads` is what leaves less, it is deleted and the
+build goes ahead if that freed enough. Downloaded archives otherwise stay in
+`DIR/downloads` until every trusted pinned revision is published and are then
+deleted. The commits-only clone of Mathlib `master` holds commits and no files.
+One controller maintains a given directory.
 
 The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for workers
 whose `sandbox` is `bubble`. It reads the setting when it starts, so a running
