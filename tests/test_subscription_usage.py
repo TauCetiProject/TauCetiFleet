@@ -87,8 +87,11 @@ class SubscriptionUsage(unittest.TestCase):
         )
         self.assertEqual(subscription_usage.readings(SUBSCRIPTION, NOW), expected)
         self.assertEqual(subscription_usage.readings(dict(SUBSCRIPTION, agent="claude"), NOW), dict(claude=expected["claude"]))
-        elsewhere = dict(SUBSCRIPTION, env=dict(CLAUDE_CONFIG_DIR=str(self.root / "other"), TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
-        self.assertEqual(subscription_usage.readings(elsewhere, NOW)["claude"]["fetched_at"], NOW - 900)
+        elsewhere = dict(SUBSCRIPTION, env=dict(TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
+        host.worker_fields(elsewhere)
+        self.cache(self.root / "kept/state/.quota-usage/0011223344556677/quota-claude-0123456789abcdef.json",
+                   flat(dict(utilization=50, resets_at=iso(NOW + hour)), None), 5)
+        self.assertEqual(subscription_usage.readings(elsewhere, NOW)["claude"]["fetched_at"], NOW - 5)
         self.codex(self.root / "kept/state/fleet-1/cache/quota-codex.json", 5, (3, 5 * hour, hour))
         self.assertEqual(subscription_usage.readings(elsewhere, NOW)["codex"]["windows"]["session"]["left"], 97.0)
 

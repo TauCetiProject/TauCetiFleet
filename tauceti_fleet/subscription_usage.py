@@ -25,6 +25,11 @@ def providers(config):
     return names
 
 
+def claude_login(config):
+    """The Claude login directory the profile's workers copy; a profile's env may not move it."""
+    return Path.home() / ".claude"
+
+
 def reading_files(config, provider):
     """Every place the worker's pacer may have cached this provider's last usage response.
 
@@ -38,9 +43,8 @@ def reading_files(config, provider):
         roots.append(Path(env["TAUCETI_LEGACY_DATA_ROOT"]))
     if provider == "codex":
         return [path for root in roots for path in root.glob("state/*/cache/quota-codex.json")]
-    login = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     return [
-        *login.glob(".tauceti-quota/usage/quota-claude-*.json"),
+        *claude_login(config).glob(".tauceti-quota/usage/quota-claude-*.json"),
         *(path for root in roots for path in root.glob("state/.quota-usage/*/quota-claude-*.json")),
     ]
 
