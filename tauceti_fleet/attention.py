@@ -171,19 +171,19 @@ def incident_items(config):
     return items
 
 
-def incident_ack(config, item):
-    """Move the live record to `acked/<name>`, the one name the worker's hold reads there. An earlier
-    record of that name stays as `acked/<name>.<n>`, which the worker does not read."""
-    source, acked = incidents_dir() / item["record"], incidents_dir() / "acked"
-    target = acked / item["record"]
+def archive(name):
+    """Move the live record to `acked/<name>`, the one name the worker's hold reads there, and return
+    where an earlier record of that name was kept, as `acked/<name>.<n>`, which the worker does not read."""
+    source, acked = incidents_dir() / name, incidents_dir() / "acked"
+    target = acked / name
     acked.mkdir(mode=0o700, exist_ok=True)
     aside = None
     if target.exists() and source.exists():
         n = 1
         while True:
             try:
-                os.link(target, acked / f"{item['record']}.{n}")
-                aside = acked / f"{item['record']}.{n}"
+                os.link(target, acked / f"{name}.{n}")
+                aside = acked / f"{name}.{n}"
                 break
             except FileExistsError:
                 n += 1
@@ -193,22 +193,46 @@ def incident_ack(config, item):
         if aside is not None:
             aside.unlink(missing_ok=True)
         raise
+    return aside
+
+
+def incident_ack(config, item):
+    archive(item["record"])
 
 
 def incident_sweep(config, items):
     """Archive the records events have overtaken, marked as such, so the live folder holds what still waits."""
     for item in items:
-        path = incidents_dir() / item["record"]
+        source, target = incidents_dir() / item["record"], incidents_dir() / "acked" / item["record"]
         try:
-            record = json.loads(path.read_text())
-            # A worker may have rewritten the record for a later round since it was judged.
-            if (printable(record.get("last_at"), 20), printable(record.get("head"), 64)) != (item["at"], item["head"]):
-                continue
-            record["overtaken"] = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), by=item["cleared"])
-            atomic(incidents_dir() / "acked" / item["record"], record)
-            path.unlink()
-            notes_path(item["record"]).unlink(missing_ok=True)
+            aside = archive(item["record"])
+        except OSError:
+            continue
+        try:
+            record = json.loads(target.read_text())
+            unchanged = (printable(record.get("last_at"), 20), printable(record.get("head"), 64)) == (item["at"], item["head"])
         except (OSError, ValueError):
+            record, unchanged = None, False
+        if unchanged:
+            record["overtaken"] = dict(at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), by=item["cleared"])
+            try:
+                atomic(target, record)
+            except (OSError, ValueError):
+                pass
+            notes_path(item["record"]).unlink(missing_ok=True)
+            continue
+        # The worker rewrote the record for a later round since it was judged: put it back unless an
+        # even later write has taken the live name, which supersedes it as the worker's own replace would.
+        try:
+            try:
+                os.link(target, source)
+            except FileExistsError:
+                pass
+            if aside is not None:
+                os.replace(aside, target)
+            else:
+                target.unlink()
+        except OSError:
             continue
 
 

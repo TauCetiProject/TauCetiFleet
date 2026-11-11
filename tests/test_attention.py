@@ -426,8 +426,44 @@ class Attention(unittest.TestCase):
         judged = [i for i in attention.incident_items(config) if i.get("cleared")]
         later = self.record("declined", "fix", 4, at="2026-01-15T12:00:00Z", summary="again")
         attention.incident_sweep(config, judged)
-        self.assertTrue(later.exists())
+        self.assertEqual(json.loads(later.read_text())["summary"], "again")
+        self.assertFalse((acked / "declined-fix-4.json").exists())
         self.assertEqual(self.github.call_count, 0)
+
+    def test_sweep_keeps_a_record_the_worker_rewrites_while_the_old_one_is_archived(self):
+        config = self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 1, summary="old")
+        self.record("declined", "fix", 1, acked=True, summary="earlier")
+        self.observe(1, "OPEN", "b" * 40, at + 60)
+        judged = [i for i in attention.incident_items(config) if i.get("cleared")]
+        write = store.atomic
+
+        def worker_writes_first(path, value):
+            self.record("declined", "fix", 1, head="b" * 40, at="2026-01-15T09:32:00Z", summary="new")
+            write(path, value)
+
+        with patch.object(attention, "atomic", worker_writes_first):
+            attention.incident_sweep(config, judged)
+        acked = attention.incidents_dir() / "acked"
+        live = json.loads((attention.incidents_dir() / "declined-fix-1.json").read_text())
+        self.assertEqual((live["summary"], live["head"]), ("new", "b" * 40))
+        self.assertEqual(json.loads((acked / "declined-fix-1.json").read_text())["overtaken"]["by"], "new head")
+        self.assertEqual(json.loads((acked / "declined-fix-1.json.1").read_text())["summary"], "earlier")
+
+    def test_sweep_puts_back_a_record_rewritten_before_it_moved_and_restores_the_earlier_one(self):
+        config = self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 1, summary="old")
+        self.record("declined", "fix", 1, acked=True, summary="earlier")
+        self.observe(1, "OPEN", "b" * 40, at + 60)
+        judged = [i for i in attention.incident_items(config) if i.get("cleared")]
+        self.record("declined", "fix", 1, head="b" * 40, at="2026-01-15T09:32:00Z", summary="new")
+        attention.incident_sweep(config, judged)
+        acked = attention.incidents_dir() / "acked"
+        self.assertEqual(json.loads((attention.incidents_dir() / "declined-fix-1.json").read_text())["summary"], "new")
+        self.assertEqual(sorted(p.name for p in acked.iterdir()), ["declined-fix-1.json"])
+        self.assertEqual(json.loads((acked / "declined-fix-1.json").read_text())["summary"], "earlier")
 
     def test_incident_and_credential_variables_share_one_env_table(self):
         with patch.object(host, "install_service"):
