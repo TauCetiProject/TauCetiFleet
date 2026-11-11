@@ -970,9 +970,11 @@ recently first, so repeated calls reach every one. A forge that fails leaves the
 other's requests to go ahead and is asked after them in later calls, and a pull
 request its forge will not show (HTTP 404, or 403 on Forgejo) is reported and
 asked again in turn without stopping the rest of that forge. The answers are
-kept in `~/.local/state/tauceti-fleet/attention/`; the worker's live record
-files are never rewritten. Nothing else in `attention` or `status` contacts a forge.
-`--ack all` also archives the records the list had already dropped.
+kept in `~/.local/state/tauceti-fleet/attention/`, where overlapping lookups
+keep, per pull request, the answer whose request started last; the worker's live
+record files are never rewritten. Nothing else in `attention` or `status`
+contacts a forge. `--ack all` also archives the records the list had already
+dropped.
 
 Once a minute the host controller moves the records whose pull request has
 merged into `incidents/acked/`, each with an `overtaken` field giving the time
