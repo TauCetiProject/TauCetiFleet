@@ -112,11 +112,16 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     cap = min(ceiling, max(floor, state["cap"] if type(state.get("cap")) is int else bounds["start"]))
     readings, samples, resets_at = list(state.get("readings") or []), list(state.get("rounds") or []), state.get("resets_at")
     rate = hold = None
+    idle = reading is not None and reading["used"] == 0 and reading["resets_at"] is None
     if not enabled or slot_seconds == 0:
         hold = "outside the weekly schedule" if enabled else "workers are not enabled"
         readings, samples = [], []
     elif reading is None:
         hold = "no usage reading yet"
+    elif idle:
+        if now - reading["fetched_at"] > STALE:
+            hold = f"the usage reading is {int(now - reading['fetched_at']) // 60} minutes old"
+        readings, samples, resets_at = [], [], None
     elif reading["used"] is None or reading["resets_at"] is None:
         reset = reading["resets_at"] is not None and reading["resets_at"] <= now
         hold = "the weekly window has reset since the last usage reading" if reset else "the usage reading has no weekly figure"
@@ -137,6 +142,16 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     result = dict(version=1, at=now, cap=cap, previous=cap, floor=floor, ceiling=ceiling,
                   readings=readings, rounds=samples, resets_at=resets_at, held=hold is not None, reason=hold)
     if hold:
+        return result
+    if idle:
+        # Nothing opens the window but a model call, so with nothing spent the cap climbs until a round runs.
+        ends_at, ends = now + subscription_usage.WEEK, "weekly window"
+        if slot_seconds is not None and slot_seconds < subscription_usage.WEEK:
+            ends_at, ends = now + slot_seconds, "slot"
+        result.update(step(cap, left=100.0, hours=(ends_at - now) / 3600, listed=0.0, outside=0.0, cutting=False,
+                           session_left=session_left, floor=floor, ceiling=ceiling),
+                      left=100.0, rate=0.0, outside_share=None, ends=ends, ends_at=ends_at)
+        result["reason"] = "the weekly window is not open yet, " + result["reason"]
         return result
     ends_at, ends = reading["resets_at"], "weekly window"
     if slot_seconds is not None and now + slot_seconds < ends_at:

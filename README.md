@@ -987,6 +987,11 @@ window is left, and it is not lowered for spending over plan while no
 outside-list round is running, because a cap already below the open pull
 requests admits nothing and would only take longer to return.
 
+A weekly window that is not open yet, which the reading reports with no usage
+and no reset time, counts as nothing spent with the whole week ahead: the cap
+rises every step until a round opens the window, since only a model call opens
+it.
+
 ```text
 Outside-list cap: 14 (bounds 0-40); 91% of the weekly window projected spent when the slot ends in 14h00m; last step 12m ago: 13 -> 14, spending under plan
 ```

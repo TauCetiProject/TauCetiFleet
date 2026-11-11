@@ -134,6 +134,13 @@ class ControlLaw(unittest.TestCase):
         self.assertEqual(advance(slot_seconds=0.0)["readings"], [])
         self.assertEqual(advance(reading=dict(fresh, fetched_at=now - 1900))["readings"], history["readings"])
         self.assertEqual(advance(state=dict(history, cap=90))["previous"], 40)
+        idle = dict(fresh, used=0.0, resets_at=None)
+        opening = advance(reading=idle)
+        self.assertEqual((opening["held"], opening["cap"], opening["readings"], opening["reason"]),
+                         (False, 11, [], "the weekly window is not open yet, spending under plan"))
+        self.assertEqual(advance(reading=idle, slot_seconds=10 * HOUR)["ends_at"], now + 10 * HOUR)
+        self.assertEqual(advance(reading=idle, session_left=5.0)["cap"], 10)
+        self.assertEqual(advance(reading=dict(idle, fetched_at=now - 1900))["reason"], "the usage reading is 31 minutes old")
 
     def test_simulated_weeks(self):
         for name, simulation, quiet_from in WEEKS:
@@ -349,6 +356,28 @@ class Wiring(unittest.TestCase):
         seen = advance.call_args.kwargs
         self.assertEqual((seen["reading"], seen["session_left"], seen["slot_seconds"], seen["rounds"]),
                          (dict(fetched_at=now - 120, used=30.0, resets_at=now + 100 * HOUR), 5.0, None, [0.0, 0.0, 0.0]))
+
+    def test_an_unopened_weekly_window_raises_a_zero_cap_until_a_round_opens_it(self):
+        self.pace(start=0)
+        now = 1_800_000_000.0
+        cache = self.root / "home/.claude/.tauceti-quota/usage/quota-claude-account.json"
+        cache.parent.mkdir(parents=True)
+        pacer = outside_list.Pacer()
+        config = dict(store.host_config(), workers_enabled=True)
+        caps = []
+        for _ in range(4):
+            cache.write_text(json.dumps(dict(fetched_at=now - 60, payload=dict(five_hour=None, seven_day=None))))
+            with contextlib.redirect_stderr(io.StringIO()):
+                caps.append(pacer.tick(config, list, now=now)["cap"])
+            now += outside_list.EVERY
+        self.assertEqual(caps, [1, 2, 3, 4])
+        self.assertEqual(outside_list.cap_file().read_text(), "4\n")
+        self.assertEqual(pacer.state["reason"], "the weekly window is not open yet, spending under plan")
+        # Once a round opens it, the window is measured from its first reading.
+        opened = dict(seven_day=dict(utilization=1, resets_at=datetime.fromtimestamp(now + 167 * HOUR, UTC).isoformat()))
+        cache.write_text(json.dumps(dict(fetched_at=now - 60, payload=opened)))
+        block = pacer.tick(config, list, now=now)
+        self.assertEqual((block["cap"], block["reason"]), (4, "under 2 h of usage readings in this weekly window"))
 
     def test_status_line(self):
         now = 1_000_000.0
