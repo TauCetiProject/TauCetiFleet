@@ -286,23 +286,25 @@ def incident_lookup(config, items):
     asked, answers, error = 0, {}, None
     deadline = time.monotonic() + 40
 
+    def open_named(item):
+        """A cleared item's own pull request may reopen at the record's head; what it names matters only once it does."""
+        if item.get("cleared"):
+            return []
+        return [n for n in item["named"] if n.get("state") in (None, "OPEN") and n["pr"] != item["pr"]]
+
     def checked(item):
         """When this item's pull requests were last asked about, so a bounded call starts where the last one stopped."""
-        if "pr" not in item:
-            return 0
         own = notes(item["record"]).get(f"{item['repository']}#{item['pr']}")
-        times = [own.get("observed") if isinstance(own, dict) else None] + [
-            n.get("observed") for n in item["named"] if n.get("state") in (None, "OPEN")]
+        times = [own.get("observed") if isinstance(own, dict) else None] + [n.get("observed") for n in open_named(item)]
         return min(t if isinstance(t, int | float) else 0 for t in times)
 
+    items = [i for i in items if "pr" in i and i.get("cleared") != "merged"]
     for item in sorted(items, key=checked):
-        if error or "pr" not in item:
-            continue
+        if error:
+            break
         cached = notes(item["record"])
         fresh = {}
-        wanted = [(item["pr"], False)] + [
-            (n["pr"], True) for n in item["named"] if n.get("state") in (None, "OPEN") and n["pr"] != item["pr"]
-        ]
+        wanted = [(item["pr"], False)] + [(n["pr"], True) for n in open_named(item)]
         for number, named in wanted:
             key = (item["repository"], number, named)
             if key not in answers:
@@ -417,7 +419,7 @@ def host_action(payload):
         looked = dict(asked=0, error=None)
         for source in SOURCES.values():
             if source.get("lookup"):
-                answer = source["lookup"](config, [i for i in source["items"](config) if not i.get("cleared")])
+                answer = source["lookup"](config, source["items"](config))
                 looked = dict(asked=looked["asked"] + answer["asked"], error=looked["error"] or answer["error"])
         result["lookup"] = looked
     value = listing(config)

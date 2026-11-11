@@ -246,8 +246,8 @@ class Attention(unittest.TestCase):
         self.assertIn(f"{REPOSITORY}#398", store.read(attention.notes_path(path.name))["prs"])
         self.github.reset_mock()
         code, output = self.cli("attention", "box", "--lookup")
-        self.assertEqual(sorted(c.args[0].split("/")[-1] for c in self.github.call_args_list), ["400", "412"])
-        self.assertIn("Asked GitHub about 2 pull requests", output)
+        self.assertEqual(sorted(c.args[0].split("/")[-1] for c in self.github.call_args_list), ["400", "412", "413"])
+        self.assertIn("Asked GitHub about 3 pull requests", output)
         self.assertIn("   subsumed by: #398  MERGED  2026-01-14  Title 398  (someone)", output)
         self.github.side_effect = store.FleetError("GitHub request unavailable")
         value = self.listed(lookup=True)
@@ -266,6 +266,47 @@ class Attention(unittest.TestCase):
                 self.assertEqual(self.listed(lookup=True)["lookup"]["asked"], 2)
                 asked.append([int(c.args[0].split("/")[-1]) for c in self.github.call_args_list])
         self.assertEqual(asked, [[1, 2], [3, 4], [5, 1]])
+
+    def test_repeated_bounded_lookups_reach_every_named_pull_request(self):
+        self.on()
+        for pr in (1, 2, 3):
+            self.record("declined", "fix", pr, summary=f"see #{pr + 10}", mentions=[pr + 10])
+
+        def answer(path, **_):
+            if "/pulls/" in path:
+                return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+            return dict(state="open", pull_request=dict(merged_at=None))
+
+        self.github.side_effect = answer
+        asked = []
+        with patch.object(attention, "MAX_LOOKUPS", 3):
+            for _ in range(3):
+                self.github.reset_mock()
+                self.listed(lookup=True)
+                asked.append([c.args[0].split("/", 3)[-1] for c in self.github.call_args_list])
+        self.assertEqual(asked, [["pulls/1", "issues/11", "pulls/2"], ["pulls/2", "issues/12", "pulls/3"],
+                                 ["pulls/3", "issues/13", "pulls/1"]])
+
+    def test_lookup_asks_again_about_a_closed_record_until_it_is_acknowledged(self):
+        self.on()
+        self.record("declined", "fix", 7, summary="no")
+        self.record("declined", "fix", 8, summary="no")
+        states = {"7": "closed", "8": "closed"}
+
+        def answer(path, **_):
+            number = path.split("/")[-1]
+            return dict(state=states[number], merged_at="2026-01-16T00:00:00Z" if number == "8" else None,
+                        head=dict(sha="a" * 40))
+
+        self.github.side_effect = answer
+        value = self.listed(lookup=True)
+        self.assertEqual((value["lookup"]["asked"], value["items"]), (2, []))
+        self.assertEqual(sorted(c["cleared"] for c in value["cleared"]), ["closed", "merged"])
+        states["7"] = "open"
+        self.github.reset_mock()
+        value = self.listed(lookup=True)
+        self.assertEqual([c.args[0].split("/")[-1] for c in self.github.call_args_list], ["7"])
+        self.assertEqual([i["id"] for i in value["items"]], ["7"])
 
     def test_only_a_missing_number_is_remembered_as_not_found(self):
         self.on()
