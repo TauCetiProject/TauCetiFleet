@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -100,6 +101,20 @@ class SlotGroups(unittest.TestCase):
                     self.assertLess(abs(admitted.count(group) - ceiling * count / sum(counts)), 1, (counts, ceiling))
                     members = [position for position in order[:ceiling] if placed[position] == group]
                     self.assertEqual(members, [p for p in range(len(placed)) if placed[p] == group][:len(members)])
+
+    def test_the_largest_shapes_order_within_the_bound_in_well_under_a_lease(self):
+        for counts in ((4067,) + (1,) * 29, (1,) * 2048 + (2048,), (1, 1, 1, 4093), tuple(range(1, 91))):
+            slot_groups.sequence.cache_clear()
+            began = time.monotonic()
+            sequence = slot_groups.sequence(counts)
+            self.assertLess(time.monotonic() - began, 5, counts[:3])
+            total, held = sum(counts), [0] * len(counts)
+            for prefix, group in enumerate(sequence, 1):
+                held[group] += 1
+                checked = range(len(counts)) if len(counts) <= 100 else (group, len(counts) - 1)
+                for g in checked:
+                    self.assertLessEqual(prefix * counts[g] // total, held[g])
+                    self.assertLessEqual(held[g], -(-prefix * counts[g] // total))
 
     def test_an_edit_rewrites_only_the_definitions_that_change_group(self):
         store.update_host(workers_enabled=True, max_workers=16)
