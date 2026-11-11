@@ -259,7 +259,7 @@ def credential_items(config):
     # A token without a usage login is a standing doctor note about the profile, never something due.
     return [
         dict(source="credential", id=entry["name"], kind="credential", text=entry["evidence"], next=entry["remedy"])
-        for entry in claude_credentials.report(config)
+        for entry in claude_credentials.report(config, wait=False)
         if entry["status"] != "ok" and (entry["name"] != "claude-usage-login" or config.get(claude_credentials.USAGE))
     ]
 

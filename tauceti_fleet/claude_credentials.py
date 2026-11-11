@@ -13,7 +13,7 @@ import shlex
 import time
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, locked, read
+from .store import FleetError, atomic, config_dir, locked, read, try_lock
 
 TOKEN = "claude_token_file"
 USAGE = "claude_usage_credentials_file"
@@ -45,9 +45,11 @@ def selected(payload):
     return updates
 
 
-def refresh_lock(target):
-    """The lock the worker holds while it renews the login in `target`."""
-    return locked(target.with_name(f".{target.name.lstrip('.')}.refresh.lock"))
+def refresh_lock(target, *, wait=True):
+    """The lock the worker holds while it renews the login in `target`; with `wait` false it yields
+    whether it was taken."""
+    name = target.with_name(f".{target.name.lstrip('.')}.refresh.lock")
+    return locked(name) if wait else try_lock(name)
 
 
 def block(secret):
@@ -114,19 +116,20 @@ def install(kind, secret, since=None):
         atomic(marker, dict(sha256=digest, signed_in=since))
 
 
-def signed_in(target):
+def signed_in(target, *, wait=True):
     """When the stored login was signed in: at the transfer, or later on the host itself.
 
     A login newer than both the transfer record and the worker's last renewal was written by
-    neither, so it is a sign-in on the host. Its time is recorded before a renewal hides it.
+    neither, so it is a sign-in on the host. Its time is recorded before a renewal hides it. With
+    `wait` false, a renewal in progress leaves the recorded time as it is.
     """
     marker = target.with_name("transferred.json")
     renewed = target.with_name(f".{target.name.lstrip('.')}.refresh.last-success")
     try:
-        with refresh_lock(target):
+        with refresh_lock(target, wait=wait) as held:
             recorded = read(marker, {})
             written = target.stat().st_mtime
-            if all(written > p.stat().st_mtime for p in (marker, renewed) if p.exists()):
+            if held is not False and all(written > p.stat().st_mtime for p in (marker, renewed) if p.exists()):
                 recorded = dict(recorded, signed_in=written)
                 atomic(marker, recorded)
     except (OSError, FleetError):
@@ -155,8 +158,9 @@ def worker_env(config):
     return env
 
 
-def report(config, *, now=None):
-    """One entry per expected credential for doctor and status: time left, and the sign-in when due."""
+def report(config, *, now=None, wait=True):
+    """One entry per expected credential for doctor and status: time left, and the sign-in when due.
+    With `wait` false it never waits on a renewal in progress."""
     now = time.time() if now is None else now
     token, usage = config.get(TOKEN), config.get(USAGE)
     entries = []
@@ -195,7 +199,7 @@ def report(config, *, now=None):
         if type(expiry) in (int, float) and expiry > 0:
             expiry /= 1000
         elif login.get("refreshToken"):
-            since = signed_in(Path(usage))
+            since = signed_in(Path(usage), wait=wait)
             expiry = None if since is None else since + LIFETIME[USAGE]
         if not login.get("refreshToken"):
             add(USAGE, "blocked", "usage login missing, readable by other users, or without a refresh token")

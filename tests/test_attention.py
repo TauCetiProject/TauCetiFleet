@@ -1,9 +1,11 @@
+import fcntl
 import io
 import json
 import os
 import signal
 import sqlite3
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -450,6 +452,22 @@ class Attention(unittest.TestCase):
         store.update_host(claude_usage_credentials_file=None)
         self.assertEqual([e["status"] for e in claude_credentials.report(store.host_config())], ["ok", "warning"])
         self.assertEqual(self.listed()["items"], [])
+
+    def test_credentials_are_listed_without_waiting_for_a_renewal_in_progress(self):
+        login = json.dumps({"claudeAiOauth": dict(accessToken="access", refreshToken="one")})
+        store.update_host(claude_billing="subscription", **{k: str(claude_credentials.path(k)) for k in claude_credentials.KINDS})
+        claude_credentials.install(claude_credentials.USAGE, login, time.time() - 26 * DAY)
+        claude_credentials.install(claude_credentials.TOKEN, "sk-ant-oat01-token", time.time())
+        held = claude_credentials.path(claude_credentials.USAGE)
+        # The worker's lock name, held as a renewal holds it across its token exchange.
+        with held.with_name(".credentials.json.refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            passing = threading.Thread(target=attention.prepare, args=(store.host_config(),))
+            passing.start()
+            passing.join(3)
+            self.assertFalse(passing.is_alive())
+            self.assertEqual(attention.prepared()["kinds"], {"credential": 1})
+            self.assertEqual([i["id"] for i in self.listed()["items"]], ["claude-usage-login"])
 
     def test_controller_archives_overtaken_records_as_overtaken_without_asking_github(self):
         config = self.on(workers_enabled=True, max_workers=1)
