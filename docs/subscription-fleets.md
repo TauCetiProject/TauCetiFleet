@@ -12,7 +12,7 @@ section here links to the README section that is its reference.
 | --- | --- | --- |
 | A GitHub account of its own | Sign `gh` in as it on the machine you run `tauceti-fleet` from: `gh auth login -h github.com -p https -s workflow`. Or name a token in the profile's `github_token_file` | Until revoked |
 | A Claude setup-token | `claude setup-token`, saved in a private file | A year; it never rotates, so every worker shares it |
-| A Claude usage sign-in, same account | `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login` on Linux, which writes `.credentials.json` in that directory. On a Mac it writes no file ([macOS](#macos)) | About four weeks from the sign-in |
+| A Claude usage sign-in, same account, one per host | `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login` on Linux, which writes `.credentials.json` in that directory; a directory of its own for each host. On a Mac it writes no file ([macOS](#macos)) | About four weeks from the sign-in |
 | A Codex sign-in, for `codex` and `auto` slots | `codex login` on the host, as the host account | Renewed by the workers, see below |
 
 **The account.** The fleet acts as the profile's `github_account` and as nothing
@@ -32,9 +32,15 @@ worker without a usage reading starts no Claude work. An ordinary sign-in can
 read usage, but its access token is short-lived and its refresh token is
 single-use, so one party alone may renew it. The workers do, which is why the
 sign-in is made for the fleet in a directory of its own and is never a copy of
-a login another `claude` uses. A profile can also leave both out: the host
-account is then signed in with `claude auth login`, and each worker copies that
-login.
+a login another `claude` uses. Each host's workers renew their own copy, so two
+hosts given one login break each other at the first renewal: the other host's
+refresh token no longer works, and once its access token expires it reads no
+usage and starts no Claude work. Every host therefore needs a usage sign-in
+made for it alone, and so does every install on a shared machine. `add` records
+which host each usage login went to and refuses to transfer it to another. The
+setup-token never rotates, and one token serves every host. A profile can also
+leave both out: the host account is then signed in with `claude auth login`, and
+each worker copies that login.
 
 **Codex renewal.** A Codex access token lasts about ten days and the CLI renews
 it only while it runs. A worker with `auto_refresh` renews the host's
@@ -71,6 +77,13 @@ tauceti-fleet enable big-server --workers
 
 Give a host the two Claude keys before its workers first start: a worker slot
 keeps the Claude credential directory it first ran with.
+
+The profile serves one host, because its usage file does. For each further
+host, copy the profile under another name with its own
+`claude_usage_credentials_file`, signed in in its own directory, and `add` the
+host with that profile. On a Linux host the profile may instead name a file the
+operator's machine does not hold: `add` then transfers no usage login, and you
+sign in on the host with the command `doctor` prints there.
 
 ## Settings, one group at a time
 
@@ -421,7 +434,8 @@ A Mac takes the workers role and nothing else
 | --- | --- | --- |
 | Every worker `waiting-quota`; the usage line shows a window at 0% left | The subscription's session or weekly allowance is spent | Nothing: workers resume when the window resets, and `auto` slots keep working while the other provider has room |
 | Workers wait with `claude usage HTTP 403` | The agents run on a setup-token and there is no usage sign-in to read the windows with | Add `claude_usage_credentials_file` to the profile and repeat `add` |
-| Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, on Linux ([macOS](#macos)), and keep that directory for the fleet alone |
+| Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, on Linux ([macOS](#macos)), and keep that directory for one host's fleet alone |
+| `add` is refused: the usage login `was transferred to` another host | The profile's usage file holds a login already given to that host | Give this host its own profile and usage sign-in ([A minimal profile](#a-minimal-profile)) |
 | `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it | Run `codex` as the host account, signing in again if it asks; then let the workers renew it ([Codex renewal](#what-it-needs)) |
 | A worker's log repeats `keeps Claude creds first copied from ...` | The slot first ran before the host had `claude_token_file` and still uses the sign-in it copied then | With the worker stopped, remove `.credentials.json` and `.tauceti-creds-source` from the `.claude` directory of that worker's isolated home; its next start copies the token |
 | `Starting new work: paused; outside the weekly schedule` in a slot you expected | Slot times are host local time unless saved with `--timezone`; a saved schedule the controller cannot read admits nothing | `schedule HOST` shows what is saved; `--clear` or a new set of slots replaces it |
