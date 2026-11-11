@@ -3,11 +3,12 @@
 import hashlib
 import json
 import math
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 
-from .store import data_dir
+from .store import data_dir, state_dir
 
 SESSION, WEEK = 5 * 3600.0, 7 * 86400.0
 # How long a worker keeps serving its cached reading for the credential it was fetched under.
@@ -30,12 +31,25 @@ def claude_login(config):
     return Path.home() / ".claude"
 
 
+def launched_data_root():
+    return state_dir() / "worker-data-root"
+
+
+def record_data_root(config):
+    """Keep the worker data root the launcher hands the workers, which a profile's env overrides."""
+    value = (config.get("env") or {}).get("TAUCETI_LEGACY_DATA_ROOT") or os.environ.get("TAUCETI_LEGACY_DATA_ROOT")
+    if value:
+        launched_data_root().write_text(value + "\n")
+    else:
+        launched_data_root().unlink(missing_ok=True)
+
+
 def worker_roots(config):
-    env = config.get("env") or {}
     # Worker state stays inside the runtime that created it, so an earlier runtime can hold the newest reading.
     roots = list((data_dir() / "worker-runtimes").glob("*/lib/python*/site-packages/tauceti_worker"))
-    if env.get("TAUCETI_LEGACY_DATA_ROOT"):
-        roots.append(Path(env["TAUCETI_LEGACY_DATA_ROOT"]))
+    for root in ((config.get("env") or {}).get("TAUCETI_LEGACY_DATA_ROOT"), recorded_source(launched_data_root())):
+        if root and Path(root).is_absolute() and Path(root) not in roots:
+            roots.append(Path(root))
     return roots
 
 

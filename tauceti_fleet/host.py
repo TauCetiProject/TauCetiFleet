@@ -467,6 +467,9 @@ def run_workers():
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
     os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
+    from . import subscription_usage
+
+    subscription_usage.record_data_root(config)
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
