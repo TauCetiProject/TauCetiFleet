@@ -119,6 +119,8 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
             self.assertEqual(targets.summarize(targets.parse(EXAMPLE), verifying)["rounds"], [dict(worker="w1", item="MeasureTheory/kolmogorov-zero-one")])
         ticked = EXAMPLE.replace("[~] `truncation", "[x] `truncation")
         self.assertEqual(targets.summarize(targets.parse(ticked), [])["eligible"], 2)
+        mixed = targets.parse(EXAMPLE.replace("`borel-cantelli`, `truncation-bounds`", "borel-cantelli, `truncation-bounds`"))
+        self.assertEqual(mixed["items"][-1]["needs"], ["borel-cantelli", "truncation-bounds"])
         undefined = EXAMPLE.replace("needs: none", "needs: no-such-slug")
         self.assertEqual(targets.summarize(targets.parse(undefined), [])["blocked"], 1)
         with self.assertRaisesRegex(FleetError, "marker"):

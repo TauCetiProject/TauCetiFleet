@@ -100,7 +100,7 @@ def parse(text):
                 key, _, value = clause.partition(":")
                 clauses[key.strip().lower()] = value.strip()
             needs = clauses.get("needs", "none")
-            needs = [] if needs.lower() == "none" else [s.strip() for s in SLUG.findall(needs) or needs.split(",") if s.strip()]
+            needs = [] if needs.lower() == "none" else [s.strip().strip("`").strip() for s in needs.split(",") if s.strip("` \t")]
             items.append(dict(area=area, slug=slug.group(1).strip(), status=MARKS[match.group(2)], needs=needs,
                               line=number, clauses=clauses))
     return dict(areas=areas, items=items, malformed=malformed)
