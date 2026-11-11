@@ -354,6 +354,22 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
     return dict(value, observed=time.time())
 
 
+def origins_path():
+    return state_dir() / "attention/origins.json"
+
+
+def failed_origins():
+    """When each forge last failed a whole lookup request, by origin."""
+    try:
+        value = read(origins_path(), {})
+    except FleetError:
+        return {}
+    failed = value.get("failed") if isinstance(value, dict) else None
+    if not isinstance(failed, dict):
+        return {}
+    return {o: v for o, v in failed.items() if isinstance(v, dict) and isinstance(v.get("at"), int | float)}
+
+
 def incident_lookup(config, items):
     """Ask each listed item's forge about its pull request and the ones it names; answers go to Fleet's notes."""
     asked, answers, error = 0, {}, None
@@ -368,13 +384,15 @@ def incident_lookup(config, items):
     def observed(value):
         return value["observed"] if isinstance(value, dict) and isinstance(value.get("observed"), int | float) else 0
 
-    # Each request is ordered by when it was last answered, so a bounded call resumes where the last one stopped,
-    # inside an item as well as between items.
+    # Each request is ordered by when it was last answered, or its forge last failed, so a bounded call resumes
+    # where the last one stopped, inside an item as well as between items, and an unreachable forge goes last.
+    down = failed_origins()
     requests = []
     for item in (i for i in items if "pr" in i and i.get("cleared") != "merged"):
         own = notes(item["record"]).get(f"{item['repository']}#{item['pr']}")
-        requests.append((observed(own), item, item["pr"], False))
-        requests += [(observed(n), item, n["pr"], True) for n in open_named(item)]
+        since = down.get(item["origin"], {}).get("at", 0)
+        requests.append((max(observed(own), since), item, item["pr"], False))
+        requests += [(max(observed(n), since), item, n["pr"], True) for n in open_named(item)]
     requests.sort(key=lambda r: r[0])
     failed, unreadable = {}, []
     for _, item, number, named in requests:
@@ -394,6 +412,12 @@ def incident_lookup(config, items):
         except FleetError as exc:
             # One forge that fails leaves the other's requests to go ahead.
             failed[item["origin"]] = str(exc)
+    reached = {origin for origin, *_ in answers} - set(failed)
+    if failed or reached & set(down):
+        now = time.time()
+        atomic(origins_path(), dict(version=1, failed={
+            **{o: v for o, v in down.items() if o not in reached},
+            **{o: dict(at=now, error=printable(e, 200)) for o, e in failed.items()}}))
     error = "; ".join([*failed.values(), *unreadable, *([error] if error else [])]) or None
     fresh = {}
     for _, item, number, named in requests:
