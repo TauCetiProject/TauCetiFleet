@@ -154,8 +154,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
-login into its own home once and keeps that source, so another account means
-signing the host account in to it. Like a model change, changing any of these keys on an
+login into its own home once and keeps following that location. Like a model change, changing any of these keys on an
 active host requires a drain before repeating `add`. A key removed from the
 profile returns to its default.
 
