@@ -56,6 +56,8 @@ def write_agent(label, arguments, environment, **keys):
         StandardErrorPath=str(log),
         **keys,
     )))
+    # launchd refuses an agent that group or others can write.
+    path.chmod(0o600)
 
 
 def loaded(label):

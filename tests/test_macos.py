@@ -128,6 +128,20 @@ class MacOS(unittest.TestCase):
         self.assertEqual(self.launchctl("bootout"), [[f"{self.domain}/org.tauceti.fleet"]])
         self.assertEqual(self.launchctl("kickstart"), [[f"{self.domain}/org.tauceti.fleet.observe"]])
 
+    def test_agents_are_writable_only_by_their_owner_whatever_the_umask(self):
+        agents = self.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        (agents / "org.tauceti.fleet.plist").touch(mode=0o664)
+        os.chmod(agents / "org.tauceti.fleet.plist", 0o664)
+        previous = os.umask(0o002)
+        try:
+            host.install_service()
+            host.start_workers()
+        finally:
+            os.umask(previous)
+        for path in (*agents.glob("*.plist"), self.home / "config/launchd/org.tauceti.fleet.workers.plist"):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+
     def test_bootstrap_waits_while_launchd_still_holds_the_label(self):
         host.install_service()
         self.refusals = 2
