@@ -182,6 +182,131 @@ class Isolated(unittest.TestCase):
         self.assertEqual(fields["agent"], "auto")
         self.assertFalse({"author_model", "author_effort"} & set(fields))
 
+    def forgejo_secrets(self):
+        (self.root / "forgejo").write_text("forgejo-secret")
+        (self.root / "forgejo").chmod(0o600)
+        return dict(self.secrets(), forgejo_token_file=str(self.root / "forgejo"))
+
+    def doctor_checks(self, protocol):
+        def probe(argv, **_):
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(protocol) if argv[-1] == "_fleet-protocol" else "0")
+
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(capabilities, "run", side_effect=probe),
+            patch.object(capabilities, "executable", side_effect=lambda name: "/fake/tauceti" if name == "tauceti" else None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            return {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}
+
+    def test_forge_selection_rejects_what_the_worker_manager_rejects(self):
+        store.host_config()
+        token = dict(credentials={"forgejo_token_file": "forgejo-secret"})
+        rejected = [
+            (dict(forges="forgejo"), "forges must be a list"),
+            (dict(forges=["gitlab"]), r"unknown forge\(s\): gitlab; use github and/or forgejo"),
+            (dict(forges=[]), "at least one of github, forgejo"),
+            (dict(forges=["github", "github"]), "more than once"),
+            (dict(new_pr_forge="gitlab"), "new_pr_forge must be github or forgejo"),
+            (dict(new_pr_forge="forgejo"), "new_pr_forge must be one of the forges"),
+            (dict(forges=["github"], new_pr_forge="forgejo"), "new_pr_forge must be one of the forges"),
+            (dict(forges=["github", "forgejo"], env={"TAUCETI_PR": "12"}), "env.TAUCETI_PR targets one source"),
+            (dict(forges=["forgejo"], sandbox="bubble", **token), "Forgejo rounds run on the host only"),
+            (dict(forges=["github", "forgejo"], new_pr_forge="forgejo", sandbox="bubble", **token), "host only"),
+            (dict(forges=["forgejo"], env={"TAUCETI_REPO": "Example/Fork"}, **token), "env.TAUCETI_FORGEJO_ORIGIN"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example"}, **token),
+             "env.TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_REPO": "Example/Fork"}, **token), "TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example",
+                                           "TAUCETI_FORGEJO_REPOSITORY_ID": "0"}, **token), "TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example",
+                                           "TAUCETI_FORGEJO_REPOSITORY_ID": "7"}), "needs forgejo_token_file"),
+            *((dict(env={name: "x"}), "env must not set " + name) for name in host.FORGE_OWNED_ENV),
+            (dict(env={"TAUCETI_FORGEJO_TOKEN_FILE": "/elsewhere"}, **token), "env must not set TAUCETI_FORGEJO_TOKEN_FILE"),
+            (dict(forgejo_token_file="/elsewhere"), "transferred as a credential"),
+        ]
+        with patch.object(host, "install_service"):
+            for shape, message in rejected:
+                with self.assertRaisesRegex(store.FleetError, message, msg=shape):
+                    host.configure(shape)
+            self.assertFalse({"forges", "new_pr_forge", "forgejo_token_file", "env"} & set(store.host_config()))
+            self.assertFalse((store.config_dir() / "secrets/forgejo_token_file").exists())
+            # The canonical repository needs no connection settings; a token file named in env is enough.
+            host.configure(dict(forges=["forgejo"]))
+            host.configure(dict(forges=["forgejo"], new_pr_forge="forgejo", env={
+                "TAUCETI_FORGEJO_ORIGIN": "https://forge.example", "TAUCETI_FORGEJO_REPO": "Example/Fork",
+                "TAUCETI_FORGEJO_REPOSITORY_ID": "7", "TAUCETI_FORGEJO_TOKEN_FILE": "/host/forgejo-token",
+                "TAUCETI_FORGEJO_FORK": "operator/Fork"}))
+            store.update_host(workers_enabled=True)
+            for shape in (dict(forges=["github", "forgejo"]), dict(new_pr_forge=None)):
+                with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
+                    host.configure(shape)
+
+    def test_forgejo_profile_transfers_its_token_and_writes_forge_fields(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "forgejo": dict(self.forgejo_secrets(), forges=["forgejo"], new_pr_forge="forgejo",
+                            env={"TAUCETI_FORGEJO_FORK": "operator/TauCeti"}),
+            "both": dict(self.secrets(), forges=["forgejo", "github"]),
+            "github": self.secrets(),
+        })
+        payload = remote.profile("forgejo")
+        self.assertEqual(payload["credentials"]["forgejo_token_file"], "forgejo-secret")
+        self.assertEqual(payload["credentials"]["github_token_file"], "token-secret")
+        store.update_host(max_workers=1)
+        stored = store.config_dir() / "secrets/forgejo_token_file"
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="forgejo", ci_allowed=False))
+        self.assertEqual(stored.read_text(), "forgejo-secret\n")
+        self.assertEqual(stored.stat().st_mode & 0o077, 0)
+        with patch.object(host, "worker_protocol", return_value=dict(version=1, forges=1)):
+            (wid,) = host.worker_config(store.host_config())
+        self.assertEqual(
+            (store.config_dir() / "workers.toml").read_text(),
+            f'version = 1\n\n[[workers]]\nid = "{wid}"\nagent = "claude"\nmax_open_prs = 8\nclaude_billing = "api"\n'
+            f'budget = true\ngithub_account = "operator"\nanthropic_api_key_file = "{store.config_dir() / "secrets/anthropic_api_key_file"}"\n'
+            'forges = ["forgejo"]\nnew_pr_forge = "forgejo"\n'
+            f'env = {{TAUCETI_FORGEJO_FORK = "operator/TauCeti", TAUCETI_FORGEJO_TOKEN_FILE = "{stored}"}}\n',
+        )
+        self.assertNotIn("forgejo-secret", (store.config_dir() / "workers.toml").read_text())
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("both"), profile="both"))
+        self.assertIsNone(store.host_config()["forgejo_token_file"])
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual((fields["forges"], "new_pr_forge" in fields, "env" in fields), (["github", "forgejo"], False, False))
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("github"), profile="github"))
+        self.assertFalse({"forges", "new_pr_forge", "env"} & set(host.worker_fields(store.host_config())))
+        (self.root / "forgejo").unlink()
+        with self.assertRaisesRegex(store.FleetError, "does not exist"):
+            remote.profile("forgejo")
+
+    def test_forge_fields_reach_only_a_worker_that_reports_the_forges_protocol(self):
+        store.update_host(max_workers=1, forges=["github", "forgejo"], new_pr_forge="github")
+        for protocol in ({}, dict(version=1, roadmap_focus=1)):
+            with patch.object(host, "worker_protocol", return_value=protocol), self.assertRaisesRegex(store.FleetError, "does not accept forges"):
+                host.worker_config(store.host_config())
+        self.assertFalse((store.config_dir() / "workers.toml").exists())
+        checks = self.doctor_checks(dict(version=1, roadmap_focus=1))
+        self.assertEqual((checks["worker-runtime"]["status"], checks["worker-forges"]["status"]), ("ok", "blocked"))
+        self.assertEqual(checks["worker-forges"]["roles"], ["workers"])
+        self.assertEqual(checks["forgejo-token"]["status"], "blocked")
+        token = self.root / "forgejo"
+        token.write_text("forgejo-secret")
+        token.chmod(0o644)
+        store.update_host(forgejo_token_file=str(token))
+        self.assertEqual(self.doctor_checks(dict(version=1, forges=1))["forgejo-token"]["status"], "blocked")
+        token.chmod(0o600)
+        checks = self.doctor_checks(dict(version=1, forges=1))
+        self.assertEqual((checks["worker-forges"]["status"], checks["forgejo-token"]["status"]), ("ok", "ok"))
+        self.assertIn("github, forgejo; new PRs: github", checks["worker-forges"]["evidence"])
+        store.update_host(sandbox="bubble")
+        self.assertEqual(self.doctor_checks(dict(version=1, forges=1))["worker-forges"]["status"], "warning")
+        store.update_host(forges=None, new_pr_forge=None, sandbox=None)
+        self.assertFalse({"worker-forges", "forgejo-token"} & set(self.doctor_checks({})))
+        with patch.object(host, "worker_protocol") as probe:
+            host.worker_config(store.host_config())
+        probe.assert_not_called()
+
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
             result = host.configure(dict(ci_allowed=False))

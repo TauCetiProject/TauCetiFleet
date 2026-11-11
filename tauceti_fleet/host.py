@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
-from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
+from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory, worker_protocol
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -107,6 +107,9 @@ def configure(payload):
         "sandbox",
         "pace",
         "env",
+        "forges",
+        "new_pr_forge",
+        "forgejo_token_file",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -125,20 +128,23 @@ def configure(payload):
         capacity.jobs(updates)
     if "ci_kinds" in updates and updates["ci_kinds"] not in capacity.KINDS.values():
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
+    if updates.get("forgejo_token_file") is not None:
+        raise FleetError("forgejo_token_file is transferred as a credential")
     credentials = payload.get("credentials", {})
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
-    current = host_config()
-    capacity.staging_slots(dict(current, **updates))
-    worker_fields(dict(current, **updates))
-    if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
-            raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file",
+                       "ci_broker_token_file", "forgejo_token_file"):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+    current = host_config()
+    capacity.staging_slots(dict(current, **updates))
+    worker_fields(dict(current, **updates) | {key: str(config_dir() / "secrets" / key) for key in credentials})
+    if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
+        if any(current.get(k) != v for k, v in updates.items()):
+            raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -296,6 +302,12 @@ FLEET_OWNED_ENV = {
 # source for the id's lifetime; Fleet's slot ids never change, so a different
 # source named here would never reach an existing slot.
 CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+# The worker sets these from its forge selection and, each round, from its Forgejo token.
+FORGE_OWNED_ENV = {"TAUCETI_WORKER_FORGES", "TAUCETI_NEW_PR_FORGE", "TAUCETI_FORGEJO_USER_ID"}
+FORGES = ("github", "forgejo")
+# worker_sources.native_source supplies these for the canonical repository only.
+CANONICAL_REPOSITORY = "taucetiproject/tauceti"
+CANONICAL_FORGEJO_ORIGIN = "https://git.taucetiproject.org"
 
 
 def pace_curve(spec):
@@ -306,6 +318,55 @@ def pace_curve(spec):
         if at > 100 or points.setdefault(at, share) != share:
             return False
     return True
+
+
+def forge_fields(config, env):
+    """`forges` and `new_pr_forge` for workers.toml, refused where the worker manager or
+    `worker_sources.native_source` would refuse them."""
+    named, destination = config.get("forges"), config.get("new_pr_forge")
+    if named is None and destination is None:
+        return {}
+    named = ["github"] if named is None else named
+    if not isinstance(named, list) or not all(isinstance(forge, str) for forge in named):
+        raise FleetError("forges must be a list of forge names")
+    unknown = sorted(set(named) - set(FORGES))
+    if unknown:
+        raise FleetError(f"forges has unknown forge(s): {', '.join(unknown)}; use github and/or forgejo")
+    if not named:
+        raise FleetError("forges must name at least one of github, forgejo")
+    if len(set(named)) != len(named):
+        raise FleetError("forges names a forge more than once")
+    forges = [forge for forge in FORGES if forge in named]
+    if destination is not None and destination not in FORGES:
+        raise FleetError("new_pr_forge must be github or forgejo")
+    if destination is not None and destination not in forges:
+        raise FleetError("new_pr_forge must be one of the forges in forges")
+    if len(forges) > 1 and env.get("TAUCETI_PR", "").strip():
+        raise FleetError("env.TAUCETI_PR targets one source: select a single forge in forges")
+    if config.get("sandbox") == "bubble" and (forges == ["forgejo"] or destination == "forgejo"):
+        raise FleetError(
+            "Forgejo rounds run on the host only, so a bubble worker can neither work on Forgejo alone "
+            "nor author new PRs there; use sandbox host"
+        )
+    if "forgejo" in forges:
+        canonical = env.get("TAUCETI_REPO", "TauCetiProject/TauCeti").lower() == CANONICAL_REPOSITORY
+        origin = env.get("TAUCETI_FORGEJO_ORIGIN") or (CANONICAL_FORGEJO_ORIGIN if canonical else None)
+        if not origin:
+            raise FleetError("forges with forgejo needs env.TAUCETI_FORGEJO_ORIGIN when env.TAUCETI_REPO names another repository")
+        default_origin = origin.rstrip("/").lower() == CANONICAL_FORGEJO_ORIGIN
+        repository = env.get("TAUCETI_FORGEJO_REPO", env.get("TAUCETI_REPO", "TauCetiProject/TauCeti"))
+        native_id = env.get("TAUCETI_FORGEJO_REPOSITORY_ID")
+        if native_id is None and default_origin and repository.lower() == CANONICAL_REPOSITORY:
+            native_id = "1"
+        if native_id is None or not (native_id.isascii() and native_id.isdigit() and int(native_id) >= 1):
+            raise FleetError("forges with forgejo needs env.TAUCETI_FORGEJO_REPOSITORY_ID, the repository's native ID, "
+                             "outside the canonical TauCeti repository")
+        if not (config.get("forgejo_token_file") or env.get("TAUCETI_FORGEJO_TOKEN_FILE") or (canonical and default_origin)):
+            raise FleetError("forges with forgejo needs forgejo_token_file for a Forgejo server other than the canonical one")
+    fields = {} if config.get("forges") is None else dict(forges=forges)
+    if destination is not None:
+        fields["new_pr_forge"] = destination
+    return fields
 
 
 def worker_fields(config):
@@ -344,6 +405,13 @@ def worker_fields(config):
     )
     if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
         raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
+    owned = FORGE_OWNED_ENV | ({"TAUCETI_FORGEJO_TOKEN_FILE"} if config.get("forgejo_token_file") else set())
+    if owned & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(owned & set(env)))
+            + ": the worker derives them from forges, new_pr_forge and its Forgejo token, and forgejo_token_file supplies the token"
+        )
+    forges = forge_fields(config, env)
     fields = dict(
         agent=agent,
         max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
@@ -353,9 +421,14 @@ def worker_fields(config):
         github_account=config.get("github_account", "tauceti-ai-for-science"),
         anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
     )
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
         if config.get(key):
             fields[key] = config[key]
+    fields.update(forges)
+    if "forgejo" in forges.get("forges", ()) and config.get("forgejo_token_file"):
+        env = dict(env, TAUCETI_FORGEJO_TOKEN_FILE=config["forgejo_token_file"])
+    if env:
+        fields["env"] = env
     return fields
 
 
@@ -368,6 +441,8 @@ def toml_value(value):
 def worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = worker_fields(config)
+    if {"forges", "new_pr_forge"} & set(fields) and worker_protocol().get("forges") != 1:
+        raise FleetError("The installed worker does not accept forges or new_pr_forge; drain and run prepare")
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -1170,6 +1245,7 @@ def rpc(payload):
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
+            **{key: config[key] for key in ("forges", "new_pr_forge") if config.get(key) is not None},
             lean_host_pressure=pressure,
             lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
             ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),

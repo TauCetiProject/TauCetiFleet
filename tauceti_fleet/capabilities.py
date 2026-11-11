@@ -182,6 +182,19 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
     return values
 
 
+def worker_protocol(worker=None):
+    """The installed worker's `_fleet-protocol` report, or {} when it has none Fleet supports."""
+    worker = worker or executable("tauceti")
+    if not worker:
+        return {}
+    try:
+        result = run([worker, "_fleet-protocol"], check=False)
+        protocol = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (FleetError, ValueError, AttributeError):
+        return {}
+    return protocol if isinstance(protocol, dict) and protocol.get("version") == 1 else {}
+
+
 def doctor(config=None, *, probe=True):
     config = config or host_config()
     checks = []
@@ -373,18 +386,8 @@ def doctor(config=None, *, probe=True):
             "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
             roles=("workers",),
         )
-    compatible = False
-    protocol = {}
-    if worker:
-        try:
-            result = run([worker, "_fleet-protocol"], check=False)
-            if result.returncode == 0:
-                protocol = json.loads(result.stdout)
-                compatible = isinstance(protocol, dict) and protocol.get("version") == 1
-            if not isinstance(protocol, dict):
-                protocol = {}
-        except (FleetError, ValueError, AttributeError):
-            pass
+    protocol = worker_protocol(worker) if worker else {}
+    compatible = bool(protocol)
     add(
         "worker-runtime",
         "ok" if compatible else "blocked",
@@ -407,6 +410,32 @@ def doctor(config=None, *, probe=True):
             "Worker supports live roadmap focus" if supported else "Installed worker ignores the configured roadmap focus",
             "Install a Worker release with roadmap_focus protocol support using a live update", roles=("workers",),
         )
+    if config.get("forges") is not None or config.get("new_pr_forge") is not None:
+        forges = [forge for forge in ("github", "forgejo") if forge in (config.get("forges") or ["github"])]
+        supported = protocol.get("forges") == 1
+        mixed_bubble = supported and config.get("sandbox") == "bubble" and len(forges) > 1
+        add(
+            "worker-forges",
+            "blocked" if not supported else "warning" if mixed_bubble else "ok",
+            "Installed worker does not accept forges or new_pr_forge in workers.toml" if not supported
+            else "Bubble workers count Forgejo PRs toward their limits but work on GitHub PRs only" if mixed_bubble
+            else "Worker sources: " + ", ".join(forges) + "; new PRs: " + (config.get("new_pr_forge") or "github"),
+            "Drain and run prepare to install a Worker release whose _fleet-protocol reports forges" if not supported
+            else "Use sandbox host for workers that should work on Forgejo PRs",
+            roles=("workers",),
+        )
+        if "forgejo" in forges:
+            env = config.get("env") or {}
+            token = (config.get("forgejo_token_file") or env.get("TAUCETI_FORGEJO_TOKEN_FILE")
+                     or str(Path.home() / ".config/tauceti-forgejo/worker-token"))
+            private = Path(token).is_file() and Path(token).stat().st_size > 0 and Path(token).stat().st_mode & 0o077 == 0
+            add(
+                "forgejo-token",
+                "ok" if private else "blocked",
+                "private Forgejo credential file present" if private else "Forgejo credential missing or readable by other users",
+                "Set forgejo_token_file in the profile and repeat add; use chmod 600 for credential files",
+                roles=("workers",),
+            )
     image = data_dir() / "images/prepared.json"
     add(
         "ci-image",

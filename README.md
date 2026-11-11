@@ -150,13 +150,69 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
 | `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
-| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME`, and the forge settings the worker derives (`TAUCETI_WORKER_FORGES`, `TAUCETI_NEW_PR_FORGE`, `TAUCETI_FORGEJO_USER_ID`) are refused. Not a secret store: values are written to `workers.toml` | none |
+| `forges` | The [forges](#forgejo) workers discover PRs on: `["github"]`, `["forgejo"]` or both | GitHub only |
+| `new_pr_forge` | `github` or `forgejo`, one of `forges`: where new PRs are authored | `github` |
+| `forgejo_token_file` | A private Forgejo token file on this machine, transferred like `github_token_file` and given to workers as `TAUCETI_FORGEJO_TOKEN_FILE`, which `env` may then not set | none |
 
 A subscription profile carries no model credential. Sign in to `claude` or
 `codex` as the host account before enabling workers; each worker copies that
 login into its own home once and keeps following that location. Like a model change, changing any of these keys on an
 active host requires a drain before repeating `add`. A key removed from the
 profile returns to its default.
+
+### Forgejo
+
+`forges` and `new_pr_forge` become the worker's own `forges` and `new_pr_forge`
+keys in `workers.toml`, which the worker passes to `tauceti work` as
+`--github`/`--no-github`, `--forgejo` and `--new-pr-forge`. A Forgejo-only
+profile that authors there:
+
+```json
+{
+  "forgejo": {
+    "github_account": "operator",
+    "github_token_file": "/home/operator/.config/secrets/github-token",
+    "forgejo_token_file": "/home/operator/.config/secrets/forgejo-token",
+    "claude_billing": "subscription",
+    "agent": "auto",
+    "forges": ["forgejo"],
+    "new_pr_forge": "forgejo",
+    "env": {"TAUCETI_FORGEJO_FORK": "operator/TauCeti"}
+  }
+}
+```
+
+A profile on both forges that keeps authoring on GitHub:
+
+```json
+{
+  "both": {
+    "github_account": "operator",
+    "forgejo_token_file": "/home/operator/.config/secrets/forgejo-token",
+    "forges": ["github", "forgejo"]
+  }
+}
+```
+
+The worker knows the canonical TauCeti repository's Forgejo server and native
+repository ID. For another repository, set `TAUCETI_FORGEJO_ORIGIN`,
+`TAUCETI_FORGEJO_REPO` and `TAUCETI_FORGEJO_REPOSITORY_ID` in `env`;
+`TAUCETI_FORGEJO_FORK` names an explicit fork for new PR branches. `add` refuses
+a combination the worker would refuse: no repository ID for a non-canonical
+repository, no token for a non-canonical server, `TAUCETI_PR` in `env` with
+both forges, and the `bubble` sandbox with `forges = ["forgejo"]` or
+`new_pr_forge = "forgejo"`, because Forgejo rounds run on the host only. With
+both forges a bubble worker counts Forgejo PRs toward its limits but works on
+GitHub PRs only; `doctor` warns.
+
+Workers on Forgejo still use their GitHub login for author claims, the review
+archive and the roadmap, review, data and claims repositories, so the profile's
+GitHub credential stays required. Fleet makes no Forgejo requests itself:
+`doctor` checks that the installed worker reports `"forges": 1` from
+`tauceti _fleet-protocol` (otherwise workers cannot be enabled) and that the
+Forgejo token file is present and private, and `status` prints the selected
+forges. Changing either key takes a drain before repeating `add`.
 
 ## Protected roadmap capacity
 
