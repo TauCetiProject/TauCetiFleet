@@ -208,10 +208,18 @@ tauceti-fleet targets big-server --clear
 
 Workers read the file at the start of every roadmap round, and take no
 [roadmap focus](../README.md#roadmap-focus) while they have a list. `--audit`
-reports where the file disagrees with what the host knows, such as a `[~]` item
-whose pull request has closed, and `--apply` writes the corrections it is sure
-of. The worker's `curate` phase does the same from GitHub on a worker whose
-`only` names it; slot groups do not name that phase.
+reports where the file disagrees with files on the host, without asking GitHub,
+such as a `[~]` item whose `in flight:` pull request has closed. For one that
+landed it proposes `[x]` unless the item's own `partial:` clause names that pull
+request: the host cannot read a pull request's marker, so it cannot tell a
+landing that completed the item from one that did only part of it. Check each
+such line before `--apply`, and add `partial: #N` to an item that is not
+finished, or `--apply` marks it done and the items that need it become
+eligible. `--apply` writes into the file the workers read; for a transferred
+list that is the host's copy, so make the same edits in your own file. The
+worker's `curate` phase corrects the file from GitHub instead, reading each pull
+request's marker, on a worker whose `only` names it; slot groups do not name
+that phase.
 
 **Sharing a list.** Several installs on one machine each name the same absolute
 path with `--on-host`; the file has to be readable by every fleet account, and
@@ -399,7 +407,7 @@ A Mac takes the workers role and nothing else
 | `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it | Run `codex` as the host account, signing in again if it asks; then let the workers renew it ([Codex renewal](#what-it-needs)) |
 | A worker's log repeats `keeps Claude creds first copied from ...` | The slot first ran before the host had `claude_token_file` and still uses the sign-in it copied then | With the worker stopped, remove `.credentials.json` and `.tauceti-creds-source` from the `.claude` directory of that worker's isolated home; its next start copies the token |
 | `Starting new work: paused; outside the weekly schedule` in a slot you expected | Slot times are host local time unless saved with `--timezone`; a saved schedule the controller cannot read admits nothing | `schedule HOST` shows what is saved; `--clear` or a new set of slots replaces it |
-| The target list line shows `0 eligible` | Every open item waits on another: often a `[~]` item whose pull request closed unmerged, or a landing too old for the workers' view of recently closed pull requests | `targets HOST --audit`; tick landed items `[x]` in the file. `outside_list_cap` keeps workers authoring meanwhile |
+| The target list line shows `0 eligible` | Every open item waits on another: often a `[~]` item whose pull request closed unmerged, or a landing too old for the workers' view of recently closed pull requests | `targets HOST --audit`; tick landed items `[x]` in the file, and give one that landed only in part `partial: #N` ([Target lists](#target-lists)). `outside_list_cap` keeps workers authoring meanwhile |
 | The list has eligible items and no roadmap round starts | The account is at its open pull request limit, the profile's `max_open_prs` (8 unless set); `status` shows the authoring pressure | Nothing: repair and review continue, and authoring resumes as pull requests land |
 | `Outside-list cap: not paced; ...` | No target list is set, or the installed TauCetiWorker does not report `targets_fallback` | Set a list, or `update` the host to a TauCetiWorker release that does |
 | `targets --file` is refused | The installed TauCetiWorker does not report `roadmap_targets`, and a worker manager that does not know the key loads no worker at all | Install a TauCetiWorker release that does (`update`), and have the worker manager running on it before setting the list |
