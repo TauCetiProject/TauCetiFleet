@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -51,6 +52,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def status_ssl_context():
+    context = ssl.create_default_context()
+    # Standalone Python may expect /etc/ssl/cert.pem, absent on NixOS. Its
+    # existing certs directory need not contain OpenSSL's hashed issuer links.
+    # Use the distribution's installed bundle; preserve explicit trust settings.
+    if ssl.get_default_verify_paths().cafile is None and not any(
+            key in os.environ for key in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
+        for path in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-bundle.crt"):
+            if Path(path).is_file():
+                context.load_verify_locations(cafile=path)
+                break
+    return context
+
+
 def fetch(url, *, token_file=None, timeout=10):
     headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetStatus/1.0"}
     if token_file:
@@ -59,7 +74,8 @@ def fetch(url, *, token_file=None, timeout=10):
             raise FleetError("Invalid status credential")
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=status_ssl_context()))
+    with opener.open(request, timeout=timeout) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         raise FleetError("Status response exceeds limit")
