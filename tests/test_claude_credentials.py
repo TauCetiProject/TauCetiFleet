@@ -207,6 +207,19 @@ class ClaudeCredentials(unittest.TestCase):
         self.add()
         self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
 
+    def test_status_does_not_wait_for_a_renewal_in_progress(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        replies = []
+        with held.with_name(".credentials.json.refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            reading = threading.Thread(target=lambda: replies.append(host.rpc(dict(action="status"))))
+            reading.start()
+            reading.join(5)
+            self.assertFalse(reading.is_alive())
+        entries = {e["name"]: e["status"] for e in replies[0]["claude_credentials"]}
+        self.assertEqual(entries, {"claude-setup-token": "ok", "claude-usage-login": "ok"})
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [

@@ -1184,6 +1184,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
-            claude_credentials=claude_credentials.report(config),
+            claude_credentials=claude_credentials.report(config, wait=False),
         )
     raise FleetError("Unknown host operation")
