@@ -37,7 +37,9 @@ hosts given one login break each other at the first renewal: the other host's
 refresh token no longer works, and once its access token expires it reads no
 usage and starts no Claude work. Every host therefore needs a usage sign-in
 made for it alone, and so does every install on a shared machine. `add` records
-which host each usage login went to and refuses to transfer it to another. The
+the host a usage login is for before sending it, keeps that record even if the
+send fails, and refuses the login to any other host. A login is known by its
+refresh token, so reformatting the file does not make it a new one. The
 setup-token never rotates, and one token serves every host. A profile can also
 leave both out: the host account is then signed in with `claude auth login`, and
 each worker copies that login.
@@ -83,7 +85,8 @@ host, copy the profile under another name with its own
 `claude_usage_credentials_file`, signed in in its own directory, and `add` the
 host with that profile. On a Linux host the profile may instead name a file the
 operator's machine does not hold: `add` then transfers no usage login, and you
-sign in on the host with the command `doctor` prints there.
+sign in on the host with `tauceti-fleet claude-usage-login`, which `doctor`
+names there.
 
 ## Settings, one group at a time
 
@@ -136,8 +139,12 @@ credential blocks worker activation. Once a worker has renewed the usage
 sign-in the operator's copy of it no longer works, so a repeated `add` leaves
 the host's sign-in in place unless the profile's file holds a different one.
 When it is due, sign in again on the operator's machine and repeat `add`, or run
-the command `doctor` prints on the host; both need Linux, since on a Mac the
-sign-in goes to the Keychain and the file stays as it was.
+`tauceti-fleet claude-usage-login` on the host. That command runs
+`claude auth login`, moves the new login into place under the workers' renewal
+lock and records the time, from which `doctor` counts the four weeks again.
+Either way the sign-in has to happen on Linux: on a Mac `claude auth login` writes no file, so the
+operator's file stays as it was, and `claude-usage-login` on a Mac host reports
+that the sign-in left no login and changes nothing.
 
 ### Slot groups
 
@@ -162,7 +169,9 @@ The groups given replace the saved list, so name every group on each edit: a
 group left out admits no more rounds. An edit rewrites only the workers that
 change group, and the worker manager
 holds a changed agent or phase list until that worker's round ends. Fleet admits
-a rewritten worker only once its status shows the new agent and phases. The
+a worker whose agent or phases were rewritten, including by `slots --clear`,
+only once its status shows the new ones; one that has not started yet waits
+for its first pass after it does. The
 counts say how many slots exist; `workers --max` stays the admission ceiling,
 and a ceiling below the total admits each group within one slot of its
 proportional share.
@@ -233,8 +242,10 @@ request: the host cannot read a pull request's marker, so it cannot tell a
 landing that completed the item from one that did only part of it. Check each
 such line before `--apply`, and add `partial: #N` to an item that is not
 finished, or `--apply` marks it done and the items that need it become
-eligible. `--apply` writes into the file the workers read; for a transferred
-list that is the host's copy, so make the same edits in your own file. The
+eligible. `--apply` writes into the file the workers read. It keeps an edit
+someone made to the file while the audit ran, and writes nothing if that edit
+touched a line it corrects; audit again then. For a transferred list the file
+is the host's copy, so make the same edits in your own file. The
 worker's `curate` phase corrects the file from GitHub instead, reading each pull
 request's marker, on a worker whose `only` names it; slot groups do not name
 that phase.
@@ -243,10 +254,11 @@ that phase.
 path with `--on-host`; the file has to be readable by every fleet account, and
 writable by one that runs `--audit --apply`. Across machines, transfer the same
 file to each host, or keep a checkout of the list's repository on each and name
-it with `--on-host`. Workers that share a claim namespace keep off each other's
-items through the claim each takes on its item, and every worker sees an item as
-in flight or done from the pull request that carries its marker, whichever host
-opened it. Each host's `status` counts only the file's marks and its own rounds.
+it with `--on-host`. A path that is a symlink is saved as the file it names when
+the list is set; after repointing the link, set the list again. Workers that
+share a claim namespace keep off each other's items through the claim each takes
+on its item, and every worker sees an item as in flight or done from the pull
+request that carries its marker, whichever host opened it. Each host's `status` counts only the file's marks and its own rounds.
 
 ### Authoring outside the list
 
@@ -436,9 +448,10 @@ A Mac takes the workers role and nothing else
   agents from the token file, renew the usage sign-in as a file, and read no
   Claude item from the Keychain. That file has to be made on Linux: sign in
   there as in [What it needs](#what-it-needs) and transfer it with `add`, both
-  the first time and when it falls due. The sign-in command `doctor` prints
-  updates only the Keychain when run on the Mac, and `add` from a Mac finds no
-  file to transfer. Nobody may sign in to `claude` with the token's directory as
+  the first time and when it falls due. `tauceti-fleet claude-usage-login`,
+  which `doctor` names, cannot sign a Mac host in: it reports that the sign-in
+  left no login and changes nothing. `add` from a Mac finds no file to
+  transfer. Nobody may sign in to `claude` with the token's directory as
   `CLAUDE_CONFIG_DIR`: Claude Code prefers a Keychain item for that directory to
   the file. Codex keeps a file and is renewed as on Linux.
 
@@ -449,7 +462,7 @@ A Mac takes the workers role and nothing else
 | Every worker `waiting-quota`; the usage line shows a window at 0% left | The subscription's session or weekly allowance is spent | Nothing: workers resume when the window resets, and `auto` slots keep working while the other provider has room |
 | Workers wait with `claude usage HTTP 403` | The agents run on a setup-token and there is no usage sign-in to read the windows with | Add `claude_usage_credentials_file` to the profile and repeat `add` |
 | Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, on Linux ([macOS](#macos)), and keep that directory for one host's fleet alone |
-| `add` is refused: the usage login `was transferred to` another host | The profile's usage file holds a login already given to that host | Give this host its own profile and usage sign-in ([A minimal profile](#a-minimal-profile)) |
+| `add` is refused: the usage login `was transferred to` another host | The profile's usage file holds a login already sent to that host, or reserved for it by an `add` whose send failed | Give this host its own profile and usage sign-in ([A minimal profile](#a-minimal-profile)) |
 | `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it | Run `codex` as the host account, signing in again if it asks; then let the workers renew it ([Codex renewal](#what-it-needs)) |
 | A worker's log repeats `keeps Claude creds first copied from ...` | The slot first ran before the host had `claude_token_file` and still uses the sign-in it copied then | With the worker stopped, remove `.credentials.json` and `.tauceti-creds-source` from the `.claude` directory of that worker's isolated home; its next start copies the token |
 | `Starting new work: paused; outside the weekly schedule` in a slot you expected | Slot times are host local time unless saved with `--timezone`; a saved schedule the controller cannot read admits nothing | `schedule HOST` shows what is saved; `--clear` or a new set of slots replaces it |
@@ -461,4 +474,5 @@ A Mac takes the workers role and nothing else
 | Rounds in progress ended when a setting changed | The worker manager restarts a worker whose definition changes: setting, moving or clearing the list, or a progress key on a group | Nothing to repair. New contents at the same list path, and a slot group's agent or phases, end no round |
 | A push is refused with a message about workflows | The account's token lacks the `workflow` scope | `gh auth refresh -h github.com -s workflow` where the profile's GitHub credential is kept, repeat `add`, then restart the worker manager on the host as under [Halts](#day-to-day): it reads the token only when it starts, and workers it starts after that use the new one |
 | Every Bubble round ends at once, or waits for the network | A row of the [Bubble table](#bubble-under-a-restricted-incus-project) is missing: a mount outside the account's home, the bridge behind the firewall, or the uid and gid not delegated | Fix that row |
+| `status` shows `Needs you: unavailable` | The fleet account cannot list its incident directory, `~/.local/state/tauceti-fleet/incidents/` | `attention HOST` prints the error; repair the directory's ownership or permissions |
 | `status` or `doctor` reports the shared host directory unusable | The directory is missing or this account cannot write to it; until repaired the install sizes itself alone | Create it or fix its permissions |
