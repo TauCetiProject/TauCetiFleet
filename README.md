@@ -532,7 +532,10 @@ controller has stopped drops out. Each cycle starts by publishing the claim from
 the install's own job records and the job starts its guests have announced,
 before any request to GitHub, and a background thread renews it every five
 seconds, so a cycle that waits on GitHub or fails keeps a running CI job's claim
-alive. The other installs' claims change two decisions:
+alive. Each renewal also marks CI busy when a job record or a native runner's
+start hook shows a job that began during the wait; a VM guest's start, and the
+end of any job, show at the next cycle. The other installs' claims change two
+decisions:
 
 - The worker soft memory limit grows by the install's share of spare RAM, its
   `workers` over the sum of everyone's, where an install alone grows by all of

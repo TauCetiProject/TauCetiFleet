@@ -256,6 +256,23 @@ def observed_ci_busy(slots, config):
     return any(busy)
 
 
+def announced_ci_busy():
+    """Read-only twin of observed_ci_busy for the heartbeat thread: records and native start hooks.
+
+    A VM guest announces its start on a socket the controller loop owns, so that start
+    waits for the next cycle.
+    """
+    for index in vm.slots_in_use():
+        value = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
+        if value.get("busy"):
+            return True
+        if native_runner.is_native(value) and any(
+            str(json.loads(line).get("run_id", "")).isdigit() for line in native_runner.hook_lines(value["directory"])[0]
+        ):
+            return True
+    return False
+
+
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     shared = capacity.shared_memory_bytes(caps)
@@ -871,7 +888,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
-        heartbeat = shared_host.Heartbeat()
+        heartbeat = shared_host.Heartbeat(announced_ci_busy)
         while not stopping:
             config = host_config()
             try:

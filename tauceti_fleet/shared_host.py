@@ -96,11 +96,14 @@ class Heartbeat:
 
     One cycle can block on GitHub or the broker for longer than LEASE, and a failed
     cycle skips the claim; a CI job still running must keep the other installs' reserve.
+    `probe` reports a job that started since the cycle observed; it runs on this thread
+    beside the controller loop, so it may only read.
     """
 
     interval = LEASE / 3
 
-    def __init__(self):
+    def __init__(self, probe=None):
+        self.probe = probe
         self.claim = None
         self.lock = threading.Lock()
         self.stopped = threading.Event()
@@ -130,5 +133,15 @@ class Heartbeat:
                     continue
                 directory, machine_id, claim = self.claim
                 if problem(directory) is None:
+                    ci_busy = claim["ci_busy"] or self.started()
                     with contextlib.suppress(OSError):
-                        publish(directory, machine_id, **claim, now=time.time())
+                        publish(directory, machine_id, workers=claim["workers"], ci_busy=ci_busy, now=time.time())
+
+    def started(self):
+        if self.probe is None:
+            return False
+        try:
+            return bool(self.probe())
+        except Exception:
+            # State the probe cannot read may belong to a running job, and this thread must survive it.
+            return True

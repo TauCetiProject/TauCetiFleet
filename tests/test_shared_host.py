@@ -234,6 +234,28 @@ class SharedHost(unittest.TestCase):
         self.assertEqual(seen, [(1000, False, False), (1005, True, True)])
         self.assertEqual(store.read(store.state_dir() / "vm.json")["run_id"], 7)
 
+    def test_a_native_job_start_during_a_blocked_github_request_is_claimed_before_it_returns(self):
+        guest = self.root / "guest"
+        (guest / "control").mkdir(parents=True)
+        store.atomic(store.state_dir() / "vm.json", dict(runtime=native_runner.RUNTIME, busy=False, directory=str(guest)))
+        clock, seen = [1000.0], []
+
+        def runners(_):
+            if seen:
+                raise store.FleetError("runner inventory unavailable")
+            seen.append(self.own_claim()["ci_busy"])
+            (guest / "control/events.jsonl").write_text(json.dumps(dict(kind="ci_started", run_id=7, at=1005)) + "\n")
+            # The request is still waiting at 1060, past the lease.
+            clock[0] = 1060
+            deadline = host.time.monotonic() + 5
+            while host.time.monotonic() < deadline and self.own_claim()["expires_at"] < 1075:
+                threading.Event().wait(0.01)
+            seen.append((self.own_claim(), self.peer_sees_ci(1061)))
+            raise store.FleetError("runner inventory unavailable")
+
+        self.run_controller_offline(clock, runners, stop=1070)
+        self.assertEqual(seen, [False, (dict(version=1, expires_at=1075, workers=8, ci_busy=True), True)])
+
     def test_doctor_reports_the_directory_only_when_the_setting_is_present(self):
         def check(config):
             with (
