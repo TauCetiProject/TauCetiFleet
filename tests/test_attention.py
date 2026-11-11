@@ -282,8 +282,30 @@ class Attention(unittest.TestCase):
                 self.github.reset_mock()
                 self.listed(lookup=True)
                 asked.append([c.args[0].split("/", 3)[-1] for c in self.github.call_args_list])
-        self.assertEqual(asked, [["pulls/1", "issues/11", "pulls/2"], ["pulls/2", "issues/12", "pulls/3"],
-                                 ["pulls/3", "issues/13", "pulls/1"]])
+        self.assertEqual(asked, [["pulls/1", "issues/11", "pulls/2"], ["issues/12", "pulls/3", "issues/13"],
+                                 ["pulls/1", "issues/11", "pulls/2"]])
+
+    def test_bounded_lookups_resume_inside_an_item_that_names_more_than_one_call_can_ask(self):
+        self.on()
+        self.record("declined", "fix", 7, summary="see #11 #12 #13", mentions=[11, 12, 13])
+        self.record("declined", "fix", 8, summary="no", at="2026-01-15T09:31:00Z")
+
+        def answer(path, **_):
+            if "/pulls/" in path:
+                return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+            return dict(state="open", pull_request=dict(merged_at=None))
+
+        self.github.side_effect = answer
+        asked = []
+        with patch.object(attention, "MAX_LOOKUPS", 3):
+            for _ in range(3):
+                self.github.reset_mock()
+                self.listed(lookup=True)
+                asked.append([c.args[0].split("/", 3)[-1] for c in self.github.call_args_list])
+        self.assertEqual(asked, [["pulls/7", "issues/11", "issues/12"], ["issues/13", "pulls/8", "pulls/7"],
+                                 ["issues/11", "issues/12", "issues/13"]])
+        self.assertEqual(sorted(store.read(attention.notes_path("declined-fix-7.json"))["prs"]),
+                         [f"{REPOSITORY}#{n}" for n in (11, 12, 13, 7)])
 
     def test_lookup_asks_again_about_a_closed_record_until_it_is_acknowledged(self):
         self.on()
