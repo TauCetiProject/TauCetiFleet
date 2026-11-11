@@ -777,7 +777,7 @@ additions require updating the configured list or reapplying an updated preset.
 ```sh
 tauceti-fleet attention                    # every enrolled host
 tauceti-fleet attention server1
-tauceti-fleet attention server1 --lookup   # ask GitHub about the pull requests involved
+tauceti-fleet attention server1 --lookup   # ask each pull request's forge about it
 tauceti-fleet attention server1 --ack 412  # archive the records for pull request 412
 tauceti-fleet attention server1 --ack all
 tauceti-fleet attention --json
@@ -785,11 +785,19 @@ tauceti-fleet attention --json
 
 The list is built from sources ([`attention.py`](tauceti_fleet/attention.py)).
 The one source so far is the worker's incident records: a `rebase`, `fix` or
-`fix-ci` round that ended with nothing on GitHub (`declined`, with the agent's
+`fix-ci` round that ended with nothing on the forge (`declined`, with the agent's
 final message, the pull requests it named and the transcript path), and a stage
 that has used its attempts on a pull request head (`budget-spent`). The format
 is TauCetiWorker's `docs/incidents.md`. A worker release without incident
 records ignores the setting, and the list stays empty.
+
+A record names its pull request's forge, GitHub or a Forgejo instance. A
+Forgejo item is listed as `PR #412 on Forgejo <origin>` with its Forgejo link and
+an `ack id` such as `git.example.org/TauCetiProject/TauCeti#412`; so is a record
+of a GitHub repository other than the workers' own, with an id such as
+`TauCetiProject/TauCetiRoadmap#12`. `--ack` takes that id, and the bare number
+acknowledges only the workers' own GitHub repository. A record of any other forge
+is listed under its key and never looked up.
 
 Records are off until the host's profile sets `incidents`:
 
@@ -826,16 +834,19 @@ needs an explicit host.
 An item leaves the list by itself once its pull request is merged, closed or at
 a different head than the record names. The evidence is pull request state
 already on the host, read from the worker's prepared activity database, and only
-an observation newer than the record counts. That database covers pull requests
-this host's workers opened. For the rest, `--lookup` asks GitHub with the host's
-credential: once per listed pull request, once per pull request an item names
-until that one is known to be merged or closed, and once per dropped record
-whose pull request has not merged, since it can reopen at the same head. That
-is at most 100 requests a call, each pull request asked about least recently
-first, so repeated calls reach every one. The answers are kept in `~/.local/state/tauceti-fleet/attention/`; the
-worker's record files are never rewritten. Nothing else in `attention` or
-`status` contacts GitHub. `--ack all` also archives the records the list had
-already dropped.
+an observation newer than the record counts. That database covers GitHub pull
+requests this host's workers opened, and is never matched against a Forgejo
+record. For the rest, `--lookup` asks the record's forge: GitHub with the host's
+credential, a Forgejo instance anonymously through its REST API, so a private
+Forgejo repository cannot be looked up. It asks once per listed pull request,
+once per pull request an item names until that one is known to be merged or
+closed, and once per dropped record whose pull request has not merged, since it
+can reopen at the same head. That is at most 100 requests a call, each pull
+request asked about least recently first, so repeated calls reach every one; a
+forge that fails leaves the other's requests to go ahead. The answers are kept
+in `~/.local/state/tauceti-fleet/attention/`; the worker's record files are
+never rewritten. Nothing else in `attention` or `status` contacts a forge.
+`--ack all` also archives the records the list had already dropped.
 
 While records are on, the controller counts the listed items once a minute and
 `status` shows the count above the host's worker lines, with the command:
