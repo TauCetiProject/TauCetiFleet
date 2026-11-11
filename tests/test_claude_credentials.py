@@ -242,6 +242,28 @@ class ClaudeCredentials(unittest.TestCase):
         recorded = json.loads(held.with_name("transferred.json").read_text())
         self.assertEqual(recorded["sha256"], claude_credentials.fingerprint(json.dumps(login("refresh-of-a-new-sign-in"))))
 
+    def test_a_retry_after_a_lost_transfer_record_keeps_a_later_host_sign_in(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        now = time.time()
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in")))
+        os.utime(self.files["usage"], (now - 30 * DAY, now - 30 * DAY))
+        write = claude_credentials.atomic
+
+        def full(path, value):
+            if Path(path).name == "transferred.json":
+                raise OSError(28, "No space left on device")
+            write(path, value)
+
+        with patch.object(claude_credentials, "atomic", side_effect=full), self.assertRaises(OSError):
+            self.add()
+        script = "import os, sys; open(os.environ['CLAUDE_CONFIG_DIR'] + '/.credentials.json', 'w').write(sys.argv[1])"
+        claude_credentials.sign_in([sys.executable, "-c", script, json.dumps(login("refresh-of-a-host-sign-in"))])
+        self.add()
+        self.assertEqual(json.loads(held.read_text())["claudeAiOauth"]["refreshToken"], "refresh-of-a-host-sign-in")
+        entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
+        self.assertEqual((entry["status"], entry["evidence"]), ("ok", "usage login renews for another 28 days"))
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [
