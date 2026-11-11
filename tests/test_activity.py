@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import activity, host, report
+from tauceti_fleet import activity, activity_summary, host, report
 
 
 class ActivityTests(unittest.TestCase):
@@ -83,9 +83,37 @@ class ActivityTests(unittest.TestCase):
             activity.display(partial)
         self.assertEqual(partial["summary"]["costs"]["windows"]["24h"]["attributed_loc"], "8000")
         self.assertIn("partial ~$0.0046", partial_output.getvalue())
+        for row in second["summary"]["costs"]["windows"].values():
+            row.update(attribution_backfilling=True, attribution_preparing=True)
+        with contextlib.redirect_stdout(io.StringIO()) as warming_output:
+            warming = activity.combine_status([first, second])
+            activity.display(warming)
+        self.assertTrue(warming["summary"]["costs"]["windows"]["24h"]["attribution_backfilling"])
+        for line in warming_output.getvalue().splitlines():
+            if line.startswith(("Attributed landed Lean LOC", "Estimated $ / attributed LOC")):
+                self.assertNotIn("~", line)
+                self.assertIn("—", line)
+        self.assertIn("unavailable until backfill finishes", warming_output.getvalue())
         del second["summary"]["costs"]["windows"]["24h"]["attribution_version"]
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertIsNone(row["attributed_loc"])
+
+    def test_backfill_never_displays_full_spend_over_partial_history(self):
+        row = dict(
+            estimated_usd="35091.30",
+            attributed_loc="11.3099162",
+            attribution_known_prs=2,
+            attribution_missing_prs=1141,
+            attribution_preparing=True,
+            attribution_backfilling=True,
+        )
+        self.assertIsNone(activity_summary.attributed_rate(row))
+        self.assertEqual(activity_summary.attributed_rate_display(row), "—")
+        older = dict(row)
+        del older["attribution_backfilling"]
+        self.assertIsNone(activity_summary.attributed_rate(older))
+        row["attribution_backfilling"] = False
+        self.assertIsNotNone(activity_summary.attributed_rate(row))
 
     def test_table_aligns_all_rows_and_lists_zero_count_work_types(self):
         value = dict(
