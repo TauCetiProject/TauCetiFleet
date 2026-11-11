@@ -721,7 +721,9 @@ Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 1
 
 These are the responses the workers' pacer last cached on the host. Fleet sends
 no usage request, so a line ages while no worker is checking its quota, and a
-window that has reset since the reading shows no figure. The caches are kept per
+window that has reset since the reading shows no figure. When Codex reported its
+limit reached, the line says so before the percentages, and the JSON reading has
+`limit_reached`. The caches are kept per
 credential, and Fleet does not read credentials, so it cannot tell which one is
 active. A reading is current while the worker would still use it (an hour for
 Claude, ten minutes for Codex) or while a window it shows spent has not reset.
