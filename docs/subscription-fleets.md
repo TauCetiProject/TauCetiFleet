@@ -380,8 +380,11 @@ admission place, so the host runs one fewer round until `clear-halt`. Put the
 account right first: a worker whose account is still wrong halts again. A
 restarted worker takes its GitHub token from the worker manager, which read the
 token file when it started, so after a new token reaches the host `clear-halt`
-refuses until the manager has been restarted. It names the command; that
-restart ends every round in progress.
+refuses until the manager has been restarted with the command it names
+(`systemctl --user restart tauceti-fleet-workers.service` on Linux). That
+restart leaves workers in their own scopes running, with the token they started
+with; a worker whose status shows degraded isolation runs inside the manager's
+service, and its round ends with it.
 
 ## Hosts
 
@@ -456,6 +459,6 @@ A Mac takes the workers role and nothing else
 | `targets --file` is refused | The installed TauCetiWorker does not report `roadmap_targets`, and a worker manager that does not know the key loads no worker at all | Install a TauCetiWorker release that does (`update`), and have the worker manager running on it before setting the list |
 | Progress reports stop under `threshold` | `progress_max_open` reports of the account are open and none is landing | Close the stuck ones; the worker's suppression reason names them |
 | Rounds in progress ended when a setting changed | The worker manager restarts a worker whose definition changes: setting, moving or clearing the list, or a progress key on a group | Nothing to repair. New contents at the same list path, and a slot group's agent or phases, end no round |
-| A push is refused with a message about workflows | The account's token lacks the `workflow` scope | `gh auth refresh -h github.com -s workflow` where the profile's GitHub credential is kept, then repeat `add` |
+| A push is refused with a message about workflows | The account's token lacks the `workflow` scope | `gh auth refresh -h github.com -s workflow` where the profile's GitHub credential is kept, repeat `add`, then restart the worker manager on the host as under [Halts](#day-to-day): it reads the token only when it starts, and workers it starts after that use the new one |
 | Every Bubble round ends at once, or waits for the network | A row of the [Bubble table](#bubble-under-a-restricted-incus-project) is missing: a mount outside the account's home, the bridge behind the firewall, or the uid and gid not delegated | Fix that row |
 | `status` or `doctor` reports the shared host directory unusable | The directory is missing or this account cannot write to it; until repaired the install sizes itself alone | Create it or fix its permissions |
