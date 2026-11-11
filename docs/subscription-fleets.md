@@ -352,8 +352,8 @@ under the fleet account's home.
 | --- | --- |
 | `status`, `status HOST`, `status -f` | The fleet or one host, once or live ([Status](../README.md#status-and-cost-estimates)) |
 | `status --workers` | One row per worker: state, stage, the pull request or target it holds, agent, time in the round, last log line; then the workers' latest pull request events |
-| `attention [HOST]` | What is waiting for a person; `--lookup` first asks GitHub about the pull requests involved |
-| `attention HOST --ack PR`, `--ack all` | Archive the incident records for one pull request, or all of them |
+| `attention [HOST]` | What is waiting for a person; `--lookup` first asks each record's own forge about its pull request: GitHub with the host's credential, a Forgejo instance anonymously, so a private Forgejo repository cannot be looked up |
+| `attention HOST --ack PR`, `--ack all` | Archive the incident records for one pull request, or all of them. A bare number names a pull request of the workers' own GitHub repository; any other, a Forgejo one included, takes the `ack id` its item shows, such as `git.example.org/OWNER/REPO#412` |
 | `attention HOST --show-roadmap PR`, `--file-roadmap PR` | Print a roadmap change the decide phase drafted, or copy it to `./roadmap-PR.md` to file by hand |
 | `clear-halt HOST [WORKER]` | Clear an identity halt and restart the worker, or every halted worker |
 | `targets HOST`, `schedule HOST`, `slots HOST` | The list's counts per area; the saved schedule; the groups and how many of each are admitted |
