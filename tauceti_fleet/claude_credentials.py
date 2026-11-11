@@ -6,13 +6,14 @@ own. The token's scope cannot read subscription usage; the worker reads usage th
 named by `TAUCETI_CLAUDE_USAGE_CREDENTIALS` and renews that login under `auto_refresh`.
 """
 
+import contextlib
 import hashlib
 import json
 import shlex
 import time
 from pathlib import Path
 
-from .store import FleetError, atomic, config_dir, read
+from .store import FleetError, atomic, config_dir, locked, read
 
 TOKEN = "claude_token_file"
 USAGE = "claude_usage_credentials_file"
@@ -44,6 +45,11 @@ def selected(payload):
     return updates
 
 
+def refresh_lock(target):
+    """The lock the worker holds while it renews the login in `target`."""
+    return locked(target.with_name(f".{target.name.lstrip('.')}.refresh.lock"))
+
+
 def block(secret):
     try:
         value = json.loads(secret)["claudeAiOauth"]
@@ -58,6 +64,29 @@ def validate(kind, secret):
         raise FleetError("claude_token_file does not hold a setup-token (sk-ant-oat...); run claude setup-token again")
     if kind == USAGE and not all(isinstance(block(secret).get(k), str) for k in ("accessToken", "refreshToken")):
         raise FleetError("claude_usage_credentials_file is not the .credentials.json of a claude auth login")
+
+
+def fingerprint(secret):
+    return hashlib.sha256(secret.strip().encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def handed_to(machine_id, secret, names):
+    """On the operator's machine: refuse a usage login already transferred to another host, and
+    record the host once the body succeeds. Each host renews its own copy of a single-use refresh
+    token, so a login shared by two hosts stops working on one of them at the first renewal."""
+    path = config_dir() / "claude-usage-hosts.json"
+    with locked(path.with_suffix(".lock")):
+        owners = read(path, {})
+        owner = owners.get(fingerprint(secret), machine_id)
+        if owner != machine_id:
+            raise FleetError(
+                f"The usage login in claude_usage_credentials_file was transferred to {names.get(owner, owner)}. "
+                "Sign in once per host: give this host a profile whose claude_usage_credentials_file holds its own "
+                "claude auth login, or names a file this machine does not hold, then sign in on the host as doctor shows"
+            )
+        yield
+        atomic(path, dict(owners, **{fingerprint(secret): machine_id}))
 
 
 def install(kind, secret, since=None):
@@ -75,12 +104,38 @@ def install(kind, secret, since=None):
         return
     # Refresh tokens are single-use: once a worker has renewed this login, the operator's copy is
     # dead, and writing it again on a repeated add would end the chain the host now holds.
-    digest = hashlib.sha256(secret.strip().encode()).hexdigest()
+    digest = fingerprint(secret)
     marker = target.with_name("transferred.json")
-    if target.is_file() and read(marker, {}).get("sha256") == digest:
-        return
-    atomic(target, json.loads(secret))
-    atomic(marker, dict(sha256=digest, signed_in=since))
+    # A worker renewing under this lock writes back a rotation of the login it read before the wait.
+    with refresh_lock(target):
+        if target.is_file() and read(marker, {}).get("sha256") == digest:
+            return
+        atomic(target, json.loads(secret))
+        atomic(marker, dict(sha256=digest, signed_in=since))
+
+
+def signed_in(target):
+    """When the stored login was signed in: at the transfer, or later on the host itself.
+
+    A login newer than both the transfer record and the worker's last renewal was written by
+    neither, so it is a sign-in on the host. Its time is recorded before a renewal hides it.
+    """
+    marker = target.with_name("transferred.json")
+    renewed = target.with_name(f".{target.name.lstrip('.')}.refresh.last-success")
+    try:
+        with refresh_lock(target):
+            recorded = read(marker, {})
+            written = target.stat().st_mtime
+            if all(written > p.stat().st_mtime for p in (marker, renewed) if p.exists()):
+                recorded = dict(recorded, signed_in=written)
+                atomic(marker, recorded)
+    except (OSError, FleetError):
+        try:
+            recorded = read(marker, {})
+        except FleetError:
+            return None
+    since = recorded.get("signed_in") if isinstance(recorded, dict) else None
+    return since if type(since) in (int, float) else None
 
 
 def worker_env(config):
@@ -139,11 +194,9 @@ def report(config, *, now=None):
         expiry = login.get("refreshTokenExpiresAt")
         if type(expiry) in (int, float) and expiry > 0:
             expiry /= 1000
-        else:
-            try:
-                expiry = read(Path(usage).with_name("transferred.json"), {})["signed_in"] + LIFETIME[USAGE]
-            except (FleetError, KeyError, TypeError):
-                expiry = None
+        elif login.get("refreshToken"):
+            since = signed_in(Path(usage))
+            expiry = None if since is None else since + LIFETIME[USAGE]
         if not login.get("refreshToken"):
             add(USAGE, "blocked", "usage login missing, readable by other users, or without a refresh token")
         elif expiry is None:

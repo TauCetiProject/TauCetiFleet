@@ -241,7 +241,14 @@ def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=
     payload = dict(action="configure") if preserve_profile else dict(
         action="configure", profile=profile_name, ci_allowed=not no_ci, **profile(profile_name)
     )
-    status = call(target, payload, expected_machine_id=expected_machine_id)
+    usage = payload.get("credentials", {}).get(claude_credentials.USAGE)
+    if usage is None:
+        status = call(target, payload, expected_machine_id=expected_machine_id)
+    else:
+        machine = expected_machine_id or call(target, dict(action="status"))["machine_id"]
+        names = {entry["machine_id"]: name for name, entry in inventory().items()}
+        with claude_credentials.handed_to(machine, usage, names):
+            status = call(target, payload, expected_machine_id=machine)
     matching = remember(target, status, profile_name=status["profile"])
     readiness = call(target, dict(action="doctor"), expected_machine_id=status["machine_id"])
     return dict(host=matching, installed=status, doctor=readiness)

@@ -1,9 +1,11 @@
 import contextlib
+import fcntl
 import io
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -102,6 +104,75 @@ class ClaudeCredentials(unittest.TestCase):
         self.assertTrue(held.is_file())
         with self.assertRaisesRegex(store.FleetError, "Drain"):
             self.add(claude_usage_credentials_file=None)
+
+    def test_replacing_a_login_waits_for_a_renewal_in_progress(self):
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+        self.write("usage", json.dumps(login("refresh-of-a-new-sign-in")))
+        payload = remote.profile("p")
+        # The worker's lock name, held as a renewal of the old login holds it across its token exchange.
+        with held.with_name(".credentials.json.refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            replacing = threading.Thread(target=host.configure, args=(dict(payload, profile="p", ci_allowed=False),))
+            replacing.start()
+            time.sleep(0.5)
+            store.atomic(held, login("refresh-2"))
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        replacing.join(10)
+        self.assertEqual(json.loads(held.read_text()), login("refresh-of-a-new-sign-in"))
+
+    def test_a_sign_in_on_the_host_restarts_the_login_lifetime(self):
+        now = time.time()
+        os.utime(self.files["usage"], (now - 30 * DAY, now - 30 * DAY))
+        self.add()
+        held = store.config_dir() / "secrets/claude-usage/.credentials.json"
+
+        def usage():
+            entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
+            return entry["status"], entry["evidence"]
+
+        self.assertEqual(usage(), ("blocked", "usage login stopped renewing 2 days ago"))
+        store.atomic(held, login("refresh-of-a-host-sign-in"))
+        os.utime(held, (now + 5, now + 5))
+        self.assertEqual(usage(), ("ok", "usage login renews for another 28 days"))
+        # A later renewal by a worker writes its success marker after the login.
+        store.atomic(held, login("refresh-2"))
+        renewed = held.with_name(".credentials.json.refresh.last-success")
+        store.atomic(renewed, {"at": now + 10})
+        for path in (held, renewed):
+            os.utime(path, (now + 10, now + 10))
+        self.assertEqual(usage(), ("ok", "usage login renews for another 28 days"))
+        self.add()
+        self.assertEqual(json.loads(held.read_text()), login("refresh-2"))
+
+    def test_a_usage_login_goes_to_one_host(self):
+        self.add()
+        failing = set()
+
+        def call(target, payload, expected_machine_id=None, **_):
+            machine = "machine-" + target
+            self.assertIn(expected_machine_id, (None, machine))
+            if payload["action"] == "configure" and target in failing:
+                raise store.FleetError("offline")
+            return dict(machine_id=machine, profile="p", ci_enrolled=False)
+
+        def add(target):
+            return remote.add(target, profile_name="p")
+
+        with patch.object(remote, "deploy"), patch.object(remote, "call", side_effect=call):
+            add("a")
+            add("a")
+            with self.assertRaisesRegex(store.FleetError, "transferred to a. Sign in once per host"):
+                add("b")
+            self.write("usage", json.dumps(login("refresh-of-a-sign-in-for-b")))
+            failing.add("c")
+            with self.assertRaisesRegex(store.FleetError, "offline"):
+                add("c")
+            add("b")
+            with self.assertRaisesRegex(store.FleetError, "transferred to b"):
+                add("a")
+            self.files["usage"].unlink()
+            add("a")
 
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
