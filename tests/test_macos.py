@@ -144,13 +144,19 @@ class MacOS(unittest.TestCase):
     def test_worker_manager_starts_only_through_the_controller_and_is_never_restarted(self):
         host.start_workers()
         path = self.home / "config/launchd/org.tauceti.fleet.workers.plist"
-        manager = plistlib.loads(path.read_bytes())
-        self.assertEqual(manager["ProgramArguments"][-3:], ["-m", "tauceti_fleet", "run-workers"])
-        self.assertEqual(manager["EnvironmentVariables"]["PYTHONPATH"], host.RUNNING_RELEASE)
+        loaded = path.read_bytes()
+        manager = plistlib.loads(loaded)
+        self.assertEqual(manager["ProgramArguments"], [str(self.home / ".local/bin/tauceti-fleet"), "run-workers"])
+        self.assertNotIn("PYTHONPATH", manager["EnvironmentVariables"])
         self.assertEqual(manager["EnvironmentVariables"]["TAUCETI_FLEET_CONFIG"], str(self.home / "config"))
         self.assertFalse((self.home / "Library/LaunchAgents/org.tauceti.fleet.workers.plist").exists())
         self.assertEqual(self.launchctl("bootstrap"), [[self.domain, str(path)]])
-        host.start_workers()
+        # A controller of another release finds the manager loaded and only
+        # kickstarts it, so launchd's retained definition must still be right.
+        with patch.object(host, "RUNNING_RELEASE", str(self.home / "data/releases/new")), \
+                patch.object(host.sys, "executable", str(self.home / "data/releases/new/python")):
+            host.start_workers()
+        self.assertEqual(path.read_bytes(), loaded)
         self.assertEqual(self.launchctl("bootout"), [])
         self.assertEqual(self.launchctl("kickstart"), [[f"{self.domain}/org.tauceti.fleet.workers"]])
         with self.assertRaisesRegex(store.FleetError, "no worker slice"):

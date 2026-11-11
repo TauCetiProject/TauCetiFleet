@@ -87,12 +87,15 @@ def service_environment():
     return environment
 
 
+def launcher():
+    return Path.home() / ".local/bin/tauceti-fleet"
+
+
 def install_service(*, restart=True):
-    launcher = Path.home() / ".local/bin/tauceti-fleet"
     environment = service_environment()
-    write_agent(CONTROLLER, [launcher, "host-daemon"], environment,
+    write_agent(CONTROLLER, [launcher(), "host-daemon"], environment,
                 RunAtLoad=True, KeepAlive=dict(SuccessfulExit=False), ThrottleInterval=5)
-    write_agent(OBSERVER, [launcher, "collect-status"], environment, RunAtLoad=True, StartInterval=300, Nice=10)
+    write_agent(OBSERVER, [launcher(), "collect-status"], environment, RunAtLoad=True, StartInterval=300, Nice=10)
     start(CONTROLLER, restart=restart)
     start(OBSERVER)
 
@@ -102,8 +105,10 @@ def install_pressure_service():
 
 
 def start_workers():
-    write_agent(WORKERS, [*host.command(), "run-workers"],
-                dict(service_environment(), PYTHONPATH=host.RUNNING_RELEASE),
+    # launchd keeps the definition it loaded until bootout, which would stop
+    # the running manager, so the agent names the launcher that follows the
+    # installed release rather than this controller's release.
+    write_agent(WORKERS, [launcher(), "run-workers"], service_environment(),
                 RunAtLoad=True, KeepAlive=dict(SuccessfulExit=False), ExitTimeOut=30)
     start(WORKERS)
 
