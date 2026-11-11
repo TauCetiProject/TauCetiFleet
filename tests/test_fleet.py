@@ -122,7 +122,10 @@ class Isolated(unittest.TestCase):
             self.assertEqual(checks["worker-tool-" + tool]["roles"], ["workers"])
         self.assertNotIn("anthropic_api_key_file", checks)
         self.assertIn("anthropic_api_key_file", defaults)
-        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus"} & defaults)
+        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus", "worker-sandbox-bubble"} & defaults)
+        bubble = checks["worker-sandbox-bubble"]
+        self.assertEqual((bubble["status"], bubble["roles"]), ("warning", ["workers"]))
+        self.assertIn("outside tauceti-fleet-workers.slice", bubble["evidence"])
 
     def test_profile_rejects_what_the_worker_rejects_and_changes_only_while_drained(self):
         store.host_config()
