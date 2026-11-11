@@ -152,8 +152,8 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     session window as dict(used, resets_at) or None. The cap holds whenever the
     inputs cannot support a decision, and is not raised while the curve lets no
     round start in either window. Rounds are recorded through every hold but the
-    schedule's and a disabled host's, so that the split covers the span the
-    spending rate is measured over.
+    schedule's and a disabled host's, and the split takes those within the span
+    the spending rate is measured over.
     """
     floor, ceiling = bounds["floor"], bounds["ceiling"]
     cap = min(ceiling, max(floor, state["cap"] if type(state.get("cap")) is int else bounds["start"]))
@@ -207,7 +207,8 @@ def advance(state, *, now, bounds, enabled, slot_seconds, reading, session_left,
     ends_at, ends = reading["resets_at"], "weekly window"
     if slot_seconds is not None and now + slot_seconds < ends_at:
         ends_at, ends = now + slot_seconds, "slot"
-    authoring = [sum(s[index] for s in samples) for index in (1, 2)]
+    # A sample counts the rounds since the step before it, so the split takes those after the rate's first reading.
+    authoring = [sum(s[index] for s in samples if s[0] > readings[0][0]) for index in (1, 2)]
     # Rounds that report neither kind are divided as the authoring rounds are; with none of either, nothing is reserved.
     share = authoring[1] / sum(authoring) if sum(authoring) else 1.0
     left = max(0.0, 100 - reading["used"])

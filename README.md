@@ -1008,8 +1008,9 @@ window is left or while the weekly or the session window's usage is at the
 pacing curve, since no round starts then, and it is not lowered for spending
 over plan while no outside-list round is running, because a cap already below
 the open pull requests admits nothing and would only take longer to return.
-Rounds are still counted while the reading holds the cap, so the split covers
-the same span as the rate when readings return.
+Rounds are still counted while the reading holds the cap, and the split takes
+only those after the first reading the rate is measured from, so both cover
+the same span.
 
 A weekly window that is not open yet, which the reading reports with no usage
 and no reset time, counts as nothing spent with the whole week ahead: the cap

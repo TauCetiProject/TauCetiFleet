@@ -171,7 +171,7 @@ class ControlLaw(unittest.TestCase):
     def test_rounds_are_kept_while_the_reading_is_held(self):
         now = 50 * HOUR
         state = dict(cap=14, resets_at=100 * HOUR, readings=[[now - 6 * HOUR, 0.0], [now - 4 * HOUR, 2.0]],
-                     rounds=[[now - 6 * HOUR + 900 * n, 1, 0, 0] for n in range(8)])
+                     rounds=[[now - 6 * HOUR + 900 * (n + 1), 1, 0, 0] for n in range(8)])
         values = dict(now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, session_left=60.0, curve=outside_list.pace_points(dict(pace="0:100")))
         for n in range(15):
             at = now - 4 * HOUR + 900 * (n + 1)
@@ -182,6 +182,16 @@ class ControlLaw(unittest.TestCase):
         self.assertAlmostEqual(stepped["outside_share"], 16 / 24)
         # Two hours of list work and four of outside-list work at 1%/h, 50 h left: a third of 50%, plus a quarter, reserved.
         self.assertAlmostEqual(stepped["reserve"], 50 / 3 * 1.25, delta=0.1)
+
+    def test_rounds_before_the_first_reading_of_the_rate_are_not_split(self):
+        # Four hours of list work under a held reading, then two of outside-list work measured from a new first reading.
+        now, resets = 50 * HOUR, 123 * HOUR
+        rounds = [[now - 6 * HOUR + 900 * (n + 1), 1, 0, 0] for n in range(16)] + [[now - 2 * HOUR + 900 * (n + 1), 0, 2, 0] for n in range(7)]
+        state = dict(cap=40, resets_at=resets, readings=[[now - 2 * HOUR, 25.0]], rounds=rounds)
+        stepped = outside_list.advance(state, now=now, bounds=BOUNDS, enabled=True, slot_seconds=None, session_left=60.0, rounds=(0, 2, 0),
+                                       curve=outside_list.pace_points({}), reading=dict(fetched_at=now, used=27.0, resets_at=resets))
+        self.assertEqual((stepped["outside_share"], stepped["reserve"], stepped["cap"]), (1.0, 0.0, 40))
+        self.assertEqual(len(stepped["rounds"]), 24)
 
     def test_simulated_weeks(self):
         for name, simulation, quiet_from in WEEKS:
