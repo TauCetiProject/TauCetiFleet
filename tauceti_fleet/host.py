@@ -299,6 +299,12 @@ def write_slices(config, caps):
 
 
 WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*. The worker manager lays a
+# definition's env over its own environment, so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+}
 
 
 def pace_curve(spec):
@@ -336,7 +342,7 @@ def worker_fields(config):
     # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
     valid = isinstance(env, dict) and all(
         isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
-        and not k.startswith("TAUCETI_FLEET_") and k != "TAUCETI_WORKER_SLICE"
+        and not k.startswith("TAUCETI_FLEET_") and k not in FLEET_OWNED_ENV
         and isinstance(v, str) and v.isascii() and v.isprintable()
         for k, v in env.items()
     )
