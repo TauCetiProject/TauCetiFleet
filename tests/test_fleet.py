@@ -268,7 +268,8 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
-        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"), dict(binary=launch.call_args.args[0]))
+        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"),
+                         dict(binary=launch.call_args.args[0], github_token_sha256=host.token_digest("fake-selected-token")))
 
     def write_workers(self, **states):
         for name, state in states.items():
@@ -316,7 +317,8 @@ class Isolated(unittest.TestCase):
                 return subprocess.CompletedProcess(args, active)
             self.assertEqual(kwargs["env"]["TAUCETI_WORKERS_STATE_DIR"], str(store.state_dir() / "workers"))
             self.assertEqual(kwargs["env"]["TAUCETI_RUNTIME_DIR"], str(store.state_dir() / "worker-runtime"))
-            return subprocess.CompletedProcess(args, 0)
+            # A worker without `workers clear-halt` rejects the subcommand.
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
 
         def commands(*workers):
             config = str(store.config_dir() / "workers.toml")
@@ -331,10 +333,10 @@ class Isolated(unittest.TestCase):
                 host.rpc(dict(action="clear-halt", worker="w2"))
             self.assertEqual(calls, [])
             self.assertEqual(host.rpc(dict(action="clear-halt", worker="w3"))["cleared"], ["w3"])
-            self.assertEqual(calls[1:], commands("w3"))
+            self.assertEqual(calls[2:], commands("w3"))
             del calls[:]
             self.assertEqual(sorted(host.rpc(dict(action="clear-halt"))["cleared"]), ["w1", "w3"])
-            self.assertEqual(sorted(calls[1:]), sorted(commands("w1", "w3")))
+            self.assertEqual(sorted(calls[2:]), sorted(commands("w1", "w3")))
             del calls[:]
             active = 3
             with self.assertRaisesRegex(store.FleetError, "manager is not running"):
@@ -352,6 +354,93 @@ class Isolated(unittest.TestCase):
         ):
             self.assertEqual(main(["clear-halt", "big", "w3"]), 0)
         self.assertEqual(call.call_args.args[1], dict(action="clear-halt", worker="w3"))
+
+    def test_clear_halt_uses_the_workers_own_clear_when_the_worker_offers_it(self):
+        self.write_workers(w1="halted")
+        store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/runtime/old/bin/tauceti"))
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch.object(host, "run", side_effect=fake):
+            host.rpc(dict(action="clear-halt"))
+        config = str(store.config_dir() / "workers.toml")
+        self.assertEqual(calls[1:], [
+            ["/runtime/old/bin/tauceti", "workers", "clear-halt", "--help"],
+            ["/runtime/old/bin/tauceti", "workers", "--config", config, "clear-halt", "w1"],
+            ["/runtime/old/bin/tauceti", "workers", "--config", config, "restart", "w1"],
+        ])
+
+    def test_clear_halt_without_a_record_uses_the_runtime_the_manager_process_runs(self):
+        # The manager started before Fleet recorded its runtime, and a live update has since moved
+        # the installed link to another runtime.
+        self.write_workers(w1="halted")
+        secret = self.root / "token"
+        secret.write_text("token-a\n")
+        store.update_host(github_token_file=str(secret))
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        argv = ["/runtime/old/bin/python", "/runtime/old/bin/tauceti", "workers", "--config", "w.toml", "manager"]
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
+            patch.object(host, "manager_process", return_value=(argv, dict(GH_TOKEN="token-a"))),
+        ):
+            host.rpc(dict(action="clear-halt"))
+        self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
+        self.assertIn(["/runtime/old/bin/tauceti", "work", "--worker-id", "w1", "--clear-halt"], calls)
+        del calls[:]
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
+            patch.object(host, "manager_process", return_value=None),
+        ):
+            with self.assertRaisesRegex(store.FleetError, "Cannot tell which worker runtime.*systemctl --user restart tauceti-fleet-workers.service"):
+                host.rpc(dict(action="clear-halt"))
+        self.assertEqual([c[0] for c in calls], ["systemctl"])
+
+    @unittest.skipUnless(Path("/proc/self/cmdline").exists(), "needs /proc")
+    def test_manager_process_reads_the_services_main_process(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "workers"],
+                                 env=dict(os.environ, GH_TOKEN="token-a"))
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        shown = subprocess.CompletedProcess([], 0, f"{child.pid}\n")
+        with patch.object(host, "run", return_value=shown):
+            argv, environ = host.manager_process()
+        self.assertEqual(argv[1:], ["-c", "import time; time.sleep(30)", "workers"])
+        self.assertEqual(environ["GH_TOKEN"], "token-a")
+        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, "0\n")):
+            self.assertIsNone(host.manager_process())
+
+    def test_clear_halt_refuses_until_the_manager_has_read_a_replaced_token(self):
+        self.write_workers(w1="halted")
+        secret = self.root / "token"
+        secret.write_text("token-a")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        secret.write_text("token-b")
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        with patch.object(host, "run", side_effect=fake):
+            with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*systemctl --user restart"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual([c[0] for c in calls], ["systemctl"])
+            with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+                host.run_workers()
+                self.assertEqual(os.environ["GH_TOKEN"], "token-b")
+            self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], ["w1"])
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
