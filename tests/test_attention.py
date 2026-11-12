@@ -2,6 +2,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import tempfile
@@ -238,6 +239,26 @@ class Attention(unittest.TestCase):
             done["thread"].join()
         kept = store.read(attention.notes_path("declined-fix-7.json"))["prs"][f"{REPOSITORY}#7"]
         self.assertEqual((kept["state"], kept["observed"]), ("OPEN", at + 20))
+
+    def test_an_unreadable_credential_file_fails_only_github(self):
+        origin = "https://forge.example"
+        for forgejo_first in (True, False):
+            with self.subTest(forgejo_first=forgejo_first):
+                for path in attention.incidents_dir().glob("*.json"):
+                    path.unlink()
+                shutil.rmtree(store.state_dir() / "attention", ignore_errors=True)
+                self.on(github_token_file=str(self.root / "missing-token"))
+                early, late = "2026-01-15T09:00:00Z", "2026-01-15T09:30:00Z"
+                self.record("declined", "fix", 7, at=early if not forgejo_first else late, summary="no")
+                self.record("declined", "fix", 8, at=early if forgejo_first else late, suffix=".000000000008",
+                            forge=dict(kind="forgejo", url=origin))
+                self.github.side_effect = REQUEST
+                self.forgejo.side_effect = lambda at, path: dict(state="closed", merged=False, merged_at=None,
+                                                                 head=dict(sha="a" * 40))
+                value = self.listed(lookup=True)
+                self.assertIn("credential", value["lookup"]["error"])
+                self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/TauCetiProject/TauCeti#8"])
+                self.assertEqual([i["id"] for i in value["items"]], ["7"])
 
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()

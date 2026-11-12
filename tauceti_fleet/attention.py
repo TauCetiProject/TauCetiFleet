@@ -253,7 +253,10 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
     started = time.time()
     try:
         if forge == "github":
-            data = github.request(path, token_file=config.get("github_token_file"))
+            try:
+                data = github.request(path, token_file=config.get("github_token_file"))
+            except OSError as exc:
+                raise FleetError(f"GitHub credential file could not be read: {exc.strerror or exc}") from None
         else:
             data = forgejo.request(origin, path)
         meta = (data.get("pull_request") or {}) if named else data
