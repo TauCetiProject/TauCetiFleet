@@ -624,10 +624,14 @@ CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
 
 The first lines report running jobs by runner pool,
-the queued PR-build and total workflow backlogs, and account authoring pressure
+the PR-build and other-workflow backlogs, and account authoring pressure
 against its configured PR limit. Running-job counts cover all organization
-workflows, including small control jobs. Backlog counts are queued workflow runs,
-not individual jobs. Authoring pressure uses the workers' complete cached survey:
+workflows, including small control jobs. Backlog reporting separates pending
+and queued workflows. A second line shows verified stuck records and records
+without confirmed active jobs; these are not added to waiting work. Verification
+requires a complete empty/terminal job inventory and a settled workflow, never
+age alone. An old pending job remains waiting. Counts come from retained shared
+observations before detail-page limits; incomplete observations remain explicit. Authoring pressure uses the workers' complete cached survey:
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
 limit is reached. Missing facts are unknown; old observations retain their age.
@@ -645,9 +649,9 @@ cleanup instrumentation remain in `status --json`.
 `tauceti-fleet-observe.timer` prepares observations about every five minutes,
 with a randomized delay. A nonblocking lock and a persisted attempt deadline
 also bound concurrent and failed refreshes. Each refresh uses one Bors snapshot,
-two `per_page=1` GitHub queued-run counts, the shared service's **cached-only**
-running-job snapshot, and existing local worker survey responses. It does not
-scan GitHub runs or jobs. The shared snapshot adds no discovery requests and can
+the public CI manifest and its prepared backlog summary, the shared service's
+**cached-only** running-job snapshot, and existing local worker survey responses.
+It makes no GitHub run-count requests and does not scan runs or jobs. The shared snapshot adds no discovery requests and can
 remain stale when no scheduler has refreshed it. Existing host-service setup
 installs the observation timer; for a live code update, install/start only that
 timer while leaving the controller, workers, and CI guests running. JSON status
