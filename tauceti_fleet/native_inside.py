@@ -13,8 +13,11 @@ from pathlib import Path
 LINK = Path("/fleet-link")
 WORK = Path("/opt/actions-runner/_work")
 DISK_BUDGET_GIB = 56
-DISK_SCAN_INTERVAL = 60
-DISK_SCAN_TIMEOUT = 10
+# Full roots contain tens of thousands of cache artifacts. A healthy populated
+# runner already takes ~6s to scan; a 10s wall deadline fails under ordinary I/O
+# contention. Space/inode headroom remains checked every two seconds below.
+DISK_SCAN_INTERVAL = 300
+DISK_SCAN_TIMEOUT = 120
 DISK_SCAN_FAILURES = 3
 
 
@@ -75,9 +78,12 @@ class DiskUsage:
         self.measured_at = None
         self.error = None
         self.failures = 0
+        self.scan_seconds = None
 
     def failed(self, error):
-        self.allocated = None
+        # Keep the last verified measurement and its original timestamp. The
+        # error/failure fields expose staleness; repeated failures still retire
+        # the runner, and host free-space checks do not depend on this scan.
         self.error = error
         self.failures += 1
 
@@ -87,6 +93,7 @@ class DiskUsage:
             if self.child is not None:
                 code = self.child.poll()
                 if code is not None or now - self.started >= DISK_SCAN_TIMEOUT:
+                    self.scan_seconds = max(0, now - self.started)
                     if code is None:
                         self.child.kill()
                     stdout, _ = self.child.communicate(timeout=1)
@@ -107,7 +114,10 @@ class DiskUsage:
                 try:
                     self.child = subprocess.Popen(
                         ['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/'],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        # A busy workspace can produce many disappearing-file
+                        # diagnostics. Never leave an unread stderr pipe that
+                        # can block du before it emits its one-line summary.
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 except OSError as error:
                     self.failed(str(error))
 
@@ -115,7 +125,9 @@ class DiskUsage:
         return dict(disk_allocated=self.allocated, disk_measured_at=self.measured_at,
                     disk_measurement_age=None if self.measured_at is None else max(0, time.time() - self.measured_at),
                     disk_scan_running=self.child is not None, disk_scan_error=self.error,
-                    disk_scan_failures=self.failures, disk_budget_bytes=DISK_BUDGET_GIB * 1024**3)
+                    disk_scan_failures=self.failures, disk_scan_seconds=self.scan_seconds,
+                    disk_scan_timeout_seconds=DISK_SCAN_TIMEOUT, disk_scan_interval_seconds=DISK_SCAN_INTERVAL,
+                    disk_budget_bytes=DISK_BUDGET_GIB * 1024**3)
 
     def close(self):
         with self.lock:
