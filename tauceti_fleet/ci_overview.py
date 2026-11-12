@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -51,6 +52,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def status_ssl_context():
+    context = ssl.create_default_context()
+    # Standalone Python may expect /etc/ssl/cert.pem, absent on NixOS. Its
+    # existing certs directory need not contain OpenSSL's hashed issuer links.
+    # Use the distribution's installed bundle; preserve explicit trust settings.
+    if ssl.get_default_verify_paths().cafile is None and not any(
+            key in os.environ for key in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
+        for path in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-bundle.crt"):
+            if Path(path).is_file():
+                context.load_verify_locations(cafile=path)
+                break
+    return context
+
+
 def fetch(url, *, token_file=None, timeout=10):
     headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetStatus/1.0"}
     if token_file:
@@ -59,7 +74,8 @@ def fetch(url, *, token_file=None, timeout=10):
             raise FleetError("Invalid status credential")
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=status_ssl_context()))
+    with opener.open(request, timeout=timeout) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         raise FleetError("Status response exceeds limit")
@@ -211,8 +227,9 @@ def worker_policies(config):
     return sorted(policies)
 
 
-def pressure_row(path, identity, account, policies):
-    if path.stat().st_size > 8 * 1024 * 1024:
+def pressure_rows(path, identity, account, policies):
+    stat = path.stat()
+    if stat.st_size > 8 * 1024 * 1024:
         return []
     cached = read(path, {})
     query, payload = cached.get("query", {}), cached.get("payload", {})
@@ -223,23 +240,23 @@ def pressure_row(path, identity, account, policies):
         return []
     scope, skip = args.get("roadmap", "any") or "any", args.get("skip", "")
     skipped = tuple(sorted(set(filter(None, skip.split(",")))))
-    limits = {limit for area, excluded, limit in policies if area == scope and excluded == skipped}
-    if not limits:
-        return []
-    if scope in ("any", "auto"):
-        counts = payload.get("author_counts")
-        if not isinstance(counts, dict):
-            return []
-        count = counts.get(account, 0)
-    else:
-        rows = payload.get("data")
-        if not isinstance(rows, list):
-            return []
-        count = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
-    if type(count) is not int or count < 0:
-        return []
-    return [dict(scope=scope, skip=skip, count=count, limit=limit, blocked=count >= limit,
-                 observed_at=path.stat().st_mtime) for limit in limits]
+    # The gateway computes author_counts over the inventory before filtering
+    # rows by roadmap. Only the exclusions need to match an all-roadmaps policy.
+    author_counts = payload.get("author_counts")
+    counts = {}
+    if isinstance(author_counts, dict):
+        counts.update((area, author_counts.get(account, 0)) for area in ("any", "auto"))
+    rows = payload.get("data")
+    if scope not in ("any", "auto") and isinstance(rows, list) and any(
+        area == scope and excluded == skipped for area, excluded, _ in policies
+    ):
+        counts[scope] = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
+    return [
+        dict(scope=area, skip=",".join(skipped), count=count, limit=limit, blocked=count >= limit,
+             observed_at=stat.st_mtime)
+        for area, excluded, limit in policies
+        if excluded == skipped and type(count := counts.get(area)) is int and count >= 0
+    ]
 
 
 def pressure(config):
@@ -255,11 +272,15 @@ def pressure(config):
     root = Path(os.environ.get("TAUCETI_GITHUB_SHARED_DIR", Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "tauceti/github-shared"))
     directory = root / "gateway" / identity / "responses"
     scopes = {}
+    seen = set()
     deadline = time.monotonic() + 5
 
     def observe(path):
+        if path in seen:
+            return
+        seen.add(path)
         try:
-            for row in pressure_row(Path(path), identity, account, policies):
+            for row in pressure_rows(path, identity, account, policies):
                 key = (row["scope"], row["skip"], row["limit"])
                 if row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
                     scopes[key] = row
@@ -273,7 +294,7 @@ def pressure(config):
         args = dict(roadmap=scope, skip=",".join(skip), numbers="", stages=stages)
         key = hashlib.sha256(json.dumps([REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
         observe(directory / (key + ".json"))
-    if len(scopes) < len(policies):
+    if len(scopes) < len(policies) or any(scope in ("auto", "any") for scope, _, _ in policies):
         newest = []
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -285,10 +306,12 @@ def pressure(config):
                         heapq.heappush(newest, (stat.st_mtime, entry.path))
                         if len(newest) > 256:
                             heapq.heappop(newest)
-        for _, path in sorted(newest, reverse=True):
+        for stamp, path in sorted(newest, reverse=True):
             if time.monotonic() > deadline:
                 break
-            observe(path)
+            if len(scopes) == len(policies) and stamp <= min(row["observed_at"] for row in scopes.values()):
+                break
+            observe(Path(path))
     if not scopes:
         raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
     rows = list(scopes.values())
@@ -554,19 +577,21 @@ def display(value, *, section="all"):
         data = source_value("pressure", observation)
         if data is None:
             continue
-        age = max(0, int(time.time() - observation.get("observed_at", time.time())))
+        rows = {}
+        for row in data["scopes"]:
+            if row["scope"] in ("any", "auto") and not row["skip"]:
+                limit = row["limit"]
+                if row["observed_at"] > rows.get(limit, {}).get("observed_at", -1):
+                    rows[limit] = row
+        newest = max((r["observed_at"] for r in rows.values()), default=observation["observed_at"])
+        age = max(0, int(time.time() - newest))
         note = f"{age}s old" + ("; stale" if age > 600 or observation.get("error") else "")
-        rows = sorted((r for r in data["scopes"] if r["scope"] in ("any", "auto") and not r["skip"]),
-                      key=lambda r: -r["observed_at"])
         parts = []
-        for row in rows[:1]:
-            scope = "all roadmaps" if row["scope"] in ("any", "auto") else row["scope"]
-            if row["skip"]:
-                scope += " (with exclusions)"
-            parts.append(f"{scope}: {row['count']}/{row['limit']}" + (" blocked" if row["blocked"] else ""))
+        for limit, row in sorted(rows.items()):
+            parts.append(f"{row['count']}/{limit}" + (" blocked" if row["blocked"] else ""))
             scope_age = max(0, int(time.time() - row["observed_at"]))
-            if scope_age > 600:
+            if scope_age > 600 and row["observed_at"] < newest:
                 parts[-1] += f" (stale {scope_age}s)"
         machine = data.get("machine_id")
         label = " on " + pool_names.get("fleet-" + machine[:12], machine[:12]) if isinstance(machine, str) else ""
-        print(f"Backpressure {data['account']}{label}: " + ("; ".join(parts) or "all roadmaps: unknown") + f" open non-draft roadmap PRs ({note})")
+        print(f"Backpressure {data['account']}{label}: all roadmaps: " + (", ".join(parts) or "unknown") + f" open non-draft roadmap PRs ({note})")

@@ -430,6 +430,14 @@ def start_workers():
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+    # A manager kept running across a live update never reruns run_workers(); it
+    # inherited the user manager's environment, so record the data root from there.
+    manager = run(["systemctl", "--user", "show-environment"], check=False)
+    if manager.returncode == 0 and isinstance(manager.stdout, str):
+        from . import subscription_usage
+
+        environment = dict(line.partition("=")[::2] for line in manager.stdout.splitlines())
+        subscription_usage.record_data_root(host_config(), environment)
 
 
 def manager_environment():
@@ -763,7 +771,14 @@ def collect_ci_results(config):
                 # Anchor to the actual failure, so replay/crash recovery never
                 # renews the same cooldown or shortens a newer fault's cooldown.
                 circuit = read(circuit_path, {})
-                delay = 60 if decision["reason"] == "pr_runner_step_failed" else 900
+                # A disposable staging guest's failed GitHub/bootstrap step
+                # must not withhold the reserved slot for fifteen minutes when
+                # its host service exited cleanly. Actual host faults stay long.
+                quick_retry = decision["reason"] == "pr_runner_step_failed" or (
+                    kind == "staging" and value.get("host_health") == "healthy"
+                    and decision["reason"] == "infrastructure_step_failed"
+                )
+                delay = 60 if quick_retry else 900
                 if completed + delay > circuit.get("until", 0):
                     atomic(circuit_path, dict(until=completed + delay, job_id=job["id"], reason=decision["reason"]))
             event(

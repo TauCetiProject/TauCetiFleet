@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -277,6 +278,28 @@ class SubscriptionUsage(unittest.TestCase):
         with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
             host.run_workers()
         self.assertIsNone(subscription_usage.readings(store.host_config(), NOW)["codex"])
+
+    def test_worker_data_root_of_an_already_running_manager_is_recorded_when_its_service_is_kept(self):
+        hour = 3600
+        kept = self.root / "durable"
+        store.update_host(agent="codex")
+        self.codex(kept / "state/fleet-1/cache/quota-codex.json", 60, (20, 5 * hour, hour))
+
+        def systemctl(args, **_):
+            output = f"LANG=C\nTAUCETI_LEGACY_DATA_ROOT={kept}\n" if args[-1] == "show-environment" else ""
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        units = self.root / "units"
+        units.mkdir()
+        with patch.object(host, "units", return_value=units), patch.object(host, "run", side_effect=systemctl):
+            host.start_workers()
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
+        with (
+            patch.object(host, "units", return_value=units),
+            patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, "", "")),
+        ):
+            host.start_workers()
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
 
 
 if __name__ == "__main__":
