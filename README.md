@@ -697,6 +697,23 @@ show `~` and measurement coverage. With no measured sample, output contributes
 zero; positive spending over zero LOC shows `$∞`. Older creation-cohort summaries
 show unavailable landed output until their collectors are refreshed.
 
+Updated worker collectors also supply **attributed landed LOC**. This estimates
+our share of each landed PR using measured local authoring, fix and review costs
+and our fraction of its observed review passes. It credits reviews/fixes of
+other contributors' PRs and accounts for outside reviews of our own. Production
+cost per LOC and review cost per pass are measured dynamically; there is no fixed
+author/reviewer split. Every recorded review pass counts equally.
+
+`Estimated $ / attributed LOC` charges all spending, including unsuccessful work,
+`bump`, `progress` and other overhead, against this attributed output. Fleet totals
+sum locally estimated credit and dollars before dividing. Attribution coverage
+is explicit; missing cost links, LOC, review records or calibration samples add
+no credited output. Partial rates are labelled explicitly; all-missing rates are unavailable. Host-local worker/group credits share common denominators and sum to the host total. Cross-host production assists can overlap; no global ownership reconciliation is attempted. The original authored-LOC rate remains visible. Older hosts
+show attribution as unavailable until their worker collectors are updated.
+This uses existing local receipts and already-synced review archive records,
+with bounded cached reads in the existing worker collector. Fleet status adds
+no processes, scans or network requests.
+
 Spending has 3h, 24h, 7d and All time columns: worker-hours recorded, API dollars
 per worker-hour and API dollars per elapsed hour, using accrued usage from running, completed and interrupted conversations.
 Native final totals correct token-price estimates at the original usage timestamps;
