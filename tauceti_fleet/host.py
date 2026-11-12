@@ -822,7 +822,14 @@ def collect_ci_results(config):
                 # Anchor to the actual failure, so replay/crash recovery never
                 # renews the same cooldown or shortens a newer fault's cooldown.
                 circuit = read(circuit_path, {})
-                delay = 60 if decision["reason"] == "pr_runner_step_failed" else 900
+                # A disposable staging guest's failed GitHub/bootstrap step
+                # must not withhold the reserved slot for fifteen minutes when
+                # its host service exited cleanly. Actual host faults stay long.
+                quick_retry = decision["reason"] == "pr_runner_step_failed" or (
+                    kind == "staging" and value.get("host_health") == "healthy"
+                    and decision["reason"] == "infrastructure_step_failed"
+                )
+                delay = 60 if quick_retry else 900
                 if completed + delay > circuit.get("until", 0):
                     atomic(circuit_path, dict(until=completed + delay, job_id=job["id"], reason=decision["reason"]))
             event(
