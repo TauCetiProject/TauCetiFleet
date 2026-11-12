@@ -202,6 +202,10 @@ def incident_items(config):
                 numbers = record.get(relation) if isinstance(record.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
                     known = cached.get(f"{repository}#{number}")
+                    # Only a merge cannot be undone; any other answer from before this record is asked again.
+                    if (isinstance(known, dict) and known.get("state") != "MERGED"
+                            and not (isinstance(known.get("observed"), int | float) and known["observed"] >= written)):
+                        known = None
                     item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
         items.append(item)
     return items

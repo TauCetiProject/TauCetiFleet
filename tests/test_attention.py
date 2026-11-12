@@ -260,6 +260,33 @@ class Attention(unittest.TestCase):
                 self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/TauCetiProject/TauCeti#8"])
                 self.assertEqual([i["id"] for i in value["items"]], ["7"])
 
+    def test_a_rewritten_record_asks_again_about_what_it_names_unless_that_merged(self):
+        self.on()
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        self.record("declined", "fix", 7, summary="see #8 #9", mentions=[8, 9])
+        clock = [at + 60]
+        states = {"8": dict(state="closed"), "9": dict(state="closed", pull_request=dict(merged_at="2026-01-15T09:00:00Z"))}
+
+        def answer(path, **_):
+            number = path.split("/")[-1]
+            if "/pulls/" in path:
+                return dict(state="open", merged_at=None, head=dict(sha="b" * 40))
+            return dict(states[number], title=f"#{number}")
+
+        self.github.side_effect = answer
+        with patch.object(attention.time, "time", side_effect=lambda: clock[0]):
+            self.listed(lookup=True)
+            states["8"] = dict(state="open")
+            clock[0] = at + 180
+            self.record("declined", "fix", 7, head="b" * 40, summary="see #8 #9", mentions=[8, 9],
+                        at="2026-01-15T09:32:00Z")
+            self.assertEqual([n.get("state") for n in self.listed()["items"][0]["named"]], [None, "MERGED"])
+            self.github.reset_mock()
+            value = self.listed(lookup=True)
+        self.assertEqual(sorted(c.args[0].split("/", 3)[-1] for c in self.github.call_args_list),
+                         ["issues/8", "pulls/7"])
+        self.assertEqual([n["state"] for n in value["items"][0]["named"]], ["OPEN", "MERGED"])
+
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")
