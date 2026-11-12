@@ -448,6 +448,8 @@ def write_worker_config(config):
             if value is not None:
                 lines.append(key + " = " + toml_value(value))
     path = config_dir() / "workers.toml"
+    if path.exists() and path.read_text() == "\n".join(lines) + "\n":
+        return ids
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
     os.chmod(temporary, 0o600)
@@ -455,11 +457,9 @@ def write_worker_config(config):
     return ids
 
 
-def maintenance_workers(config):
-    """Ids whose slot group leaves out roadmap rounds, where roadmap focus has nothing to steer."""
-    if not config.get("slots"):
-        return set()
-    return {wid for wid, fields, _ in worker_plan(config)[0] if "roadmap" not in fields.get("only", ["roadmap"])}
+def maintenance_workers():
+    """Written ids whose phases leave out roadmap rounds, where roadmap focus has nothing to steer."""
+    return {wid for wid, (_, only) in written_roles().items() if only and "roadmap" not in only}
 
 
 def unapplied_workers():
@@ -1046,8 +1046,7 @@ def daemon():
         pool_error = None
         error = None
         ids = []
-        applied_slots = None
-        maintenance = set()
+        manifest = None
         last_results = 0
         memory_paused = False
         while not stopping:
@@ -1096,10 +1095,13 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    grouped = config.get("slots")
-                    if not ids or grouped != applied_slots or (not grouped and len(ids) < config["max_workers"]):
-                        ids, applied_slots = worker_config(config), grouped
-                        maintenance = maintenance_workers(config)
+                    # Every pass brings workers.toml back to the saved configuration,
+                    # whichever writer changed either since the last one.
+                    ids = worker_config(config)
+                    path = config_dir() / "workers.toml"
+                    written = path.read_text() if path.exists() else ""
+                    if manifest != written:
+                        manifest = written
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -1132,6 +1134,7 @@ def daemon():
                 )
                 with locked(state_dir() / "worker-definitions.lock"):
                     held = acknowledge_workers()
+                    maintenance = maintenance_workers()
                     admitted = [wid for wid in ids[:target] if wid not in held]
                     roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
                     atomic(
