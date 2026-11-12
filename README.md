@@ -878,3 +878,5 @@ to load a new client release.
 The queue table labels the oldest sealed non-head batch `next head`, with later
 sealed batches `sealed, waiting`. A sealed batch has fixed membership even when
 its preparation has finished; only unsealed batches receive incoming PRs.
+
+Enable locally verified PR labeling with `tauceti-fleet workers HOST --self-tested`, or disable it with `--no-self-tested`. This persists `self_tested = true` in the host’s generated worker definitions. Workers apply the `self-tested` label only after the normal successful local verification; reviews and staging tests remain required. Install a Worker release supporting `--self-tested` and hand over the running manager to that runtime, preserving worker scopes, before enabling this setting. The command checks the installed runtime and running manager for support. The admission ceiling and active rounds are preserved.
