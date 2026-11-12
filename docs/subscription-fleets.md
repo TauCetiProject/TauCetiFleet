@@ -47,13 +47,24 @@ each worker copies that login.
 **Codex renewal.** A Codex access token lasts about ten days and the CLI renews
 it only while it runs. A worker with `auto_refresh` renews the host's
 `~/.codex/auth.json` itself, two days before expiry or on a 401, provided
-Codex's `cli_auth_credentials_store` is `file` and the login's plan is one for
-which Codex fetches no workspace policy: free, go, plus, the pro plans, team and
-the self-serve business plans. A business, education or enterprise plan, or one
-the worker does not recognise, is renewed only once its name, as the token
-carries it, is in `TAUCETI_CODEX_REFRESH_PLANS` (comma-separated, for example
-`edu_pro`). Name one only after `codex doctor` on the host reports the file
-store for that login: a workspace policy can keep it in the keyring instead.
+Codex's `cli_auth_credentials_store` resolves to `file`, including in the
+administrator files under `/etc/codex`. A workspace policy, which Codex fetches
+for business, education and enterprise plans, and a `config_server` enrolled in
+a requirements file under `/etc/codex`, for any plan, can choose another store,
+so the worker renews by one of two routes:
+
+- **Set the store explicitly (preferred).** With
+  `cli_auth_credentials_store = "file"` in the `config.toml` of both the host's
+  `~/.codex` and the worker's own Codex directory, which for a worker with an
+  isolated home is the one in that home and is not copied from the host's, the
+  worker renews on any plan and with a `config_server` enrolled.
+- **Name the plan.** Otherwise the worker renews only a plan Codex fetches no
+  policy for (free, go, plus, the pro plans, team and the self-serve business
+  plans) or one named, as the token carries it, in `TAUCETI_CODEX_REFRESH_PLANS`
+  (comma-separated, for example `edu_pro`), and nothing while a `config_server`
+  is enrolled. Name a plan only after `codex doctor` on the host reports the
+  file store for that login: a workspace policy can keep it in the keyring.
+
 Fleet sets `auto_refresh` for a profile with a usage sign-in; another profile
 sets `TAUCETI_AUTO_REFRESH` to `1` in [`env`](#billing-agent-sandbox-and-pace),
 which also carries `TAUCETI_CODEX_REFRESH_PLANS`. TauCetiWorker's
@@ -131,7 +142,7 @@ TauCetiWorker's
 | --- | --- |
 | `TAUCETI_PACE_CLAUDE`, `TAUCETI_PACE_CODEX` | A curve for one provider's windows; the other follows `pace`. For `auto` slots whose two subscriptions should be spent at different rates |
 | `TAUCETI_AUTO_REFRESH` = `1` | Workers renew the sign-ins they were given |
-| `TAUCETI_CODEX_REFRESH_PLANS` | Codex plans renewed beyond the worker's own list ([Codex renewal](#what-it-needs)) |
+| `TAUCETI_CODEX_REFRESH_PLANS` | Codex plans renewed beyond the worker's own list, for a login whose `config.toml` does not set the credential store ([Codex renewal](#what-it-needs)) |
 | `TAUCETI_REACTIONS` = `0` | A reviewer's claim on an author contest is a file under `TAUCETI_GITHUB_SHARED_DIR`, not a reaction on GitHub |
 | `TAUCETI_STUCK_ISSUES` = `0` | No "Review stuck" tracking issues are opened |
 | `TAUCETI_SHARED_ATTEMPTS_DIR` | Repair attempts are counted once for all workers that name the directory |
@@ -477,7 +488,7 @@ A Mac takes the workers role and nothing else
 | Workers wait with `claude usage HTTP 403` | The agents run on a setup-token and there is no usage sign-in to read the windows with | Add `claude_usage_credentials_file` to the profile and repeat `add` |
 | Workers wait with `claude usage HTTP 401 (access token expired or rejected; log in again)` | The usage sign-in stopped renewing, about four weeks after it was made, or another holder of the same file spent its refresh token | Sign in again with the command `doctor` or `attention` prints, on Linux ([macOS](#macos)), and keep that directory for one host's fleet alone |
 | `add` is refused: the usage login `was transferred to` another host | The profile's usage file holds a login already sent to that host, or reserved for it by an `add` whose send failed | Give this host its own profile and usage sign-in ([A minimal profile](#a-minimal-profile)) |
-| `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it: renewal is off, the credential store is not `file`, or the login's plan is outside the worker's list and not in `TAUCETI_CODEX_REFRESH_PLANS` | Run `codex` as the host account, signing in again if it asks. Then put right whichever condition of [Codex renewal](#what-it-needs) fails, or the next expiry stops the workers again |
+| `codex token expired; refresh left to the operator` | The Codex access token lapsed and the workers do not renew it: renewal is off, or the credential store does not resolve to `file`; or, where the two `config.toml` files do not set the store to `file` explicitly, the login's plan is outside the worker's list and not in `TAUCETI_CODEX_REFRESH_PLANS`, or a `config_server` is enrolled under `/etc/codex` | Run `codex` as the host account, signing in again if it asks. Then put right whichever condition of [Codex renewal](#what-it-needs) fails, preferably by setting the store in both `config.toml` files, or the next expiry stops the workers again |
 | A worker's log repeats `keeps Claude creds first copied from ...` | The slot first ran before the host had `claude_token_file` and still uses the sign-in it copied then | With the worker stopped, remove `.credentials.json` and `.tauceti-creds-source` from the `.claude` directory of that worker's isolated home; its next start copies the token |
 | `Starting new work: paused; outside the weekly schedule` in a slot you expected | Slot times are host local time unless saved with `--timezone`; a saved schedule the controller cannot read admits nothing | `schedule HOST` shows what is saved; `--clear` or a new set of slots replaces it |
 | The target list line shows `0 eligible` | Every open item waits on another: often a `[~]` item whose pull request closed unmerged, or a landing too old for the workers' view of recently closed pull requests | `targets HOST --audit`; tick landed items `[x]` in the file, and give one that landed only in part `partial: #N` ([Target lists](#target-lists)). `outside_list_cap` keeps workers authoring meanwhile |
