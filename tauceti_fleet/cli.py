@@ -59,9 +59,11 @@ def parser():
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
     reserve.add_argument("--json", action="store_true")
-    workers = sub.add_parser("workers", help="change the admission ceiling without interrupting active work")
+    workers = sub.add_parser("workers", help="change worker capacity or self-tested prompting without interrupting active work")
     workers.add_argument("host")
-    workers.add_argument("--max", dest="maximum", type=int, required=True)
+    workers.add_argument("--max", dest="maximum", type=int)
+    workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
+                         help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--json", action="store_true")
     clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
     clear.add_argument("host")
@@ -193,6 +195,8 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
+        if args.command == "workers" and args.maximum is None and args.self_tested is None:
+            raise FleetError("Select --max, --self-tested, or --no-self-tested")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.command == "attention" and args.ack and not args.host:
@@ -232,7 +236,10 @@ def main(argv=None, *, _status_results=None):
                 if args.prepare:
                     payload["prepare"] = True
             if args.command == "workers":
-                payload.update(maximum=args.maximum)
+                if args.maximum is not None:
+                    payload["maximum"] = args.maximum
+                if args.self_tested is not None:
+                    payload["self_tested"] = args.self_tested
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
             if args.command == "clear-halt":
