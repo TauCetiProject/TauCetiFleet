@@ -301,24 +301,6 @@ def sweep_one(item):
         return
 
 
-# What to put right before clearing a halt, by the worker's reason and the forge it names.
-HALT_REMEDY = {
-    "identity-mismatch": dict(
-        github="Give the host a GitHub credential of the account github_account names, or correct github_account",
-        forgejo="Write a token of the Forgejo user TAUCETI_FORGEJO_USER_ID names to the file "
-                "TAUCETI_FORGEJO_TOKEN_FILE names on the host, or correct the user ID"),
-    "invalid-credentials": dict(
-        github="Replace the host's GitHub token (github_token_file, or the stored gh credential)",
-        forgejo="Issue a new Forgejo token for the worker's user and write it to the file "
-                "TAUCETI_FORGEJO_TOKEN_FILE names on the host"),
-    "account-halt": dict(
-        github="Have GitHub lift the suspension or lock on the worker's account",
-        forgejo="Have the Forgejo instance's administrator reinstate the worker's user, "
-                "or give its token the read:user scope"),
-}
-FORGE_NAMES = dict(github="GitHub", forgejo="Forgejo")
-
-
 def halt_items(config):
     from . import host  # host imports this module
 
@@ -326,11 +308,10 @@ def halt_items(config):
     for worker in host.worker_statuses():
         if worker.get("state") == "halted":
             wid = printable(worker["id"], 100)
-            reason = str(worker.get("halt_reason") or "")
-            # A worker release before Forgejo identity checks names GitHub's reasons without the forge.
-            forge, _, bare = reason.rpartition(":") if ":" in reason else ("github", "", reason)
-            remedy = HALT_REMEDY.get(bare, {}).get(forge)
-            head = " ".join(v for v in (FORGE_NAMES.get(forge, forge) if reason else "", bare) if v)
+            reason = worker.get("halt_reason")
+            forge, verdict = host.halt_forge(reason)
+            remedy = host.HALT_REMEDY.get(verdict, {}).get(forge) if reason else None
+            head = f"{host.FORGE_NAMES.get(forge, forge)} {verdict}" if reason else ""
             text = ": ".join(str(v) for v in (head, worker.get("failure_reason")) if v) or "reason not recorded"
             items.append(dict(
                 source="halt", id=wid, kind="halted", forge=forge if reason else None, command=["clear-halt", wid],

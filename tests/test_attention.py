@@ -805,6 +805,16 @@ class Attention(unittest.TestCase):
         self.assertEqual((status["error"], status["active_worker_limit"]), (None, 1))
         self.assertIn("unreadable", attention.prepared()["error"])
 
+    def test_a_halt_shows_the_remedy_and_forge_name_host_defines(self):
+        store.update_host(workers_enabled=True, max_workers=1)
+        store.atomic(store.state_dir() / "workers/w1.json", dict(
+            id="w1", state="halted", alive=False, halt_reason="forgejo:account-halt", failure_reason="HTTP 403"))
+        remedies = dict(host.HALT_REMEDY, **{"account-halt": dict(forgejo="Ask the instance")})
+        with patch.object(host, "HALT_REMEDY", remedies), patch.object(host, "FORGE_NAMES", dict(forgejo="The forge")):
+            text = self.listed()["items"][0]["text"]
+        self.assertEqual(text, "The forge account-halt: HTTP 403\nAsk the instance, then clear the halt; "
+                               "the worker stays stopped until then.")
+
     def test_a_forgejo_halt_is_listed_with_its_forge_and_the_forgejo_remedy(self):
         store.update_host(workers_enabled=True, max_workers=1)
         store.atomic(store.state_dir() / "workers/w1.json", dict(
