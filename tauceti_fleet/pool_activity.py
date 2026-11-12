@@ -94,18 +94,24 @@ def cached():
     return value if isinstance(value, dict) else {}
 
 
+def jobs_url(manifest):
+    domain = manifest.get("domains", {}).get("jobs", {})
+    path = domain.get("url", "")
+    scope = manifest.get("scope", "")
+    if (manifest.get("schema") != "tauceti.operations.manifest/v1"
+            or not isinstance(scope, str) or not re.fullmatch(r"[a-f0-9]{64}", scope)
+            or not isinstance(path, str) or not re.fullmatch(
+                r"/v1/operations/objects/" + scope + r"/[a-f0-9]{64}\.json", path)):
+        raise ValueError("Invalid public CI jobs object URL")
+    return ORIGIN + path
+
+
 def refresh():
     previous = cached()
     manifest = None
     try:
         manifest = ci_overview.fetch(MANIFEST, timeout=3)
-        domain = manifest.get("domains", {}).get("jobs", {})
-        path = domain.get("url", "")
-        scope = manifest.get("scope", "")
-        if not isinstance(scope, str) or not re.fullmatch(r"[a-f0-9]{64}", scope) or not isinstance(path, str) or not re.fullmatch(
-                r"/v1/operations/objects/" + scope + r"/[a-f0-9]{64}\.json", path):
-            raise ValueError("Invalid public CI jobs object URL")
-        value = dict(value=parse(manifest, ci_overview.fetch(ORIGIN + path, timeout=3)), checked_at=time.time())
+        value = dict(value=parse(manifest, ci_overview.fetch(jobs_url(manifest), timeout=3)), checked_at=time.time())
     except (FleetError, OSError, ValueError, TypeError, AttributeError) as error:
         value = dict(previous, error="Public CI activity refresh failed (" + type(error).__name__ + ")",
                      checked_at=time.time())
