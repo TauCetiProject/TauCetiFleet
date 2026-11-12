@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from calendar import timegm
 from contextlib import closing, contextmanager
@@ -211,14 +212,31 @@ def incident_items(config):
     return items
 
 
+_held = threading.local()
+
+
 @contextmanager
 def records_lock():
     """The incident directory's `.records.lock`, held across keeping an archived record aside and replacing it,
-    so overlapping acknowledgements cannot both keep the same record and drop the one between them."""
+    so overlapping acknowledgements cannot both keep the same record and drop the one between them.
+    A second flock on a new descriptor would wait on this thread's own lock, so nesting in one thread only
+    counts; other threads and processes each take it on their own descriptor."""
+    depth = getattr(_held, "depth", 0)
+    if depth:
+        _held.depth = depth + 1
+        try:
+            yield
+        finally:
+            _held.depth -= 1
+        return
     fd = os.open(incidents_dir() / ".records.lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
     finally:
         os.close(fd)
 
