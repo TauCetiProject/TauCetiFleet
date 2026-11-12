@@ -285,6 +285,8 @@ def worker_config(config):
         github_account=config.get("github_account", "tauceti-ai-for-science"),
         anthropic_api_key_file=config.get("anthropic_api_key_file"),
     )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
@@ -481,6 +483,23 @@ def set_worker_maximum(maximum, *, lease_seconds=None):
             dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
         )
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
+
+
+def set_worker_policy(payload):
+    maximum = payload.get("maximum")
+    local = payload.get("self_tested")
+    if maximum is None and local is None:
+        raise FleetError("Select a worker maximum or self-tested prompting")
+    if local is not None and type(local) is not bool:
+        raise FleetError("self_tested must be a boolean")
+    if maximum is not None and (type(maximum) is not int or not 0 <= maximum <= 4096):
+        raise FleetError("Worker maximum must be an integer from 0 to 4096")
+    result = set_worker_maximum(maximum) if maximum is not None else {}
+    if local is not None:
+        config = update_host(self_tested=local)
+        worker_config(config)
+        result.update(self_tested=local, detail="Self-tested prompting changes between rounds; active work continues")
+    return result
 
 
 def worker_statuses():
@@ -1067,7 +1086,7 @@ def rpc(payload):
     if action == "focus":
         return focus.configure(payload)
     if action == "workers":
-        return set_worker_maximum(payload["maximum"])
+        return set_worker_policy(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"])
     if action == "drain":
@@ -1097,6 +1116,7 @@ def rpc(payload):
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
+            self_tested=config.get("self_tested", False),
             lean_host_pressure=pressure,
             lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
             ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
