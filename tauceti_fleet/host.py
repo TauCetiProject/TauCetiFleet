@@ -276,6 +276,15 @@ def write_slices(config, caps):
 
 
 def worker_config(config):
+    # Serialize controller and operator rewrites, and never restore an old label policy.
+    with locked(config_dir() / "worker-policy.lock"):
+        current = host_config()
+        if "self_tested" in current:
+            config = dict(config, self_tested=current["self_tested"])
+        return _worker_config(config)
+
+
+def _worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = dict(
         agent="claude",
@@ -485,6 +494,26 @@ def set_worker_maximum(maximum, *, lease_seconds=None):
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
+def require_self_tested_support():
+    binary = executable("tauceti")
+    if not binary or json.loads(run([binary, "_fleet-protocol"]).stdout).get("self_tested") != 1:
+        raise FleetError("Install a Worker release supporting --self-tested before enabling it")
+    path = state_dir() / "worker-runtime/manager.sock"
+    if not path.exists():
+        return  # A future manager will use the installed, supporting runtime.
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(str(path))
+            client.sendall(b'{"action":"ping"}\n')
+            reply = client.makefile("rb").readline(65537)
+        if json.loads(reply).get("self_tested") == 1:
+            return
+    except (OSError, ValueError):
+        pass
+    raise FleetError("The running worker manager does not support --self-tested; hand over the manager to the installed runtime without stopping worker scopes")
+
+
 def set_worker_policy(payload):
     maximum = payload.get("maximum")
     local = payload.get("self_tested")
@@ -494,6 +523,8 @@ def set_worker_policy(payload):
         raise FleetError("self_tested must be a boolean")
     if maximum is not None and (type(maximum) is not int or not 0 <= maximum <= 4096):
         raise FleetError("Worker maximum must be an integer from 0 to 4096")
+    if local is True:
+        require_self_tested_support()
     result = set_worker_maximum(maximum) if maximum is not None else {}
     if local is not None:
         config = update_host(self_tested=local)
