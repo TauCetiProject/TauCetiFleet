@@ -338,6 +338,33 @@ class Attention(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(json.loads((attention.incidents_dir() / "acked" / path.name).read_text())["overtaken"]["by"], "merged")
 
+    def test_the_records_lock_nests_in_one_thread_and_excludes_others(self):
+        self.on()
+        attention.incidents_dir().mkdir(parents=True, exist_ok=True)
+        done = threading.Event()
+
+        def nested():
+            with attention.records_lock(), attention.records_lock():
+                pass
+            done.set()
+
+        threading.Thread(target=nested, daemon=True).start()
+        self.assertTrue(done.wait(timeout=2))
+        entered = threading.Event()
+
+        def other():
+            with attention.records_lock():
+                entered.set()
+
+        with attention.records_lock():
+            waiting = threading.Thread(target=other, daemon=True)
+            waiting.start()
+            with attention.records_lock():
+                self.assertFalse(entered.wait(timeout=0.3))
+            self.assertFalse(entered.wait(timeout=0.3))
+        self.assertTrue(entered.wait(timeout=2))
+        waiting.join()
+
     def test_overlapping_acks_never_overwrite_an_archived_record(self):
         self.on()
         acked = attention.incidents_dir() / "acked"
