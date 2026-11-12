@@ -410,6 +410,14 @@ def start_workers():
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+    # A manager kept running across a live update never reruns run_workers(); it
+    # inherited the user manager's environment, so record the data root from there.
+    manager = run(["systemctl", "--user", "show-environment"], check=False)
+    if manager.returncode == 0 and isinstance(manager.stdout, str):
+        from . import subscription_usage
+
+        environment = dict(line.partition("=")[::2] for line in manager.stdout.splitlines())
+        subscription_usage.record_data_root(host_config(), environment)
 
 
 def run_workers():
