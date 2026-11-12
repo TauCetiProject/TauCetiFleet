@@ -511,8 +511,10 @@ tauceti-fleet mathlib-store big-server           # show the saved setting
 tauceti-fleet mathlib-store big-server --clear   # stop maintaining it
 ```
 
-The host saves this as `mathlib_store` in `host.json`, unset by default.
-Saving it needs no drain. `DIR` holds three directories on one filesystem:
+The host saves this as `mathlib_store` in `host.json`, unset by default, and
+refuses it unless the profile's `sandbox` is `bubble`, since only Bubble rounds
+mount the store; a saved setting does nothing while the sandbox is anything
+else. Saving it needs no drain. `DIR` holds three directories on one filesystem:
 `DIR/store`, the store itself, which is all that containers see; `DIR/staging`,
 where an entry is built, and where an entry being removed is moved before it is
 deleted, so an interrupted removal leaves nothing in the store; and
@@ -574,8 +576,8 @@ build goes ahead if that freed enough. Downloaded archives otherwise stay in
 deleted. The commits-only clone of Mathlib `master` holds commits and no files.
 One controller maintains a given directory.
 
-The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for workers
-whose `sandbox` is `bubble`. It reads the setting when it starts, so a running
+The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for the
+workers. It reads the setting when it starts, so a running
 manager keeps what it had. `--clear` stops the passes and leaves the directory
 and its contents in place.
 

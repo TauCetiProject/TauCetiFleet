@@ -372,7 +372,7 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    if config.get("mathlib_store") and config.get("sandbox") == "bubble":
+    if mathlib_store.enabled(config):
         os.environ["TAUCETI_MATHLIB_STORE"] = str(mathlib_store.mounted(config))
     os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
     gh_config = state_dir() / "gh"

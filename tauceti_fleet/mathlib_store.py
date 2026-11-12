@@ -41,6 +41,8 @@ def configure(payload):
         directory = None
     elif "directory" in payload:
         directory = payload["directory"]
+        if host_config().get("sandbox") != "bubble":
+            raise FleetError("The Mathlib store needs the profile's sandbox to be bubble; only Bubble workers mount it")
         # The worker hands the path to its sandbox as SOURCE:TARGET:MODE.
         if not isinstance(directory, str) or not re.fullmatch(r"/[A-Za-z0-9._/+-]+", directory):
             raise FleetError("The Mathlib store needs an absolute path made of letters, digits and . _ + - /")
@@ -52,6 +54,10 @@ def configure(payload):
         return dict(mathlib_store=host_config().get("mathlib_store"))
     update_host(mathlib_store=directory)
     return dict(mathlib_store=directory)
+
+
+def enabled(config):
+    return bool(config.get("mathlib_store")) and config.get("sandbox") == "bubble"
 
 
 def mounted(config):
@@ -254,7 +260,7 @@ def warm(config=None, now=None):
     """One background pass: refresh the pins, remove entries unpinned for long enough, publish missing ones."""
     config = config or host_config()
     directory = config.get("mathlib_store")
-    if not directory:
+    if not enabled(config):
         return None
     with try_lock(state_dir() / "mathlib-store.lock") as owned:
         if not owned:
@@ -389,7 +395,7 @@ class Warmer:
         self.error = None
 
     def step(self, config, now):
-        if not config.get("mathlib_store") or now - self.attempted < INTERVAL:
+        if not enabled(config) or now - self.attempted < INTERVAL:
             return
         self.attempted = now
         try:

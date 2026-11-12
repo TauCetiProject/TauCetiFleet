@@ -89,6 +89,7 @@ class Store(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.machine = store.host_config()["machine_id"]
+        store.update_host(sandbox="bubble")
         self.directory = self.root / "store"
         self.mounted = self.directory / "store"
         self.bin = store.data_dir() / "bin"
@@ -141,6 +142,24 @@ class Store(unittest.TestCase):
         self.assertEqual(host.rpc(dict(action="mathlib-store", clear=True)), dict(mathlib_store=None))
         self.assertEqual(self.start.call_count, 2)
         self.assertTrue(self.mounted.is_dir())
+
+    def test_setting_is_refused_unless_workers_run_in_bubble(self):
+        for sandbox in (None, "host"):
+            store.update_host(sandbox=sandbox)
+            with self.assertRaisesRegex(store.FleetError, "only Bubble workers mount it"):
+                host.rpc(dict(action="mathlib-store", directory=str(self.directory)))
+            self.assertIsNone(store.host_config().get("mathlib_store"))
+        self.start.assert_not_called()
+        store.update_host(mathlib_store=str(self.directory))
+        self.assertEqual(host.rpc(dict(action="mathlib-store", clear=True)), dict(mathlib_store=None))
+
+    def test_a_saved_setting_does_nothing_once_workers_no_longer_run_in_bubble(self):
+        store.update_host(mathlib_store=str(self.directory), sandbox="host")
+        start = Mock()
+        mathlib_store.Warmer(start).step(store.host_config(), 5000)
+        start.assert_not_called()
+        self.assertIsNone(mathlib_store.warm(store.host_config(), now=1000))
+        self.assertFalse(self.mounted.exists())
 
     def test_cli_sends_directory_or_clear_and_queries_without_changing(self):
         entry = dict(target="machine", machine_id="one")
@@ -485,7 +504,7 @@ class Store(unittest.TestCase):
         token.write_text("token\n")
         store.update_host(github_token_file=str(token))
         seen = []
-        for changes in ({}, dict(mathlib_store=str(self.directory)), dict(sandbox="bubble")):
+        for changes in (dict(sandbox=None), dict(mathlib_store=str(self.directory)), dict(sandbox="bubble")):
             store.update_host(**changes)
             with patch.dict(os.environ), patch.object(host.os, "execv"):
                 host.run_workers()
