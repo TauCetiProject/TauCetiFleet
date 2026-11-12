@@ -95,7 +95,7 @@ class SlotGroups(unittest.TestCase):
             self.assertEqual((worker["github_account"], worker["claude_billing"]), ("operator", "subscription"))
         # Each group is spread through the admission order, so the default ceiling of 8 drops one of the six.
         self.assertEqual(order, [1, 2, 7, 3, 9, 4, 5, 8, 6])
-        self.assertEqual({w.rsplit("-", 1)[1] for w in host.maintenance_workers(store.host_config())}, set("789"))
+        self.assertEqual({w.rsplit("-", 1)[1] for w in host.maintenance_workers()}, set("789"))
         with (
             patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
             patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
@@ -402,6 +402,27 @@ class SlotGroups(unittest.TestCase):
             policies = self.daemon_passes(settled)
         self.assertEqual(numbers(host.unapplied_workers()), ["2"])
         self.assertEqual([numbers(ids) for ids in between + [policies[1]["workers"]]], [["1"], ["1"]])
+
+    def test_a_running_controller_restores_the_saved_layout_after_another_writer(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        first = [slot_groups.parse("2:claude:review")]
+        host.rpc(dict(action="slots", groups=first))
+        self.worker_status(1, "claude", ["review"])
+        self.worker_status(2, "claude", ["review"])
+        ready, slices, resources = self.ready()
+
+        def detour():
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review"), slot_groups.parse("1:codex:progress")]))
+            with ready, slices, resources:
+                host.enable(workers=True)
+            host.rpc(dict(action="slots", groups=first))
+            # The manager consumed the definition enable() wrote.
+            self.worker_status(2, "codex", ["progress"])
+
+        policies = self.daemon_passes(detour, lambda: None)
+        _, workers = self.definitions()
+        self.assertEqual(self.shape(workers)[2], ("claude", "review"))
+        self.assertEqual([[wid.rsplit("-", 1)[1] for wid in p["workers"]] for p in policies], [["1", "2"], ["1"], ["1"], ["1"]])
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
