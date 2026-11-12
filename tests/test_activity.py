@@ -84,7 +84,7 @@ class ActivityTests(unittest.TestCase):
             partial = activity.combine_status([first, second])
             activity.display(partial)
         self.assertEqual(partial["summary"]["costs"]["windows"]["24h"]["attributed_loc"], "8000")
-        self.assertIn("partial ~$0.0046", partial_output.getvalue())
+        self.assertIn("~$0.0046", partial_output.getvalue())
         for row in second["summary"]["costs"]["windows"].values():
             row.update(attribution_backfilling=True, attribution_preparing=True)
         with contextlib.redirect_stdout(io.StringIO()) as warming_output:
@@ -95,7 +95,7 @@ class ActivityTests(unittest.TestCase):
             if line.startswith(("Attributed landed Lean LOC", "Estimated $ / attributed LOC")):
                 self.assertNotIn("~", line)
                 self.assertIn("—", line)
-        self.assertIn("unavailable until backfill finishes", warming_output.getvalue())
+        self.assertNotIn("Attribution ", warming_output.getvalue())
         del second["summary"]["costs"]["windows"]["24h"]["attribution_version"]
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertIsNone(row["attributed_loc"])

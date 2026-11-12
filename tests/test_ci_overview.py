@@ -1,5 +1,4 @@
 import contextlib
-import datetime
 import hashlib
 import io
 import json
@@ -25,9 +24,6 @@ class Overview(unittest.TestCase):
                                      "TAUCETI_GITHUB_SHARED_DIR": str(self.root / "shared")})
         env.start()
         self.addCleanup(env.stop)
-        orphans = patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", ())
-        orphans.start()
-        self.addCleanup(orphans.stop)
         self.config = dict(store.host_config(), github_account="science", profile="ai-for-science", max_open_prs=128, workers_enabled=True)
 
     def worker(self, slot, scope=None, limit=128):
@@ -41,7 +37,7 @@ class Overview(unittest.TestCase):
         return value
 
     def test_foreground_status_never_queries_or_starts_collectors(self):
-        value = self.snapshot(dict(backlog=dict(value=dict(pr_builds=732, all_workflows=1352, created_since=overview.QUEUED_RUNS_CREATED_SINCE), observed_at=100)))
+        value = self.snapshot(dict(backlog=dict(value=dict(pr_builds=732, all_workflows=1352, created_since="2026-10-08T00:00:00Z"), observed_at=100)))
         with patch.object(overview, "fetch", side_effect=AssertionError("API in status")), patch.object(github, "request", side_effect=AssertionError("API in status")), patch.object(overview, "collect", side_effect=AssertionError("collector in status")), patch.object(overview.concurrent.futures, "ThreadPoolExecutor", side_effect=AssertionError("background work in status")):
             self.assertEqual(overview.cached(self.config), value)
             self.assertEqual(host.rpc(dict(action="status"))["ci_overview"], value)
@@ -191,11 +187,11 @@ class Overview(unittest.TestCase):
     def test_malformed_source_does_not_abort_other_status_lines(self):
         out = io.StringIO()
         value = dict(sources={name: dict(value={}, observed_at="invalid") for name in ("bors", "pools", "pressure")})
-        value["sources"]["backlog"] = dict(value=dict(pr_builds=3, all_workflows=8, created_since=overview.QUEUED_RUNS_CREATED_SINCE), observed_at=time.time())
+        value["sources"]["backlog"] = dict(value=self.backlog_value(), observed_at=time.time())
         with contextlib.redirect_stdout(out):
             overview.display(value)
         self.assertIn("Bors: unknown", out.getvalue())
-        self.assertIn("CI backlog: 3", out.getvalue())
+        self.assertIn("CI backlog: PR builds 1200 pending", out.getvalue())
 
     def test_unknown_machine_keys_merge_and_use_inventory_names(self):
         machine = "c" * 32
@@ -206,84 +202,83 @@ class Overview(unittest.TestCase):
         self.assertIn("Newhost 3", out.getvalue())
         self.assertNotIn("fleet-" + machine, out.getvalue())
 
-    def test_background_queue_counts_cost_only_two_small_requests(self):
-        with patch.object(github, "request", return_value=dict(total_count=0)) as request:
-            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-        self.assertEqual(request.call_count, 2)
-        self.assertTrue(all("per_page=1" in c.args[0] for c in request.call_args_list))
-        self.assertEqual(data, dict(pr_builds=0, all_workflows=0, created_since=overview.QUEUED_RUNS_CREATED_SINCE))
+    def backlog_value(self, *, partial=False):
+        def group(**changes):
+            return {**dict(pending=0, queued=0, in_progress=0, stuck=0, unconfirmed=0,
+                           oldest_waiting_at=None), **changes}
+        return dict(schema=overview.BACKLOG_SCHEMA, partial=partial, waiting_jobs=1230, running_jobs=53,
+                    pr_builds=group(pending=1200, queued=30, stuck=134),
+                    other_workflows=group(pending=2, queued=1, stuck=776, unconfirmed=4))
 
-    def test_oldest_queued_run_uses_one_final_page_without_scanning_jobs(self):
-        responses = [dict(total_count=7), dict(total_count=900),
-                     dict(total_count=900, workflow_runs=[dict(created_at="2026-01-01T00:00:00Z")])]
-        with patch.object(github, "request", side_effect=responses) as request:
-            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-        self.assertEqual(request.call_count, 3)
-        self.assertTrue(request.call_args.args[0].endswith("&page=900"))
-        self.assertTrue(all("created=%3E%3D2026-10-08T00%3A00%3A00Z" in c.args[0] for c in request.call_args_list))
-        self.assertEqual(data["oldest_created_at"], 1767225600)
-        value = dict(sources=dict(backlog=dict(value=data, observed_at=1767287100)))
+    def public_backlog(self, *, partial=False):
+        scope = "a" * 64
+        manifest = dict(schema="tauceti.operations.manifest/v1", scope=scope,
+                        domains=dict(jobs=dict(url=f"/v1/operations/objects/{scope}/{'b' * 64}.json")))
+        row = self.backlog_value(partial=partial)
+        row.pop("schema")
+        row.pop("partial")
+        jobs = dict(schema="tauceti.operations.jobs/v1", observed_at="2026-11-12T00:00:00Z",
+                    truncated=True, source_truncated=True,
+                    backlog=dict(schema=overview.BACKLOG_SCHEMA, coverage="partial" if partial else "observed",
+                                 repositories={overview.REPOSITORY: row}))
+        return manifest, jobs
+
+    def test_backlog_reads_two_shared_objects_without_github_or_job_scans(self):
+        manifest, jobs = self.public_backlog()
+        with patch.object(overview, "fetch", side_effect=[manifest, jobs]) as fetch, patch.object(github, "request", side_effect=AssertionError("GitHub scan")):
+            data, stamp = overview.backlog(self.config)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(data, self.backlog_value())
+        self.assertEqual(stamp, 1794441600)
+        self.assertTrue(fetch.call_args.args[0].startswith("https://ci-data.taucetiproject.org/v1/operations/objects/"))
+
+    def test_pending_and_queued_are_separate_from_verified_and_unconfirmed_records(self):
+        data = self.backlog_value(partial=True)
+        data["pr_builds"]["oldest_waiting_at"] = time.time() - 8 * 3600
         out = io.StringIO()
-        with patch.object(overview.time, "time", return_value=1767287100), contextlib.redirect_stdout(out):
-            overview.display(value)
-        self.assertIn("oldest queued run 17h 5m old", out.getvalue())
+        with contextlib.redirect_stdout(out), patch.object(overview, "fetch", side_effect=AssertionError("foreground network")):
+            overview.display(dict(sources=dict(backlog=dict(value=data, observed_at=time.time()))))
+        text = out.getvalue()
+        self.assertIn("PR builds 1200 pending, 30 queued", text)
+        self.assertIn("other workflows 2 pending, 1 queued", text)
+        self.assertIn("910 verified stuck; 4 without confirmed active jobs", text)
+        self.assertIn("oldest PR wait 8h 0m", text)
+        self.assertIn("partial observations", text)
+        self.assertNotIn("across all workflows", text)
 
-    def test_confirmed_orphan_is_removed_from_counts_and_oldest_age_only_while_queued(self):
-        orphan = dict(id=41474083442, status="queued", created_at="2026-11-02T15:41:35Z",
-                      path=".github/workflows/pr-build.yml")
-        responses = [dict(total_count=2), dict(total_count=2),
-                     dict(total_count=2, workflow_runs=[orphan]),
-                     dict(total_count=2, workflow_runs=[dict(id=99, created_at="2026-11-02T23:00:00Z")])]
-        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (orphan["id"],)), patch.object(overview, "fetch", return_value=orphan) as direct, patch.object(github, "request", side_effect=responses) as request:
-            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-        self.assertEqual(data["pr_builds"], 1)
-        self.assertEqual(data["all_workflows"], 1)
-        self.assertEqual(data["excluded_orphans"], 1)
-        self.assertEqual(data["oldest_created_at"], datetime.datetime.fromisoformat("2026-11-02T23:00:00+00:00").timestamp())
-        self.assertEqual(request.call_count + direct.call_count, 5)
-        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (orphan["id"],)), patch.object(overview, "fetch", return_value=dict(orphan, status="completed")), patch.object(github, "request", side_effect=[dict(total_count=1), dict(total_count=1, workflow_runs=[dict(id=99, created_at="2026-11-02T23:00:00Z")])]):
-            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-        self.assertEqual(data["all_workflows"], 1)
-        self.assertNotIn("excluded_orphans", data)
+    def test_invalid_or_absent_shared_backlog_does_not_invent_empty_queue(self):
+        for alteration in ("absent", "scope", "schema", "negative", "boolean"):
+            manifest, jobs = self.public_backlog()
+            source = jobs["backlog"]
+            if alteration == "absent":
+                jobs.pop("backlog")
+            elif alteration == "scope":
+                source["repositories"] = {}
+            elif alteration == "schema":
+                source["schema"] = "unknown"
+            else:
+                source["repositories"][overview.REPOSITORY]["pr_builds"]["pending"] = -1 if alteration == "negative" else True
+            with self.subTest(alteration=alteration), patch.object(overview, "fetch", side_effect=[manifest, jobs]), self.assertRaises(store.FleetError):
+                overview.backlog(self.config)
 
-    def test_multiple_confirmed_orphans_leave_the_real_queue_count_and_oldest_run(self):
-        orphans = [dict(id=i, status="queued", created_at=f"2026-11-02T0{i}:00:00Z",
-                        path=".github/workflows/pr-build.yml") for i in (1, 2)]
-        real = dict(id=3, created_at="2026-11-03T01:00:00Z")
-        responses = [dict(total_count=3), dict(total_count=3)] + [
-            dict(total_count=3, workflow_runs=[run]) for run in (*orphans, real)]
-        with patch.object(overview, "CONFIRMED_ORPHAN_RUN_IDS", (1, 2)), patch.object(overview, "fetch", side_effect=orphans) as direct, patch.object(github, "request", side_effect=responses) as request:
-            data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-        self.assertEqual(data["pr_builds"], 1)
-        self.assertEqual(data["all_workflows"], 1)
-        self.assertEqual(data["excluded_orphans"], 2)
-        self.assertEqual(data["oldest_created_at"], datetime.datetime.fromisoformat("2026-11-03T01:00:00+00:00").timestamp())
-        self.assertEqual(direct.call_count, 2)
-        self.assertEqual(request.call_count, 5)
-        self.assertFalse(any("/jobs" in call.args[0] for call in request.call_args_list))
-
-    def test_oldest_queue_age_does_not_claim_accuracy_past_api_limit_or_on_race(self):
-        for count, final in ((1001, None), (5, dict(total_count=6, workflow_runs=[]))):
-            responses = [dict(total_count=3), dict(total_count=count)] + ([final] if final else [])
-            with patch.object(github, "request", side_effect=responses) as request:
-                data, _ = overview.backlog(dict(self.config, github_token_file="private-file"))
-            self.assertEqual(request.call_count, len(responses))
-            self.assertNotIn("oldest_created_at", data)
-            self.assertIn("oldest_unavailable", data)
+    def test_newer_legacy_counts_cannot_replace_detailed_backlog(self):
+        good = dict(value=self.backlog_value(), observed_at=time.time() - 30)
+        old = dict(value=dict(pr_builds=146, all_workflows=917, created_since="2026-10-08T00:00:00Z"), observed_at=time.time())
+        combined = overview.combine([dict(sources=dict(backlog=good)), dict(sources=dict(backlog=old))])
+        self.assertEqual(combined["sources"]["backlog"], good)
+        self.assertIsNone(overview.source_value("backlog", old))
 
     def test_bors_total_and_legacy_backlog_cache(self):
         batches = list(reversed([dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]))
         value = dict(sources=dict(
             bors=dict(value=dict(batches=batches, held=0), observed_at=time.time()),
-            backlog=dict(value=dict(pr_builds=71, all_workflows=100,
-                                    oldest_created_at=time.time() - 631 * 3600), observed_at=time.time())))
+            backlog=dict(value=dict(pr_builds=71, all_workflows=100), observed_at=time.time())))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(value)
         self.assertIn("Bors: 54=26+26+2", out.getvalue())
-        self.assertIn("CI backlog: refreshing", out.getvalue())
-        self.assertNotIn("631h", out.getvalue())
-        self.assertIn("excluding stuck runs through 2026-10-07", out.getvalue())
+        self.assertIn("CI backlog: unknown", out.getvalue())
+        self.assertNotIn("71 PR-build", out.getvalue())
 
     def test_history_windows_show_outcome_fractions_attempts_and_sampled_job_runtime(self):
         windows = [dict(window=label, completed_batches=4, successful_batches=2,
