@@ -35,10 +35,10 @@ def launched_data_root():
     return state_dir() / "worker-data-root"
 
 
-def record_data_root(config, environment=None):
-    """Keep the worker data root the launcher hands the workers, which a profile's env overrides."""
+def record_data_root(environment=None):
+    """Keep the worker data root the manager inherited; worker_roots adds the profile's own override."""
     environment = os.environ if environment is None else environment
-    value = (config.get("env") or {}).get("TAUCETI_LEGACY_DATA_ROOT") or environment.get("TAUCETI_LEGACY_DATA_ROOT")
+    value = environment.get("TAUCETI_LEGACY_DATA_ROOT")
     if value:
         launched_data_root().parent.mkdir(parents=True, exist_ok=True)
         launched_data_root().write_text(value + "\n")

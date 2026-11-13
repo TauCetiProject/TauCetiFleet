@@ -325,6 +325,29 @@ class SubscriptionUsage(unittest.TestCase):
             host.start_workers()
         self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
 
+    def test_inherited_data_root_is_searched_again_once_a_profile_override_is_removed(self):
+        hour = 3600
+        inherited, override = self.root / "inherited", self.root / "override"
+        token = self.root / "token"
+        token.write_text("synthetic-token")
+        store.update_host(github_token_file=str(token), agent="codex", env=dict(TAUCETI_LEGACY_DATA_ROOT=str(override)))
+        with (
+            patch.dict(os.environ, {"TAUCETI_LEGACY_DATA_ROOT": str(inherited)}),
+            patch.object(host, "executable", return_value="/fake/tauceti"),
+            patch.object(host.os, "execv"),
+        ):
+            host.run_workers()
+        self.codex(override / "state/fleet-1/cache/quota-codex.json", 60, (30, 5 * hour, hour))
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 70.0)
+        # The manager keeps running; reconfigured workers fall back to the root it inherited.
+        store.update_host(env={})
+        units = self.root / "units"
+        units.mkdir()
+        with patch.object(host, "units", return_value=units), patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            host.start_workers()
+        self.codex(inherited / "state/fleet-1/cache/quota-codex.json", 30, (20, 5 * hour, hour))
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
+
 
 if __name__ == "__main__":
     unittest.main()
