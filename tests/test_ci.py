@@ -394,6 +394,36 @@ class Collection(unittest.TestCase):
         self.assertEqual(store.read(self.backoff)["job_id"], 99)
         self.assertEqual(len(store.export_events()), 1)
 
+    def bootstrap_failure(self, host_health):
+        job, _, _ = evidence()
+        job["conclusion"] = "failure"
+        job["steps"][1]["conclusion"] = "failure"
+        job["steps"][2]["conclusion"] = "skipped"
+        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health=host_health,
+                                         ci_kinds=["staging"])])
+        with patch.object(host.github, "request", return_value=dict(jobs=[job])):
+            host.collect_ci_results(self.config)
+        return report.timestamp(job["completed_at"])
+
+    def test_healthy_staging_checkout_failure_retries_after_one_minute(self):
+        completed = self.bootstrap_failure("healthy")
+        self.assertEqual(store.read(self.backoff)["until"], completed + 60)
+        self.assertEqual(store.read(self.backoff)["reason"], "infrastructure_step_failed")
+
+    def test_staging_bootstrap_without_host_health_keeps_long_cooldown(self):
+        completed = self.bootstrap_failure(None)
+        self.assertEqual(store.read(self.backoff)["until"], completed + 900)
+
+    def test_staging_bootstrap_host_fault_keeps_long_cooldown(self):
+        completed = self.bootstrap_failure("fault")
+        self.assertEqual(store.read(self.backoff)["until"], completed + 900)
+        self.assertEqual(store.read(self.backoff)["reason"], "host_service_fault")
+
+    def test_fast_staging_retry_does_not_shorten_another_faults_cooldown(self):
+        store.atomic(self.backoff, dict(until=9999999999, job_id=99))
+        self.bootstrap_failure("healthy")
+        self.assertEqual(store.read(self.backoff)["job_id"], 99)
+
     def test_missing_evidence_and_host_fault_cool_down(self):
         self.collect(api_fault=True)
         self.assertEqual(store.read(self.backoff)["reason"], "cancellation_evidence_unavailable")
