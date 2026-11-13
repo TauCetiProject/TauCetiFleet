@@ -281,23 +281,47 @@ class SubscriptionUsage(unittest.TestCase):
 
     def test_worker_data_root_of_an_already_running_manager_is_recorded_when_its_service_is_kept(self):
         hour = 3600
-        kept = self.root / "durable"
+        kept = self.root / "durable worker state"
         store.update_host(agent="codex")
         self.codex(kept / "state/fleet-1/cache/quota-codex.json", 60, (20, 5 * hour, hour))
+        # The running manager's own environment holds unit-level settings, unquoted.
+        proc = self.root / "proc"
+        (proc / "4242").mkdir(parents=True)
+        (proc / "4242/environ").write_bytes(b"GH_TOKEN=synthetic\0TAUCETI_LEGACY_DATA_ROOT=" + os.fsencode(kept) + b"\0LANG=C\0")
 
         def systemctl(args, **_):
-            output = f"LANG=C\nTAUCETI_LEGACY_DATA_ROOT={kept}\n" if args[-1] == "show-environment" else ""
+            output = "4242\n" if "--property=MainPID" in args else "LANG=C\n" if args[-1] == "show-environment" else ""
             return subprocess.CompletedProcess(args, 0, output, "")
 
         units = self.root / "units"
         units.mkdir()
-        with patch.object(host, "units", return_value=units), patch.object(host, "run", side_effect=systemctl):
-            host.start_workers()
-        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
         with (
             patch.object(host, "units", return_value=units),
-            patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, "", "")),
+            patch.object(host, "run", side_effect=systemctl),
+            patch.object(host, "PROC", proc),
         ):
+            host.start_workers()
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
+        self.assertNotIn("synthetic", subscription_usage.launched_data_root().read_text())
+
+    def test_kept_service_leaves_the_data_root_its_manager_was_launched_with(self):
+        hour = 3600
+        kept = self.root / "durable"
+        token = self.root / "token"
+        token.write_text("synthetic-token")
+        store.update_host(github_token_file=str(token), agent="codex")
+        self.codex(kept / "state/fleet-1/cache/quota-codex.json", 60, (20, 5 * hour, hour))
+        with (
+            patch.dict(os.environ, {"TAUCETI_LEGACY_DATA_ROOT": str(kept)}),
+            patch.object(host, "executable", return_value="/fake/tauceti"),
+            patch.object(host.os, "execv"),
+        ):
+            host.run_workers()
+        # A root set on the service itself is absent from the user manager's environment.
+        units = self.root / "units"
+        units.mkdir()
+        manager = subprocess.CompletedProcess([], 0, "LANG=C\n", "")
+        with patch.object(host, "units", return_value=units), patch.object(host, "run", return_value=manager):
             host.start_workers()
         self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
 
