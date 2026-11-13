@@ -1,5 +1,7 @@
 """Disk watchdog checks remain live while bounded background scans run."""
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -25,15 +27,15 @@ class DiskMonitor(unittest.TestCase):
             monitor.poll()
             spawn.assert_called_once()
             child.communicate.assert_not_called()
-            clock.return_value = 10
+            clock.return_value = inside.DISK_SCAN_TIMEOUT
             monitor.poll()
             child.kill.assert_called_once()
             self.assertIsNone(monitor.snapshot()['disk_allocated'])
             self.assertIn('timed out', monitor.error)
-            clock.return_value = 59
+            clock.return_value = inside.DISK_SCAN_INTERVAL - 1
             monitor.poll()
             spawn.assert_called_once()
-            clock.return_value = 60
+            clock.return_value = inside.DISK_SCAN_INTERVAL
             monitor.poll()
             self.assertEqual(spawn.call_count, 2)
             monitor.close()
@@ -44,7 +46,8 @@ class DiskMonitor(unittest.TestCase):
         child.communicate.return_value = ('', 'permission denied')
         monitor = inside.DiskUsage()
         with patch.object(inside.subprocess, 'Popen', return_value=child), patch.object(inside.time, 'monotonic', return_value=0) as clock:
-            for at in (0, 2, 60, 62, 120, 122):
+            for at in (0, 2, inside.DISK_SCAN_INTERVAL, inside.DISK_SCAN_INTERVAL + 2,
+                       inside.DISK_SCAN_INTERVAL * 2, inside.DISK_SCAN_INTERVAL * 2 + 2):
                 clock.return_value = at
                 monitor.poll()
             self.assertEqual(monitor.failures, inside.DISK_SCAN_FAILURES)
@@ -66,6 +69,60 @@ class DiskMonitor(unittest.TestCase):
             command = spawn.call_args.args[0]
             self.assertEqual(command.count('/'), 1)
             self.assertNotIn(str(inside.WORK), command)
+
+    def test_scan_can_finish_after_the_old_ten_second_deadline(self):
+        child = Mock(pid=42)
+        child.poll.side_effect = [None, 0]
+        child.communicate.return_value = ('12345\t/\n', None)
+        monitor = inside.DiskUsage()
+        with patch.object(inside.subprocess, 'Popen', return_value=child) as spawn, patch.object(inside.time, 'monotonic', return_value=0) as clock:
+            monitor.poll()
+            clock.return_value = 30
+            monitor.poll()
+            self.assertTrue(monitor.snapshot()['disk_scan_running'])
+            child.kill.assert_not_called()
+            clock.return_value = 45
+            monitor.poll()
+            self.assertEqual(monitor.allocated, 12345)
+            self.assertEqual(monitor.failures, 0)
+            self.assertFalse(monitor.snapshot()['disk_scan_running'])
+            self.assertEqual(monitor.snapshot()['disk_scan_seconds'], 45)
+            self.assertEqual(monitor.snapshot()['disk_scan_timeout_seconds'], inside.DISK_SCAN_TIMEOUT)
+            spawn.assert_called_once()
+
+    def test_failed_scan_retains_last_good_value_without_refreshing_its_age(self):
+        monitor = inside.DiskUsage()
+        monitor.allocated, monitor.measured_at = 12345, 100
+        with patch.object(inside.time, 'time', return_value=160):
+            monitor.failed('disk usage scan timed out')
+            value = monitor.snapshot()
+        self.assertEqual(value['disk_allocated'], 12345)
+        self.assertEqual(value['disk_measured_at'], 100)
+        self.assertEqual(value['disk_measurement_age'], 60)
+        self.assertEqual(value['disk_scan_failures'], 1)
+        self.assertEqual(value['disk_scan_error'], 'disk usage scan timed out')
+
+    def test_diagnostic_flood_cannot_block_the_scanner(self):
+        spawn = subprocess.Popen
+        children = []
+
+        def scanner(_argv, **kwargs):
+            self.assertIs(kwargs['stderr'], subprocess.DEVNULL)
+            child = spawn([sys.executable, '-c',
+                           'import os; os.write(2, b"x" * 1024**2); print("12345\\t/")'], **kwargs)
+            children.append(child)
+            return child
+
+        monitor = inside.DiskUsage()
+        try:
+            with patch.object(inside.subprocess, 'Popen', side_effect=scanner):
+                monitor.poll()
+                children[0].wait(timeout=5)
+                monitor.poll()
+            self.assertEqual(monitor.allocated, 12345)
+            self.assertEqual(monitor.failures, 0)
+        finally:
+            monitor.close()
 
     def test_low_space_stops_job_even_while_scan_is_running(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(inside, 'LINK', Path(directory)), patch.object(inside, 'WORK', Path(directory)):

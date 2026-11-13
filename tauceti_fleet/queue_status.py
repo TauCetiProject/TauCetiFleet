@@ -93,8 +93,10 @@ def parse(manifest, queue):
             raise ValueError("Invalid queue tasks")
         # Keep only public, bounded task fields and numeric progress. Never cache source prompts.
         row["active_tasks"] = [task(t, number) for t in row["active_tasks"][:16]]
-        if any(t["batch_version"] != row["version"] for t in row["active_tasks"]):
-            raise ValueError("Stale queue task version")
+        # Insertion can advance membership before the controller refreshes an open task.
+        # Its earlier version is useful progress, but a future version is inconsistent.
+        if any(t["batch_version"] > row["version"] for t in row["active_tasks"]):
+            raise ValueError("Future queue task version")
         if row["latest_attempt"] is not None:
             attempt = row["latest_attempt"]
             if not isinstance(attempt, dict) or attempt.get("batch_id") != number:
@@ -227,9 +229,14 @@ def activity(batch, claims, names, now, timezone):
                       and timestamp(c["expires_at"]) > now), None)
         kind = {"prepare": "preparation", "pre_rebase": "pre-rebase", "repair": "repair",
                 "rebase_conflict": "rebase repair"}.get(current["kind"], current["kind"])
+        earlier_membership = current["batch_version"] < batch["version"]
         if not claim:
+            if earlier_membership:
+                return "membership changed; awaiting task refresh"
             return kind + " queued"
         label = names.get(claim.get("worker"), "worker") + ": " + kind
+        if earlier_membership:
+            label += " (earlier membership)"
         progress = current.get("progress") or {}
         if (progress.get("observed_at") and claim.get("created_at")
                 and timestamp(progress["observed_at"]) < timestamp(claim["created_at"])):
