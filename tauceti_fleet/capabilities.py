@@ -48,6 +48,36 @@ def memory_accounting(current, high, maximum, stats, pressure, events, swap=0):
     )
 
 
+def task_accounting(cgroup):
+    """Kernel task usage and local rejection counts; missing optional counters stay unknown."""
+    result = {}
+    for source, key in (("pids.current", "current"), ("pids.max", "maximum"), ("pids.peak", "peak")):
+        try:
+            raw = (cgroup / source).read_text().strip()
+            result[key] = None if raw == "max" else int(raw)
+        except (OSError, ValueError):
+            result[key] = None
+    try:
+        events = dict(line.split() for line in (cgroup / "pids.events.local").read_text().splitlines())
+        result["rejected"] = int(events.get("max", 0))
+    except (OSError, ValueError):
+        try:
+            result["rejected"] = int(
+                dict(line.split() for line in (cgroup / "pids.events").read_text().splitlines())["max"]
+            )
+        except (OSError, ValueError, KeyError):
+            result["rejected"] = None
+    return result
+
+def task_observation(tasks, previous, now):
+    """A reset/restart is unknown, not a burst of new failures."""
+    old = previous or {}
+    count, before = tasks.get("rejected"), old.get("rejected")
+    delta = count - before if isinstance(count, int) and isinstance(before, int) and count >= before else None
+    return {**tasks, "new_rejections": delta, "sample_seconds": max(0, now - old["at"]) if "at" in old else None,
+            "last_rejection_at": now if delta else old.get("last_rejection_at"), "at": now}
+
+
 def worker_memory():
     result = run(
         [
@@ -88,6 +118,7 @@ def worker_memory():
         counters("memory.events"),
         int((cg / "memory.swap.current").read_text()),
     )
+    memory["tasks"] = task_accounting(cg)
     memory["cgroup"] = str(cg)
     return memory
 
