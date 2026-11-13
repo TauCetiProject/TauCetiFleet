@@ -131,11 +131,9 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
-    worker_fields(dict(current, **updates))
     if updates.get("slots") is not None:
         updates["slots"] = slot_groups.validate(updates["slots"])
-    if dict(current, **updates).get("slots"):
-        slot_groups.layout(dict(current, **updates), [], worker_fields)
+    loadable_workers(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         # Slot groups change live: the worker manager holds an agent or phase edit until the round ends.
         if any(current.get(k) != v for k, v in updates.items() if k != "slots"):
@@ -160,7 +158,7 @@ def configure(payload):
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         updates[key] = str(path)
-    value = update_host(validate=capacity.staging_slots, **updates)
+    value = update_host(validate=lambda merged: (capacity.staging_slots(merged), loadable_workers(merged)), **updates)
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
     # Inactive installation never adopts or starts the existing worker fleet.
@@ -481,6 +479,17 @@ def acknowledge_workers():
     return held
 
 
+def loadable_workers(config):
+    """Raise unless every definition this configuration writes passes the worker's checks.
+
+    Writers check it again on the merged configuration inside update_host's lock,
+    so a concurrent profile or group change cannot save an incompatible pair.
+    """
+    worker_fields(config)
+    if config.get("slots"):
+        slot_groups.layout(config, [], worker_fields)
+
+
 def configure_slots(payload):
     """Show or replace the slot groups. Definitions follow on the controller's next pass."""
     config = host_config()
@@ -488,8 +497,8 @@ def configure_slots(payload):
         config = update_host(slots=None)
     elif payload.get("groups") is not None:
         groups = slot_groups.validate(payload["groups"])
-        slot_groups.layout(dict(config, slots=groups), [], worker_fields)
-        config = update_host(slots=groups)
+        loadable_workers(dict(config, slots=groups))
+        config = update_host(slots=groups, validate=loadable_workers)
     groups = config.get("slots")
     result = dict(slots=groups, max_workers=config["max_workers"])
     if groups:

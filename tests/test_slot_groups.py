@@ -424,6 +424,22 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual(self.shape(workers)[2], ("claude", "review"))
         self.assertEqual([[wid.rsplit("-", 1)[1] for wid in p["workers"]] for p in policies], [["1", "2"], ["1"], ["1"], ["1"]])
 
+    def test_groups_are_checked_against_the_profile_they_are_saved_into(self):
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:claude:review")]))
+        update, switched = store.update_host, []
+
+        def concurrent(**changes):
+            # A profile change lands between the slots request's check and its save.
+            if "slots" in changes and not switched:
+                switched.append(host.configure(dict(claude_billing="api")))
+            return update(**changes)
+
+        with patch.object(host, "update_host", side_effect=concurrent), self.assertRaises(store.FleetError):
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("1:codex:progress")]))
+        saved = store.host_config()
+        self.assertEqual((saved["claude_billing"], saved["slots"]), ("api", [dict(count=1, agent="claude", roles=["review"])]))
+        host.worker_config(saved)
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (
