@@ -199,8 +199,9 @@ def incident_items(config):
             item.update(repository=repository, pr=number, forge=target["forge"], origin=target["origin"],
                         cleared=overtaken(record, observation),
                         observed_at=observation["observed"] if observation else None, named=[])
-            if isinstance(own, dict) and own.get("state") == "UNREADABLE":
-                item["unreadable"] = own.get("status")
+            attempt = own.get("attempt") if isinstance(own, dict) else None
+            if isinstance(attempt, dict) and (attempt.get("at") or 0) >= (own.get("observed") or 0):
+                item["unreadable"] = attempt.get("status")
             for relation in ("subsumed_by", "mentions"):
                 numbers = record.get(relation) if isinstance(record.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
@@ -412,7 +413,11 @@ def incident_lookup(config, items):
         return [n for n in item["named"] if n.get("state") in (None, "OPEN", "UNREADABLE") and n["pr"] != item["pr"]]
 
     def observed(value):
-        return value["observed"] if isinstance(value, dict) and isinstance(value.get("observed"), int | float) else 0
+        """When this pull request was last asked about, answered or not."""
+        if not isinstance(value, dict):
+            return 0
+        attempt = value.get("attempt") if isinstance(value.get("attempt"), dict) else {}
+        return max(t for t in (value.get("observed"), attempt.get("at"), 0) if isinstance(t, int | float))
 
     # Each request is ordered by when it was last answered, or its forge last failed, so a bounded call resumes
     # where the last one stopped, inside an item as well as between items, and an unreachable forge goes last.
@@ -460,7 +465,8 @@ def incident_lookup(config, items):
 
 def merge_notes(record, values):
     """Add answers to a record's notes, keeping per pull request the answer whose request started last.
-    Lookups can overlap and finish in any order, so the read and the write share one lock."""
+    An unreadable answer is kept beside it as `attempt` and never replaces it, since it says nothing about
+    the pull request. Lookups can overlap and finish in any order, so the read and the write share one lock."""
     lock = notes_path(record).parent / ".notes.lock"
     lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
@@ -468,10 +474,15 @@ def merge_notes(record, values):
         fcntl.flock(fd, fcntl.LOCK_EX)
         kept = notes(record)
         for key, value in values.items():
-            old = kept.get(key)
-            if not (isinstance(old, dict) and isinstance(old.get("observed"), int | float)
-                    and old["observed"] > value["observed"]):
-                kept[key] = value
+            old = kept.get(key) if isinstance(kept.get(key), dict) else {}
+            answered, attempt = old.get("observed"), old.get("attempt")
+            answered = answered if isinstance(answered, int | float) else None
+            attempt = attempt if isinstance(attempt, dict) and isinstance(attempt.get("at"), int | float) else None
+            if value["state"] == "UNREADABLE":
+                if (answered or 0) <= value["observed"] and (attempt or {}).get("at", 0) <= value["observed"]:
+                    kept[key] = dict(old, attempt=dict(status=value.get("status"), at=value["observed"]))
+            elif answered is None or answered <= value["observed"]:
+                kept[key] = dict(value, **({"attempt": attempt} if attempt and attempt["at"] > value["observed"] else {}))
         atomic(notes_path(record), dict(version=1, prs=kept))
     finally:
         os.close(fd)
