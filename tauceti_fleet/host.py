@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
-from .capabilities import GIB, doctor, memory_pressure, resources, worker_memory
+from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -891,6 +891,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        previous_tasks = None
         while not stopping:
             config = host_config()
             try:
@@ -948,6 +949,8 @@ def daemon():
                     maximum = 0
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
+                    memory["tasks"] = task_observation(memory.get("tasks") or {}, previous_tasks, time.time())
+                    previous_tasks = memory["tasks"]
                     try:
                         refresh_worker_memory(config, caps, memory, ci_busy=busy)
                     except (OSError, ValueError) as exc:
