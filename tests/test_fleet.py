@@ -37,6 +37,80 @@ class Isolated(unittest.TestCase):
         self.environ.stop()
         self.temporary.cleanup()
 
+    def test_self_tested_setting_reaches_worker_specs_without_changing_admission(self):
+        import tomllib
+        original = store.update_host(max_workers=2, workers_enabled=True, ci_enabled=True)
+        lease = store.state_dir() / "worker-admission-lease.json"
+        store.atomic(lease, dict(expires_at=100))
+        for enabled in (True, False):
+            with patch.object(host, "require_self_tested_support"):
+                result = host.rpc(dict(action="workers", self_tested=enabled))
+            actual = store.host_config()
+            self.assertEqual(actual, {**original, "self_tested": enabled})
+            self.assertEqual(result["self_tested"], enabled)
+            self.assertTrue(lease.exists())
+            specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+            self.assertEqual(len(specs), 2)
+            self.assertTrue(all(spec.get("self_tested", False) == enabled for spec in specs))
+        with self.assertRaises(store.FleetError):
+            host.rpc(dict(action="workers", self_tested="yes", maximum=0))
+        self.assertEqual(store.host_config()["max_workers"], 2)
+
+    def test_unsupported_running_manager_does_not_change_policy_or_admissions(self):
+        original = store.update_host(max_workers=2, workers_enabled=True)
+        with patch.object(host, "require_self_tested_support", side_effect=store.FleetError("old manager")):
+            with self.assertRaisesRegex(store.FleetError, "old manager"):
+                host.set_worker_policy(dict(self_tested=True, maximum=0))
+        self.assertEqual(store.host_config(), original)
+
+    def test_self_tested_support_checks_the_running_manager(self):
+        import socket
+        import threading
+        from types import SimpleNamespace
+
+        path = store.state_dir() / "worker-runtime/manager.sock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for reply, supported in ((dict(ok=True), False), (dict(ok=True, self_tested=1), True)):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(path))
+                server.listen(1)
+                def serve():
+                    connection, _ = server.accept()
+                    with connection:
+                        connection.recv(4096)
+                        connection.sendall(json.dumps(reply).encode() + b"\n")
+                thread = threading.Thread(target=serve)
+                thread.start()
+                with patch.object(host, "executable", return_value="tauceti"), patch.object(
+                    host, "run", return_value=SimpleNamespace(stdout='{"self_tested":1}')
+                ):
+                    if supported:
+                        host.require_self_tested_support()
+                    else:
+                        with self.assertRaisesRegex(store.FleetError, "running worker manager"):
+                            host.require_self_tested_support()
+                thread.join(5)
+            path.unlink()
+
+    def test_controller_rewrite_keeps_newer_self_tested_policy(self):
+        import tomllib
+        before = store.update_host(max_workers=2, workers_enabled=True, self_tested=False)
+        store.update_host(self_tested=True)
+        host.worker_config(before)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertTrue(all(s["self_tested"] for s in specs))
+
+    def test_worker_cli_passes_only_explicit_policy_changes(self):
+        with (patch.object(remote, "inventory", return_value={"test": dict(target="target", machine_id="m")}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            for flag, enabled in (("--self-tested", True), ("--no-self-tested", False)):
+                self.assertEqual(main(["workers", "test", flag, "--json"]), 0)
+                self.assertEqual(call.call_args.args[1], dict(action="workers", self_tested=enabled))
+            self.assertEqual(main(["workers", "test", "--max", "4", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", maximum=4))
+
     def test_identity_and_private_configuration_survive_reinstallation(self):
         one = store.host_config()
         store.update_host(workers_enabled=True)
