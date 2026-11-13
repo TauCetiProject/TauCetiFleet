@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -330,6 +331,10 @@ class Isolated(unittest.TestCase):
                                  env=dict(os.environ, GH_TOKEN="token-a"))
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)
+        # A spawned child can still show its parent's command line for a moment after Popen returns.
+        deadline = time.monotonic() + 10
+        while b"time.sleep(30)" not in Path(f"/proc/{child.pid}/cmdline").read_bytes() and time.monotonic() < deadline:
+            time.sleep(0.01)
         shown = subprocess.CompletedProcess([], 0, f"{child.pid}\n")
         with patch.object(host, "run", return_value=shown):
             argv, environ = host.manager_process()
