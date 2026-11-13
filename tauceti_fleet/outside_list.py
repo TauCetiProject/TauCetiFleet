@@ -8,6 +8,7 @@ when it ends, or when the schedule slot ends if that is sooner, after setting
 aside what list work needs until then.
 """
 
+import os
 import sys
 import time
 
@@ -76,9 +77,13 @@ def worker_keys(config):
     return dict(targets_fallback_max_open=max(1, bounds["start"]), targets_fallback_cap_file=str(cap_file()))
 
 
-def pace_points(config):
-    """The workers' pacing curve as sorted (time %, budget %) points, with the ends the worker fills in."""
-    spec = config.get("pace") or (config.get("env") or {}).get("TAUCETI_PACE") or DEFAULT_PACE
+def pace_points(config, inherited=None):
+    """The workers' pacing curve as sorted (time %, budget %) points, with the ends the worker fills in.
+
+    The worker takes the profile's `pace`, then `TAUCETI_PACE` from its definition's env,
+    then the one in the manager's environment (`inherited`), then its default.
+    """
+    spec = config.get("pace") or (config.get("env") or {}).get("TAUCETI_PACE") or inherited or DEFAULT_PACE
     points = {}
     for token in filter(str.strip, spec.split(",")):
         at, budget = token.split(":")
@@ -86,6 +91,17 @@ def pace_points(config):
     points.setdefault(0.0, 0.0)
     points.setdefault(100.0, 100.0)
     return sorted(points.items())
+
+
+def inherited_pace():
+    """TAUCETI_PACE as the running worker manager has it, else as this controller inherited it from the same user manager."""
+    from . import host
+
+    try:
+        process = host.manager_process()
+    except (FleetError, OSError):
+        process = None
+    return (process[1] if process else os.environ).get("TAUCETI_PACE")
 
 
 def budget(curve, elapsed):
@@ -292,7 +308,7 @@ class Pacer:
             reading=dict(fetched_at=usage["fetched_at"], used=weekly["used"], resets_at=weekly["resets_at"]) if weekly else None,
             session_left=(windows.get("session") or {}).get("left"),
             session={key: windows["session"][key] for key in ("used", "resets_at")} if windows.get("session") else None,
-            rounds=[count / self.passes for count in self.seen], curve=pace_points(config),
+            rounds=[count / self.passes for count in self.seen], curve=pace_points(config, inherited_pace()),
             limit_reached=bool(usage.get("limit_reached")),
             missing=f"{several} credentials have current usage readings and the active one cannot be told" if several else "no usage reading yet",
         )

@@ -1008,7 +1008,8 @@ Every 15 minutes the controller takes one step:
    [schedule](#weekly-schedule) slot when that comes first. The rate times the
    hours left is the projected spend at the end. What may still be spent is
    what the workers' pacing curve (the profile's `pace`, else `TAUCETI_PACE` in
-   its `env`, else TauCetiWorker's default `60:40`) allows at the horizon, less
+   its `env`, else the `TAUCETI_PACE` the worker manager runs with, else
+   TauCetiWorker's default `60:40`) allows at the horizon, less
    what is used: a worker starts no round while usage is at the curve.
 3. The rate is divided between list work and outside-list work in the proportion
    of running rounds that reported `roadmap_work` `list` and `outside-list` over
