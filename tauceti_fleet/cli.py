@@ -380,6 +380,18 @@ def main(argv=None, *, _status_results=None):
                         )
                         if memory.get("allocation_error"):
                             print(f"Memory allocation error: {memory['allocation_error']}")
+                        tasks = memory.get("tasks") or {}
+                        if tasks.get("current") is not None:
+                            limit = str(tasks["maximum"]) if tasks.get("maximum") is not None else "unlimited/unknown"
+                            print(
+                                f"Worker tasks: {tasks['current']}/{limit} (threads count toward the limit); peak {tasks.get('peak', 'unknown')}"
+                            )
+                            if tasks.get("rejected") is not None:
+                                change = tasks.get("new_rejections")
+                                recent = f"; +{change} since previous sample" if change is not None else ""
+                                print(f"  Task-limit rejections: {tasks['rejected']} total{recent}")
+                        if tasks.get("last_rejection_at"):
+                            print(f"  Last task-limit rejection observed {max(0, int(time.time() - tasks['last_rejection_at']))}s ago")
                         print("Worker memory reclamation waits (1-minute averages; informational)")
                         print(
                             f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}%"
