@@ -64,7 +64,8 @@ export class GitHub {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
     const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
-    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main']);
+    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
+      'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
         !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();
