@@ -405,6 +405,7 @@ def _worker_config(config):
 
 
 WORKER_OOM_SCORE_ADJ = 500
+PROC = Path("/proc")
 
 
 def start_workers():
@@ -423,15 +424,22 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
     from . import subscription_usage
 
-    # A manager kept running across a live update never reruns run_workers(); it
-    # inherited the user manager's environment, so record the data root from there
-    # unless run_workers() already recorded what it launched with.
+    # A manager kept running across a live update never reruns run_workers(), so
+    # unless that recorded what it launched with, read the root from the manager's own
+    # environment, which also carries unit-level settings and needs no unquoting.
     if subscription_usage.launched_data_root().exists():
         return
-    manager = run(["systemctl", "--user", "show-environment"], check=False)
-    if manager.returncode == 0 and isinstance(manager.stdout, str):
-        environment = dict(line.partition("=")[::2] for line in manager.stdout.splitlines())
-        subscription_usage.record_data_root(host_config(), environment)
+    manager = run(["systemctl", "--user", "show", "--property=MainPID", "--value", target.name], check=False)
+    pid = manager.stdout.strip() if manager.returncode == 0 and isinstance(manager.stdout, str) else ""
+    if not pid.isdigit() or pid == "0":
+        return
+    try:
+        entries = (PROC / pid / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return
+    name = b"TAUCETI_LEGACY_DATA_ROOT="
+    value = next((os.fsdecode(e[len(name):]) for e in entries if e.startswith(name)), None)
+    subscription_usage.record_data_root(host_config(), {"TAUCETI_LEGACY_DATA_ROOT": value} if value else {})
 
 
 def run_workers():
