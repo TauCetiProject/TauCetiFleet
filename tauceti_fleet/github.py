@@ -85,7 +85,8 @@ def runner_policy(config):
         if kinds in (["roadmap"], ["control"], ["queue-control"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main"}
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
@@ -93,7 +94,7 @@ def runner_policy(config):
         or required not in selected
         or not selected <= allowed
     ):
-        raise FleetError("Runner group must allow only pr-build.yml and optional fleet-smoke.yml at refs/heads/main")
+        raise FleetError("Runner group must allow only trusted main pr-build, nightly-verify, and fleet-smoke workflows")
     return group
 
 
