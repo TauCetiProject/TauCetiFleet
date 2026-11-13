@@ -375,11 +375,8 @@ def worker_plan(config):
     """(id, definition keys, slot group or None) per worker, and the ids in admission order."""
     # Keep existing definitions when reducing admissions: removing a definition
     # makes the manager terminate its worker, including an admitted paid session.
-    import tomllib
-
-    prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old = tomllib.loads(prior.read_text()).get("workers", []) if preserve and prior.exists() else []
+    old = written_workers() if preserve else []
     if config.get("slots"):
         plan = slot_groups.layout(config, old, worker_fields)
         admission = slot_groups.order([group for _, group in plan])
@@ -390,13 +387,39 @@ def worker_plan(config):
     return [(wid, *entry) for wid, entry in zip(ids, plan, strict=True)], [ids[n] for n in admission]
 
 
-def written_roles():
-    """(agent, phases) of each worker definition the manager reads now."""
+def manifest_signature():
+    """Identifies the workers.toml on disk; every write replaces the file."""
+    path = config_dir() / "workers.toml"
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (str(path),)
+    return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
+# Parsed definitions and the last plan written, each kept with the manifest
+# signature (and saved configuration) it was built from.
+_manifest = dict(signature=None, workers=[], roles={})
+_written = dict(key=None, ids=[])
+
+
+def written_workers():
+    """The worker definitions in workers.toml, parsed again only after it is replaced."""
     import tomllib
 
-    path = config_dir() / "workers.toml"
-    workers = tomllib.loads(path.read_text()).get("workers", []) if path.exists() else []
-    return {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
+    signature = manifest_signature()
+    if _manifest["signature"] != signature:
+        path = config_dir() / "workers.toml"
+        workers = tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else []
+        roles = {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
+        _manifest.update(signature=signature, workers=workers, roles=roles)
+    return _manifest["workers"]
+
+
+def written_roles():
+    """(agent, phases) of each worker definition the manager reads now."""
+    written_workers()
+    return _manifest["roles"]
 
 
 def worker_config(config):
@@ -409,6 +432,10 @@ def worker_config(config):
 
 def write_worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
+    preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
+    settings = json.dumps(config, sort_keys=True, default=str), preserve
+    if _written["key"] == (*settings, manifest_signature()):
+        return list(_written["ids"])
     definitions, ids = worker_plan(config)
     before = written_roles()
     changed = {wid for wid, fields, _ in definitions
@@ -432,12 +459,12 @@ def write_worker_config(config):
             if value is not None:
                 lines.append(key + " = " + toml_value(value))
     path = config_dir() / "workers.toml"
-    if path.exists() and path.read_text() == "\n".join(lines) + "\n":
-        return ids
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    if not (path.exists() and path.read_text() == "\n".join(lines) + "\n"):
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text("\n".join(lines) + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    _written.update(key=(*settings, manifest_signature()), ids=list(ids))
     return ids
 
 
@@ -1132,8 +1159,7 @@ def daemon():
                     # Every pass brings workers.toml back to the saved configuration,
                     # whichever writer changed either since the last one.
                     ids = worker_config(config)
-                    path = config_dir() / "workers.toml"
-                    written = path.read_text() if path.exists() else ""
+                    written = manifest_signature()
                     if manifest != written:
                         manifest = written
                         start_workers()

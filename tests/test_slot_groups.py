@@ -440,6 +440,26 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual((saved["claude_billing"], saved["slots"]), ("api", [dict(count=1, agent="claude", roles=["review"])]))
         host.worker_config(saved)
 
+    def test_an_unchanged_pass_renews_admission_without_rereading_definitions(self):
+        host.configure(dict(env={"A": "x" * 4096}))
+        store.update_host(workers_enabled=True, max_workers=8)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("4096:claude:review")]))
+        parse, plan, timing = tomllib.loads, host.worker_plan, []
+
+        def unchanged():
+            timing.append(time.monotonic())
+            loads.reset_mock()
+            planned.reset_mock()
+
+        with (
+            patch("tomllib.loads", side_effect=parse) as loads,
+            patch.object(host, "worker_plan", side_effect=plan) as planned,
+        ):
+            policies = self.daemon_passes(unchanged, lambda: timing.append(time.monotonic()))
+            self.assertEqual((loads.call_count, planned.call_count), (0, 0))
+        self.assertEqual([len(policy["workers"]) for policy in policies], [8, 8, 8])
+        self.assertLess(timing[1] - timing[0], 5)
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (
