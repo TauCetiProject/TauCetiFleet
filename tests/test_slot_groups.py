@@ -521,6 +521,31 @@ class SlotGroups(unittest.TestCase):
         self.assertEqual([len(policy["workers"]) for policy in policies], [8, 8, 8])
         self.assertLess(timing[1] - timing[0], 5)
 
+    def test_an_edit_to_a_parked_slot_renews_without_reparsing_or_revalidating_each_slot(self):
+        host.configure(dict(env={f"E{n}": "x" * 26 for n in range(64)}))
+        store.update_host(workers_enabled=True, max_workers=8)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("256:claude:review")]))
+        parse, fields = tomllib.loads, host.worker_fields
+
+        def edit():
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("255:claude:review"), slot_groups.parse("1:codex:progress")]))
+            loads.reset_mock()
+            checked.reset_mock()
+
+        with (
+            patch("tomllib.loads", side_effect=parse) as loads,
+            patch.object(host, "worker_fields", side_effect=fields) as checked,
+        ):
+            policies = self.daemon_passes(edit, lambda: None)
+            parsed, built = loads.call_count, checked.call_count
+        _, workers = self.definitions()
+        self.assertEqual(self.shape(workers)[256], ("codex", "progress"))
+        self.assertEqual(host.written_workers(), list(workers.values()))
+        self.assertEqual([len(policy["workers"]) for policy in policies], [8, 8, 8])
+        # The changed pass builds one definition per agent and reads none back from disk.
+        self.assertEqual(parsed, 0)
+        self.assertLessEqual(built, 2)
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (

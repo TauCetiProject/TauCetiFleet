@@ -426,10 +426,13 @@ def written_workers():
     signature = manifest_signature()
     if _manifest["signature"] != signature:
         path = config_dir() / "workers.toml"
-        workers = tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else []
-        roles = {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
-        _manifest.update(signature=signature, workers=workers, roles=roles)
+        remember_manifest(signature, tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else [])
     return _manifest["workers"]
+
+
+def remember_manifest(signature, workers):
+    roles = {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
+    _manifest.update(signature=signature, workers=workers, roles=roles)
 
 
 def written_roles():
@@ -480,7 +483,11 @@ def write_worker_config(config):
         temporary.write_text("\n".join(lines) + "\n")
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
-    _written.update(key=(*settings, manifest_signature()), ids=list(ids))
+    signature = manifest_signature()
+    # The definitions just rendered are what parsing the file would return.
+    remember_manifest(signature, [dict(id=wid, **{k: v for k, v in fields.items() if v is not None})
+                                  for wid, fields, _ in definitions])
+    _written.update(key=(*settings, signature), ids=list(ids))
     return ids
 
 
