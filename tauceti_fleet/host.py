@@ -459,7 +459,7 @@ def start_workers():
         return
     name = b"TAUCETI_LEGACY_DATA_ROOT="
     value = next((os.fsdecode(e[len(name):]) for e in entries if e.startswith(name)), None)
-    subscription_usage.record_data_root(host_config(), {"TAUCETI_LEGACY_DATA_ROOT": value} if value else {})
+    subscription_usage.record_data_root({"TAUCETI_LEGACY_DATA_ROOT": value} if value else {})
 
 
 def manager_environment():
@@ -499,7 +499,7 @@ def run_workers():
     os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
     from . import subscription_usage
 
-    subscription_usage.record_data_root(config)
+    subscription_usage.record_data_root()
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
