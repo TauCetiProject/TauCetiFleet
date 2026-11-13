@@ -78,8 +78,11 @@ FUSE is required.
 
 Cheap free-space/inode checks and phase observations run every two seconds.
 Allocated disk is measured by one bounded whole-instance scan at most every
-60 seconds; slow scans do not block the cheap checks. Failed/timed-out scans are
-unknown rather than zero usage, and repeated failures stop the affected instance.
+five minutes, with a two-minute scan deadline; slow scans do not block the cheap
+checks. Scanner diagnostics cannot fill an unread pipe. A failed scan retains
+the last verified value and its original timestamp, with its error and age
+reported explicitly. Three consecutive failed scans still stop the instance.
+Telemetry includes scan duration, deadline and interval for live verification.
 A budget breach, low space, inode exhaustion or resource-monitor failure is an
 infrastructure failure. Only the affected instance is stopped and cleaned up.
 
