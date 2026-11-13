@@ -287,6 +287,40 @@ class Attention(unittest.TestCase):
                          ["issues/8", "pulls/7"])
         self.assertEqual([n["state"] for n in value["items"][0]["named"]], ["OPEN", "MERGED"])
 
+    def test_an_unreadable_lookup_keeps_the_last_answer_it_could_not_refresh(self):
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        for forge in ("github", "forgejo"):
+            with self.subTest(forge=forge):
+                for path in attention.incidents_dir().glob("*.json"):
+                    path.unlink()
+                shutil.rmtree(store.state_dir() / "attention", ignore_errors=True)
+                self.on()
+                origin = "https://forge.example"
+                where = {} if forge == "github" else dict(forge=dict(kind="forgejo", url=origin), suffix=".000000000007")
+                path = self.record("declined", "fix", 7, summary="no", **where)
+                self.observe(7, "CLOSED", "a" * 40, at + 30)
+                clock, answers = [at + 60], ["open"]
+
+                def answer(*args, answers=answers, **_):
+                    if answers[0] == "gone":
+                        error = store.FleetError("HTTP 404")
+                        error.status = 404
+                        raise error
+                    return dict(state=answers[0], merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+                self.github.side_effect = self.forgejo.side_effect = answer
+                with patch.object(attention.time, "time", side_effect=lambda clock=clock: clock[0]):
+                    self.assertEqual(len(self.listed(lookup=True)["items"]), 1)
+                    clock[0], answers[0] = at + 120, "gone"
+                    value = self.listed(lookup=True)
+                self.assertEqual(len(value["items"]), 1)
+                self.assertEqual((value["items"][0]["unreadable"], value["cleared"]), (404, []))
+                key = f"{REPOSITORY}#7"
+                kept = store.read(attention.notes_path(path.name))["prs"][key]
+                self.assertEqual((kept["state"], kept["observed"], kept["attempt"]),
+                                 ("OPEN", at + 60, dict(status=404, at=at + 120)))
+                self.assertEqual(attention.prepared()["count"], 1)
+
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")
