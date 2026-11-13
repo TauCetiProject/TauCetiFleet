@@ -301,6 +301,27 @@ class SubscriptionUsage(unittest.TestCase):
             host.start_workers()
         self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
 
+    def test_kept_service_leaves_the_data_root_its_manager_was_launched_with(self):
+        hour = 3600
+        kept = self.root / "durable"
+        token = self.root / "token"
+        token.write_text("synthetic-token")
+        store.update_host(github_token_file=str(token), agent="codex")
+        self.codex(kept / "state/fleet-1/cache/quota-codex.json", 60, (20, 5 * hour, hour))
+        with (
+            patch.dict(os.environ, {"TAUCETI_LEGACY_DATA_ROOT": str(kept)}),
+            patch.object(host, "executable", return_value="/fake/tauceti"),
+            patch.object(host.os, "execv"),
+        ):
+            host.run_workers()
+        # A root set on the service itself is absent from the user manager's environment.
+        units = self.root / "units"
+        units.mkdir()
+        manager = subprocess.CompletedProcess([], 0, "LANG=C\n", "")
+        with patch.object(host, "units", return_value=units), patch.object(host, "run", return_value=manager):
+            host.start_workers()
+        self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
+
 
 if __name__ == "__main__":
     unittest.main()
