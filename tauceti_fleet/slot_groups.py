@@ -213,15 +213,28 @@ def layout(config, old, worker_fields):
     prior = [dict({key: worker[name] for key, (name, _) in KEYS.items() if worker.get(name)}, agent=worker.get("agent"))
              for worker in old]
     counts = [group["count"] for group in config["slots"]]
+    templates = {}
+
+    def shared(agent):
+        # One check per agent: the profile's other keys are the same for every slot.
+        if agent not in templates:
+            try:
+                templates[agent] = worker_fields(dict(config, agent=agent))
+            except FleetError as error:
+                templates[agent] = error
+        return templates[agent]
+
     result = []
     for position, group in enumerate(place(list(zip(counts, wanted, strict=True)), prior)):
         own = prior[position] if group is None else wanted[group]
-        try:
-            fields = worker_fields(dict(config, agent=own["agent"]))
-            fields.update((name, own[key]) for key, (name, _) in KEYS.items() if key in own)
-        except FleetError:
+        template = shared(own["agent"])
+        if isinstance(template, FleetError):
             if group is not None:
-                raise
-            fields = worker_fields(config)
+                raise template
+            own, template = {}, shared(config.get("agent"))
+            if isinstance(template, FleetError):
+                raise template
+        fields = dict(template)
+        fields.update((name, own[key]) for key, (name, _) in KEYS.items() if key in own)
         result.append((fields, group))
     return result
