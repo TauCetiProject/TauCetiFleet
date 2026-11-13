@@ -83,7 +83,9 @@ def pace_points(config, inherited=None):
     The worker takes the profile's `pace`, then `TAUCETI_PACE` from its definition's env,
     then the one in the manager's environment (`inherited`), then its default.
     """
-    spec = config.get("pace") or (config.get("env") or {}).get("TAUCETI_PACE") or inherited or DEFAULT_PACE
+    env = config.get("env") or {}
+    # A definition's env replaces the manager's value even when empty, and the worker reads empty as its default.
+    spec = config.get("pace") or (env["TAUCETI_PACE"] if "TAUCETI_PACE" in env else inherited) or DEFAULT_PACE
     points = {}
     for token in filter(str.strip, spec.split(",")):
         at, budget = token.split(":")

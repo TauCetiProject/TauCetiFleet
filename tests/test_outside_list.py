@@ -509,14 +509,15 @@ class Wiring(unittest.TestCase):
             patch.object(subscription_usage, "readings", return_value={"claude": None}),
         ):
             for process, environ, profile in [(manager, {}, {}), (None, dict(TAUCETI_PACE="0:5"), {}),
-                                              (manager, {}, dict(env=dict(TAUCETI_PACE="0:30"))), (manager, {}, dict(pace="0:50"))]:
+                                              (manager, {}, dict(env=dict(TAUCETI_PACE="0:30"))), (manager, {}, dict(pace="0:50")),
+                                              (manager, {}, dict(env=dict(TAUCETI_PACE="")))]:
                 pacer = outside_list.Pacer()
                 pacer.passes, pacer.state = 1, {}
                 with patch.object(host, "manager_process", return_value=process), patch.dict(os.environ, environ):
                     pacer.pace(dict(config, **profile), now)
                 curves.append(advance.call_args.kwargs["curve"][:2])
         self.assertEqual(curves, [[(0.0, 0.0), (60.0, 20.0)], [(0.0, 5.0), (100.0, 100.0)],
-                                  [(0.0, 30.0), (100.0, 100.0)], [(0.0, 50.0), (100.0, 100.0)]])
+                                  [(0.0, 30.0), (100.0, 100.0)], [(0.0, 50.0), (100.0, 100.0)], [(0.0, 0.0), (60.0, 40.0)]])
 
     def test_changed_bounds_reach_the_cap_file_before_the_next_step(self):
         self.pace()
