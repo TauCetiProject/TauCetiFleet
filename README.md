@@ -684,10 +684,14 @@ CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
 
 The first lines report running jobs by runner pool,
-the queued PR-build and total workflow backlogs, and account authoring pressure
+the PR-build and other-workflow backlogs, and account authoring pressure
 against its configured PR limit. Running-job counts cover all organization
-workflows, including small control jobs. Backlog counts are queued workflow runs,
-not individual jobs. Authoring pressure uses the workers' complete cached survey:
+workflows, including small control jobs. Backlog reporting separates pending
+and queued workflows. A second line shows verified stuck records and records
+without confirmed active jobs; these are not added to waiting work. Verification
+requires a complete empty/terminal job inventory and a settled workflow, never
+age alone. An old pending job remains waiting. Counts come from retained shared
+observations before detail-page limits; incomplete observations remain explicit. Authoring pressure uses the workers' complete cached survey:
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
 limit is reached. Missing facts are unknown; old observations retain their age.
@@ -705,9 +709,9 @@ cleanup instrumentation remain in `status --json`.
 `tauceti-fleet-observe.timer` prepares observations about every five minutes,
 with a randomized delay. A nonblocking lock and a persisted attempt deadline
 also bound concurrent and failed refreshes. Each refresh uses one Bors snapshot,
-two `per_page=1` GitHub queued-run counts, the shared service's **cached-only**
-running-job snapshot, and existing local worker survey responses. It does not
-scan GitHub runs or jobs. The shared snapshot adds no discovery requests and can
+the public CI manifest and its prepared backlog summary, the shared service's
+**cached-only** running-job snapshot, and existing local worker survey responses.
+It makes no GitHub run-count requests and does not scan runs or jobs. The shared snapshot adds no discovery requests and can
 remain stale when no scheduler has refreshed it. Existing host-service setup
 installs the observation timer; for a live code update, install/start only that
 timer while leaving the controller, workers, and CI guests running. JSON status
@@ -723,6 +727,23 @@ Missing LOC is estimated from measured landed PRs in that window. Such estimates
 show `~` and measurement coverage. With no measured sample, output contributes
 zero; positive spending over zero LOC shows `$∞`. Older creation-cohort summaries
 show unavailable landed output until their collectors are refreshed.
+
+Updated worker collectors also supply **attributed landed LOC**. This estimates
+our share of each landed PR using measured local authoring, fix and review costs
+and our fraction of its observed review passes. It credits reviews/fixes of
+other contributors' PRs and accounts for outside reviews of our own. Production
+cost per LOC and review cost per pass are measured dynamically; there is no fixed
+author/reviewer split. Every recorded review pass counts equally.
+
+`Estimated $ / attributed LOC` charges all spending, including unsuccessful work,
+`bump`, `progress` and other overhead, against this attributed output. Fleet totals
+sum locally estimated credit and dollars before dividing. Attribution coverage
+is explicit; missing cost links, LOC, review records or calibration samples add
+no credited output. Partial rates are labelled explicitly; all-missing rates are unavailable. Host-local worker/group credits share common denominators and sum to the host total. Cross-host production assists can overlap; no global ownership reconciliation is attempted. The original authored-LOC rate remains visible. Older hosts
+show attribution as unavailable until their worker collectors are updated.
+This uses existing local receipts and already-synced review archive records,
+with bounded cached reads in the existing worker collector. Fleet status adds
+no processes, scans or network requests.
 
 Spending has 3h, 24h, 7d and All time columns: worker-hours recorded, API dollars
 per worker-hour and API dollars per elapsed hour, using accrued usage from running, completed and interrupted conversations.
@@ -917,3 +938,5 @@ to load a new client release.
 The queue table labels the oldest sealed non-head batch `next head`, with later
 sealed batches `sealed, waiting`. A sealed batch has fixed membership even when
 its preparation has finished; only unsealed batches receive incoming PRs.
+
+Enable locally verified PR labeling with `tauceti-fleet workers HOST --self-tested`, or disable it with `--no-self-tested`. This persists `self_tested = true` in the host’s generated worker definitions. Workers apply the `self-tested` label only after the normal successful local verification; reviews and staging tests remain required. Install a Worker release supporting `--self-tested` and hand over the running manager to that runtime, preserving worker scopes, before enabling this setting. The command checks the installed runtime and running manager for support. The admission ceiling and active rounds are preserved.

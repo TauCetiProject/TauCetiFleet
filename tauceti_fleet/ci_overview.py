@@ -1,7 +1,6 @@
 """Prepared CI observations. Foreground status reads this cache only."""
 
 import concurrent.futures
-import datetime
 import fcntl
 import hashlib
 import heapq
@@ -9,6 +8,7 @@ import json
 import math
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -16,17 +16,12 @@ import urllib.request
 from pathlib import Path
 
 from . import bors_history as history_jobs
-from . import github
 from .store import FleetError, atomic, read, state_dir
 
 REPOSITORY = "TauCetiProject/TauCeti"
 INTERVAL = 300
-# Operator-confirmed uncancellable GitHub runs from 2026-10-07. Keep this a
-# fixed cohort boundary: a rolling window could hide genuinely delayed new work.
-QUEUED_RUNS_CREATED_SINCE = "2026-10-08T00:00:00Z"
-# Zero jobs; both cancel and force-cancel return 409 "has not yet queued".
-# PRs #25086 and #27094 received replacement builds. Do not generalize by age.
-CONFIRMED_ORPHAN_RUN_IDS = (41474083442, 41645104351)
+BACKLOG_SCHEMA = "tauceti.operations.backlog/v1"
+BACKLOG_STATES = ("pending", "queued", "in_progress", "stuck", "unconfirmed")
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
     "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
@@ -51,6 +46,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def status_ssl_context():
+    context = ssl.create_default_context()
+    # Standalone Python may expect /etc/ssl/cert.pem, absent on NixOS. Its
+    # existing certs directory need not contain OpenSSL's hashed issuer links.
+    # Use the distribution's installed bundle; preserve explicit trust settings.
+    if ssl.get_default_verify_paths().cafile is None and not any(
+            key in os.environ for key in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
+        for path in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-bundle.crt"):
+            if Path(path).is_file():
+                context.load_verify_locations(cafile=path)
+                break
+    return context
+
+
 def fetch(url, *, token_file=None, timeout=10):
     headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetStatus/1.0"}
     if token_file:
@@ -59,7 +68,8 @@ def fetch(url, *, token_file=None, timeout=10):
             raise FleetError("Invalid status credential")
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=status_ssl_context()))
+    with opener.open(request, timeout=timeout) as response:
         raw = response.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         raise FleetError("Status response exceeds limit")
@@ -123,61 +133,39 @@ def pools(config):
     return dict(counts=counts, scope="organization_all_workflow_jobs"), observed / 1000
 
 
+def valid_backlog(data):
+    if data.get("schema") != BACKLOG_SCHEMA or type(data.get("partial")) is not bool:
+        return False
+    for category in ("pr_builds", "other_workflows"):
+        row = data.get(category)
+        if not isinstance(row, dict) or any(type(row.get(k)) is not int or row[k] < 0 for k in BACKLOG_STATES):
+            return False
+        oldest = row.get("oldest_waiting_at")
+        if oldest is not None and (type(oldest) not in (int, float) or not math.isfinite(oldest)
+                                   or not 0 < oldest <= time.time() + 5):
+            return False
+    return all(type(data.get(k)) is int and data[k] >= 0 for k in ("waiting_jobs", "running_jobs"))
+
+
 def backlog(config):
-    token_file = config.get("github_token_file") or config.get("ci_token_file")
-    if not token_file:
-        raise FleetError("No direct read credential for queued-run counts")
-    counts = {}
-    query = "?status=queued&per_page=1&created=" + urllib.parse.quote(
-        ">=" + QUEUED_RUNS_CREATED_SINCE, safe="")
-    for name, path in (("pr_builds", "actions/workflows/pr-build.yml/runs"), ("all_workflows", "actions/runs")):
-        value = github.request("repos/" + REPOSITORY + "/" + path + query, token_file=token_file)
-        count = value.get("total_count")
-        if type(count) is not int or count < 0:
-            raise FleetError("Invalid queued-run count")
-        counts[name] = count
-    raw_total = counts["all_workflows"]
-    excluded = set()
-    if raw_total:
-        for run_id in CONFIRMED_ORPHAN_RUN_IDS:
-            try:
-                run = fetch(f"https://api.github.com/repos/{REPOSITORY}/actions/runs/{run_id}", token_file=token_file)
-            except urllib.error.HTTPError as error:
-                if error.code == 404:
-                    continue
-                raise
-            if (run.get("id") == run_id and run.get("status") == "queued"
-                    and isinstance(run.get("created_at"), str) and run["created_at"] >= QUEUED_RUNS_CREATED_SINCE):
-                excluded.add(run_id)
-                counts["all_workflows"] = max(0, counts["all_workflows"] - 1)
-                if run.get("path") == ".github/workflows/pr-build.yml":
-                    counts["pr_builds"] = max(0, counts["pr_builds"] - 1)
-    if excluded:
-        counts["excluded_orphans"] = len(excluded)
-    if counts["all_workflows"]:
-        if raw_total > 1000:
-            counts["oldest_unavailable"] = "GitHub's 1,000-run result limit"
-        else:
-            # At most one extra tiny page per explicitly confirmed orphan.
-            for position in range(raw_total, max(0, raw_total - len(excluded) - 1), -1):
-                oldest = value if raw_total == 1 else github.request(
-                    "repos/" + REPOSITORY + "/actions/runs" + query + f"&page={position}", token_file=token_file)
-                if oldest.get("total_count") != raw_total:
-                    counts["oldest_unavailable"] = "queue changed during observation"
-                    break
-                try:
-                    run = oldest["workflow_runs"][0]
-                    if run.get("id") in excluded:
-                        continue
-                    stamp = datetime.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-                    if stamp.tzinfo is None or not 0 < stamp.timestamp() <= time.time() + 5:
-                        raise ValueError("Invalid creation timestamp")
-                    counts["oldest_created_at"] = stamp.timestamp()
-                except (KeyError, IndexError, TypeError, ValueError):
-                    counts["oldest_unavailable"] = "queued-run creation time unavailable"
-                break
-    counts["created_since"] = QUEUED_RUNS_CREATED_SINCE
-    return counts, time.time()
+    from . import pool_activity
+
+    manifest = fetch(pool_activity.MANIFEST)
+    jobs = fetch(pool_activity.jobs_url(manifest))
+    source = jobs.get("backlog") or {}
+    if (jobs.get("schema") != "tauceti.operations.jobs/v1"
+            or source.get("schema") != BACKLOG_SCHEMA or source.get("coverage") not in ("observed", "partial")):
+        raise FleetError("Shared CI backlog observation is not ready")
+    row = source.get("repositories", {}).get(REPOSITORY)
+    if not isinstance(row, dict):
+        raise FleetError("Shared CI backlog has no repository observation")
+    data = dict(row, schema=BACKLOG_SCHEMA, partial=source["coverage"] == "partial")
+    if not valid_backlog(data):
+        raise FleetError("Invalid shared CI backlog counts")
+    observed = pool_activity.timestamp(jobs.get("observed_at"))
+    if not math.isfinite(observed) or not 0 < observed <= time.time() + 5:
+        raise FleetError("Invalid shared CI backlog timestamp")
+    return data, observed
 
 
 def worker_policies(config):
@@ -211,8 +199,9 @@ def worker_policies(config):
     return sorted(policies)
 
 
-def pressure_row(path, identity, account, policies):
-    if path.stat().st_size > 8 * 1024 * 1024:
+def pressure_rows(path, identity, account, policies):
+    stat = path.stat()
+    if stat.st_size > 8 * 1024 * 1024:
         return []
     cached = read(path, {})
     query, payload = cached.get("query", {}), cached.get("payload", {})
@@ -223,23 +212,23 @@ def pressure_row(path, identity, account, policies):
         return []
     scope, skip = args.get("roadmap", "any") or "any", args.get("skip", "")
     skipped = tuple(sorted(set(filter(None, skip.split(",")))))
-    limits = {limit for area, excluded, limit in policies if area == scope and excluded == skipped}
-    if not limits:
-        return []
-    if scope in ("any", "auto"):
-        counts = payload.get("author_counts")
-        if not isinstance(counts, dict):
-            return []
-        count = counts.get(account, 0)
-    else:
-        rows = payload.get("data")
-        if not isinstance(rows, list):
-            return []
-        count = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
-    if type(count) is not int or count < 0:
-        return []
-    return [dict(scope=scope, skip=skip, count=count, limit=limit, blocked=count >= limit,
-                 observed_at=path.stat().st_mtime) for limit in limits]
+    # The gateway computes author_counts over the inventory before filtering
+    # rows by roadmap. Only the exclusions need to match an all-roadmaps policy.
+    author_counts = payload.get("author_counts")
+    counts = {}
+    if isinstance(author_counts, dict):
+        counts.update((area, author_counts.get(account, 0)) for area in ("any", "auto"))
+    rows = payload.get("data")
+    if scope not in ("any", "auto") and isinstance(rows, list) and any(
+        area == scope and excluded == skipped for area, excluded, _ in policies
+    ):
+        counts[scope] = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
+    return [
+        dict(scope=area, skip=",".join(skipped), count=count, limit=limit, blocked=count >= limit,
+             observed_at=stat.st_mtime)
+        for area, excluded, limit in policies
+        if excluded == skipped and type(count := counts.get(area)) is int and count >= 0
+    ]
 
 
 def pressure(config):
@@ -255,11 +244,15 @@ def pressure(config):
     root = Path(os.environ.get("TAUCETI_GITHUB_SHARED_DIR", Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "tauceti/github-shared"))
     directory = root / "gateway" / identity / "responses"
     scopes = {}
+    seen = set()
     deadline = time.monotonic() + 5
 
     def observe(path):
+        if path in seen:
+            return
+        seen.add(path)
         try:
-            for row in pressure_row(Path(path), identity, account, policies):
+            for row in pressure_rows(path, identity, account, policies):
                 key = (row["scope"], row["skip"], row["limit"])
                 if row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
                     scopes[key] = row
@@ -273,7 +266,7 @@ def pressure(config):
         args = dict(roadmap=scope, skip=",".join(skip), numbers="", stages=stages)
         key = hashlib.sha256(json.dumps([REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
         observe(directory / (key + ".json"))
-    if len(scopes) < len(policies):
+    if len(scopes) < len(policies) or any(scope in ("auto", "any") for scope, _, _ in policies):
         newest = []
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -285,10 +278,12 @@ def pressure(config):
                         heapq.heappush(newest, (stat.st_mtime, entry.path))
                         if len(newest) > 256:
                             heapq.heappop(newest)
-        for _, path in sorted(newest, reverse=True):
+        for stamp, path in sorted(newest, reverse=True):
             if time.monotonic() > deadline:
                 break
-            observe(path)
+            if len(scopes) == len(policies) and stamp <= min(row["observed_at"] for row in scopes.values()):
+                break
+            observe(Path(path))
     if not scopes:
         raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
     rows = list(scopes.values())
@@ -401,7 +396,7 @@ def source_value(name, source):
             if not isinstance(data.get("counts"), dict) or any(not isinstance(k, str) or not re.fullmatch(r"github|namespace|self-hosted|fleet-(?:[a-f0-9]{12}|[a-f0-9]{32})", k) or not integer(v) for k, v in data["counts"].items()):
                 return None
         elif name == "backlog":
-            if not all(integer(data.get(k)) for k in ("pr_builds", "all_workflows")):
+            if not valid_backlog(data):
                 return None
         elif name == "pressure":
             if not isinstance(data.get("account"), str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", data["account"]) or not isinstance(data.get("scopes"), list):
@@ -531,20 +526,22 @@ def display(value, *, section="all"):
     data, note = source("backlog")
     if data is None:
         print("CI backlog: unknown (background observation unavailable)")
-    elif data.get("created_since") != QUEUED_RUNS_CREATED_SINCE:
-        # Older caches include the ignored cohort; do not reuse its counts or age.
-        print(f"CI backlog: refreshing (excluding stuck runs through 2026-10-07; {note})")
     else:
-        stamp = data.get("oldest_created_at")
-        if type(stamp) in (int, float) and math.isfinite(stamp) and 0 < stamp <= time.time() + 5:
-            minutes = max(0, int((time.time() - stamp) / 60))
+        if data["partial"]:
+            note += "; partial observations"
+        pr, other = data["pr_builds"], data["other_workflows"]
+        oldest = pr.get("oldest_waiting_at")
+        age = ""
+        if oldest is not None:
+            minutes = max(0, int((time.time() - oldest) / 60))
             hours, minutes = divmod(minutes, 60)
-            oldest = f"{hours}h {minutes}m old" if hours else f"{minutes}m old"
-        else:
-            oldest = "none" if data["all_workflows"] == 0 else "unknown"
-        if data.get("excluded_orphans"):
-            note += f"; {data['excluded_orphans']} confirmed orphan excluded"
-        print(f"CI backlog: {data['pr_builds']} PR-build runs queued; {data['all_workflows']} across all workflows; oldest queued run {oldest} ({note}; excluding stuck runs through 2026-10-07)")
+            age = f"; oldest PR wait {hours}h {minutes}m" if hours else f"; oldest PR wait {minutes}m"
+        print(f"CI backlog: PR builds {pr['pending']} pending, {pr['queued']} queued; "
+              f"other workflows {other['pending']} pending, {other['queued']} queued{age} ({note})")
+        stuck = pr["stuck"] + other["stuck"]
+        unconfirmed = pr["unconfirmed"] + other["unconfirmed"]
+        print(f"CI workflow records: {stuck} verified stuck; {unconfirmed} without confirmed active jobs "
+              "(separate from waiting work)")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
     pressures = pressures or [sources.get("pressure", {})]
@@ -554,19 +551,21 @@ def display(value, *, section="all"):
         data = source_value("pressure", observation)
         if data is None:
             continue
-        age = max(0, int(time.time() - observation.get("observed_at", time.time())))
+        rows = {}
+        for row in data["scopes"]:
+            if row["scope"] in ("any", "auto") and not row["skip"]:
+                limit = row["limit"]
+                if row["observed_at"] > rows.get(limit, {}).get("observed_at", -1):
+                    rows[limit] = row
+        newest = max((r["observed_at"] for r in rows.values()), default=observation["observed_at"])
+        age = max(0, int(time.time() - newest))
         note = f"{age}s old" + ("; stale" if age > 600 or observation.get("error") else "")
-        rows = sorted((r for r in data["scopes"] if r["scope"] in ("any", "auto") and not r["skip"]),
-                      key=lambda r: -r["observed_at"])
         parts = []
-        for row in rows[:1]:
-            scope = "all roadmaps" if row["scope"] in ("any", "auto") else row["scope"]
-            if row["skip"]:
-                scope += " (with exclusions)"
-            parts.append(f"{scope}: {row['count']}/{row['limit']}" + (" blocked" if row["blocked"] else ""))
+        for limit, row in sorted(rows.items()):
+            parts.append(f"{row['count']}/{limit}" + (" blocked" if row["blocked"] else ""))
             scope_age = max(0, int(time.time() - row["observed_at"]))
-            if scope_age > 600:
+            if scope_age > 600 and row["observed_at"] < newest:
                 parts[-1] += f" (stale {scope_age}s)"
         machine = data.get("machine_id")
         label = " on " + pool_names.get("fleet-" + machine[:12], machine[:12]) if isinstance(machine, str) else ""
-        print(f"Backpressure {data['account']}{label}: " + ("; ".join(parts) or "all roadmaps: unknown") + f" open non-draft roadmap PRs ({note})")
+        print(f"Backpressure {data['account']}{label}: all roadmaps: " + (", ".join(parts) or "unknown") + f" open non-draft roadmap PRs ({note})")

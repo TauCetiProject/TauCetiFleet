@@ -58,9 +58,11 @@ def parser():
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
     reserve.add_argument("--json", action="store_true")
-    workers = sub.add_parser("workers", help="change the admission ceiling without interrupting active work")
+    workers = sub.add_parser("workers", help="change worker capacity or self-tested prompting without interrupting active work")
     workers.add_argument("host")
-    workers.add_argument("--max", dest="maximum", type=int, required=True)
+    workers.add_argument("--max", dest="maximum", type=int)
+    workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
+                         help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
@@ -179,6 +181,8 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
+        if args.command == "workers" and args.maximum is None and args.self_tested is None:
+            raise FleetError("Select --max, --self-tested, or --no-self-tested")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.host == "local":
@@ -216,7 +220,10 @@ def main(argv=None, *, _status_results=None):
                 if args.prepare:
                     payload["prepare"] = True
             if args.command == "workers":
-                payload.update(maximum=args.maximum)
+                if args.maximum is not None:
+                    payload["maximum"] = args.maximum
+                if args.self_tested is not None:
+                    payload["self_tested"] = args.self_tested
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
             if args.command == "focus":
@@ -361,6 +368,18 @@ def main(argv=None, *, _status_results=None):
                         )
                         if memory.get("allocation_error"):
                             print(f"Memory allocation error: {memory['allocation_error']}")
+                        tasks = memory.get("tasks") or {}
+                        if tasks.get("current") is not None:
+                            limit = str(tasks["maximum"]) if tasks.get("maximum") is not None else "unlimited/unknown"
+                            print(
+                                f"Worker tasks: {tasks['current']}/{limit} (threads count toward the limit); peak {tasks.get('peak', 'unknown')}"
+                            )
+                            if tasks.get("rejected") is not None:
+                                change = tasks.get("new_rejections")
+                                recent = f"; +{change} since previous sample" if change is not None else ""
+                                print(f"  Task-limit rejections: {tasks['rejected']} total{recent}")
+                        if tasks.get("last_rejection_at"):
+                            print(f"  Last task-limit rejection observed {max(0, int(time.time() - tasks['last_rejection_at']))}s ago")
                         print("Worker memory reclamation waits (1-minute averages; informational)")
                         print(
                             f"  Time with at least one task waiting: {memory['stall_some']:.2f}%; all active tasks waiting: {memory['stall_full']:.2f}%"
