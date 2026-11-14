@@ -207,9 +207,10 @@ def incident_items(config):
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
                     known = cached.get(f"{repository}#{number}")
                     # Only a merge cannot be undone; any other answer from before this record is asked again.
+                    # The last attempt stays, so the next lookup still knows when this one was last asked.
                     if (isinstance(known, dict) and known.get("state") != "MERGED"
                             and not (isinstance(known.get("observed"), int | float) and known["observed"] >= written)):
-                        known = None
+                        known = {"attempt": known["attempt"]} if isinstance(known.get("attempt"), dict) else None
                     item["named"].append(dict(known if isinstance(known, dict) else {}, pr=number, relation=relation))
         items.append(item)
     return items
