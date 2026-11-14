@@ -144,6 +144,118 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "JSON object"):
             host.configure(dict(credentials=[]))
 
+    def secrets(self):
+        for name in ("key", "token"):
+            (self.root / name).write_text(name + "-secret")
+            (self.root / name).chmod(0o600)
+        return dict(github_account="operator", anthropic_api_key_file=str(self.root / "key"),
+                    github_token_file=str(self.root / "token"))
+
+    def test_api_profile_worker_definitions_keep_their_exact_text(self):
+        store.atomic(store.config_dir() / "profiles.json", {"api": dict(self.secrets(), author_model="model")})
+        payload = remote.profile("api")
+        self.assertEqual(payload["credentials"], {"anthropic_api_key_file": "key-secret", "github_token_file": "token-secret"})
+        store.update_host(max_workers=1)
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="api", ci_allowed=False))
+        (wid,) = host.worker_config(store.host_config())
+        self.assertEqual(
+            (store.config_dir() / "workers.toml").read_text(),
+            f'version = 1\n\n[[workers]]\nid = "{wid}"\nagent = "claude"\nmax_open_prs = 8\nclaude_billing = "api"\n'
+            f'budget = true\ngithub_account = "operator"\nanthropic_api_key_file = "{store.config_dir() / "secrets/anthropic_api_key_file"}"\n'
+            'author_model = "model"\n',
+        )
+
+    def test_subscription_profile_transfers_no_api_key_and_writes_no_budget(self):
+        import tomllib
+
+        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70",
+                     env={"TAUCETI_OVERLAP_BATCH_COMMITS": "80", "A": 'quoted "value"'})
+        store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
+        payload = remote.profile("subscription")
+        self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
+        store.update_host(max_workers=2, anthropic_api_key_file="/private/earlier-api-key")
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="subscription", ci_allowed=False))
+        host.worker_config(store.host_config())
+        workers = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(workers), 2)
+        for worker in workers:
+            self.assertEqual({k: worker[k] for k in shape}, shape)
+            self.assertFalse({"budget", "anthropic_api_key_file"} & set(worker))
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+            patch.object(capabilities, "executable", return_value=None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            checks = {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}
+            defaults = {c["name"] for c in capabilities.doctor(dict(store.host_config(), agent=None, claude_billing=None, sandbox=None), probe=False)["checks"]}
+        for tool in ("claude", "codex", "bubble", "incus"):
+            self.assertEqual(checks["worker-tool-" + tool]["status"], "blocked")
+            self.assertEqual(checks["worker-tool-" + tool]["roles"], ["workers"])
+        self.assertNotIn("anthropic_api_key_file", checks)
+        self.assertIn("anthropic_api_key_file", defaults)
+        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus", "worker-sandbox-bubble"} & defaults)
+        bubble = checks["worker-sandbox-bubble"]
+        self.assertEqual((bubble["status"], bubble["roles"]), ("warning", ["workers"]))
+        self.assertIn("outside tauceti-fleet-workers.slice", bubble["evidence"])
+
+    def test_profile_rejects_what_the_worker_rejects_and_changes_only_while_drained(self):
+        store.host_config()
+        rejected = [
+            dict(agent="codex"),
+            dict(agent="auto"),
+            dict(agent="kiro", claude_billing="subscription"),
+            dict(claude_billing="oauth"),
+            dict(pace="0:10"),
+            dict(claude_billing="subscription", pace="50"),
+            dict(claude_billing="subscription", pace="0:10,0:20"),
+            dict(claude_billing="subscription", pace="120:10"),
+            dict(claude_billing="subscription", agent="auto", author_model="model"),
+            dict(claude_billing="subscription", agent="auto", author_effort="high"),
+            dict(sandbox="vm"),
+            dict(env=["A=1"]),
+            dict(env={"A": 1}),
+            dict(env={"A-B": "1"}),
+            dict(env={"A": "line\nbreak"}),
+            dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
+            dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
+            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
+            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
+                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
+            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
+              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
+            dict(env={"A": "x" * 16384}),
+        ]
+        with patch.object(host, "install_service"):
+            for shape in rejected:
+                with self.assertRaises(store.FleetError, msg=shape):
+                    host.configure(shape)
+            self.assertFalse({"agent", "claude_billing", "sandbox", "pace", "env"} & set(store.host_config()))
+            host.configure(dict(claude_billing="subscription", agent="codex", author_model="model"))
+            store.update_host(workers_enabled=True)
+            host.configure(dict(claude_billing="subscription", agent="codex"))
+            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(env={"A": "1"})):
+                with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
+                    host.configure(shape)
+            store.update_host(workers_enabled=False)
+            host.configure(dict(claude_billing=None, agent=None))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual((fields["agent"], fields["claude_billing"], fields["budget"]), ("claude", "api", True))
+
+    def test_profile_without_model_overrides_clears_the_saved_ones(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "api": dict(self.secrets(), author_model="model", author_effort="high"),
+            "auto": dict(github_account="operator", claude_billing="subscription", agent="auto"),
+        })
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("api"), profile="api", ci_allowed=False))
+            host.configure(dict(remote.profile("auto"), profile="auto"))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual(fields["agent"], "auto")
+        self.assertFalse({"author_model", "author_effort"} & set(fields))
+
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
             result = host.configure(dict(ci_allowed=False))

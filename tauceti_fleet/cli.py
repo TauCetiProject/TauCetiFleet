@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, broker, host, pool_activity, remote, slot_groups
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -72,6 +72,13 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    groups = sub.add_parser("slots", help="give groups of worker slots their own agent and work phases")
+    groups.add_argument("host")
+    change = groups.add_mutually_exclusive_group()
+    change.add_argument("--group", action="append", metavar="COUNT:AGENT[:ROLE,ROLE...]",
+                        help="one group; repeat for each, replacing the saved list")
+    change.add_argument("--clear", action="store_true", help="return every slot to the profile's agent and the full rotation")
+    groups.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
@@ -237,6 +244,11 @@ def main(argv=None, *, _status_results=None):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "slots":
+                if args.clear:
+                    payload["clear"] = True
+                elif args.group:
+                    payload["groups"] = [slot_groups.parse(group) for group in args.group]
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
