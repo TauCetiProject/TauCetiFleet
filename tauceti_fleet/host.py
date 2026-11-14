@@ -1,5 +1,6 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
+import hashlib
 import json
 import os
 import signal
@@ -8,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, targets, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -275,6 +276,12 @@ def write_slices(config, caps):
     return worker
 
 
+def toml_value(value):
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def worker_config(config):
     # Serialize controller and operator rewrites, and never restore an old label policy.
     with locked(config_dir() / "worker-policy.lock"):
@@ -296,7 +303,7 @@ def _worker_config(config):
     )
     if config.get("self_tested"):
         fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
         if config.get(key):
             fields[key] = config[key]
     lines = ["version = 1"]
@@ -315,7 +322,7 @@ def _worker_config(config):
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         for key, value in fields.items():
             if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+                lines.append(key + " = " + ("true" if value is True else toml_value(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -343,6 +350,13 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
+
+
 def run_workers():
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
@@ -350,8 +364,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -364,7 +377,8 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
+    token = Path(config["github_token_file"]).read_text().strip()
+    os.environ["GH_TOKEN"] = token
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
@@ -375,7 +389,40 @@ def run_workers():
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary, github_token_sha256=token_digest(token)))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def manager_process():
+    """The running worker manager's argv and environment, or None when /proc cannot show them."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False)
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    if not pid.isdigit() or pid == "0":
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return [os.fsdecode(a) for a in argv if a], dict(os.fsdecode(e).split("=", 1) for e in environ if b"=" in e)
+
+
+def running_manager():
+    """The runtime and token digest the running manager started with."""
+    recorded = read(state_dir() / "worker-manager.json", {})
+    if recorded:
+        return recorded
+    # A manager started before the record existed: `run_workers` exec'd `<runtime>/bin/tauceti workers ...`.
+    process = manager_process()
+    if process is None:
+        return {}
+    argv, environ = process
+    binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
+    return dict(binary=binary, github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else None)
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -545,6 +592,8 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("roadmap_target"):
+                status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
     return values
 
@@ -889,6 +938,7 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied_targets = None
         last_results = 0
         memory_paused = False
         previous_tasks = None
@@ -938,8 +988,9 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    listed = config.get("roadmap_targets")
+                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
+                        ids, applied_targets = worker_config(config), listed
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -999,6 +1050,7 @@ def daemon():
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_memory=memory,
@@ -1119,6 +1171,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_policy(payload)
     if action == "reserve-staging":
