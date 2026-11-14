@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, attention, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -101,6 +101,8 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "incidents",
+        "hold_declined",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -124,6 +126,7 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    attention.validate(updates)
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -299,6 +302,7 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
+    env = attention.worker_env(config)
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -316,6 +320,8 @@ def _worker_config(config):
         for key, value in fields.items():
             if value is not None:
                 lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+        if env:
+            lines.append("env = {" + ", ".join(k + " = " + json.dumps(v) for k, v in env.items()) + "}")
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -890,6 +896,7 @@ def daemon():
         error = None
         ids = []
         last_results = 0
+        last_attention = 0
         memory_paused = False
         previous_tasks = None
         while not stopping:
@@ -899,6 +906,9 @@ def daemon():
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
                     last_results = time.time()
+                if attention.enabled(config) and time.time() - last_attention >= 60:
+                    attention.prepare(config)
+                    last_attention = time.time()
                 current = cpu_sample()
                 idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
                 previous = current
@@ -1119,6 +1129,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "attention":
+        return attention.host_action(payload)
     if action == "workers":
         return set_worker_policy(payload)
     if action == "reserve-staging":
@@ -1157,5 +1169,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            **({"attention": attention.prepared()} if attention.enabled(config) else {}),
         )
     raise FleetError("Unknown host operation")

@@ -125,6 +125,7 @@ and effort are independent settings. Version 1 profiles use Claude API billing.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
+`incidents` and `hold_declined` are described under [Attention](#attention).
 
 ## Protected roadmap capacity
 
@@ -789,6 +790,104 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Attention
+
+`attention` lists what on a host is waiting for a person:
+
+```sh
+tauceti-fleet attention                    # every enrolled host
+tauceti-fleet attention server1
+tauceti-fleet attention server1 --lookup   # ask each pull request's forge about it
+tauceti-fleet attention server1 --ack 412  # archive the records for pull request 412
+tauceti-fleet attention server1 --ack all
+tauceti-fleet attention --json
+```
+
+The list is built from sources ([`attention.py`](tauceti_fleet/attention.py)).
+The one source so far is the worker's incident records: a `rebase`, `fix` or
+`fix-ci` round that ended with nothing on the forge (`declined`, with the agent's
+final message, the pull requests it named and the transcript path), and a stage
+that has used its attempts on a pull request head (`budget-spent`). The format
+is TauCetiWorker's `docs/incidents.md`. A worker release without incident
+records ignores the setting, and the list stays empty.
+
+A record names its pull request's forge, GitHub or a Forgejo instance. A Forgejo
+item, whose origin is the one the worker writes (HTTPS, or HTTP on a loopback
+host, IPv6 in brackets), is listed as `PR #412 on Forgejo <origin>` with its
+Forgejo link and an `ack id` such as
+`git.example.org/TauCetiProject/TauCeti#412`; so is a record of a GitHub
+repository other than the workers' own, with an id such as
+`TauCetiProject/TauCetiRoadmap#12`. `--ack` takes that id, and the bare number
+acknowledges only the workers' own GitHub repository. A record of any other
+forge is listed under its key and never looked up.
+
+Records are off until the host's profile sets `incidents`:
+
+```json
+{
+  "personal": {
+    "github_account": "operator",
+    "incidents": true,
+    "hold_declined": true
+  }
+}
+```
+
+With `incidents` true, every worker definition gets
+`TAUCETI_INCIDENTS_DIR=~/.local/state/tauceti-fleet/incidents` and
+`TAUCETI_HOLD_DECLINED=1` in its `env` table. The second variable keeps a stage
+off a pull request head that a `declined` record names, so a decline waits for a
+person and is not retried at that head; it also withholds the closure `fix`
+makes after spent attempts on that head. `hold_declined` false leaves it out:
+records are still written, and a declined head is retried until its attempts
+run out, each retry rewriting the record. Both keys change worker definitions,
+so on an active host they take the drained `add` that a model change takes. Set
+`incidents` to false to turn the records off; removing the key from the profile
+leaves the host as it was.
+
+`--ack` moves the matching live records into `incidents/acked/` and deletes
+nothing. An acknowledged `declined` record still holds its head, and an
+acknowledged `budget-spent` record is not written again for that head; delete
+the file to release either. When `acked/` already holds a record of the same
+name, that one is kept as `<name>.1`, `<name>.2` and so on, which the worker
+does not read, so only the latest acknowledged record holds a head. Each
+acknowledgement holds the directory's `.records.lock` while it does this, so
+overlapping ones run one after the other. `--ack` needs an explicit host.
+
+An item leaves the list by itself once its pull request is merged, closed or at
+a different head than the record names. The evidence is pull request state
+already on the host, read from the worker's prepared activity database, and only
+an observation from a later second than the record's `last_at`, which has
+whole-second resolution, counts; a `--lookup` answer is dated from when its
+request started. That database covers GitHub pull requests this host's workers
+opened, and is never matched against a Forgejo record. For the rest, `--lookup`
+asks the record's forge: GitHub with the host's credential, a Forgejo instance
+anonymously through its REST API, so a private Forgejo repository cannot be
+looked up. It asks once per listed pull request, once per pull request an item
+names until that one is known to be merged, or closed since the record was last
+written, and once per dropped record whose pull request has not merged, since it
+can reopen at the same head. That is at most 100 requests a call, each pull
+request asked about least recently first, so repeated calls reach every one. A
+forge that fails leaves the other's requests to go ahead and is asked after them
+in later calls, and a pull request its forge will not show (HTTP 404, or 403 on
+Forgejo) is reported and asked again in turn without stopping the rest of that
+forge. The answers are kept in `~/.local/state/tauceti-fleet/attention/`, where
+overlapping lookups keep, per pull request, the answer whose request started
+last; the worker's record files are never rewritten. Nothing else in `attention`
+or `status` contacts a forge. `--ack all` also archives the records the list had
+already dropped.
+
+While records are on, the controller counts the listed items once a minute and
+`status` shows the count above the host's worker lines, with the command:
+
+```text
+Needs you: 3 items (1 budget-spent, 2 declined)
+  tauceti-fleet attention server1
+```
+
+An incident directory Fleet cannot list is an error in `attention` and a
+`Needs you: unavailable` line in `status`, never an empty list.
 
 ## Public operations telemetry
 
