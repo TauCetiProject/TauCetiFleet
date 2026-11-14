@@ -402,7 +402,8 @@ def manifest_signature():
 # was built from.
 _manifest = dict(signature=None, workers=[], roles={})
 _written = dict(key=None, ids=[])
-SUMMARY_KEYS = ("id", "agent", "only")
+# What a later layout reads back from a written definition: its place, agent and each slot-group key.
+SUMMARY_KEYS = ("id", "agent", *(name for name, *_ in slot_groups.KEYS.values()))
 
 
 def written_workers():
