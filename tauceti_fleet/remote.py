@@ -148,12 +148,19 @@ def profile(name):
         raise FleetError(f"Profile {name!r} does not exist; define it in {config_dir() / 'profiles.json'}")
     if value.get("ci_broker_url") or value.get("ci_broker_token_file"):
         raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
-    allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
+    allowed = {"github_account", "max_open_prs", "runner_group_id", "github_state_url"}
     result = {k: v for k, v in value.items() if k in allowed}
+    # Always sent, so removing one of these keys from a profile returns the host to its default.
+    for key in ("author_model", "author_effort", "agent", "claude_billing", "sandbox", "pace", "env", "forges", "new_pr_forge"):
+        result[key] = value.get(key)
     credentials = {}
-    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "forgejo_token_file"):
+        if name == "anthropic_api_key_file" and result["claude_billing"] == "subscription":
+            continue
         if value.get(name):
             path = Path(value[name]).expanduser()
+            if name == "forgejo_token_file" and not path.is_file():
+                raise FleetError(f"Credential file {path} does not exist")
             if path.exists():
                 if path.stat().st_mode & 0o077:
                     raise FleetError(f"Credential file {path} is not private; use chmod 600")
@@ -163,6 +170,8 @@ def profile(name):
         if token.returncode == 0:
             credentials["github_token_file"] = token.stdout.strip()
     result["credentials"] = credentials
+    if "forgejo_token_file" not in credentials:
+        result["forgejo_token_file"] = None
     return result
 
 

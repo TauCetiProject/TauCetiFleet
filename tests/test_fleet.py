@@ -144,6 +144,243 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "JSON object"):
             host.configure(dict(credentials=[]))
 
+    def secrets(self):
+        for name in ("key", "token"):
+            (self.root / name).write_text(name + "-secret")
+            (self.root / name).chmod(0o600)
+        return dict(github_account="operator", anthropic_api_key_file=str(self.root / "key"),
+                    github_token_file=str(self.root / "token"))
+
+    def test_api_profile_worker_definitions_keep_their_exact_text(self):
+        store.atomic(store.config_dir() / "profiles.json", {"api": dict(self.secrets(), author_model="model")})
+        payload = remote.profile("api")
+        self.assertEqual(payload["credentials"], {"anthropic_api_key_file": "key-secret", "github_token_file": "token-secret"})
+        store.update_host(max_workers=1)
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="api", ci_allowed=False))
+        (wid,) = host.worker_config(store.host_config())
+        self.assertEqual(
+            (store.config_dir() / "workers.toml").read_text(),
+            f'version = 1\n\n[[workers]]\nid = "{wid}"\nagent = "claude"\nmax_open_prs = 8\nclaude_billing = "api"\n'
+            f'budget = true\ngithub_account = "operator"\nanthropic_api_key_file = "{store.config_dir() / "secrets/anthropic_api_key_file"}"\n'
+            'author_model = "model"\n',
+        )
+
+    def test_subscription_profile_transfers_no_api_key_and_writes_no_budget(self):
+        import tomllib
+
+        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70",
+                     env={"TAUCETI_OVERLAP_BATCH_COMMITS": "80", "A": 'quoted "value"'})
+        store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
+        payload = remote.profile("subscription")
+        self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
+        store.update_host(max_workers=2, anthropic_api_key_file="/private/earlier-api-key")
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="subscription", ci_allowed=False))
+        host.worker_config(store.host_config())
+        workers = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(workers), 2)
+        for worker in workers:
+            self.assertEqual({k: worker[k] for k in shape}, shape)
+            self.assertFalse({"budget", "anthropic_api_key_file"} & set(worker))
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+            patch.object(capabilities, "executable", return_value=None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            checks = {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}
+            defaults = {c["name"] for c in capabilities.doctor(dict(store.host_config(), agent=None, claude_billing=None, sandbox=None), probe=False)["checks"]}
+        for tool in ("claude", "codex", "bubble", "incus"):
+            self.assertEqual(checks["worker-tool-" + tool]["status"], "blocked")
+            self.assertEqual(checks["worker-tool-" + tool]["roles"], ["workers"])
+        self.assertNotIn("anthropic_api_key_file", checks)
+        self.assertIn("anthropic_api_key_file", defaults)
+        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus", "worker-sandbox-bubble"} & defaults)
+        bubble = checks["worker-sandbox-bubble"]
+        self.assertEqual((bubble["status"], bubble["roles"]), ("warning", ["workers"]))
+        self.assertIn("outside tauceti-fleet-workers.slice", bubble["evidence"])
+
+    def test_profile_rejects_what_the_worker_rejects_and_changes_only_while_drained(self):
+        store.host_config()
+        rejected = [
+            dict(agent="codex"),
+            dict(agent="auto"),
+            dict(agent="kiro", claude_billing="subscription"),
+            dict(claude_billing="oauth"),
+            dict(pace="0:10"),
+            dict(claude_billing="subscription", pace="50"),
+            dict(claude_billing="subscription", pace="0:10,0:20"),
+            dict(claude_billing="subscription", pace="120:10"),
+            dict(claude_billing="subscription", agent="auto", author_model="model"),
+            dict(claude_billing="subscription", agent="auto", author_effort="high"),
+            dict(sandbox="vm"),
+            dict(env=["A=1"]),
+            dict(env={"A": 1}),
+            dict(env={"A-B": "1"}),
+            dict(env={"A": "line\nbreak"}),
+            dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
+            dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
+            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
+            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
+                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
+            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
+              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
+            dict(env={"A": "x" * 16384}),
+        ]
+        with patch.object(host, "install_service"):
+            for shape in rejected:
+                with self.assertRaises(store.FleetError, msg=shape):
+                    host.configure(shape)
+            self.assertFalse({"agent", "claude_billing", "sandbox", "pace", "env"} & set(store.host_config()))
+            host.configure(dict(claude_billing="subscription", agent="codex", author_model="model"))
+            store.update_host(workers_enabled=True)
+            host.configure(dict(claude_billing="subscription", agent="codex"))
+            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(env={"A": "1"})):
+                with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
+                    host.configure(shape)
+            store.update_host(workers_enabled=False)
+            host.configure(dict(claude_billing=None, agent=None))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual((fields["agent"], fields["claude_billing"], fields["budget"]), ("claude", "api", True))
+
+    def test_profile_without_model_overrides_clears_the_saved_ones(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "api": dict(self.secrets(), author_model="model", author_effort="high"),
+            "auto": dict(github_account="operator", claude_billing="subscription", agent="auto"),
+        })
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("api"), profile="api", ci_allowed=False))
+            host.configure(dict(remote.profile("auto"), profile="auto"))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual(fields["agent"], "auto")
+        self.assertFalse({"author_model", "author_effort"} & set(fields))
+
+    def forgejo_secrets(self):
+        (self.root / "forgejo").write_text("forgejo-secret")
+        (self.root / "forgejo").chmod(0o600)
+        return dict(self.secrets(), forgejo_token_file=str(self.root / "forgejo"))
+
+    def doctor_checks(self, protocol):
+        def probe(argv, **_):
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(protocol) if argv[-1] == "_fleet-protocol" else "0")
+
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(capabilities, "run", side_effect=probe),
+            patch.object(capabilities, "executable", side_effect=lambda name: "/fake/tauceti" if name == "tauceti" else None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            return {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}
+
+    def test_forge_selection_rejects_what_the_worker_manager_rejects(self):
+        store.host_config()
+        token = dict(credentials={"forgejo_token_file": "forgejo-secret"})
+        rejected = [
+            (dict(forges="forgejo"), "forges must be a list"),
+            (dict(forges=["gitlab"]), r"unknown forge\(s\): gitlab; use github and/or forgejo"),
+            (dict(forges=[]), "at least one of github, forgejo"),
+            (dict(forges=["github", "github"]), "more than once"),
+            (dict(new_pr_forge="gitlab"), "new_pr_forge must be github or forgejo"),
+            (dict(new_pr_forge="forgejo"), "new_pr_forge must be one of the forges"),
+            (dict(forges=["github"], new_pr_forge="forgejo"), "new_pr_forge must be one of the forges"),
+            (dict(forges=["github", "forgejo"], env={"TAUCETI_PR": "12"}), "env.TAUCETI_PR targets one source"),
+            (dict(forges=["forgejo"], sandbox="bubble", **token), "Forgejo rounds run on the host only"),
+            (dict(forges=["github", "forgejo"], new_pr_forge="forgejo", sandbox="bubble", **token), "host only"),
+            (dict(forges=["forgejo"], env={"TAUCETI_REPO": "Example/Fork"}, **token), "env.TAUCETI_FORGEJO_ORIGIN"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example"}, **token),
+             "env.TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_REPO": "Example/Fork"}, **token), "TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example",
+                                           "TAUCETI_FORGEJO_REPOSITORY_ID": "0"}, **token), "TAUCETI_FORGEJO_REPOSITORY_ID"),
+            (dict(forges=["forgejo"], env={"TAUCETI_FORGEJO_ORIGIN": "https://forge.example",
+                                           "TAUCETI_FORGEJO_REPOSITORY_ID": "7"}), "needs forgejo_token_file"),
+            *((dict(env={name: "x"}), "env must not set " + name) for name in host.FORGE_OWNED_ENV),
+            (dict(env={"TAUCETI_FORGEJO_TOKEN_FILE": "/elsewhere"}, **token), "env must not set TAUCETI_FORGEJO_TOKEN_FILE"),
+            (dict(forgejo_token_file="/elsewhere"), "transferred as a credential"),
+        ]
+        with patch.object(host, "install_service"):
+            for shape, message in rejected:
+                with self.assertRaisesRegex(store.FleetError, message, msg=shape):
+                    host.configure(shape)
+            self.assertFalse({"forges", "new_pr_forge", "forgejo_token_file", "env"} & set(store.host_config()))
+            self.assertFalse((store.config_dir() / "secrets/forgejo_token_file").exists())
+            # The canonical repository needs no connection settings; a token file named in env is enough.
+            host.configure(dict(forges=["forgejo"]))
+            host.configure(dict(forges=["forgejo"], new_pr_forge="forgejo", env={
+                "TAUCETI_FORGEJO_ORIGIN": "https://forge.example", "TAUCETI_FORGEJO_REPO": "Example/Fork",
+                "TAUCETI_FORGEJO_REPOSITORY_ID": "7", "TAUCETI_FORGEJO_TOKEN_FILE": "/host/forgejo-token",
+                "TAUCETI_FORGEJO_FORK": "operator/Fork"}))
+            store.update_host(workers_enabled=True)
+            for shape in (dict(forges=["github", "forgejo"]), dict(new_pr_forge=None)):
+                with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
+                    host.configure(shape)
+
+    def test_forgejo_profile_transfers_its_token_and_writes_forge_fields(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "forgejo": dict(self.forgejo_secrets(), forges=["forgejo"], new_pr_forge="forgejo",
+                            env={"TAUCETI_FORGEJO_FORK": "operator/TauCeti"}),
+            "both": dict(self.secrets(), forges=["forgejo", "github"]),
+            "github": self.secrets(),
+        })
+        payload = remote.profile("forgejo")
+        self.assertEqual(payload["credentials"]["forgejo_token_file"], "forgejo-secret")
+        self.assertEqual(payload["credentials"]["github_token_file"], "token-secret")
+        store.update_host(max_workers=1)
+        stored = store.config_dir() / "secrets/forgejo_token_file"
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="forgejo", ci_allowed=False))
+        self.assertEqual(stored.read_text(), "forgejo-secret\n")
+        self.assertEqual(stored.stat().st_mode & 0o077, 0)
+        with patch.object(host, "worker_protocol", return_value=dict(version=1, forges=1)):
+            (wid,) = host.worker_config(store.host_config())
+        self.assertEqual(
+            (store.config_dir() / "workers.toml").read_text(),
+            f'version = 1\n\n[[workers]]\nid = "{wid}"\nagent = "claude"\nmax_open_prs = 8\nclaude_billing = "api"\n'
+            f'budget = true\ngithub_account = "operator"\nanthropic_api_key_file = "{store.config_dir() / "secrets/anthropic_api_key_file"}"\n'
+            'forges = ["forgejo"]\nnew_pr_forge = "forgejo"\n'
+            f'env = {{TAUCETI_FORGEJO_FORK = "operator/TauCeti", TAUCETI_FORGEJO_TOKEN_FILE = "{stored}"}}\n',
+        )
+        self.assertNotIn("forgejo-secret", (store.config_dir() / "workers.toml").read_text())
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("both"), profile="both"))
+        self.assertIsNone(store.host_config()["forgejo_token_file"])
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual((fields["forges"], "new_pr_forge" in fields, "env" in fields), (["github", "forgejo"], False, False))
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("github"), profile="github"))
+        self.assertFalse({"forges", "new_pr_forge", "env"} & set(host.worker_fields(store.host_config())))
+        (self.root / "forgejo").unlink()
+        with self.assertRaisesRegex(store.FleetError, "does not exist"):
+            remote.profile("forgejo")
+
+    def test_forge_fields_reach_only_a_worker_that_reports_the_forges_protocol(self):
+        store.update_host(max_workers=1, forges=["github", "forgejo"], new_pr_forge="github")
+        for protocol in ({}, dict(version=1, roadmap_focus=1)):
+            with patch.object(host, "worker_protocol", return_value=protocol), self.assertRaisesRegex(store.FleetError, "does not accept forges"):
+                host.worker_config(store.host_config())
+        self.assertFalse((store.config_dir() / "workers.toml").exists())
+        checks = self.doctor_checks(dict(version=1, roadmap_focus=1))
+        self.assertEqual((checks["worker-runtime"]["status"], checks["worker-forges"]["status"]), ("ok", "blocked"))
+        self.assertEqual(checks["worker-forges"]["roles"], ["workers"])
+        self.assertEqual(checks["forgejo-token"]["status"], "blocked")
+        token = self.root / "forgejo"
+        token.write_text("forgejo-secret")
+        token.chmod(0o644)
+        store.update_host(forgejo_token_file=str(token))
+        self.assertEqual(self.doctor_checks(dict(version=1, forges=1))["forgejo-token"]["status"], "blocked")
+        token.chmod(0o600)
+        checks = self.doctor_checks(dict(version=1, forges=1))
+        self.assertEqual((checks["worker-forges"]["status"], checks["forgejo-token"]["status"]), ("ok", "ok"))
+        self.assertIn("github, forgejo; new PRs: github", checks["worker-forges"]["evidence"])
+        store.update_host(sandbox="bubble")
+        self.assertEqual(self.doctor_checks(dict(version=1, forges=1))["worker-forges"]["status"], "warning")
+        store.update_host(forges=None, new_pr_forge=None, sandbox=None)
+        self.assertFalse({"worker-forges", "forgejo-token"} & set(self.doctor_checks({})))
+        with patch.object(host, "worker_protocol") as probe:
+            host.worker_config(store.host_config())
+        probe.assert_not_called()
+
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
             result = host.configure(dict(ci_allowed=False))

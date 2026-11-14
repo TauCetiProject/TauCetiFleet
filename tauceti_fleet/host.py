@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
-from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
+from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory, worker_protocol
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -101,6 +102,14 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
+        "env",
+        "forges",
+        "new_pr_forge",
+        "forgejo_token_file",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -119,19 +128,23 @@ def configure(payload):
         capacity.jobs(updates)
     if "ci_kinds" in updates and updates["ci_kinds"] not in capacity.KINDS.values():
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
+    if updates.get("forgejo_token_file") is not None:
+        raise FleetError("forgejo_token_file is transferred as a credential")
     credentials = payload.get("credentials", {})
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
-    current = host_config()
-    capacity.staging_slots(dict(current, **updates))
-    if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
-            raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file",
+                       "ci_broker_token_file", "forgejo_token_file"):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+    current = host_config()
+    capacity.staging_slots(dict(current, **updates))
+    worker_fields(dict(current, **updates) | {key: str(config_dir() / "secrets" / key) for key in credentials})
+    if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
+        if any(current.get(k) != v for k, v in updates.items()):
+            raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -275,6 +288,158 @@ def write_slices(config, caps):
     return worker
 
 
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
+}
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+# The worker sets these from its forge selection and, each round, from its Forgejo token.
+FORGE_OWNED_ENV = {"TAUCETI_WORKER_FORGES", "TAUCETI_NEW_PR_FORGE", "TAUCETI_FORGEJO_USER_ID"}
+FORGES = ("github", "forgejo")
+# worker_sources.native_source supplies these for the canonical repository only.
+CANONICAL_REPOSITORY = "taucetiproject/tauceti"
+CANONICAL_FORGEJO_ORIGIN = "https://git.taucetiproject.org"
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def forge_fields(config, env):
+    """`forges` and `new_pr_forge` for workers.toml, refused where the worker manager or
+    `worker_sources.native_source` would refuse them."""
+    named, destination = config.get("forges"), config.get("new_pr_forge")
+    if named is None and destination is None:
+        return {}
+    named = ["github"] if named is None else named
+    if not isinstance(named, list) or not all(isinstance(forge, str) for forge in named):
+        raise FleetError("forges must be a list of forge names")
+    unknown = sorted(set(named) - set(FORGES))
+    if unknown:
+        raise FleetError(f"forges has unknown forge(s): {', '.join(unknown)}; use github and/or forgejo")
+    if not named:
+        raise FleetError("forges must name at least one of github, forgejo")
+    if len(set(named)) != len(named):
+        raise FleetError("forges names a forge more than once")
+    forges = [forge for forge in FORGES if forge in named]
+    if destination is not None and destination not in FORGES:
+        raise FleetError("new_pr_forge must be github or forgejo")
+    if destination is not None and destination not in forges:
+        raise FleetError("new_pr_forge must be one of the forges in forges")
+    if len(forges) > 1 and env.get("TAUCETI_PR", "").strip():
+        raise FleetError("env.TAUCETI_PR targets one source: select a single forge in forges")
+    if config.get("sandbox") == "bubble" and (forges == ["forgejo"] or destination == "forgejo"):
+        raise FleetError(
+            "Forgejo rounds run on the host only, so a bubble worker can neither work on Forgejo alone "
+            "nor author new PRs there; use sandbox host"
+        )
+    if "forgejo" in forges:
+        canonical = env.get("TAUCETI_REPO", "TauCetiProject/TauCeti").lower() == CANONICAL_REPOSITORY
+        origin = env.get("TAUCETI_FORGEJO_ORIGIN") or (CANONICAL_FORGEJO_ORIGIN if canonical else None)
+        if not origin:
+            raise FleetError("forges with forgejo needs env.TAUCETI_FORGEJO_ORIGIN when env.TAUCETI_REPO names another repository")
+        default_origin = origin.rstrip("/").lower() == CANONICAL_FORGEJO_ORIGIN
+        repository = env.get("TAUCETI_FORGEJO_REPO", env.get("TAUCETI_REPO", "TauCetiProject/TauCeti"))
+        native_id = env.get("TAUCETI_FORGEJO_REPOSITORY_ID")
+        if native_id is None and default_origin and repository.lower() == CANONICAL_REPOSITORY:
+            native_id = "1"
+        if native_id is None or not (native_id.isascii() and native_id.isdigit() and int(native_id) >= 1):
+            raise FleetError("forges with forgejo needs env.TAUCETI_FORGEJO_REPOSITORY_ID, the repository's native ID, "
+                             "outside the canonical TauCeti repository")
+        if not (config.get("forgejo_token_file") or env.get("TAUCETI_FORGEJO_TOKEN_FILE") or (canonical and default_origin)):
+            raise FleetError("forges with forgejo needs forgejo_token_file for a Forgejo server other than the canonical one")
+    fields = {} if config.get("forges") is None else dict(forges=forges)
+    if destination is not None:
+        fields["new_pr_forge"] = destination
+    return fields
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace, env = config.get("pace"), config.get("env") or {}
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    if isinstance(env, dict) and CREDENTIAL_SOURCE_ENV & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(CREDENTIAL_SOURCE_ENV & set(env)))
+            + ": workers sign in from the host account's own claude and codex logins"
+        )
+    # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
+    valid = isinstance(env, dict) and all(
+        isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
+        and not k.startswith("TAUCETI_FLEET_") and k not in FLEET_OWNED_ENV
+        and isinstance(v, str) and v.isascii() and v.isprintable()
+        for k, v in env.items()
+    )
+    if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
+        raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
+    owned = FORGE_OWNED_ENV | ({"TAUCETI_FORGEJO_TOKEN_FILE"} if config.get("forgejo_token_file") else set())
+    if owned & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(owned & set(env)))
+            + ": the worker derives them from forges, new_pr_forge and its Forgejo token, and forgejo_token_file supplies the token"
+        )
+    forges = forge_fields(config, env)
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
+        if config.get(key):
+            fields[key] = config[key]
+    fields.update(forges)
+    if "forgejo" in forges.get("forges", ()) and config.get("forgejo_token_file"):
+        env = dict(env, TAUCETI_FORGEJO_TOKEN_FILE=config["forgejo_token_file"])
+    if env:
+        fields["env"] = env
+    return fields
+
+
+def toml_value(value):
+    if isinstance(value, dict):
+        return "{" + ", ".join(k + " = " + json.dumps(v) for k, v in sorted(value.items())) + "}"
+    return "true" if value is True else json.dumps(value)
+
+
 def worker_config(config):
     # Serialize controller and operator rewrites, and never restore an old label policy.
     with locked(config_dir() / "worker-policy.lock"):
@@ -286,19 +451,9 @@ def worker_config(config):
 
 def _worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
-    )
-    if config.get("self_tested"):
-        fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
-        if config.get(key):
-            fields[key] = config[key]
+    fields = worker_fields(config)
+    if {"forges", "new_pr_forge"} & set(fields) and worker_protocol().get("forges") != 1:
+        raise FleetError("The installed worker does not accept forges or new_pr_forge; drain and run prepare")
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -315,7 +470,7 @@ def _worker_config(config):
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         for key, value in fields.items():
             if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+                lines.append(key + " = " + toml_value(value))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -1150,6 +1305,7 @@ def rpc(payload):
             ci_enrolled=bool(config.get("ci_broker_url")),
             workers_enabled=config["workers_enabled"],
             max_workers=config["max_workers"],
+            **{key: config[key] for key in ("forges", "new_pr_forge") if config.get(key) is not None},
             self_tested=config.get("self_tested", False),
             lean_host_pressure=pressure,
             lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
