@@ -443,6 +443,11 @@ def main(argv=None, *, _status_results=None):
                         if error:
                             print("    Isolation degraded: " + error)
                     print()
+                    if value.get("subscription_usage"):
+                        from . import subscription_usage
+
+                        subscription_usage.display(value["subscription_usage"])
+                        print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
                 else:
