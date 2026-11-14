@@ -1,5 +1,6 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
+import hashlib
 import json
 import os
 import signal
@@ -343,6 +344,13 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
+
+
 def run_workers():
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
@@ -350,8 +358,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -364,7 +371,8 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
+    token = Path(config["github_token_file"]).read_text().strip()
+    os.environ["GH_TOKEN"] = token
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
@@ -375,7 +383,112 @@ def run_workers():
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary, github_token_sha256=token_digest(token)))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def manager_process():
+    """The running worker manager's argv and environment, or None when /proc cannot show them."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False)
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    if not pid.isdigit() or pid == "0":
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return [os.fsdecode(a) for a in argv if a], dict(os.fsdecode(e).split("=", 1) for e in environ if b"=" in e)
+
+
+def running_manager():
+    """The runtime and token digest the running manager started with."""
+    recorded = read(state_dir() / "worker-manager.json", {})
+    if recorded:
+        return recorded
+    # A manager started before the record existed: `run_workers` exec'd `<runtime>/bin/tauceti workers ...`.
+    process = manager_process()
+    if process is None:
+        return {}
+    argv, environ = process
+    binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
+    return dict(binary=binary, github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else None)
+
+
+RESTART_MANAGER = (
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, then clear the halt again. "
+    "Workers in their own scopes keep running and the new manager adopts them; a worker whose status shows "
+    "degraded isolation runs inside the manager's service and its round ends with it"
+)
+
+
+# What to put right before clearing a halt, by the worker's reason and the forge it names.
+HALT_REMEDY = {
+    "identity-mismatch": dict(
+        github="Give the host a GitHub credential of the account github_account names, or correct github_account",
+        forgejo="Write a token of the Forgejo user TAUCETI_FORGEJO_USER_ID names to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host, or correct the user ID"),
+    "invalid-credentials": dict(
+        github="Replace the host's GitHub token (github_token_file, or the stored gh credential)",
+        forgejo="Issue a new Forgejo token for the worker's user and write it to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host"),
+    "account-halt": dict(
+        github="Have GitHub lift the suspension or lock on the worker's account",
+        forgejo="Have the Forgejo instance's administrator reinstate the worker's user, "
+                "or give its token the read:user scope"),
+}
+FORGE_NAMES = dict(github="GitHub", forgejo="Forgejo")
+
+
+def halt_forge(reason):
+    """The forge and verdict of a halt reason such as `forgejo:invalid-credentials`."""
+    # A worker release before Forgejo identity checks names GitHub's reasons without the forge.
+    forge, _, verdict = str(reason or "").rpartition(":")
+    return forge or "github", verdict
+
+
+def clear_halt(worker=None):
+    reasons = {w["id"]: w.get("halt_reason") for w in worker_statuses() if w.get("state") == "halted"}
+    halted = list(reasons)
+    if worker is not None and worker not in halted:
+        raise FleetError(f"Worker {worker} is not halted")
+    cleared = [worker] if worker else halted
+    if not cleared:
+        return dict(cleared=[], detail="No worker on this host is halted")
+    # `workers restart` starts a manager of its own, outside the worker slice, when it finds none.
+    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False).returncode:
+        raise FleetError("The worker manager is not running; enable workers before clearing a halt")
+    # A worker keeps its halt record beside the runtime it runs from, and a live update leaves the
+    # running manager on the runtime it started with, so clear with that one.
+    manager = running_manager()
+    binary = manager.get("binary")
+    if not binary:
+        raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
+    # Restarted workers inherit GH_TOKEN from the manager, which read the token file once. A Forgejo
+    # source reads TAUCETI_FORGEJO_TOKEN_FILE at every identity check, so the worker's restart suffices.
+    github = [wid for wid in cleared if halt_forge(reasons[wid])[0] == "github"]
+    token_file = host_config().get("github_token_file") if github else None
+    try:
+        current = token_file and token_digest(Path(token_file).read_text().strip())
+    except OSError as exc:
+        raise FleetError(f"Cannot read {token_file}: {type(exc).__name__}; repair it before clearing a halt") from None
+    if current and manager.get("github_token_sha256") != current:
+        raise FleetError(f"{token_file} differs from the token the worker manager started with, which "
+                         f"{', '.join(github)} would restart with; " + RESTART_MANAGER)
+    env = dict(os.environ, **manager_environment())
+    workers_config = config_dir() / "workers.toml"
+    managed = run([binary, "workers", "clear-halt", "--help"], env=env, check=False).returncode == 0
+    for wid in cleared:
+        if managed:
+            run([binary, "workers", "--config", workers_config, "clear-halt", wid], env=env)
+        else:
+            run([binary, "work", "--worker-id", wid, "--clear-halt"], env=env)
+        run([binary, "workers", "--config", workers_config, "restart", wid], env=env, timeout=60)
+    return dict(cleared=cleared, detail="Halt records removed and workers restarted; a worker whose account is still wrong halts again")
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -545,6 +658,9 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("state") == "halted":
+                status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"),
+                              halt_forge=halt_forge(value["halt_reason"])[0] if value.get("halt_reason") else None)
             values.append(status)
     return values
 
@@ -1125,6 +1241,8 @@ def rpc(payload):
         return reserve_staging(payload["maximum"])
     if action == "drain":
         return drain()
+    if action == "clear-halt":
+        return clear_halt(payload.get("worker"))
     if action == "budget":
         return budget(payload)
     if action == "snapshot":

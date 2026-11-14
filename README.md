@@ -352,6 +352,39 @@ sessions can keep running while CI builds. CI has CPUWeight 1000 and workers 10.
 memory-bandwidth isolation are not provided. CI throughput must be measured
 under representative load; scheduling weights alone do not guarantee a runtime.
 
+A worker that TauCetiWorker stops for its identity on a forge is listed by
+`status` as `halted (<forge> <reason>)` with the worker's description and what
+to put right first. On GitHub the reasons are a login other than
+`github_account` (`identity-mismatch`), a rejected token (`invalid-credentials`)
+and a suspended or locked account (`account-halt`); on a Forgejo source they are
+a user other than `TAUCETI_FORGEJO_USER_ID`, a rejected token, and a refused
+account or a token without `read:user`. A worker release from before Forgejo
+identity checks writes the reason without its forge, which `status` reads as
+GitHub's. `status --json` carries `halt_reason`, `halt_forge` and
+`failure_reason` on that worker's entry under `status.workers`. The worker
+manager does not start a halted worker again by itself. Once the account is in
+order:
+
+```sh
+tauceti-fleet clear-halt big-server                    # every halted worker on the host
+tauceti-fleet clear-halt big-server fleet-1a2b3c4d-2   # one worker
+```
+
+For each worker this runs `tauceti workers clear-halt ID` (`tauceti work
+--worker-id ID --clear-halt` with a worker release that lacks it) and `tauceti
+workers restart ID` on the host, with the worker runtime the running manager was
+started from; it requires that manager to be running. A restarted worker gets its
+GitHub token from the manager, which reads `github_token_file` when it starts, so
+after that file is replaced `clear-halt` refuses for a GitHub halt until
+`systemctl --user restart tauceti-fleet-workers.service` has run on the host. That
+restart leaves scoped workers running (see below); a worker whose status shows
+degraded isolation runs inside the manager's service and its round ends with it.
+A Forgejo source reads the file `TAUCETI_FORGEJO_TOKEN_FILE` names at every
+identity check, so a Forgejo halt needs only `clear-halt` once that file holds
+the new token.
+A worker whose account is still wrong halts again. Worker releases without identity halts never
+report the state, and `clear-halt` then finds nothing to clear.
+
 Each worker runs in an independent systemd scope inside the same worker slice;
 memory remains pooled. A manager-service restart preserves scoped workers. Scope
 setup failures report degraded isolation and continue the same process. Whole-host

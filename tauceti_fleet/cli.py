@@ -64,6 +64,10 @@ def parser():
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--json", action="store_true")
+    clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
+    clear.add_argument("host")
+    clear.add_argument("worker", nargs="?", help="worker id (default: every halted worker on the host)")
+    clear.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
     focus.add_argument("--percent", type=int)
@@ -226,6 +230,8 @@ def main(argv=None, *, _status_results=None):
                     payload["self_tested"] = args.self_tested
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "clear-halt":
+                payload.update(worker=args.worker)
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -429,19 +435,31 @@ def main(argv=None, *, _status_results=None):
                         )
                     if status.get("workers"):
                         print()
-                    groups = {}
+                    groups, remedies = {}, {}
                     for worker in status.get("workers", []):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
+                        detail = worker.get("detail") or ""
+                        if state == "halted":
+                            reason = worker.get("halt_reason")
+                            forge, verdict = host.halt_forge(reason)
+                            state = f"halted ({host.FORGE_NAMES.get(forge, forge)} {verdict})" if reason else "halted (reason not recorded)"
+                            detail = worker.get("failure_reason") or detail
+                            remedy = host.HALT_REMEDY.get(verdict, {}).get(forge) if reason else None
+                            remedies[state] = (f"{remedy}, then clear the halt" if remedy
+                                               else "The worker stays stopped; clear the halt once the account is in order")
                         error = worker.get("isolation_error")
-                        key = (state, worker.get("detail") or "", error, worker["id"] if error else None)
+                        key = (state, detail, error, worker["id"] if error else None)
                         groups.setdefault(key, []).append(worker["id"])
                     for (state, detail, error, _), workers in groups.items():
                         label = workers[0] if len(workers) == 1 else f"{len(workers)} workers"
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                        if state in remedies:
+                            print(f"    {remedies[state]}: tauceti-fleet clear-halt {name} "
+                                  + (workers[0] if len(workers) == 1 else "[WORKER]"))
                     print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
