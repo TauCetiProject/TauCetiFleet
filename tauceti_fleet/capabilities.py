@@ -8,6 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import claude_credentials
 from .process import executable, run
 from .store import FleetError, data_dir, host_config, read, state_dir
 
@@ -383,13 +384,25 @@ def doctor(config=None, *, probe=True):
         roles=("ci",),
     )
     worker = executable("tauceti")
-    for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
+    agent = config.get("agent") or "claude"
+    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agent in (name, "auto")]
+    if config.get("sandbox") == "bubble":
+        tools += ["bubble", "incus"]
+    for name in tools:
         path = executable(name)
         add(
             "worker-tool-" + name,
             "ok" if path else "blocked",
             path or "not installed",
             "Install this tool in the account's PATH before enabling workers; lake is supplied by elan and claude by Claude Code",
+            roles=("workers",),
+        )
+    if config.get("sandbox") == "bubble":
+        add(
+            "worker-sandbox-bubble",
+            "warning",
+            "Bubble containers run under the Incus daemon, outside tauceti-fleet-workers.slice: its memory ceiling and CPU weight do not apply to them and worker memory does not count them; host headroom at admission is the only bound",
+            "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
             roles=("workers",),
         )
     compatible = False
@@ -482,7 +495,9 @@ def doctor(config=None, *, probe=True):
                 "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    credential_names = ["github_token_file"]
+    if config.get("claude_billing") != "subscription":
+        credential_names.insert(0, "anthropic_api_key_file")
     if config.get("ci_broker_url"):
         credential_names.append("ci_broker_token_file")
     for name in credential_names:
@@ -501,6 +516,8 @@ def doctor(config=None, *, probe=True):
             "Configure the selected profile and repeat add; use chmod 600 for credential files",
             roles=roles,
         )
+    for check in claude_credentials.report(config, wait=False):
+        add(check["name"], check["status"], check["evidence"], check["remedy"], roles=("workers",))
     if config.get("github_token_file"):
         try:
             from .github import request
