@@ -214,10 +214,13 @@ def stage(directory, jit):
     directory = Path(directory)
     value = image()
     (directory / "control").mkdir(mode=0o700)
+    if host_config().get("ci_shared_host_guard"):
+        (directory / "control/admission-required").touch()
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
     atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB))
     return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
+                shared_host_guard=bool(host_config().get("ci_shared_host_guard")),
                 disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
 

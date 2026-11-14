@@ -34,6 +34,8 @@ def hook(kind):
         stream.write(json.dumps(dict(kind=kind, run_id=os.environ.get("GITHUB_RUN_ID"), at=time.time())) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
+    if kind == "ci_started":
+        wait_admission()
     workspace = os.environ.get("GITHUB_WORKSPACE")
     if kind == "ci_completed" and workspace:
         source = Path(workspace) / "pr/.lake/telemetry"
@@ -49,6 +51,23 @@ def hook(kind):
                     outgoing.write(content)
             except OSError:
                 pass
+
+
+def admitted(now=None):
+    """An opted-in shared host must explicitly allow each new job."""
+    if not (LINK / "admission-required").exists():
+        return True
+    try:
+        value = json.loads((LINK / "admission.json").read_text())
+        age = (time.time() if now is None else now) - value["at"]
+        return value.get("allowed") is True and 0 <= age < 10
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def wait_admission():
+    while not admitted():
+        time.sleep(.25)
 
 
 def pressure():
@@ -206,6 +225,7 @@ def boot():
     sampler = threading.Thread(target=progress, args=(stop, usage), daemon=True)
     sampler.start()
     try:
+        wait_admission()
         jit = (LINK / 'jit').read_text()
         (LINK / 'jit').unlink()
         # Runner CommandSettings consumes and removes this input. Keep JIT
