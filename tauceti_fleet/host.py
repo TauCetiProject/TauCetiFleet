@@ -830,7 +830,9 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
-                         or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
+                         or (not value.get("ci_bootstrap_waiting")
+                             and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
+                             and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
                 if config.get("ci_idle_pool"):
                     value["routing_labels"] = ci_pool.labels(value, own)
