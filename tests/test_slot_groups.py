@@ -2,6 +2,7 @@ import io
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -540,11 +541,47 @@ class SlotGroups(unittest.TestCase):
             parsed, built = loads.call_count, checked.call_count
         _, workers = self.definitions()
         self.assertEqual(self.shape(workers)[256], ("codex", "progress"))
-        self.assertEqual(host.written_workers(), list(workers.values()))
+        self.assertEqual(host.written_workers(), [{k: w[k] for k in ("id", "agent", "only") if k in w} for w in workers.values()])
         self.assertEqual([len(policy["workers"]) for policy in policies], [8, 8, 8])
         # The changed pass builds one definition per agent and reads none back from disk.
         self.assertEqual(parsed, 0)
         self.assertLessEqual(built, 2)
+
+    def test_a_separate_writer_and_the_controller_share_the_written_layout_without_parsing_it(self):
+        host.configure(dict(env={f"E{n}": "x" * 26 for n in range(64)}))
+        store.update_host(workers_enabled=True, max_workers=8)
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("256:claude:review")]))
+        writer = """
+import tomllib
+from unittest.mock import patch
+from tauceti_fleet import host
+ready = dict(readiness=dict(ci="ready", workers="ready"), checks=[])
+with (patch("tomllib.loads", side_effect=tomllib.loads) as loads, patch.object(host, "doctor", return_value=ready),
+      patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}),
+      patch.object(host, "install_service")):
+    host.enable(workers=True)
+print(loads.call_count)
+"""
+        parsed = []
+
+        def edit():
+            host.rpc(dict(action="slots", groups=[slot_groups.parse("255:claude:review"), slot_groups.parse("1:codex:progress")]))
+            result = subprocess.run([sys.executable, "-c", writer], cwd=Path(__file__).parents[1],
+                                    capture_output=True, text=True, check=True)
+            parsed.append(int(result.stdout))
+            loads.reset_mock()
+
+        with patch("tomllib.loads", side_effect=tomllib.loads) as loads:
+            policies = self.daemon_passes(edit, lambda: None)
+            parsed.append(loads.call_count)
+        self.assertEqual(parsed, [0, 0])
+        self.assertEqual([len(policy["workers"]) for policy in policies], [8, 8, 8])
+        self.assertEqual(self.shape(self.definitions()[1])[256], ("codex", "progress"))
+        # A hand edit changes the manifest's signature, so the summary no longer stands for it.
+        path = store.config_dir() / "workers.toml"
+        path.write_text(path.read_text().replace('agent = "codex"', 'agent = "auto"'))
+        roles = {wid.rsplit("-", 1)[1]: role for wid, role in host.written_roles().items()}
+        self.assertEqual(roles["256"], ("auto", ["progress"]))
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")

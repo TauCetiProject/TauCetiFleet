@@ -413,26 +413,48 @@ def manifest_signature():
     return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
-# Parsed definitions and the last plan written, each kept with the manifest
-# signature (and saved configuration) it was built from.
+# The id, agent and phases of each written definition, and the last plan
+# written, each kept with the manifest signature (and saved configuration) it
+# was built from.
 _manifest = dict(signature=None, workers=[], roles={})
 _written = dict(key=None, ids=[])
+SUMMARY_KEYS = ("id", "agent", "only")
 
 
 def written_workers():
-    """The worker definitions in workers.toml, parsed again only after it is replaced."""
+    """id, agent and only of each definition in workers.toml.
+
+    Other processes share them through a summary keyed by the manifest's
+    signature, which any change to the file (a hand edit included) invalidates;
+    without a matching summary the file is parsed and the summary rewritten.
+    """
     import tomllib
 
     signature = manifest_signature()
-    if _manifest["signature"] != signature:
+    if _manifest["signature"] == signature:
+        return _manifest["workers"]
+    try:
+        summary = read(state_dir() / "worker-summary.json", {})
+    except FleetError:
+        summary = {}
+    workers = summary.get("workers")
+    if summary.get("signature") == list(signature) and isinstance(workers, list) and all(
+        isinstance(w, dict) and isinstance(w.get("id"), str) and set(w) <= set(SUMMARY_KEYS) for w in workers
+    ):
+        remember_manifest(signature, workers, share=False)
+    else:
         path = config_dir() / "workers.toml"
-        remember_manifest(signature, tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else [])
+        parsed = tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else []
+        remember_manifest(signature, parsed, share=manifest_signature() == signature)
     return _manifest["workers"]
 
 
-def remember_manifest(signature, workers):
+def remember_manifest(signature, workers, share=True):
+    workers = [{key: w[key] for key in SUMMARY_KEYS if key in w} for w in workers]
     roles = {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
     _manifest.update(signature=signature, workers=workers, roles=roles)
+    if share:
+        atomic(state_dir() / "worker-summary.json", dict(signature=list(signature), workers=workers))
 
 
 def written_roles():
