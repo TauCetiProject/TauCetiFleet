@@ -321,6 +321,35 @@ class Attention(unittest.TestCase):
                                  ("OPEN", at + 60, dict(status=404, at=at + 120)))
                 self.assertEqual(attention.prepared()["count"], 1)
 
+    def test_named_pull_requests_its_forge_will_not_show_take_their_turn(self):
+        self.on()
+        origin = "https://forge.example"
+        on_forgejo = dict(forge=dict(kind="forgejo", url=origin))
+        self.record("declined", "fix", 7, summary="see #11 #12 #13", mentions=[11, 12, 13], suffix=".000000000007",
+                    **on_forgejo)
+        self.record("declined", "fix", 8, at="2026-01-15T09:31:00Z", summary="no", suffix=".000000000008", **on_forgejo)
+        clock = [attention.epoch("2026-01-15T10:00:00Z")]
+
+        def answer(at, path):
+            clock[0] += 15
+            if "/issues/" in path:
+                error = store.FleetError(f"{at} GET returned HTTP 403")
+                error.status = 403
+                raise error
+            state = "open" if path.endswith("/7") else "closed"
+            return dict(state=state, merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+        self.forgejo.side_effect = answer
+        asked = []
+        with (patch.object(attention.time, "time", side_effect=lambda: clock[0]),
+              patch.object(attention.time, "monotonic", side_effect=lambda: clock[0])):
+            for _ in range(2):
+                self.forgejo.reset_mock()
+                value = self.listed(lookup=True)
+                asked.append([c.args[1].split("/", 3)[-1] for c in self.forgejo.call_args_list])
+        self.assertEqual(asked, [["pulls/7", "issues/11", "issues/12"], ["issues/13", "pulls/8", "pulls/7"]])
+        self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/TauCetiProject/TauCeti#8"])
+
     def test_an_observation_inside_the_records_write_second_is_not_newer(self):
         self.on()
         at = attention.epoch("2026-01-15T09:30:00Z")
