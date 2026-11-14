@@ -527,21 +527,12 @@ def display(value, *, section="all"):
     if data is None:
         print("CI backlog: unknown (background observation unavailable)")
     else:
-        if data["partial"]:
-            note += "; partial observations"
         pr, other = data["pr_builds"], data["other_workflows"]
-        oldest = pr.get("oldest_waiting_at")
-        age = ""
-        if oldest is not None:
-            minutes = max(0, int((time.time() - oldest) / 60))
-            hours, minutes = divmod(minutes, 60)
-            age = f"; oldest PR wait {hours}h {minutes}m" if hours else f"; oldest PR wait {minutes}m"
-        print(f"CI backlog: PR builds {pr['pending']} pending, {pr['queued']} queued; "
-              f"other workflows {other['pending']} pending, {other['queued']} queued{age} ({note})")
-        stuck = pr["stuck"] + other["stuck"]
-        unconfirmed = pr["unconfirmed"] + other["unconfirmed"]
-        print(f"CI workflow records: {stuck} verified stuck; {unconfirmed} without confirmed active jobs "
-              "(separate from waiting work)")
+        print(f"CI backlog: {data['waiting_jobs']} observed jobs waiting to start; "
+              f"{data['running_jobs']} running (builds and automation; {note})")
+        if data["partial"] or any(row[state] for row in (pr, other)
+                                  for state in ("unconfirmed",)):
+            print("  Total waiting work: unknown. The queue monitor cannot account for all workflows.")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
     pressures = pressures or [sources.get("pressure", {})]
