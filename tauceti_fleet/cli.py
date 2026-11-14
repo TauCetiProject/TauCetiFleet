@@ -253,7 +253,7 @@ def main(argv=None, *, _status_results=None):
                 if args.on_host:
                     payload["path"] = args.file
                 elif args.file is not None:
-                    payload["text"] = targets.load(Path(args.file).expanduser())
+                    payload["text"] = targets.load(Path(args.file).expanduser(), targets.LIMIT)
                 payload.update({k: True for k in ("clear", "audit", "apply") if getattr(args, k)})
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])

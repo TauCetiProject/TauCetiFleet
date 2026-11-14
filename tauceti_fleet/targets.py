@@ -31,6 +31,8 @@ ACTIVE = ("running", "surveying")
 VERIFYING = ("verifying", "working", "verification-pending", "verification-incomplete")
 # A transferred list travels inside the 1 MiB host request, where JSON escapes can double its size.
 LIMIT = 256 * 1024
+# A list named on the host never travels; this only bounds what the controller reads into memory.
+HOST_LIMIT = 16 * 1024 * 1024
 REPOSITORY = "TauCetiProject/TauCeti"
 ROADMAP = "TauCetiProject/TauCetiRoadmap"
 FILE_ONLY = "Counted from the file's marks and this host's rounds; workers also count open and merged pull requests"
@@ -55,11 +57,11 @@ def stored():
     return config_dir() / "roadmap-targets.md"
 
 
-def load(path):
+def load(path, limit=HOST_LIMIT):
     try:
         raw = Path(path).read_bytes()
-        if len(raw) > LIMIT:
-            raise FleetError(f"Target list {path} exceeds {LIMIT // 1024} KiB")
+        if len(raw) > limit:
+            raise FleetError(f"Target list {path} exceeds {limit // 1024} KiB")
         return raw.decode()
     except (OSError, UnicodeDecodeError) as exc:
         raise FleetError(f"Cannot read target list {path}: {type(exc).__name__}") from None

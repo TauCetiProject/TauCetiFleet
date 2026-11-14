@@ -170,6 +170,15 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         shared.unlink()
         self.assertIn("Cannot read target list", targets.status(store.host_config(), [])["error"])
 
+    def test_a_list_on_the_host_may_exceed_the_transfer_limit(self):
+        shared = self.root / "big/list.md"
+        shared.parent.mkdir()
+        shared.write_text(EXAMPLE + "\n" + "<!-- padding -->\n" * (targets.LIMIT // 16))
+        self.assertGreater(shared.stat().st_size, targets.LIMIT)
+        self.assertEqual(targets.configure(dict(path=str(shared)), [])["roadmap_targets"], str(shared.resolve()))
+        with self.assertRaisesRegex(FleetError, "at most 256 KiB"):
+            targets.configure(dict(text=shared.read_text()), [])
+
     def test_a_path_outside_the_basic_plane_is_valid_in_the_definitions(self):
         shared = self.root / "lists/goal-\U0001d6fc\x7f.md"
         shared.parent.mkdir()

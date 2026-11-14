@@ -813,7 +813,9 @@ transfer replaces that copy. With `--on-host`, `PATH` is an absolute path on the
 host and the workers read that file in place, which suits a list kept in a git
 checkout there or shared by several installs. A symlink is saved as the file it
 names when the list is set, since workers resolve the path when they start; after
-repointing the link, set the list again. Either way the list must carry
+repointing the link, set the list again. A transferred list is at most 256 KiB,
+the room it has inside the request to the host; a list on the host may be up to
+16 MiB. Either way the list must carry
 the `<!-- tauceti-targets:v1 -->` marker, define each slug once, and name only
 roadmap directories under its `## ` headings: Fleet checks the headings against
 the roadmap mirror the workers already keep on the host, and refuses a heading
