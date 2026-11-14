@@ -444,7 +444,7 @@ be in place:
 | The account is in group `incus`, and lingering is on (`loginctl enable-linger USER`) | administrator | No project; services stop at logout. A user manager that is already running keeps its old groups until restarted |
 | The host firewall admits the project's bridge, which exists once the account has run `incus` once | administrator | Containers get no address, and rounds wait for the network until they time out |
 | `/etc/subuid` and `/etc/subgid` delegate the account's own uid and gid to root (`root:UID:1`, `root:GID:1`), and Incus was restarted since | administrator | Incus refuses to map the account onto the container's `user`, and files mounted from the host belong to nobody inside |
-| A Bubble release that uses the project's bridge and maps the host user onto the container's `user` | fleet account | As the two rows above |
+| A Bubble release that accepts `--github-account`, uses the project's bridge and maps the host user onto the container's `user` | fleet account | Without the option the worker's preflight ends every round, since Fleet names an account for each worker; otherwise as the two rows above |
 | Everything the worker mounts lies under the account's home: Fleet's configuration, state and data roots (the defaults do), `TAUCETI_GITHUB_SHARED_DIR`, a `TAUCETI_REVIEW_ENGINE_DIR` checkout, `ELAN_HOME` with `TAUCETI_BUBBLE_TOOLCHAINS`, and `TAUCETI_VERIFY_CACHE_DIR` with `TAUCETI_VERIFY_HELPER=1` | operator | Incus rejects the disk device and the round ends |
 
 Restart Incus only while the host is drained: the restart rebuilds the bridge
