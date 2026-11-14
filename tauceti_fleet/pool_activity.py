@@ -133,8 +133,8 @@ def refresh():
     return value
 
 
-def age(value, now):
-    seconds = max(0, int(now - timestamp(value)))
+def elapsed(seconds):
+    seconds = max(0, int(seconds))
     if seconds < 60:
         return f"{seconds}s"
     minutes = seconds // 60
@@ -142,6 +142,10 @@ def age(value, now):
         return f"{minutes}m"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h{minutes:02}m" if hours < 48 else f"{hours // 24}d{hours % 24:02}h"
+
+
+def age(value, now):
+    return elapsed(now - timestamp(value))
 
 
 def display(report, *, now=None, all_jobs=False):
