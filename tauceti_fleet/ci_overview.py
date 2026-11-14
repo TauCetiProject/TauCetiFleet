@@ -531,7 +531,7 @@ def display(value, *, section="all"):
         print(f"CI backlog: {data['waiting_jobs']} observed jobs waiting to start; "
               f"{data['running_jobs']} running (builds and automation; {note})")
         if data["partial"] or any(row[state] for row in (pr, other)
-                                  for state in ("pending", "stuck", "unconfirmed")):
+                                  for state in ("unconfirmed",)):
             print("  Total waiting work: unknown. The queue monitor cannot account for all workflows.")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []

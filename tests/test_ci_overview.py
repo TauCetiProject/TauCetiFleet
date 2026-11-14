@@ -244,8 +244,8 @@ class Overview(unittest.TestCase):
         for misleading in ('PR builds', 'pending,', 'queued;', 'verified stuck', 'without confirmed active jobs', 'oldest PR wait', '1200', '1230'):
             self.assertNotIn(misleading, text)
 
-    def test_missing_job_evidence_is_a_monitoring_gap_even_when_source_says_observed(self):
-        for state in ('pending', 'stuck', 'unconfirmed'):
+    def test_unrecognised_workflow_state_is_a_monitoring_gap_even_when_source_says_observed(self):
+        for state in ('unconfirmed',):
             data = self.backlog_value()
             for row in (data['pr_builds'], data['other_workflows']):
                 row.update(pending=0, queued=0, stuck=0, unconfirmed=0)
@@ -257,10 +257,10 @@ class Overview(unittest.TestCase):
             self.assertIn('Total waiting work: unknown.', text)
             self.assertNotIn('1022', text)
 
-    def test_complete_job_observation_has_no_false_monitoring_alarm(self):
+    def test_normal_pending_workflows_do_not_trigger_a_false_monitoring_alarm(self):
         data = self.backlog_value()
         for row in (data['pr_builds'], data['other_workflows']):
-            row.update(pending=0, stuck=0, unconfirmed=0)
+            row.update(pending=1200, stuck=0, unconfirmed=0)
         data.update(waiting_jobs=0, running_jobs=0)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
