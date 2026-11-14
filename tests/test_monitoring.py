@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tauceti_fleet import monitoring
+from tauceti_fleet import hostos, monitoring
+
+hostos.MACOS = False
 
 
 class Monitoring(unittest.TestCase):

@@ -31,7 +31,8 @@ tauceti-fleet status
 ```
 
 `add local` installs on the current account. Hosts require Python 3.11+, Linux
-x86-64, systemd user services, and usable CPU/memory cgroup controls. The operator
+x86-64, systemd user services, and usable CPU/memory cgroup controls; a Mac can
+take the workers role alone, see [macOS hosts](#macos-hosts). The operator
 needs `gh` to reuse a selected stored GitHub credential. `prepare` installs the
 latest Worker main revision using user-local uv, and fetches pinned QEMU/cloud-init
 tools through an existing Nix installation when necessary. Without Nix, provide
@@ -99,6 +100,41 @@ retain guests and block pool growth, with an error in status.
 The controller reads the existing capacity cache at most once per 30 seconds;
 foreground status performs no new requests. Broker-enrolled hosts retain their
 existing pool behavior.
+
+## macOS hosts
+
+A Mac takes the workers role and nothing else. `add`, `doctor`, `prepare`,
+`enable --workers`, `workers`, `focus`, `status`, `drain` and `update` work
+against it as they do against a Linux host:
+
+```sh
+tauceti-fleet add kim@mac-studio --no-ci
+tauceti-fleet prepare mac-studio
+tauceti-fleet enable mac-studio --workers
+```
+
+- **Services.** launchd agents stand in for the systemd units:
+  `org.tauceti.fleet` (the controller) and `org.tauceti.fleet.observe` (status
+  observations every five minutes) in `~/Library/LaunchAgents`, and
+  `org.tauceti.fleet.workers` (the worker manager), which the controller loads
+  from `~/.config/tauceti-fleet/launchd` so that it never starts without the
+  controller. Their output goes to `~/.local/state/tauceti-fleet/logs`.
+- **Login session.** LaunchAgents run only while the account is logged in at
+  the Mac's desktop. `doctor` blocks without that session and notes when
+  automatic login is off, since the services then wait for a login after a restart.
+- **No CI.** `add` needs `--no-ci`; `enroll`, `enable --ci`, `native-runner`,
+  `reserve-staging` and `doctor --smoke` are refused, and `doctor` lists no CI checks.
+- **No CPU or memory limits.** macOS has no slices, so admission counts each
+  worker as 4 GiB of memory. The controller admits at most as many workers as
+  total memory less the OS reserve holds, and admits an idle worker only while
+  free memory less the reserve holds another; a worker with a live round in
+  progress (a heartbeat from the last 30 seconds) costs nothing. As on Linux, no
+  new round starts while available memory is below the reserve. `status` shows
+  the count and its reason and has no worker memory section.
+- **Sandbox.** Rounds run on the host, the worker's default `host` sandbox.
+- **PATH.** The agents inherit the PATH of the SSH session that installed them.
+  That non-interactive PATH (zsh reads `~/.zshenv`) must provide Python 3.11+,
+  `uv`, and the worker tools `doctor` lists.
 
 ## Profiles
 
@@ -731,6 +767,11 @@ runtime/images: `~/.local/share/tauceti-fleet`. These roots support correspondin
 `TAUCETI_FLEET_CONFIG`, `TAUCETI_FLEET_STATE`, and `TAUCETI_FLEET_DATA` overrides
 for isolated tests. Credentials and runtime state are never part of release
 archives. `release.json` pins the required TauCetiWorker commit.
+
+Test modules that drive the systemd, cgroup and /proc side set
+`hostos.MACOS = False` after their imports, so that on a Mac they cannot take
+the launchd side and reach the developer's own `launchctl`; `tests/test_macos.py`
+patches it to true and replaces every `run`.
 
 See [local validation](docs/validation.md) for measured rootless tests and the
 remaining activation checks.

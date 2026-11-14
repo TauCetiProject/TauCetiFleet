@@ -7,6 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tauceti_fleet import hostos
+
+hostos.MACOS = False
+
 path = Path(__file__).parents[1] / "services/ci-broker/scripts/setup.py"
 spec = importlib.util.spec_from_file_location("monitoring_setup", path)
 setup = importlib.util.module_from_spec(spec)

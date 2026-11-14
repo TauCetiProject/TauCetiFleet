@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import cli, host, remote, store, update
+from tauceti_fleet import cli, host, hostos, remote, store, update
+
+hostos.MACOS = False
 
 
 class LiveUpdate(unittest.TestCase):

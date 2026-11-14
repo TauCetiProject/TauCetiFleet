@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci_priority, github, lean_host, lean_pressure, lean_guest, store, vm
+from tauceti_fleet import ci_priority, github, hostos, lean_host, lean_pressure, lean_guest, store, vm
+
+hostos.MACOS = False
 
 GIB=1024**3
 

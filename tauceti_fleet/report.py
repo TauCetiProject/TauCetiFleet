@@ -3,6 +3,7 @@
 import datetime as dt
 import gzip
 import json
+import os
 import sqlite3
 import time
 import urllib.request
@@ -21,9 +22,13 @@ def timestamp(value):
 
 
 def budget_path():
-    import os
-
     return Path(os.environ.get("TAUCETI_BUDGET_DIR", Path.home() / ".local/state/tauceti/budget"))
+
+
+def budget_environment():
+    # TauCetiWorker's own default differs by platform; workers, funding and
+    # reports must all name the same ledger.
+    return dict(os.environ, TAUCETI_BUDGET_DIR=str(budget_path()))
 
 
 def settled_costs(path=None):
@@ -223,7 +228,7 @@ def snapshot(config=None, *, refresh=False):
     binary = executable("tauceti")
     if binary:
         try:
-            budget = json.loads(run([binary, "budget", "--json"]).stdout)
+            budget = json.loads(run([binary, "budget", "--json"], env=budget_environment()).stdout)
         except (FleetError, ValueError):
             errors.append("Current grant balance and pending estimates unavailable")
     return dict(

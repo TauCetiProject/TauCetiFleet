@@ -397,6 +397,8 @@ def main(argv=None, *, _status_results=None):
                     decision = status.get("worker_admission", {})
                     if decision and decision.get("policy") == "opportunistic":
                         print(f"CPU idle: {status['cpu_idle_fraction']:.1%}; workers yield CPU to CI")
+                    elif decision and decision.get("policy") == "memory-count":
+                        print(f"CPU idle: {status['cpu_idle_fraction']:.1%}")
                     elif decision:
                         print(
                             f"CPU idle: {status['cpu_idle_fraction']:.1%}; required for an increase: {decision['cpu_idle_required']:.0%}"
