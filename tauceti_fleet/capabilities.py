@@ -213,6 +213,20 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
     return values
 
 
+def worker_protocol(worker=None):
+    """The `_fleet-protocol` reply of a worker runtime, the installed one by default; {} when it is missing or speaks another version."""
+    worker = worker or executable("tauceti")
+    if worker:
+        try:
+            result = run([worker, "_fleet-protocol"], check=False)
+            protocol = json.loads(result.stdout) if result.returncode == 0 else {}
+            if isinstance(protocol, dict) and protocol.get("version") == 1:
+                return protocol
+        except (FleetError, ValueError, AttributeError):
+            pass
+    return {}
+
+
 def doctor(config=None, *, probe=True):
     config = config or host_config()
     checks = []
@@ -383,7 +397,11 @@ def doctor(config=None, *, probe=True):
         roles=("ci",),
     )
     worker = executable("tauceti")
-    for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
+    agent = config.get("agent") or "claude"
+    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agent in (name, "auto")]
+    if config.get("sandbox") == "bubble":
+        tools += ["bubble", "incus"]
+    for name in tools:
         path = executable(name)
         add(
             "worker-tool-" + name,
@@ -392,18 +410,16 @@ def doctor(config=None, *, probe=True):
             "Install this tool in the account's PATH before enabling workers; lake is supplied by elan and claude by Claude Code",
             roles=("workers",),
         )
-    compatible = False
-    protocol = {}
-    if worker:
-        try:
-            result = run([worker, "_fleet-protocol"], check=False)
-            if result.returncode == 0:
-                protocol = json.loads(result.stdout)
-                compatible = isinstance(protocol, dict) and protocol.get("version") == 1
-            if not isinstance(protocol, dict):
-                protocol = {}
-        except (FleetError, ValueError, AttributeError):
-            pass
+    if config.get("sandbox") == "bubble":
+        add(
+            "worker-sandbox-bubble",
+            "warning",
+            "Bubble containers run under the Incus daemon, outside tauceti-fleet-workers.slice: its memory ceiling and CPU weight do not apply to them and worker memory does not count them; host headroom at admission is the only bound",
+            "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
+            roles=("workers",),
+        )
+    protocol = worker_protocol()
+    compatible = bool(protocol)
     add(
         "worker-runtime",
         "ok" if compatible else "blocked",
@@ -425,6 +441,29 @@ def doctor(config=None, *, probe=True):
             "roadmap-focus", "ok" if supported else "warning",
             "Worker supports live roadmap focus" if supported else "Installed worker ignores the configured roadmap focus",
             "Install a Worker release with roadmap_focus protocol support using a live update", roles=("workers",),
+        )
+    if config.get("roadmap_targets"):
+        from .targets import status as target_list
+
+        listed = target_list(config, [])
+        supported = protocol.get("roadmap_targets") == 1
+        # Either fault stops every worker: the manager loads no definitions with an unknown key, and
+        # a worker exits at startup when its list is missing or unmarked.
+        add(
+            "roadmap-targets", "ok" if supported and "error" not in listed else "blocked",
+            "Installed worker has no target-list support" if not supported
+            else listed.get("error") or f"{listed['items']} items in {len(listed['areas'])} areas at {listed['path']}",
+            "Install a Worker release with roadmap_targets protocol support, or replace the list with targets HOST --file or remove it with targets HOST --clear",
+            roles=("workers",),
+        )
+    if config.get("outside_list_cap") and config.get("roadmap_targets"):
+        from .outside_list import unsupported
+
+        why = unsupported()
+        add(
+            "outside-list-cap", "warning" if why else "ok",
+            why[0].upper() + why[1:] + "; the cap is not paced" if why else "Worker reads the paced outside-list cap",
+            "Install a Worker release with targets_fallback protocol support using a live update", roles=("workers",),
         )
     image = data_dir() / "images/prepared.json"
     add(
@@ -482,7 +521,9 @@ def doctor(config=None, *, probe=True):
                 "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    credential_names = ["github_token_file"]
+    if config.get("claude_billing") != "subscription":
+        credential_names.insert(0, "anthropic_api_key_file")
     if config.get("ci_broker_url"):
         credential_names.append("ci_broker_token_file")
     for name in credential_names:

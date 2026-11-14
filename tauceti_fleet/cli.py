@@ -6,8 +6,9 @@ import math
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, broker, host, pool_activity, remote, targets
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -64,6 +65,12 @@ def parser():
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--json", action="store_true")
+    schedule = sub.add_parser("schedule", help="admit new worker rounds only inside weekly time slots")
+    schedule.add_argument("host")
+    schedule.add_argument("slots", nargs="*", metavar="SLOT", help='for example "Mon 23:00 -> Thu 07:00"; omit to show the saved schedule')
+    schedule.add_argument("--timezone", help="IANA zone the slot times are in (default: the host's local time)")
+    schedule.add_argument("--clear", action="store_true")
+    schedule.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
     focus.add_argument("--percent", type=int)
@@ -72,6 +79,15 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    listed = sub.add_parser("targets", help="have workers author from an operator target list, or audit the list")
+    listed.add_argument("host")
+    change = listed.add_mutually_exclusive_group()
+    change.add_argument("--file", help="the list: a file on this machine to transfer, or with --on-host a path on the host")
+    change.add_argument("--clear", action="store_true", help="return workers to their own choice of roadmap area")
+    change.add_argument("--audit", action="store_true", help="compare the list with the host's files")
+    listed.add_argument("--on-host", action="store_true", help="read --file in place on the host instead of transferring it")
+    listed.add_argument("--apply", action="store_true", help="with --audit, write the corrections into the list")
+    listed.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
@@ -226,6 +242,11 @@ def main(argv=None, *, _status_results=None):
                     payload["self_tested"] = args.self_tested
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "schedule":
+                slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
+                if (args.clear and slots) or (args.timezone and not slots):
+                    raise FleetError("Give --timezone together with slots, and --clear alone")
+                payload.update(dict(clear=True) if args.clear else dict(slots=slots, timezone=args.timezone) if slots else {})
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -237,6 +258,14 @@ def main(argv=None, *, _status_results=None):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "targets":
+                if args.on_host and args.file is None or args.apply and not args.audit:
+                    raise FleetError("--on-host qualifies --file, and --apply qualifies --audit")
+                if args.on_host:
+                    payload["path"] = args.file
+                elif args.file is not None:
+                    payload["text"] = targets.load(Path(args.file).expanduser(), targets.LIMIT)
+                payload.update({k: True for k in ("clear", "audit", "apply") if getattr(args, k)})
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
@@ -305,6 +334,8 @@ def main(argv=None, *, _status_results=None):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
+                elif args.command == "targets" and "error" not in value:
+                    targets.display(value)
                 elif args.command == "status" and "status" in value:
                     status = value["status"]
                     if value.get("offline"):
@@ -411,6 +442,10 @@ def main(argv=None, *, _status_results=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    if status.get("worker_schedule"):
+                        from . import schedule
+
+                        print(schedule.describe(status["worker_schedule"]))
                     if status.get("roadmap_focus_error"):
                         print("Roadmap focus disabled: " + status["roadmap_focus_error"])
                     focus = status.get("roadmap_focus", {})
@@ -427,6 +462,15 @@ def main(argv=None, *, _status_results=None):
                             + " at the current admission limit); "
                             + ", ".join(focus["areas"])
                         )
+                    listed = status.get("roadmap_targets")
+                    if listed:
+                        if focus.get("percent"):
+                            print("  Not applied: workers under a target list take no roadmap focus")
+                        print("\n".join(targets.summary_lines(listed)))
+                    if status.get("outside_list_cap"):
+                        from . import outside_list
+
+                        print(outside_list.describe(status["outside_list_cap"]))
                     if status.get("workers"):
                         print()
                     groups = {}
@@ -443,6 +487,11 @@ def main(argv=None, *, _status_results=None):
                         if error:
                             print("    Isolation degraded: " + error)
                     print()
+                    if value.get("subscription_usage"):
+                        from . import subscription_usage
+
+                        subscription_usage.display(value["subscription_usage"])
+                        print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
                 else:

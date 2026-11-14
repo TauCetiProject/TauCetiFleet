@@ -59,8 +59,10 @@ does not require a workers-only host to obtain virtualization access. Missing
 lingering produces a persistence limitation and the request
 `loginctl enable-linger USER`; the installer does not attempt that privileged
 operation. Existing administrator resource allocations remain authoritative.
-Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
-in the account's PATH. Missing tools block worker activation with a remedy.
+Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and the
+profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PATH,
+plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
+tools block worker activation with a remedy.
 
 An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 --machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
@@ -121,10 +123,41 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 ```
 
 Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
-and effort are independent settings. Version 1 profiles use Claude API billing.
+and effort are independent settings.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
+
+Profiles default to Claude API billing. These optional keys describe a fleet on
+Claude or Codex subscriptions; each applies to every worker slot:
+
+```json
+{
+  "subscription": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "agent": "auto",
+    "sandbox": "bubble",
+    "pace": "0:10,50:70,90:90",
+    "env": {"TAUCETI_OVERLAP_BATCH_COMMITS": "80"}
+  }
+}
+```
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
+| `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
+| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
+| `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
+| `outside_list_cap` | `{"ceiling": N}`, optionally with `floor` and `start`: pace [authoring outside a target list](#authoring-outside-the-list) by the subscription's weekly window | off |
+
+A subscription profile carries no model credential. Sign in to `claude` or
+`codex` as the host account before enabling workers; each worker copies that
+login into its own home once and keeps following that location. Like a model change, changing any of these keys on an
+active host requires a drain before repeating `add`. A key removed from the
+profile returns to its default.
 
 ## Protected roadmap capacity
 
@@ -206,7 +239,7 @@ it restarts only that controller's main process via its existing systemd restart
 policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
-fleet weight 10. Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
+fleet weight 10 (except bubble containers; see `sandbox`). Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
 reserved workspace RAM. The default VM shape for staging/mixed registrations is
 32 vCPUs / 64 GiB, with 2 GiB additional host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
@@ -216,7 +249,7 @@ exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
 scheduling overhead. By default, CI and workers share a parent memory ceiling
-that preserves host OS headroom. An explicit
+that preserves host OS headroom; bubble containers are outside it. An explicit
 `--ci-memory-budget-gib N` additionally bounds the whole CI child slice at N GiB and permits
 guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
 completions and memory events when choosing concurrency. Workers use currently
@@ -577,7 +610,8 @@ tauceti-fleet budget
 These wrap the existing local grant ledger. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
-Queries can aggregate hosts. Workers on a host share its budget. Estimated
+Queries can aggregate hosts. API-billed workers on a host share its budget;
+subscription workers do not draw on it. Estimated
 session costs reserve funds before launch; receipts settle actual costs. Credits
 accumulate while idle. Grants govern admissions, not a hard billing cap, and
 active sessions may settle into a deficit.
@@ -699,6 +733,29 @@ rate pools spending over summed worker time; the elapsed-hour rate pools spendin
 over the longest covered wall-clock duration. These values come from the same
 prepared worker summary, with no extra collector or GitHub requests.
 
+For a profile with subscription billing or a Codex agent, `status` prints one
+usage line per provider above these tables, and `status --json` carries the
+same figures per host under `subscription_usage`:
+
+```
+Claude usage: 5h 62% left, resets in 2h00m; 7d 41% left, resets in 3d08h (read 10m ago)
+```
+
+These are the responses the workers' pacer last cached on the host. Fleet sends
+no usage request, so a line ages while no worker is checking its quota, and a
+window that has reset since the reading shows no figure. When Codex reported its
+limit reached, the line says so before the percentages, and the JSON reading has
+`limit_reached`. Claude readings are looked for beside `~/.claude` and beside
+every login a worker recorded as the source of its isolated copy, which is where
+a worker started with `CLAUDE_CONFIG_DIR` in its launcher's environment keeps
+them. The caches are kept per credential, and Fleet does not read credentials, so it cannot tell which one is
+active. A reading is current while the worker would still use it (an hour for
+Claude, ten minutes for Codex) or while a window it shows spent has not reset.
+While more than one credential has a current reading, each is printed on its own
+line under a short credential label, and the JSON value is `{"credentials": [...]}`;
+a single reading is printed with its label whenever other credentials have older
+ones, which the JSON counts in `other_credentials`.
+
 Native host coding rounds can share immutable extracted Mathlib snapshots with
 private copy-on-write builds. The native activity collector prepares the sharing
 summary as well; Fleet only renders it. See the worker
@@ -754,6 +811,7 @@ existing global maintenance behavior. An explicit
 worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
 Workers require the corresponding TauCetiWorker focus support; older workers
 ignore the additional policy field.
+A worker that authors from a [target list](#target-lists) takes no focus.
 
 At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
 from the eligible focus areas at the start of each round. The other
@@ -789,6 +847,219 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Weekly schedule
+
+Admit new worker rounds only during chosen parts of the week:
+
+```sh
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00"
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00" "Sat 09:00 -> Sun 21:00" --timezone Europe/Berlin
+tauceti-fleet schedule big-server          # show the saved slots, the current slot and the next boundary
+tauceti-fleet schedule big-server --clear  # admit at any time again
+```
+
+The host saves the slots in `host.json` as `worker_schedule`; a host without one
+behaves as before. Outside every slot the controller uses a worker ceiling of
+zero in its ordinary admission decision: admitted rounds finish, no new round
+starts, and the manager, the worker definitions, `workers --max` and CI
+admissions are untouched. Inside a slot the schedule changes nothing. A change
+applies on the controller's next pass, a few seconds later, without a restart or
+a timer unit.
+
+Slot times are wall-clock times in the host's local time zone, the zone its
+controller runs in. `--timezone` names an IANA zone to use instead and is saved
+with the slots; setting slots without it returns to host local time. Across a
+daylight-saving change a slot is an hour shorter or longer, and a time the
+change skips counts as the end of the skipped hour. Days are English
+names or their first three letters and times are 24-hour. A slot whose end is
+earlier in the week than its start runs past Sunday midnight, and slots that
+touch or overlap count as one. Several slots are separate arguments or one
+comma-separated argument, given before any option.
+
+`status` shows the zone, the current slot and the next boundary:
+
+```
+Starting new work: paused; outside the weekly schedule
+Weekly schedule (host local time): outside every slot; next slot starts Mon 23:00 CET (in 2d 3h)
+```
+
+JSON status has the same facts under `status.worker_schedule`, with the boundary
+as `boundary_at` in epoch seconds. A saved schedule the controller cannot read
+admits nothing and is reported there; `--clear` or a new set of slots replaces
+it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
+admission time left in the current slot.
+
+## Target lists
+
+Have every worker on a host author from an operator target list: a markdown file
+of milestones on the way to one goal, grouped by roadmap, each naming the items
+that have to land first. TauCetiWorker's `docs/target-lists.md` defines the
+format and how a worker chooses from it.
+
+```sh
+tauceti-fleet targets big-server --file goal.md                       # transfer this file
+tauceti-fleet targets big-server --file /srv/lists/goal.md --on-host  # use a file on the host
+tauceti-fleet targets big-server                                      # show the list and its counts
+tauceti-fleet targets big-server --audit                              # compare it with the host's files
+tauceti-fleet targets big-server --audit --apply                      # and write the corrections
+tauceti-fleet targets big-server --clear                              # workers choose areas themselves again
+```
+
+`--file PATH` reads the file on the machine where the command runs and stores a
+private copy on the host at `~/.config/tauceti-fleet/roadmap-targets.md`; a later
+transfer replaces that copy. With `--on-host`, `PATH` is an absolute path on the
+host and the workers read that file in place, which suits a list kept in a git
+checkout there or shared by several installs. A symlink is saved as the file it
+names when the list is set, since workers resolve the path when they start; after
+repointing the link, set the list again. A transferred list is at most 256 KiB,
+the room it has inside the request to the host; a list on the host may be up to
+16 MiB. Either way the list must carry
+the `<!-- tauceti-targets:v1 -->` marker, define each slug once, and name only
+roadmap directories under its `## ` headings: Fleet checks the headings against
+the roadmap mirror the workers already keep on the host, and refuses a heading
+with no directory or with unfinished items under an archived roadmap
+(`Completed/`). On a host whose workers have not fetched the mirror yet, the
+list is accepted with a note and `--audit` repeats the check later.
+
+The host saves the path in `host.json`, and the controller writes it into every
+worker definition as `roadmap_targets` on its next pass. No drain is needed.
+The worker manager restarts a worker whose definition changes, so setting,
+moving or clearing a list ends the rounds in progress; workers read the file at
+the start of each roadmap round, so new contents at the same path, including
+every repeated transfer, change no definition and restart nothing. The installed
+TauCetiWorker must report `roadmap_targets` in its Fleet protocol, and so must
+the runtime a running worker manager started from, which a live update leaves in
+place. Fleet refuses to set a list otherwise, because a worker manager that does
+not know the key loads no worker from definitions that name it; restarting
+`tauceti-fleet-workers.service` moves the manager to the installed runtime.
+Workers in their own scopes keep running and the new manager adopts them; a
+worker whose status shows degraded isolation runs inside the manager's service
+and its round ends with it.
+`doctor` blocks worker activation for the same reason or when the saved list has
+become unreadable.
+
+`status` adds the list under the focus line:
+
+```text
+Target list: 12 items in 3 areas: 4 done, 2 in flight, 3 eligible, 3 blocked
+  Counted from the file's marks and this host's rounds; workers also count open and merged pull requests
+  Rounds in progress: fleet-0123abcd-3 Probability/strong-law
+```
+
+Done and in flight are the file's `[x]` and `[~]` marks, plus the items that
+rounds in progress on this host hold (each worker reports its item as
+`roadmap_target`). An open item is eligible when everything it needs is done
+and blocked otherwise. The controller reads only the list and the worker status
+files for this. Workers additionally treat an item as in flight while an open
+pull request carries its marker and as done once one has merged, so they may
+see fewer eligible items than this line. `targets HOST` prints the same counts
+per area.
+
+`--audit` reports where the list disagrees with files on the host, without
+contacting GitHub: item lines workers skip, slugs defined twice, `needs:` slugs
+the list never defines, headings without a roadmap directory, rounds in
+progress on an item the file marks done or no longer lists, and `[~]` items
+whose `in flight: #N` clause names a pull request that the worker's prepared pull
+request inventory (`tauceti activity --inventory`) records as closed. For a landed pull request the correction is
+`[x]` with `landed: #N`, or `[ ]` when the item's own `partial:` clause names
+it; the host cannot read a pull request's marker, so check the printed line
+when the pull request may have landed only part of the item. A pull request
+closed with no landing on record is reported and left to you. `--apply` writes
+the corrections into the file the workers read; an edit made to the file while
+the audit ran is kept, and one on the corrected lines leaves the file untouched
+for another audit. For a transferred list that file is the host's copy, so make
+the same edits in your own file.
+
+A worker under a target list takes no roadmap focus. With both set, `focus`,
+`targets` and `status` say that the focus share is not applied; it applies again
+after `targets HOST --clear`.
+
+### Authoring outside the list
+
+A worker whose list offers it nothing ends its round, unless the worker is given
+a cutoff: it then authors outside the list while the account has fewer open pull
+requests outside the list than the cutoff (TauCetiWorker's
+`docs/target-lists.md`, "Authoring outside the list"). A subscription profile
+can have the controller move that cutoff so that the weekly usage window is
+spent when it ends, with list work served first:
+
+```json
+{"outside_list_cap": {"floor": 0, "ceiling": 40, "start": 8}}
+```
+
+`ceiling` is required; `floor` defaults to 0 and `start`, the cap before the
+first step, to the floor. Without the key nothing below happens. With it, and
+with a target list set, every worker definition gains
+`targets_fallback_cap_file`, a file in the controller's state directory holding
+the current cap, and `targets_fallback_max_open`, which applies only if that
+file cannot be read. The installed TauCetiWorker, and the one a running worker
+manager started from, must report `targets_fallback` in their Fleet protocol;
+otherwise the definitions stay as they are and `status` and `doctor` say the
+cap is not paced. A live update leaves a running manager on its old runtime,
+so after one `status` names the manager restart; the controller checks again
+within 15 minutes.
+
+Every 15 minutes the controller takes one step:
+
+1. The spending rate is the change in the weekly usage figure over the last six
+   hours of readings, in percent of the window per hour. The readings are the
+   ones [`status` shows](#status-and-cost-estimates); a profile with both
+   providers is paced by its Claude window.
+2. The horizon is the end of the weekly window, or of the current
+   [schedule](#weekly-schedule) slot when that comes first. The rate times the
+   hours left is the projected spend at the end. What may still be spent is
+   what the workers' pacing curve (the profile's `pace`, else `TAUCETI_PACE` in
+   its `env`, else the `TAUCETI_PACE` the worker manager runs with, else
+   TauCetiWorker's default `60:40`) allows at the horizon, less
+   what is used: a worker starts no round while usage is at the curve.
+3. The rate is divided between list work and outside-list work in the proportion
+   of running rounds that reported `roadmap_work` `list` and `outside-list` over
+   the same six hours. Rounds that report neither, such as reviews and repairs,
+   are divided in that proportion too; while no authoring round of either kind
+   has run, nothing counts as list work.
+4. List work's part of the rate, continued to the horizon and raised by a
+   quarter, is reserved. What may still be spent beyond the reserve, divided by
+   the hours left, is the rate planned for outside-list work.
+5. The cap rises by a tenth (at least 1) when outside-list work spends less than
+   80% of that plan, falls by a tenth when it spends more than 120%, and falls
+   whenever the reserve alone exceeds what may still be spent. It stays between
+   `floor` and `ceiling`.
+
+The cap holds when there is no reading, while readings from several credentials
+are current (the workers use one of them and the caches do not say which),
+when the reading is over 30 minutes old
+or gives no weekly figure, for the first two hours of readings after the window
+resets or the measurement restarts, outside every schedule slot, and while
+workers are not enabled. It is not raised while less than 10% of the session
+window is left, while the weekly or the session window's usage is at the
+pacing curve, or while Codex reports its limit reached, since no round starts
+then, and it is not lowered for spending
+over plan while no outside-list round is running, because a cap already below
+the open pull requests admits nothing and would only take longer to return.
+Rounds are still counted while the reading holds the cap, and the split takes
+only those after the first reading the rate is measured from, so both cover
+the same span.
+
+A weekly window that is not open yet, which the reading reports with no usage
+and no reset time, counts as nothing spent with the whole week ahead: the cap
+rises every step until a round opens the window, since only a model call opens
+it.
+
+```text
+Outside-list cap: 14 (bounds 0-40); 91% of the weekly window projected spent when the slot ends in 14h00m; last step 12m ago: 13 -> 14, spending under plan
+```
+
+`status --json` has the step under `status.outside_list_cap`. The split is an
+estimate from round counts: Fleet has no per-round cost, so a review is priced
+like an authoring round, and anything else drawing on the same subscription is
+divided in the same proportion. Fleet also cannot count the open pull requests
+outside the list, so a cap below that count changes nothing until it has
+stepped past it; set `start` near the number already open. The key changes like
+the other profile keys, with a drain before repeating `add`, and turning it on
+changes every worker definition once. New bounds apply to the cap file on the
+controller's next pass, before the definitions are rewritten, without waiting
+for the next step.
 
 ## Public operations telemetry
 

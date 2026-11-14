@@ -1,14 +1,29 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
+import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import (
+    activity,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    focus,
+    github,
+    native_runner,
+    outside_list,
+    targets,
+    vm,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -101,6 +116,12 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
+        "env",
+        "outside_list_cap",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -124,6 +145,8 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    worker_fields(dict(current, **updates))
+    outside_list.settings(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -275,6 +298,95 @@ def write_slices(config, caps):
     return worker
 
 
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
+}
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace, env = config.get("pace"), config.get("env") or {}
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    if isinstance(env, dict) and CREDENTIAL_SOURCE_ENV & set(env):
+        raise FleetError(
+            "env must not set " + ", ".join(sorted(CREDENTIAL_SOURCE_ENV & set(env)))
+            + ": workers sign in from the host account's own claude and codex logins"
+        )
+    # The worker rejects NUL; env values are kept to printable ASCII.
+    valid = isinstance(env, dict) and all(
+        isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
+        and not k.startswith("TAUCETI_FLEET_") and k not in FLEET_OWNED_ENV
+        and isinstance(v, str) and v.isascii() and v.isprintable()
+        for k, v in env.items()
+    )
+    if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
+        raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace", "env", "roadmap_targets"):
+        if config.get(key):
+            fields[key] = config[key]
+    return fields
+
+
+def toml_value(value):
+    if isinstance(value, dict):
+        return "{" + ", ".join(k + " = " + toml_value(v) for k, v in sorted(value.items())) + "}"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def worker_config(config):
     # Serialize controller and operator rewrites, and never restore an old label policy.
     with locked(config_dir() / "worker-policy.lock"):
@@ -286,19 +398,7 @@ def worker_config(config):
 
 def _worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
-    )
-    if config.get("self_tested"):
-        fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
-        if config.get(key):
-            fields[key] = config[key]
+    fields = dict(worker_fields(config), **outside_list.worker_keys(config))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -312,10 +412,10 @@ def _worker_config(config):
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
-        lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
+        lines += ["", "[[workers]]", "id = " + toml_value(wid)]
         for key, value in fields.items():
             if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+                lines.append(key + " = " + toml_value(value))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -325,6 +425,7 @@ def _worker_config(config):
 
 
 WORKER_OOM_SCORE_ADJ = 500
+PROC = Path("/proc")
 
 
 def start_workers():
@@ -341,6 +442,31 @@ def start_workers():
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+    from . import subscription_usage
+
+    # A manager kept running across a live update never reruns run_workers(), so
+    # unless that recorded what it launched with, read the root from the manager's own
+    # environment, which also carries unit-level settings and needs no unquoting.
+    if subscription_usage.launched_data_root().exists():
+        return
+    manager = run(["systemctl", "--user", "show", "--property=MainPID", "--value", target.name], check=False)
+    pid = manager.stdout.strip() if manager.returncode == 0 and isinstance(manager.stdout, str) else ""
+    if not pid.isdigit() or pid == "0":
+        return
+    try:
+        entries = (PROC / pid / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return
+    name = b"TAUCETI_LEGACY_DATA_ROOT="
+    value = next((os.fsdecode(e[len(name):]) for e in entries if e.startswith(name)), None)
+    subscription_usage.record_data_root({"TAUCETI_LEGACY_DATA_ROOT": value} if value else {})
+
+
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
 
 
 def run_workers():
@@ -350,8 +476,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -364,18 +489,55 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
+    token = Path(config["github_token_file"]).read_text().strip()
+    os.environ["GH_TOKEN"] = token
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
     os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
+    from . import subscription_usage
+
+    subscription_usage.record_data_root()
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary, github_token_sha256=token_digest(token)))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def manager_process():
+    """The running worker manager's argv and environment, or None when /proc cannot show them."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False)
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    if not pid.isdigit() or pid == "0":
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return [os.fsdecode(a) for a in argv if a], dict(os.fsdecode(e).split("=", 1) for e in environ if b"=" in e)
+
+
+def running_manager():
+    """The runtime and token digest the running manager started with."""
+    recorded = read(state_dir() / "worker-manager.json", {})
+    if recorded:
+        return recorded
+    # A manager started before the record existed: `run_workers` exec'd `<runtime>/bin/tauceti workers ...`.
+    process = manager_process()
+    if process is None:
+        return {}
+    argv, environ = process
+    binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
+    return dict(binary=binary, github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else None)
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -545,6 +707,11 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            for key in ("roadmap_target", "roadmap_work"):
+                if value.get(key):
+                    status[key] = value[key]
+            if value.get("roadmap_target") or value.get("roadmap_work"):
+                status["next_action_at"] = value.get("next_action_at")
             values.append(status)
     return values
 
@@ -889,6 +1056,8 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied = None
+        pacer = outside_list.Pacer()
         last_results = 0
         memory_paused = False
         previous_tasks = None
@@ -937,15 +1106,23 @@ def daemon():
                         if value.get("ci_priority_error"):
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
+                pacing = pacer.tick(config, worker_statuses)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    wanted = (config.get("roadmap_targets"), pacer.keys)
+                    if not ids or len(ids) < config["max_workers"] or wanted != applied:
+                        ids, applied = worker_config(config), wanted
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
                 if lease_expired:
+                    maximum = 0
+                from . import schedule
+
+                window = schedule.state(config)
+                outside = window.get("reason") if config["workers_enabled"] else None
+                if outside:
                     maximum = 0
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
@@ -960,7 +1137,7 @@ def daemon():
                 pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
-                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
+                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else outside)
                 )
                 target, reason = scaler.step(
                     now=time.time(),
@@ -999,8 +1176,11 @@ def daemon():
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
+                        outside_list_cap=pacing,
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
+                        worker_schedule=window,
                         worker_memory=memory,
                         memory_pressure=pressure,
                         resources=caps,
@@ -1119,8 +1299,14 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_policy(payload)
+    if action == "schedule":
+        from . import schedule
+
+        return schedule.configure(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"])
     if action == "drain":
@@ -1134,6 +1320,8 @@ def rpc(payload):
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
     if action == "status":
+        from . import subscription_usage
+
         config = host_config()
         pressure = read(state_dir() / "lean-host-pressure.json", {})
         pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
@@ -1157,5 +1345,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            **subscription_usage.status(config),
         )
     raise FleetError("Unknown host operation")
