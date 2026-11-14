@@ -72,6 +72,12 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    export = sub.add_parser("status-export", help="keep a world-readable copy of this host's status in a directory")
+    export.add_argument("host")
+    destination = export.add_mutually_exclusive_group()
+    destination.add_argument("--dir", dest="directory", help="existing absolute directory on the host")
+    destination.add_argument("--clear", action="store_true")
+    export.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
@@ -119,7 +125,7 @@ def print_isolation(status):
         print("Isolation diagnostics: " + isolation["error"])
 
 
-def main(argv=None, *, _status_results=None):
+def main(argv=None, *, _status_results=None, _standalone=False):
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["monitoring"]:
         from .monitoring import main as monitoring_main
@@ -176,7 +182,9 @@ def main(argv=None, *, _status_results=None):
                 + " (no paid workers or production routing are activated)"
             )
             return 0
-        entries = remote.inventory()
+        # A standalone view has only its prepared results: no inventory, caches or requests.
+        entries = ({name: dict(target="local", machine_id=value.get("machine_id", name))
+                    for name, value in _status_results.items()} if _standalone else remote.inventory())
         if args.command == "enable" and not (args.ci or args.workers):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
@@ -237,6 +245,11 @@ def main(argv=None, *, _status_results=None):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "status-export":
+                if args.directory is not None:
+                    payload["directory"] = args.directory
+                if args.clear:
+                    payload["clear"] = True
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"])
                 results[name] = remote.deploy(entry["target"], **options)
@@ -272,10 +285,11 @@ def main(argv=None, *, _status_results=None):
 
             pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
             overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
-            overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
-            from . import queue_history, queue_status
-            overview["queue"] = overview["pool_activity"].get("queue") or queue_status.cached()
-            overview["queue_history"] = queue_history.cached()
+            if not _standalone:
+                overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
+                from . import queue_history, queue_status
+                overview["queue"] = overview["pool_activity"].get("queue") or queue_status.cached()
+                overview["queue_history"] = queue_history.cached()
             overview["queue_timezone"] = args.timezone
             bors_printed = False
 
@@ -292,8 +306,9 @@ def main(argv=None, *, _status_results=None):
             else:
                 ci_overview.display(overview, section="overview")
                 print()
-                pool_activity.display(overview["pool_activity"], all_jobs=args.all_jobs)
-                print()
+                if "pool_activity" in overview:
+                    pool_activity.display(overview["pool_activity"], all_jobs=args.all_jobs)
+                    print()
         if args.json:
             if fleet is not None:
                 results["_fleet"] = dict(activity=fleet)

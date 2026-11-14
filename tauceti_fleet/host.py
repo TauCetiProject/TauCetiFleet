@@ -891,6 +891,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        export = StatusExport()
         previous_tasks = None
         while not stopping:
             config = host_config()
@@ -1036,6 +1037,7 @@ def daemon():
                 )
                 for slot in slots.values():
                     slot.next_vm = max(slot.next_vm, time.time() + 60)
+            export.step(config, time.time())
             for _ in range(10):
                 if stopping:
                     break
@@ -1050,6 +1052,74 @@ def daemon():
         if handover:
             binary = str(Path.home() / ".local/bin/tauceti-fleet")
             os.execv(binary, [binary, "host-daemon"])
+
+
+def status_report(config):
+    pressure = read(state_dir() / "lean-host-pressure.json", {})
+    pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
+    return dict(
+        machine_id=config["machine_id"],
+        profile=config["profile"],
+        ci_allowed=config["ci_allowed"],
+        ci_enabled=config["ci_enabled"],
+        ci_kinds=capacity.kinds(config),
+        ci_max_jobs=capacity.jobs(config),
+        ci_memory_budget_gib=capacity.memory_budget_gib(config),
+        ci_staging_slots=capacity.reservation(config)[0],
+        ci_staging_reservation_error=capacity.reservation(config)[1],
+        ci_enrolled=bool(config.get("ci_broker_url")),
+        workers_enabled=config["workers_enabled"],
+        max_workers=config["max_workers"],
+        self_tested=config.get("self_tested", False),
+        lean_host_pressure=pressure,
+        lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
+        ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
+        status=read(state_dir() / "status.json", {}),
+        activity=activity.cached(config["machine_id"]),
+        ci_overview=ci_overview.cached(config),
+    )
+
+
+def configure_status_export(payload):
+    if payload.get("clear"):
+        directory = None
+    elif "directory" in payload:
+        directory = payload["directory"]
+        if not isinstance(directory, str) or not Path(directory).is_absolute() or not Path(directory).is_dir():
+            raise FleetError("Status export needs an existing directory given as an absolute path")
+    else:
+        return dict(status_export=host_config().get("status_export"))
+    update_host(status_export=directory)
+    return dict(status_export=directory)
+
+
+class StatusExport:
+    """World-readable copy of the status object, for readers without access to this account."""
+
+    INTERVAL = 30
+
+    def __init__(self):
+        self.attempted = 0
+        self.error = None
+
+    def step(self, config, now):
+        directory = config.get("status_export")
+        if not directory or now - self.attempted < self.INTERVAL:
+            return
+        self.attempted = now
+        try:
+            # store.atomic would create a missing directory private to this account.
+            if not Path(directory).is_dir():
+                raise FleetError(f"{directory} is not a directory")
+            atomic(Path(directory) / (config["machine_id"] + ".json"),
+                   dict(status_report(config), exported_at=now), mode=0o644)
+            self.error = None
+        except Exception as exc:
+            # An OSError from mkstemp names a fresh temporary file on every attempt.
+            key = (directory, type(exc), exc.errno) if isinstance(exc, OSError) and exc.errno else (directory, str(exc))
+            if key != self.error:
+                print(f"tauceti-fleet: status export failed: {exc}", file=sys.stderr, flush=True)
+                self.error = key
 
 
 def budget(payload):
@@ -1133,29 +1203,8 @@ def rpc(payload):
         result["status"] = read(state_dir() / "status.json", {})
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
+    if action == "status-export":
+        return configure_status_export(payload)
     if action == "status":
-        config = host_config()
-        pressure = read(state_dir() / "lean-host-pressure.json", {})
-        pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
-        return dict(
-            machine_id=config["machine_id"],
-            profile=config["profile"],
-            ci_allowed=config["ci_allowed"],
-            ci_enabled=config["ci_enabled"],
-            ci_kinds=capacity.kinds(config),
-            ci_max_jobs=capacity.jobs(config),
-            ci_memory_budget_gib=capacity.memory_budget_gib(config),
-            ci_staging_slots=capacity.reservation(config)[0],
-            ci_staging_reservation_error=capacity.reservation(config)[1],
-            ci_enrolled=bool(config.get("ci_broker_url")),
-            workers_enabled=config["workers_enabled"],
-            max_workers=config["max_workers"],
-            self_tested=config.get("self_tested", False),
-            lean_host_pressure=pressure,
-            lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
-            ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
-            status=read(state_dir() / "status.json", {}),
-            activity=activity.cached(config["machine_id"]),
-            ci_overview=ci_overview.cached(config),
-        )
+        return status_report(host_config())
     raise FleetError("Unknown host operation")
