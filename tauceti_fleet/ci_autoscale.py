@@ -167,7 +167,7 @@ class Controller:
             return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
         if low and general_idle and limit > floor:
             self.value.pop("growth_since", None)
-            target = max(floor, min(limit - 1, len(busy) + len(idle) - len(general_idle)))
+            target = max(floor, len(busy) + len(idle) - len(general_idle))
             if target < limit:
                 return dict(kind="limit", target=target, reason="return idle guest RAM to active builds")
         if stalled and now - self.value["stall_since"] >= 30 and limit >= self.minimum:
