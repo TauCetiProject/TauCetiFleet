@@ -20,3 +20,10 @@ test('nightly access never permits PR refs, other repos or arbitrary workflows',
     await assert.rejects(client([build,invalid]).policy({fresh:true}),PolicyError);
   await assert.rejects(client([nightly]).policy({fresh:true}),PolicyError);
 });
+
+test('source staging permits exactly the reviewed shared harness revision',async()=>{
+ const source='TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa';
+ assert.deepEqual(await client([build,nightly,source]).policy({fresh:true}),{runner_group_id:3});
+ for (const bad of [source.split('@')[0]+'@refs/heads/main',source.slice(0,-1)+'0'])
+  await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
+});
