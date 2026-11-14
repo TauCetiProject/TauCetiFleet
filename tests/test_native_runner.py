@@ -290,12 +290,39 @@ class NativeRunner(unittest.TestCase):
 
     def test_stage_is_small_and_filesystem_clone_runs_in_the_unit(self):
         (self.root / "control").rmdir()
-        with patch.object(native, "image", return_value=dict(sha256="a"*64)), patch.object(native, "run") as run:
+        with patch.object(native, "image", return_value=dict(sha256="a"*64)), patch.object(native, "host_config", return_value=self.config), patch.object(native, "run") as run:
             value = native.stage(self.root, "private-test-jit")
         run.assert_not_called()
         self.assertEqual(value["runtime"], native.RUNTIME)
         self.assertFalse((self.root / "rootfs").exists())
         self.assertEqual((self.root / "control/jit").stat().st_mode & 0o777, 0o600)
+
+    def test_shared_host_native_stage_requires_admission(self):
+        (self.root / "control").rmdir()
+        with patch.object(native, "image", return_value=dict(sha256="a"*64)), patch.object(native, "host_config", return_value=dict(self.config, ci_shared_host_guard=True)):
+            value = native.stage(self.root, "private-test-jit")
+        self.assertTrue(value["shared_host_guard"])
+        self.assertTrue((self.root / "control/admission-required").exists())
+
+    def test_shared_host_admission_requires_fresh_explicit_permission(self):
+        control = self.root / "control"
+        with patch.object(native_inside, "LINK", control):
+            self.assertTrue(native_inside.admitted(now=100))
+            (control / "admission-required").touch()
+            self.assertFalse(native_inside.admitted(now=100))
+            for value in ({"allowed":False,"at":100}, {"allowed":True,"at":80}, {"allowed":True,"at":101}, {"allowed":True}, {"allowed":1,"at":100}):
+                store.atomic(control / "admission.json", value)
+                self.assertFalse(native_inside.admitted(now=100))
+            store.atomic(control / "admission.json", dict(allowed=True,at=100))
+            self.assertTrue(native_inside.admitted(now=100))
+
+    def test_job_identity_is_durable_before_waiting_for_shared_admission(self):
+        def wait():
+            records,_ = native.hook_lines(self.root)
+            self.assertEqual(json.loads(records[0])["run_id"], "12345")
+        with patch.object(native_inside, "LINK", self.root / "control"), patch.dict(os.environ, GITHUB_RUN_ID="12345"), patch.object(native_inside, "wait_admission", side_effect=wait) as pause:
+            native_inside.hook("ci_started")
+        pause.assert_called_once()
 
     def test_shared_records_cannot_read_host_symlinks_or_block_on_fifo(self):
         target = self.root / "control/native-progress.json"

@@ -97,6 +97,7 @@ def configure(payload):
         "ci_memory_gib",
         "ci_disk_gib",
         "ci_max_jobs",
+        "ci_shared_host_guard",
         "ci_kinds",
         "github_account",
         "author_model",
@@ -106,6 +107,8 @@ def configure(payload):
         "ci_broker_url",
     }
     updates = {k: v for k, v in payload.items() if k in allowed}
+    if "ci_shared_host_guard" in updates and type(updates["ci_shared_host_guard"]) is not bool:
+        raise FleetError("ci_shared_host_guard must be a boolean")
     if "ci_broker_url" in updates:
         from .broker import validate_url
 
