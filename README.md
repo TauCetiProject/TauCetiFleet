@@ -59,8 +59,10 @@ does not require a workers-only host to obtain virtualization access. Missing
 lingering produces a persistence limitation and the request
 `loginctl enable-linger USER`; the installer does not attempt that privileged
 operation. Existing administrator resource allocations remain authoritative.
-Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
-in the account's PATH. Missing tools block worker activation with a remedy.
+Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and the
+profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PATH,
+plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
+tools block worker activation with a remedy.
 
 An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 --machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
@@ -121,10 +123,45 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 ```
 
 Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
-and effort are independent settings. Version 1 profiles use Claude API billing.
+and effort are independent settings.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
+
+Profiles default to Claude API billing. These optional keys describe a fleet on
+Claude or Codex subscriptions; each applies to every worker slot:
+
+```json
+{
+  "subscription": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "agent": "auto",
+    "sandbox": "bubble",
+    "pace": "0:10,50:70,90:90",
+    "env": {"TAUCETI_OVERLAP_BATCH_COMMITS": "80"}
+  }
+}
+```
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
+| `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
+| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
+| `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
+| `progress_repo` | The TauCetiProgress repository progress rounds run, as `OWNER/NAME`; written to each worker's `env` as `TAUCETI_PROGRESS_REPO` | the worker's pin |
+| `progress_ref` | The revision of it, as a full commit id; written as `TAUCETI_PROGRESS_REF` | the worker's pin |
+
+A subscription profile carries no model credential. Sign in to `claude` or
+`codex` as the host account before enabling workers; each worker copies that
+login into its own home once and keeps following that location. Like a model change, changing any of these keys on an
+active host requires a drain before repeating `add`. A key removed from the
+profile returns to its default.
+
+`slots` gives groups of slots their own agent and work phases in place of one
+agent for all; see [Slot groups](#slot-groups).
 
 ## Protected roadmap capacity
 
@@ -206,7 +243,7 @@ it restarts only that controller's main process via its existing systemd restart
 policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
-fleet weight 10. Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
+fleet weight 10 (except bubble containers; see `sandbox`). Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
 reserved workspace RAM. The default VM shape for staging/mixed registrations is
 32 vCPUs / 64 GiB, with 2 GiB additional host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
@@ -216,7 +253,7 @@ exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
 scheduling overhead. By default, CI and workers share a parent memory ceiling
-that preserves host OS headroom. An explicit
+that preserves host OS headroom; bubble containers are outside it. An explicit
 `--ci-memory-budget-gib N` additionally bounds the whole CI child slice at N GiB and permits
 guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
 completions and memory events when choosing concurrency. Workers use currently
@@ -577,7 +614,8 @@ tauceti-fleet budget
 These wrap the existing local grant ledger. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
-Queries can aggregate hosts. Workers on a host share its budget. Estimated
+Queries can aggregate hosts. API-billed workers on a host share its budget;
+subscription workers do not draw on it. Estimated
 session costs reserve funds before launch; receipts settle actual costs. Credits
 accumulate while idle. Grants govern admissions, not a hard billing cap, and
 active sessions may settle into a deficit.
@@ -789,6 +827,89 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Slot groups
+
+Every worker slot runs the profile's agent through the worker's full rotation of
+work phases unless the profile divides the slots into groups, each with a count,
+an agent, and optionally the phases it is limited to:
+
+```json
+{
+  "mixed": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "slots": [
+      {"count": 6, "agent": "auto"},
+      {"count": 2, "agent": "claude", "roles": ["review"]},
+      {"count": 1, "agent": "codex", "roles": ["progress"]}
+    ]
+  }
+}
+```
+
+`roles` takes the worker's phase names: `rebase`, `bump`, `lint-repair`,
+`progress`, `fix-ci`, `fix`, `review`, `overlap-fix`, `overlap-scan`, and
+`roadmap`. A group without `roles` runs the full rotation, and one without
+`agent` uses the profile's. Fleet writes each group as the `agent` and `only`
+keys of its workers' definitions and holds every group to the profile's other
+keys: API billing admits only `claude` groups, and an `auto` group excludes
+`author_model` and `author_effort`. `doctor` checks the agent CLI of every group.
+
+A group whose phases include `progress` can also carry the worker's progress
+report settings, which Fleet writes under the same names on that group's
+workers:
+
+```json
+{"count": 1, "agent": "codex", "roles": ["progress"],
+ "progress_strategy": "threshold", "progress_max_open": 3, "progress_skip": ["Sandbox"]}
+```
+
+`progress_strategy` takes `threshold`, `progress_max_open` a positive integer,
+and `progress_skip` a list of roadmap directory names; the worker's reference
+describes each. They need a TauCetiWorker release that reads these keys (an
+older one refuses the whole `workers.toml`) and, for `threshold`, a
+`progress_ref` whose `plan` has the strategy. `progress_repo` and `progress_ref`
+are profile keys and apply to every worker on the host. The longest wait
+between two `threshold` plans is the worker's `TAUCETI_PROGRESS_POLL`, set
+through `env`.
+
+The same list can be read and replaced on a running host, without a drain:
+
+```sh
+tauceti-fleet slots big-server            # the groups, their workers, and how many are admitted
+tauceti-fleet slots big-server --group 4:auto --group 4:claude:review --group 1:codex:progress
+tauceti-fleet slots big-server --clear    # every slot alike again
+```
+
+Each `--group` is `COUNT:AGENT[:ROLE,ROLE...][:KEY=VALUE...]`; an empty agent,
+as in `2::review`, keeps the profile's. A further setting follows as
+`KEY=VALUE`, a list joined by commas:
+`1:codex:progress:progress_strategy=threshold:progress_skip=Sandbox,Drafts`.
+The groups given replace the saved list.
+Repeating `add` applies the profile's `slots` the same way when the profile has
+the key, and leaves the host's groups alone when it does not.
+
+Worker ids stay positional (`fleet-<machine>-<n>`). An edit keeps every worker
+in a group that still describes it and rewrites only the definitions that
+change group: going from the profile above to the command above rewrites two of
+the nine. The worker manager holds a changed `agent` or `only` until that
+worker's round ends; this needs a TauCetiWorker release that defers those two
+edits, and an older one restarts the changed workers at once. A changed
+progress setting restarts that group's workers at once under either. Fleet
+admits a worker whose agent or phases were rewritten, including by `--clear`,
+only once its live status shows the new ones, so one that has not started yet
+waits for its first pass after it does. A group that shrinks gives up
+admissions and keeps its definitions, as lowering
+`workers --max` does, and a group that grows later takes those definitions
+before any is added.
+
+The counts say how many slots exist; `workers --max` remains the admission
+ceiling, so raise it when the groups total more. A ceiling below the total
+admits each group within one slot of its proportional share, and raising the
+ceiling only adds slots: a ceiling of five on the profile above admits three
+`auto` slots, one reviewer, and the progress slot. [Roadmap focus](#roadmap-focus)
+takes its share from the admitted slots whose phases include `roadmap`.
 
 ## Public operations telemetry
 
