@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -144,6 +145,118 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "JSON object"):
             host.configure(dict(credentials=[]))
 
+    def secrets(self):
+        for name in ("key", "token"):
+            (self.root / name).write_text(name + "-secret")
+            (self.root / name).chmod(0o600)
+        return dict(github_account="operator", anthropic_api_key_file=str(self.root / "key"),
+                    github_token_file=str(self.root / "token"))
+
+    def test_api_profile_worker_definitions_keep_their_exact_text(self):
+        store.atomic(store.config_dir() / "profiles.json", {"api": dict(self.secrets(), author_model="model")})
+        payload = remote.profile("api")
+        self.assertEqual(payload["credentials"], {"anthropic_api_key_file": "key-secret", "github_token_file": "token-secret"})
+        store.update_host(max_workers=1)
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="api", ci_allowed=False))
+        (wid,) = host.worker_config(store.host_config())
+        self.assertEqual(
+            (store.config_dir() / "workers.toml").read_text(),
+            f'version = 1\n\n[[workers]]\nid = "{wid}"\nagent = "claude"\nmax_open_prs = 8\nclaude_billing = "api"\n'
+            f'budget = true\ngithub_account = "operator"\nanthropic_api_key_file = "{store.config_dir() / "secrets/anthropic_api_key_file"}"\n'
+            'author_model = "model"\n',
+        )
+
+    def test_subscription_profile_transfers_no_api_key_and_writes_no_budget(self):
+        import tomllib
+
+        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70",
+                     env={"TAUCETI_OVERLAP_BATCH_COMMITS": "80", "A": 'quoted "value"'})
+        store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
+        payload = remote.profile("subscription")
+        self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
+        store.update_host(max_workers=2, anthropic_api_key_file="/private/earlier-api-key")
+        with patch.object(host, "install_service"):
+            host.configure(dict(payload, profile="subscription", ci_allowed=False))
+        host.worker_config(store.host_config())
+        workers = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(workers), 2)
+        for worker in workers:
+            self.assertEqual({k: worker[k] for k in shape}, shape)
+            self.assertFalse({"budget", "anthropic_api_key_file"} & set(worker))
+        with (
+            patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+            patch.object(capabilities, "executable", return_value=None),
+            patch.object(capabilities.os, "open", side_effect=PermissionError),
+        ):
+            checks = {c["name"]: c for c in capabilities.doctor(store.host_config(), probe=False)["checks"]}
+            defaults = {c["name"] for c in capabilities.doctor(dict(store.host_config(), agent=None, claude_billing=None, sandbox=None), probe=False)["checks"]}
+        for tool in ("claude", "codex", "bubble", "incus"):
+            self.assertEqual(checks["worker-tool-" + tool]["status"], "blocked")
+            self.assertEqual(checks["worker-tool-" + tool]["roles"], ["workers"])
+        self.assertNotIn("anthropic_api_key_file", checks)
+        self.assertIn("anthropic_api_key_file", defaults)
+        self.assertFalse({"worker-tool-codex", "worker-tool-bubble", "worker-tool-incus", "worker-sandbox-bubble"} & defaults)
+        bubble = checks["worker-sandbox-bubble"]
+        self.assertEqual((bubble["status"], bubble["roles"]), ("warning", ["workers"]))
+        self.assertIn("outside tauceti-fleet-workers.slice", bubble["evidence"])
+
+    def test_profile_rejects_what_the_worker_rejects_and_changes_only_while_drained(self):
+        store.host_config()
+        rejected = [
+            dict(agent="codex"),
+            dict(agent="auto"),
+            dict(agent="kiro", claude_billing="subscription"),
+            dict(claude_billing="oauth"),
+            dict(pace="0:10"),
+            dict(claude_billing="subscription", pace="50"),
+            dict(claude_billing="subscription", pace="0:10,0:20"),
+            dict(claude_billing="subscription", pace="120:10"),
+            dict(claude_billing="subscription", agent="auto", author_model="model"),
+            dict(claude_billing="subscription", agent="auto", author_effort="high"),
+            dict(sandbox="vm"),
+            dict(env=["A=1"]),
+            dict(env={"A": 1}),
+            dict(env={"A-B": "1"}),
+            dict(env={"A": "line\nbreak"}),
+            dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
+            dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
+            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
+            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
+                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
+            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
+              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
+            dict(env={"A": "x" * 16384}),
+        ]
+        with patch.object(host, "install_service"):
+            for shape in rejected:
+                with self.assertRaises(store.FleetError, msg=shape):
+                    host.configure(shape)
+            self.assertFalse({"agent", "claude_billing", "sandbox", "pace", "env"} & set(store.host_config()))
+            host.configure(dict(claude_billing="subscription", agent="codex", author_model="model"))
+            store.update_host(workers_enabled=True)
+            host.configure(dict(claude_billing="subscription", agent="codex"))
+            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(env={"A": "1"})):
+                with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
+                    host.configure(shape)
+            store.update_host(workers_enabled=False)
+            host.configure(dict(claude_billing=None, agent=None))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual((fields["agent"], fields["claude_billing"], fields["budget"]), ("claude", "api", True))
+
+    def test_profile_without_model_overrides_clears_the_saved_ones(self):
+        store.atomic(store.config_dir() / "profiles.json", {
+            "api": dict(self.secrets(), author_model="model", author_effort="high"),
+            "auto": dict(github_account="operator", claude_billing="subscription", agent="auto"),
+        })
+        with patch.object(host, "install_service"):
+            host.configure(dict(remote.profile("api"), profile="api", ci_allowed=False))
+            host.configure(dict(remote.profile("auto"), profile="auto"))
+        fields = host.worker_fields(store.host_config())
+        self.assertEqual(fields["agent"], "auto")
+        self.assertFalse({"author_model", "author_effort"} & set(fields))
+
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
             result = host.configure(dict(ci_allowed=False))
@@ -249,6 +362,209 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
+        self.assertEqual(store.read(store.state_dir() / "worker-manager.json"),
+                         dict(binary=launch.call_args.args[0], github_token_sha256=host.token_digest("fake-selected-token")))
+
+    FORGEJO_HALT = dict(halt_reason="forgejo:invalid-credentials",
+                        failure_reason="Forgejo https://git.example.org rejected the credential for user 3 (HTTP 401)")
+
+    def write_workers(self, forgejo=(), **states):
+        # A halt without `forgejo` uses the unqualified reason of a worker release before Forgejo checks.
+        for name, state in states.items():
+            row = dict(id=name, state=state, alive=state != "halted", detail="authoring", halt_reason=None)
+            if state == "halted":
+                row.update(halt_reason="account-halt", failure_reason="GitHub reports the account suspended", detail="rc=84")
+                if name in forgejo:
+                    row.update(self.FORGEJO_HALT)
+            store.atomic(store.state_dir() / "workers" / f"{name}.json", row)
+
+    def test_status_shows_a_halted_worker_with_its_reason_and_the_command_that_clears_it(self):
+        self.write_workers(w1="running")
+        unhalted = host.worker_statuses()
+        self.assertNotIn("halt_reason", unhalted[0])
+        self.write_workers(w2="halted", w3="halted", forgejo=("w3",))
+        workers = sorted(host.worker_statuses(), key=lambda w: w["id"])
+        self.assertEqual((workers[1]["halt_reason"], workers[1]["halt_forge"], workers[1]["failure_reason"]),
+                         ("account-halt", "github", "GitHub reports the account suspended"))
+        self.assertEqual((workers[2]["halt_reason"], workers[2]["halt_forge"]), ("forgejo:invalid-credentials", "forgejo"))
+        self.assertEqual(workers[0], unhalted[0])
+        entry = dict(machine_id="a", target="big")
+
+        def status(workers, *flags):
+            output = io.StringIO()
+            value = dict(machine_id="a", status=dict(workers=workers))
+            with (
+                patch.object(remote, "inventory", return_value={"big": entry}),
+                patch.object(remote, "call", return_value=value),
+                patch("sys.stdout", output),
+            ):
+                self.assertEqual(main(["status", *flags]), 0)
+            return output.getvalue()
+
+        text = status(workers)
+        self.assertIn("  w2: halted (GitHub account-halt) — GitHub reports the account suspended\n"
+                      "    Have GitHub lift the suspension or lock on the worker's account, then clear the halt: "
+                      "tauceti-fleet clear-halt big w2\n", text)
+        self.assertIn("  w3: halted (Forgejo invalid-credentials) — " + self.FORGEJO_HALT["failure_reason"] + "\n"
+                      "    Issue a new Forgejo token for the worker's user and write it to the file "
+                      "TAUCETI_FORGEJO_TOKEN_FILE names on the host, then clear the halt: tauceti-fleet clear-halt big w3\n",
+                      text)
+        self.assertNotIn("halt", status(unhalted))
+        self.assertEqual(json.loads(status(workers, "--json"))["big"]["status"]["workers"][1]["halt_reason"], "account-halt")
+
+    def test_clear_halt_clears_and_restarts_halted_workers_through_the_running_managers_runtime(self):
+        self.write_workers(w1="halted", w2="running", w3="halted")
+        store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/runtime/old/bin/tauceti"))
+        calls, active = [], 0
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            if args[0] == "systemctl":
+                return subprocess.CompletedProcess(args, active)
+            self.assertEqual(kwargs["env"]["TAUCETI_WORKERS_STATE_DIR"], str(store.state_dir() / "workers"))
+            self.assertEqual(kwargs["env"]["TAUCETI_RUNTIME_DIR"], str(store.state_dir() / "worker-runtime"))
+            # A worker without `workers clear-halt` rejects the subcommand.
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        def commands(*workers):
+            config = str(store.config_dir() / "workers.toml")
+            return [
+                ["/runtime/old/bin/tauceti", *tail]
+                for w in workers
+                for tail in (["work", "--worker-id", w, "--clear-halt"], ["workers", "--config", config, "restart", w])
+            ]
+
+        with patch.object(host, "run", side_effect=fake), patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"):
+            with self.assertRaisesRegex(store.FleetError, "w2 is not halted"):
+                host.rpc(dict(action="clear-halt", worker="w2"))
+            self.assertEqual(calls, [])
+            self.assertEqual(host.rpc(dict(action="clear-halt", worker="w3"))["cleared"], ["w3"])
+            self.assertEqual(calls[2:], commands("w3"))
+            del calls[:]
+            self.assertEqual(sorted(host.rpc(dict(action="clear-halt"))["cleared"]), ["w1", "w3"])
+            self.assertEqual(sorted(calls[2:]), sorted(commands("w1", "w3")))
+            del calls[:]
+            active = 3
+            with self.assertRaisesRegex(store.FleetError, "manager is not running"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual([c[0] for c in calls], ["systemctl"])
+            self.write_workers(w1="running", w3="running")
+            self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], [])
+            self.assertEqual(len(calls), 1)
+        entry = dict(machine_id="a", target="big")
+        with (
+            patch.object(remote, "inventory", return_value={"big": entry}),
+            patch.object(remote, "resolve", return_value=entry),
+            patch.object(remote, "call", return_value=dict(cleared=["w3"])) as call,
+            patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(main(["clear-halt", "big", "w3"]), 0)
+        self.assertEqual(call.call_args.args[1], dict(action="clear-halt", worker="w3"))
+
+    def test_clear_halt_uses_the_workers_own_clear_when_the_worker_offers_it(self):
+        self.write_workers(w1="halted")
+        store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/runtime/old/bin/tauceti"))
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch.object(host, "run", side_effect=fake):
+            host.rpc(dict(action="clear-halt"))
+        config = str(store.config_dir() / "workers.toml")
+        self.assertEqual(calls[1:], [
+            ["/runtime/old/bin/tauceti", "workers", "clear-halt", "--help"],
+            ["/runtime/old/bin/tauceti", "workers", "--config", config, "clear-halt", "w1"],
+            ["/runtime/old/bin/tauceti", "workers", "--config", config, "restart", "w1"],
+        ])
+
+    def test_clear_halt_without_a_record_uses_the_runtime_the_manager_process_runs(self):
+        # The manager started before Fleet recorded its runtime, and a live update has since moved
+        # the installed link to another runtime.
+        self.write_workers(w1="halted")
+        secret = self.root / "token"
+        secret.write_text("token-a\n")
+        store.update_host(github_token_file=str(secret))
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        argv = ["/runtime/old/bin/python", "/runtime/old/bin/tauceti", "workers", "--config", "w.toml", "manager"]
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
+            patch.object(host, "manager_process", return_value=(argv, dict(GH_TOKEN="token-a"))),
+        ):
+            host.rpc(dict(action="clear-halt"))
+        self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
+        self.assertIn(["/runtime/old/bin/tauceti", "work", "--worker-id", "w1", "--clear-halt"], calls)
+        del calls[:]
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
+            patch.object(host, "manager_process", return_value=None),
+        ):
+            with self.assertRaisesRegex(store.FleetError, "Cannot tell which worker runtime.*systemctl --user restart tauceti-fleet-workers.service"):
+                host.rpc(dict(action="clear-halt"))
+        self.assertEqual([c[0] for c in calls], ["systemctl"])
+
+    @unittest.skipUnless(Path("/proc/self/cmdline").exists(), "needs /proc")
+    def test_manager_process_reads_the_services_main_process(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "workers"],
+                                 env=dict(os.environ, GH_TOKEN="token-a"))
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        # A spawned child can still show its parent's command line for a moment after Popen returns.
+        deadline = time.monotonic() + 10
+        while b"time.sleep(30)" not in Path(f"/proc/{child.pid}/cmdline").read_bytes() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        shown = subprocess.CompletedProcess([], 0, f"{child.pid}\n")
+        with patch.object(host, "run", return_value=shown):
+            argv, environ = host.manager_process()
+        self.assertEqual(argv[1:], ["-c", "import time; time.sleep(30)", "workers"])
+        self.assertEqual(environ["GH_TOKEN"], "token-a")
+        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, "0\n")):
+            self.assertIsNone(host.manager_process())
+
+    def test_clear_halt_refuses_until_the_manager_has_read_a_replaced_token(self):
+        self.write_workers(w1="halted")
+        secret = self.root / "token"
+        secret.write_text("token-a")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        secret.write_text("token-b")
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append([str(a) for a in args])
+            return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
+
+        with patch.object(host, "run", side_effect=fake):
+            with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*"
+                                        "systemctl --user restart.*Workers in their own scopes keep running"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual([c[0] for c in calls], ["systemctl"])
+            with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+                host.run_workers()
+                self.assertEqual(os.environ["GH_TOKEN"], "token-b")
+            self.assertEqual(host.rpc(dict(action="clear-halt"))["cleared"], ["w1"])
+
+    def test_clear_halt_of_a_forgejo_halt_needs_no_manager_restart_for_a_replaced_github_token(self):
+        self.write_workers(w1="halted", w2="halted", forgejo=("w2",))
+        secret = self.root / "token"
+        secret.write_text("token-a")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        secret.write_text("token-b")
+        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(store.FleetError, "which w1 would restart with"):
+                host.rpc(dict(action="clear-halt"))
+            self.assertEqual(host.rpc(dict(action="clear-halt", worker="w2"))["cleared"], ["w2"])
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")

@@ -59,8 +59,10 @@ does not require a workers-only host to obtain virtualization access. Missing
 lingering produces a persistence limitation and the request
 `loginctl enable-linger USER`; the installer does not attempt that privileged
 operation. Existing administrator resource allocations remain authoritative.
-Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
-in the account's PATH. Missing tools block worker activation with a remedy.
+Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and the
+profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PATH,
+plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
+tools block worker activation with a remedy.
 
 An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 --machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
@@ -121,10 +123,82 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 ```
 
 Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
-and effort are independent settings. Version 1 profiles use Claude API billing.
+and effort are independent settings.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
 permissions, and `runner_group_id` selects the trusted group described below.
+`incidents` and `hold_declined` are described under [Attention](#attention).
+
+Profiles default to Claude API billing. These optional keys describe a fleet on
+Claude or Codex subscriptions; each applies to every worker slot:
+
+```json
+{
+  "subscription": {
+    "github_account": "operator",
+    "claude_billing": "subscription",
+    "agent": "auto",
+    "sandbox": "bubble",
+    "pace": "0:10,50:70,90:90",
+    "env": {"TAUCETI_OVERLAP_BATCH_COMMITS": "80"}
+  }
+}
+```
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
+| `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
+| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
+| `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
+| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
+
+With these keys alone a subscription profile carries no model credential. Sign
+in to `claude` or `codex` as the host account before enabling workers; each
+worker copies that login into its own home once and keeps following that
+location. Like a model change, changing any of these keys on an active host
+requires a drain before repeating `add`. A key removed from the profile returns
+to its default.
+
+Two more keys let a subscription profile carry the Claude sign-in, so the host
+account needs none of its own:
+
+```json
+{
+  "claude_token_file": "~/.config/tauceti-fleet/claude-setup-token",
+  "claude_usage_credentials_file": "~/.config/tauceti-fleet/claude-usage/.credentials.json"
+}
+```
+
+| Key | Holds | Lasts |
+| --- | --- | --- |
+| `claude_token_file` | The token `claude setup-token` prints. Every Claude agent on the host runs on it; it never rotates, so the workers share it | A year from when the file was saved |
+| `claude_usage_credentials_file` | The `.credentials.json` of an ordinary sign-in to the same account, made for one host's fleet alone: `CLAUDE_CONFIG_DIR=~/.config/tauceti-fleet/claude-usage claude auth login`. A setup-token cannot read subscription usage, so workers read their quota windows through this login and renew it themselves (`auto_refresh`). Requires `claude_token_file` | About four weeks from the sign-in |
+
+Both files must be private and are transferred like the other credentials. On
+the host they are stored under `secrets/claude/` and `secrets/claude-usage/` in
+the shape Claude Code reads, and `workers.toml` names only those paths
+(`CLAUDE_CONFIG_DIR`, `TAUCETI_CLAUDE_USAGE_CREDENTIALS`). `doctor` and `status`
+report the days left on each. The token gets a note thirty days before it
+expires and the usage login four days before it stops renewing, each with the
+command that replaces it; a lapsed one blocks worker activation.
+
+Renewing a login replaces its refresh token, so once a worker has renewed the
+usage login the operator's copy no longer works. A repeated `add` therefore
+leaves the host's login in place unless the profile's file holds a different
+sign-in. For the same reason a usage login renews on one host only: the
+setup-token may go to every host, but `add` records in
+`claude-usage-hosts.json` which host each usage login is sent to, before
+sending it and whether or not `add` then succeeds, and refuses it to any other,
+so give each host its own profile and sign-in. When the login is
+due, either sign in again on the operator's machine and repeat `add`, or run
+`tauceti-fleet claude-usage-login` on the host, which runs `claude auth login`
+for the stored login and records when, so `doctor` counts the four weeks from
+then; a profile may name a file the operator's machine does not hold when the
+host is signed in that way. Adding or removing either key takes a
+drained `add`; replacing a credential does not. A worker slot keeps the Claude
+credential directory it first ran with, so give a host these keys before its
+workers first start.
 
 ## Protected roadmap capacity
 
@@ -206,7 +280,7 @@ it restarts only that controller's main process via its existing systemd restart
 policy. Later updates use SIGHUP and preserve admission leases during re-exec.
 
 The host uses separate user slices: CI CPU weight 1000, the complete worker
-fleet weight 10. Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
+fleet weight 10 (except bubble containers; see `sandbox`). Disk-native PR jobs have a 54 GiB whole-job RAM cap and no
 reserved workspace RAM. The default VM shape for staging/mixed registrations is
 32 vCPUs / 64 GiB, with 2 GiB additional host overhead per job. `--max-jobs` sets one shared concurrency limit across
 PR and staging jobs; it defaults to one. `--ci pr`, `--ci staging`, or `--ci both`
@@ -216,7 +290,7 @@ exceed the host's CPU count: a quiet host lets a guest use up to its configured
 vCPUs, while concurrent guests share the available CPU. More vCPUs do not
 guarantee faster builds; excessive build parallelism can increase memory and
 scheduling overhead. By default, CI and workers share a parent memory ceiling
-that preserves host OS headroom. An explicit
+that preserves host OS headroom; bubble containers are outside it. An explicit
 `--ci-memory-budget-gib N` additionally bounds the whole CI child slice at N GiB and permits
 guest RAM overcommit. Accumulated guest memory use and simultaneous peaks can OOM guests; measure useful
 completions and memory events when choosing concurrency. Workers use currently
@@ -351,6 +425,39 @@ and memory-reclaim stalls do not reduce admissions: mostly network-bound API
 sessions can keep running while CI builds. CI has CPUWeight 1000 and workers 10. This prioritizes CPU contention; I/O and
 memory-bandwidth isolation are not provided. CI throughput must be measured
 under representative load; scheduling weights alone do not guarantee a runtime.
+
+A worker that TauCetiWorker stops for its identity on a forge is listed by
+`status` as `halted (<forge> <reason>)` with the worker's description and what
+to put right first. On GitHub the reasons are a login other than
+`github_account` (`identity-mismatch`), a rejected token (`invalid-credentials`)
+and a suspended or locked account (`account-halt`); on a Forgejo source they are
+a user other than `TAUCETI_FORGEJO_USER_ID`, a rejected token, and a refused
+account or a token without `read:user`. A worker release from before Forgejo
+identity checks writes the reason without its forge, which `status` reads as
+GitHub's. `status --json` carries `halt_reason`, `halt_forge` and
+`failure_reason` on that worker's entry under `status.workers`. The worker
+manager does not start a halted worker again by itself. Once the account is in
+order:
+
+```sh
+tauceti-fleet clear-halt big-server                    # every halted worker on the host
+tauceti-fleet clear-halt big-server fleet-1a2b3c4d-2   # one worker
+```
+
+For each worker this runs `tauceti workers clear-halt ID` (`tauceti work
+--worker-id ID --clear-halt` with a worker release that lacks it) and `tauceti
+workers restart ID` on the host, with the worker runtime the running manager was
+started from; it requires that manager to be running. A restarted worker gets its
+GitHub token from the manager, which reads `github_token_file` when it starts, so
+after that file is replaced `clear-halt` refuses for a GitHub halt until
+`systemctl --user restart tauceti-fleet-workers.service` has run on the host. That
+restart leaves scoped workers running (see below); a worker whose status shows
+degraded isolation runs inside the manager's service and its round ends with it.
+A Forgejo source reads the file `TAUCETI_FORGEJO_TOKEN_FILE` names at every
+identity check, so a Forgejo halt needs only `clear-halt` once that file holds
+the new token.
+A worker whose account is still wrong halts again. Worker releases without identity halts never
+report the state, and `clear-halt` then finds nothing to clear.
 
 Each worker runs in an independent systemd scope inside the same worker slice;
 memory remains pooled. A manager-service restart preserves scoped workers. Scope
@@ -577,7 +684,8 @@ tauceti-fleet budget
 These wrap the existing local grant ledger. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
-Queries can aggregate hosts. Workers on a host share its budget. Estimated
+Queries can aggregate hosts. API-billed workers on a host share its budget;
+subscription workers do not draw on it. Estimated
 session costs reserve funds before launch; receipts settle actual costs. Credits
 accumulate while idle. Grants govern admissions, not a hard billing cap, and
 active sessions may settle into a deficit.
@@ -789,6 +897,127 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Attention
+
+`attention` lists what on a host is waiting for a person:
+
+```sh
+tauceti-fleet attention                    # every enrolled host
+tauceti-fleet attention server1
+tauceti-fleet attention server1 --lookup   # ask each pull request's forge about it
+tauceti-fleet attention server1 --ack 412  # archive the records for pull request 412
+tauceti-fleet attention server1 --ack all
+tauceti-fleet attention --json
+```
+
+The list is built from three sources
+([`attention.py`](tauceti_fleet/attention.py)):
+
+- Halted workers: each worker reporting `halted`, with the forge and the reason
+  it names (`github:invalid-credentials`, `forgejo:identity-mismatch` and so on;
+  an unqualified reason from an older worker release is GitHub's), what to put
+  right on that forge, and the `clear-halt` command. A Forgejo token is replaced
+  in the file the worker's `TAUCETI_FORGEJO_TOKEN_FILE` names on the host.
+- Claude credentials: a profile's setup-token or usage login inside its notice
+  period, lapsed or missing, with the sign-in that replaces it.
+- The worker's incident records: a `rebase`, `fix` or `fix-ci` round that ended
+  with nothing on the forge (`declined`, with the agent's final message, the pull
+  requests it named and the transcript path), and a stage that has used its
+  attempts on a pull request head (`budget-spent`). The format is
+  TauCetiWorker's `docs/incidents.md`. A worker release without incident
+  records ignores the setting, and this source stays empty.
+
+The first two need no setting and leave the list by themselves, once the halt
+is cleared or the credential replaced; `--ack` applies to incident records only.
+
+A record names its pull request's forge, GitHub or a Forgejo instance. A Forgejo
+item, whose origin is the one the worker writes (HTTPS, or HTTP on a loopback
+host, IPv6 in brackets), is listed as `PR #412 on Forgejo <origin>` with its
+Forgejo link and an `ack id` such as
+`git.example.org/TauCetiProject/TauCeti#412`; so is a record of a GitHub
+repository other than the workers' own, with an id such as
+`TauCetiProject/TauCetiRoadmap#12`. `--ack` takes that id, and the bare number
+acknowledges only the workers' own GitHub repository. A record of any other
+forge is listed under its key and never looked up.
+
+Records are off until the host's profile sets `incidents`:
+
+```json
+{
+  "personal": {
+    "github_account": "operator",
+    "incidents": true,
+    "hold_declined": true
+  }
+}
+```
+
+With `incidents` true, every worker definition gets
+`TAUCETI_INCIDENTS_DIR=~/.local/state/tauceti-fleet/incidents` and
+`TAUCETI_HOLD_DECLINED=1` in its `env` table. The second variable keeps a stage
+off a pull request head that a `declined` record names, so a decline waits for a
+person and is not retried at that head; it also withholds the closure `fix`
+makes after spent attempts on that head. `hold_declined` false leaves it out:
+records are still written, and a declined head is retried until its attempts
+run out, each retry rewriting the record. Both keys change worker definitions,
+so on an active host they take the drained `add` that a model change takes. Set
+`incidents` to false to turn the records off; removing the key from the profile
+leaves the host as it was.
+
+`--ack` moves the matching live records into `incidents/acked/` and deletes
+nothing. An acknowledged `declined` record still holds its head, and an
+acknowledged `budget-spent` record is not written again for that head; delete
+the file to release either. When `acked/` already holds a record of the same
+name, that one is kept as `<name>.1`, `<name>.2` and so on, which the worker
+does not read, so only the latest acknowledged record holds a head. Each
+acknowledgement holds the directory's `.records.lock` while it does this, so
+overlapping ones run one after the other. `--ack` needs an explicit host.
+
+An item leaves the list by itself once its pull request is merged, closed or at
+a different head than the record names. The evidence is pull request state
+already on the host, read from the worker's prepared activity database, and only
+an observation from a later second than the record's `last_at`, which has
+whole-second resolution, counts; a `--lookup` answer is dated from when its
+request started. That database covers GitHub pull requests this host's workers
+opened, and is never matched against a Forgejo record. For the rest, `--lookup`
+asks the record's forge: GitHub with the host's credential, a Forgejo instance
+anonymously through its REST API, so a private Forgejo repository cannot be
+looked up. It asks once per listed pull request, once per pull request an item
+names until that one is known to be merged, or closed since the record was last
+written, and once per dropped record whose pull request has not merged, since it
+can reopen at the same head. That is at most 100 requests a call, each pull
+request asked about least recently first, so repeated calls reach every one. A
+forge that fails leaves the other's requests to go ahead and is asked after them
+in later calls, and a pull request its forge will not show (HTTP 404, or 403 on
+Forgejo) is reported and asked again in turn without stopping the rest of that
+forge. The answers are kept in `~/.local/state/tauceti-fleet/attention/`, where
+overlapping lookups keep, per pull request, the answer whose request started
+last; the worker's live record files are never rewritten. Nothing else in `attention`
+or `status` contacts a forge. `--ack all` also archives the records the list had
+already dropped.
+
+Once a minute the host controller moves the records whose pull request has
+merged into `incidents/acked/`, each with an `overtaken` field giving the time
+and `merged`; a record a person acknowledged has no such field. A record dropped
+because its pull request closed or moved to a new head stays live, since the
+pull request can come back to that head, and `--lookup` asks about it again.
+The controller makes no forge request for this: a record judged from a
+`--lookup` answer is moved on the next pass.
+
+In the same pass the controller counts the listed items, and `status` shows the
+count above the host's worker lines, with the command:
+
+```text
+Needs you: 4 items (1 budget-spent, 2 declined, 1 halted)
+  tauceti-fleet attention server1
+```
+
+A host with `incidents` unset shows the block only while a worker is halted or
+a credential is due.
+
+An incident directory Fleet cannot list is an error in `attention` and a
+`Needs you: unavailable` line in `status`, never an empty list.
 
 ## Public operations telemetry
 

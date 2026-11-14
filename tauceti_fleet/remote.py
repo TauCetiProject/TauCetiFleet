@@ -7,6 +7,7 @@ import shlex
 import zipfile
 from pathlib import Path
 
+from . import claude_credentials
 from .process import run
 from .store import FleetError, atomic, config_dir, locked, read
 
@@ -148,16 +149,26 @@ def profile(name):
         raise FleetError(f"Profile {name!r} does not exist; define it in {config_dir() / 'profiles.json'}")
     if value.get("ci_broker_url") or value.get("ci_broker_token_file"):
         raise FleetError("Machine-bound CI credentials cannot be deployed as a profile; use enroll HOST")
-    allowed = {"github_account", "max_open_prs", "author_model", "author_effort", "runner_group_id", "github_state_url"}
+    allowed = {"github_account", "max_open_prs", "runner_group_id", "github_state_url", "incidents", "hold_declined"}
     result = {k: v for k, v in value.items() if k in allowed}
+    # Always sent, so removing one of these keys from a profile returns the host to its default.
+    for key in ("author_model", "author_effort", "agent", "claude_billing", "sandbox", "pace", "env"):
+        result[key] = value.get(key)
+    for key in claude_credentials.KINDS:
+        result[key] = bool(value.get(key)) or None
     credentials = {}
-    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file"):
+    times = result["credential_times"] = {}
+    for name in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", *claude_credentials.KINDS):
+        if name == "anthropic_api_key_file" and result["claude_billing"] == "subscription":
+            continue
         if value.get(name):
             path = Path(value[name]).expanduser()
             if path.exists():
                 if path.stat().st_mode & 0o077:
                     raise FleetError(f"Credential file {path} is not private; use chmod 600")
                 credentials[name] = path.read_text().strip()
+                if name in claude_credentials.KINDS:
+                    times[name] = path.stat().st_mtime
     if "github_token_file" not in credentials and result.get("github_account"):
         token = run(["gh", "auth", "token", "--user", result["github_account"]], check=False)
         if token.returncode == 0:
@@ -230,7 +241,14 @@ def add(target, *, profile_name="ai-for-science", no_ci=False, preserve_profile=
     payload = dict(action="configure") if preserve_profile else dict(
         action="configure", profile=profile_name, ci_allowed=not no_ci, **profile(profile_name)
     )
-    status = call(target, payload, expected_machine_id=expected_machine_id)
+    usage = payload.get("credentials", {}).get(claude_credentials.USAGE)
+    if usage is None:
+        status = call(target, payload, expected_machine_id=expected_machine_id)
+    else:
+        machine = expected_machine_id or call(target, dict(action="status"))["machine_id"]
+        names = {entry["machine_id"]: name for name, entry in inventory().items()}
+        claude_credentials.reserve(machine, usage, names)
+        status = call(target, payload, expected_machine_id=machine)
     matching = remember(target, status, profile_name=status["profile"])
     readiness = call(target, dict(action="doctor"), expected_machine_id=status["machine_id"])
     return dict(host=matching, installed=status, doctor=readiness)
