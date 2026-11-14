@@ -80,6 +80,35 @@ class PoolActivity(unittest.TestCase):
         self.assertIn("unknown", row)
         self.assertNotIn("success", text)
 
+    def test_empty_unknown_pool_is_hidden_only_in_the_selected_display_scope(self):
+        unknown = copy.deepcopy(self.jobs["pool_activity"]["pools"][0])
+        unknown["pool"] = "unknown"
+        for category in ("builds", "all"):
+            unknown[category] = dict(running=0, waiting=0, latest_completion=None,
+                                    oldest_running=None, oldest_waiting=None,
+                                    windows=[dict(seconds=s, **dict.fromkeys(pools.OUTCOMES, 0))
+                                             for s in pools.WINDOWS])
+        self.jobs["pool_activity"]["pools"].append(unknown)
+
+        def unknown_rows(*, all_jobs=False):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                pools.display(self.report(), all_jobs=all_jobs, now=self.now)
+            return [line for line in output.getvalue().splitlines() if line.strip().startswith("unknown ")]
+
+        self.assertEqual(unknown_rows(), [])
+        self.assertEqual(self.report()["value"]["pools"][-1]["pool"], "unknown")
+        unknown["all"]["waiting"] = 1
+        self.assertEqual(unknown_rows(), [])
+        self.assertEqual(len(unknown_rows(all_jobs=True)), 1)
+        unknown["builds"]["running"] = 1
+        self.assertEqual(len(unknown_rows()), 1)
+        unknown["builds"]["running"] = 0
+        unknown["builds"]["windows"][0]["finished"] = 1
+        self.assertEqual(len(unknown_rows()), 1)
+        unknown["builds"]["windows"] = []
+        self.assertEqual(len(unknown_rows()), 1)
+
     def test_retained_aggregate_coverage_is_independent_of_capped_job_pages(self):
         self.jobs["pool_activity"]["coverage"] = "retained_observations"
         self.jobs["truncated"] = True
