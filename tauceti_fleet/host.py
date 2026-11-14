@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, shared_host, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -195,8 +195,8 @@ def worker_headroom(caps, *, ci_busy=False):
     return reserve
 
 
-def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
-    """Use presently spare RAM; retain a fixed host/swap emergency bound.
+def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False, share=1):
+    """Use this install's share of presently spare RAM; retain a fixed host/swap emergency bound.
 
     Workers and CI share the parent slice's hard ceiling, without a fixed RAM
     split. The soft bound tracks actual headroom. As CI or other host
@@ -207,17 +207,17 @@ def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
     maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
-    high = min(int(maximum * 0.95), max(pinned + GIB, pinned + caps["memory_available"] - reserve))
+    high = min(int(maximum * 0.95), max(pinned + GIB, pinned + int((caps["memory_available"] - reserve) * share)))
     return high, maximum
 
 
-def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
+def refresh_worker_memory(config, caps, memory, *, ci_busy=False, share=1):
     """Adjust the running slice without restarting work or blocking on reclaim."""
     if not caps["memory_total"]:
         memory["allocation_error"] = "Host memory measurement unavailable; retaining the last worker limit"
         return
     cg = Path(memory["cgroup"])
-    high, _ = worker_memory_limits(config, caps, memory["pinned"], ci_busy=ci_busy)
+    high, _ = worker_memory_limits(config, caps, memory["pinned"], ci_busy=ci_busy, share=share)
     maximum = memory["maximum"]
     high = min(high, int(maximum * 0.95))
     # Ignore sub-256 MiB movement. Opening nonblocking prevents synchronous
@@ -230,6 +230,47 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
         finally:
             os.close(fd)
     memory["high"] = int((cg / "memory.high").read_text())
+
+
+def host_share(config, heartbeat, *, ci_busy):
+    """This install's part of a machine that other accounts' installs also use; None without shared_host_dir."""
+    directory = config.get("shared_host_dir")
+    if not directory:
+        heartbeat.clear()
+        return None
+    # A paused or draining pool still holds memory, so it keeps its part while any worker lives.
+    workers = max(config["max_workers"] if config["workers_enabled"] else 0,
+                  sum(bool(w.get("alive")) for w in worker_statuses()))
+    return heartbeat.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
+
+
+def observed_ci_busy(slots, config):
+    """Whether a CI job runs in this install, from this machine's records and announcements alone."""
+    busy = []
+    for index in vm.slots_in_use():
+        try:
+            busy.append(bool(slots.setdefault(index, CISlot(index)).observe(config).get("busy")))
+        except (FleetError, OSError, ValueError, KeyError):
+            # An unreadable record may still belong to a running job.
+            busy.append(True)
+    return any(busy)
+
+
+def announced_ci_busy():
+    """Read-only twin of observed_ci_busy for the heartbeat thread: records and native start hooks.
+
+    A VM guest announces its start on a socket the controller loop owns, so that start
+    waits for the next cycle.
+    """
+    for index in vm.slots_in_use():
+        value = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
+        if value.get("busy"):
+            return True
+        if native_runner.is_native(value) and any(
+            str(json.loads(line).get("run_id", "")).isdigit() for line in native_runner.hook_lines(value["directory"])[0]
+        ):
+            return True
+    return False
 
 
 def write_slices(config, caps):
@@ -787,33 +828,7 @@ class CISlot:
                     value = {}
                     self.close()
                     self.next_vm = time.time() + 5
-        if value and self.client is None:
-            try:
-                self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                self.client.connect(str(Path(value["directory"]) / "events.sock"))
-                self.client.setblocking(False)
-            except OSError:
-                self.close()
-        if self.client:
-            try:
-                chunk = self.client.recv(16384)
-                if not chunk:
-                    self.close()
-                else:
-                    self.buffer = (self.buffer + chunk)[-65536:]
-            except BlockingIOError:
-                pass
-            except OSError:
-                self.close()
-            while b"\n" in self.buffer:
-                line, self.buffer = self.buffer.split(b"\n", 1)
-                try:
-                    notice = json.loads(line)
-                    if notice.get("kind") == "ci_started" and not value.get("run_id") and str(notice.get("run_id", "")).isdigit():
-                        value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
-                        atomic(path, value)
-                except (ValueError, AttributeError):
-                    pass
+        self.receive(value, path)
         if refresh:
             own = next((r for r in inventory if r["id"] == value.get("runner_id")), {})
             if value and own.get("status") == "online" and not value.get("online_observed_at"):
@@ -859,6 +874,45 @@ class CISlot:
                 value = ci_priority.persist(config, before, value)
         return value
 
+    def observe(self, config):
+        """The slot's record with job starts already announced on this machine, without asking GitHub."""
+        config = dict(config, ci_slot=self.index)
+        path = vm.slot_file(config, "vm.json")
+        value = read(path, {})
+        if value:
+            value = native_runner.reconcile_events(config, value)
+            self.receive(value, path)
+        return value
+
+    def receive(self, value, path):
+        if value and self.client is None:
+            try:
+                self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.client.connect(str(Path(value["directory"]) / "events.sock"))
+                self.client.setblocking(False)
+            except OSError:
+                self.close()
+        if self.client:
+            try:
+                chunk = self.client.recv(16384)
+                if not chunk:
+                    self.close()
+                else:
+                    self.buffer = (self.buffer + chunk)[-65536:]
+            except BlockingIOError:
+                pass
+            except OSError:
+                self.close()
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                try:
+                    notice = json.loads(line)
+                    if notice.get("kind") == "ci_started" and not value.get("run_id") and str(notice.get("run_id", "")).isdigit():
+                        value.update(busy=True, run_id=int(notice["run_id"]), job_started_at=time.time())
+                        atomic(path, value)
+                except (ValueError, AttributeError):
+                    pass
+
 
 def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -891,10 +945,12 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        heartbeat = shared_host.Heartbeat(announced_ci_busy)
         previous_tasks = None
         while not stopping:
             config = host_config()
             try:
+                shared = host_share(config, heartbeat, ci_busy=observed_ci_busy(slots, config))
                 caps = resources()
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
@@ -941,7 +997,8 @@ def daemon():
                     if not ids or len(ids) < config["max_workers"]:
                         ids = worker_config(config)
                         start_workers()
-                reserve = worker_headroom(caps, ci_busy=busy)
+                host_busy = busy or bool(shared and shared["ci_busy"])
+                reserve = worker_headroom(caps, ci_busy=host_busy)
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
@@ -952,7 +1009,8 @@ def daemon():
                     memory["tasks"] = task_observation(memory.get("tasks") or {}, previous_tasks, time.time())
                     previous_tasks = memory["tasks"]
                     try:
-                        refresh_worker_memory(config, caps, memory, ci_busy=busy)
+                        refresh_worker_memory(config, caps, memory, ci_busy=host_busy,
+                                              share=shared["share"] if shared else 1)
                     except (OSError, ValueError) as exc:
                         # Retain the last applied limit and admissions on a transient
                         # tuning error; status keeps the operation and failure visible.
@@ -1017,6 +1075,7 @@ def daemon():
                         ci_staging_slots=capacity.reservation(config)[0],
                         ci_staging_reservation_error=capacity.reservation(config)[1],
                         ci_errors=slot_errors,
+                        **({"shared_host": shared} if shared else {}),
                     ),
                 )
                 error = None
@@ -1040,6 +1099,7 @@ def daemon():
                 if stopping:
                     break
                 time.sleep(0.5)
+        heartbeat.stop()
         if not handover:
             atomic(
                 state_dir() / "admission.json",

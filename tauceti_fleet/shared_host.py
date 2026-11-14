@@ -1,0 +1,147 @@
+"""Divide one machine between Fleet installs that run under different accounts."""
+
+import contextlib
+import json
+import os
+import stat
+import threading
+import time
+from pathlib import Path
+
+from .store import atomic
+
+LEASE = 15
+
+
+def problem(directory):
+    missing = "shared_host_dir must name an existing directory by its absolute path"
+    if not isinstance(directory, str) or not Path(directory).is_absolute():
+        return missing
+    try:
+        if not stat.S_ISDIR(os.stat(directory).st_mode):
+            return missing
+    except FileNotFoundError:
+        return missing
+    except OSError as exc:
+        return f"this account cannot reach {directory}: {type(exc).__name__}"
+    if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
+        return f"this account cannot read and write {directory}"
+    return None
+
+
+def peers(directory, machine_id, now=None):
+    """Unexpired claims of the other installs; each file is another account's input."""
+    now = time.time() if now is None else now
+    values = []
+    for path in Path(directory).glob("*.json"):
+        if path.stem == machine_id:
+            continue
+        try:
+            # A FIFO or a link left in the directory must not hold the controller.
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    continue
+                value = json.loads(os.read(fd, 4096))
+            finally:
+                os.close(fd)
+        except (OSError, ValueError, RecursionError):
+            continue
+        if (
+            isinstance(value, dict)
+            and value.get("version") == 1
+            and type(value.get("workers")) is int
+            and 0 <= value["workers"] <= 4096
+            and type(value.get("ci_busy")) is bool
+            and type(value.get("expires_at")) in (int, float)
+            and now < value["expires_at"] <= now + 2 * LEASE
+        ):
+            values.append(value)
+    return values
+
+
+def publish(directory, machine_id, *, workers, ci_busy, now):
+    atomic(
+        Path(directory) / (machine_id + ".json"),
+        dict(version=1, expires_at=now + LEASE, workers=workers, ci_busy=ci_busy),
+        mode=0o644,
+    )
+
+
+def step(directory, machine_id, *, workers, ci_busy, now=None):
+    """Publish this install's claim and return its part of the machine."""
+    now = time.time() if now is None else now
+    error = problem(directory)
+    others = []
+    if error is None:
+        try:
+            publish(directory, machine_id, workers=workers, ci_busy=ci_busy, now=now)
+        except OSError as exc:
+            error = f"cannot publish in {directory}: {type(exc).__name__}"
+        others = peers(directory, machine_id, now)
+    peer_workers = sum(value["workers"] for value in others)
+    return dict(
+        directory=str(directory),
+        workers=workers,
+        peers=len(others),
+        peer_workers=peer_workers,
+        share=workers / (workers + peer_workers) if peer_workers else 1,
+        ci_busy=any(value["ci_busy"] for value in others),
+        error=error,
+    )
+
+
+class Heartbeat:
+    """Renew the claim the controller last made while its cycle waits on the network or fails.
+
+    One cycle can block on GitHub or the broker for longer than LEASE, and a failed
+    cycle skips the claim; a CI job still running must keep the other installs' reserve.
+    `probe` reports a job that started since the cycle observed; it runs on this thread
+    beside the controller loop, so it may only read.
+    """
+
+    interval = LEASE / 3
+
+    def __init__(self, probe=None):
+        self.probe = probe
+        self.claim = None
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = None
+
+    def step(self, directory, machine_id, *, workers, ci_busy):
+        with self.lock:
+            self.claim = (directory, machine_id, dict(workers=workers, ci_busy=ci_busy))
+            if self.thread is None:
+                self.thread = threading.Thread(target=self.run, name="shared-host-heartbeat", daemon=True)
+                self.thread.start()
+            return step(directory, machine_id, workers=workers, ci_busy=ci_busy)
+
+    def clear(self):
+        with self.lock:
+            self.claim = None
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+
+    def run(self):
+        while not self.stopped.wait(self.interval):
+            with self.lock:
+                if self.claim is None:
+                    continue
+                directory, machine_id, claim = self.claim
+                if problem(directory) is None:
+                    ci_busy = claim["ci_busy"] or self.started()
+                    with contextlib.suppress(OSError):
+                        publish(directory, machine_id, workers=claim["workers"], ci_busy=ci_busy, now=time.time())
+
+    def started(self):
+        if self.probe is None:
+            return False
+        try:
+            return bool(self.probe())
+        except Exception:
+            # State the probe cannot read may belong to a running job, and this thread must survive it.
+            return True

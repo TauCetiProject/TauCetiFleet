@@ -426,6 +426,18 @@ def doctor(config=None, *, probe=True):
             "Worker supports live roadmap focus" if supported else "Installed worker ignores the configured roadmap focus",
             "Install a Worker release with roadmap_focus protocol support using a live update", roles=("workers",),
         )
+    if config.get("shared_host_dir"):
+        from . import shared_host
+
+        unusable = shared_host.problem(config["shared_host_dir"])
+        add(
+            "shared-host", "warning" if unusable else "ok",
+            unusable or f"{len(shared_host.peers(config['shared_host_dir'], config['machine_id']))} other installs "
+            f"publish in {config['shared_host_dir']}",
+            "Until this is repaired the install sizes its workers as if it had the machine to itself",
+            "Create the directory, writable by every fleet account, with the sticky bit set",
+            roles=("workers",),
+        )
     image = data_dir() / "images/prepared.json"
     add(
         "ci-image",

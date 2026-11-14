@@ -499,6 +499,66 @@ worker ceiling remains under the ordinary controller and budget checks. Queue
 overload, an OOM kill, disabled workers, or lost observations can explicitly
 pause new work. Stopping the experiment itself preserves the current ceiling.
 
+## Several installs on one machine
+
+Several Unix accounts can each run their own install on one machine: units,
+slices, state and the host identity all belong to the account. Each controller
+still measures the whole machine. Where an administrator limits each account's
+user slice, every install already sizes itself inside its own limit. Without
+administrator access, the installs can divide the machine among themselves by
+naming one directory in each account's `host.json`:
+
+```json
+{"shared_host_dir": "/srv/tauceti-fleet-shared"}
+```
+
+The running controller picks the setting up at its next five-second cycle, with
+no restart; removing it returns the install to sizing itself alone. The directory
+must already exist and be writable by every fleet account. Fleet never creates
+it or changes its permissions. Set the sticky bit so that no account can replace
+another's file, use the directory for nothing else, and keep it on local storage:
+it is read and written inside the controller loop.
+
+Each cycle the controller writes `<machine_id>.json` there, mode 0644:
+
+```json
+{"version": 1, "expires_at": 1762750000.0, "workers": 8, "ci_busy": false}
+```
+
+`workers` is the install's worker ceiling while workers are enabled, or the
+number of its workers still alive if that is larger. `ci_busy` reports a CI job
+running in that install. A claim expires after 15 seconds, so an install whose
+controller has stopped drops out. Each cycle starts by publishing the claim from
+the install's own job records and the job starts its guests have announced,
+before any request to GitHub, and a background thread renews it every five
+seconds, so a cycle that waits on GitHub or fails keeps a running CI job's claim
+alive. Each renewal also marks CI busy when a job record or a native runner's
+start hook shows a job that began during the wait; a VM guest's start, and the
+end of any job, show at the next cycle. The other installs' claims change two
+decisions:
+
+- The worker soft memory limit grows by the install's share of spare RAM, its
+  `workers` over the sum of everyone's, where an install alone grows by all of
+  it. The share is of the RAM spare at that moment and is recomputed each cycle,
+  so RAM that an idle install leaves unused goes to the others over successive
+  cycles.
+- A CI job in any install raises the worker reserve in all of them to the
+  compiler gate's headroom, as an install's own CI does.
+
+Everything else stays per install. Each account's `tauceti-fleet.slice` keeps
+its own hard limit of host RAM minus the OS reserve, so across accounts the
+reserve rests on the soft limits and on every install pausing at the same
+measurement. Each install admits its own `max_workers`; choose ceilings that fit
+the machine together. CI compiler permits, the ten-second spacing of guest
+starts and guest sizes are per install, and CPU weights rank CI above workers
+only inside one account. Lean starts on workers need no claim: each waits on
+machine-wide CPU use and available RAM. Claims are taken on trust: an account
+that publishes a false one can hold the other installs' workers back.
+
+`status` shows the number of other installs, their workers and this install's
+share; `doctor` adds a `shared-host` check. An unusable directory appears in
+both, and until it is repaired the install sizes itself alone.
+
 ## GitHub CI setup
 
 The controller reconciles each guest with the existing GitHub runner inventory.
