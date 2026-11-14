@@ -583,6 +583,41 @@ print(loads.call_count)
         roles = {wid.rsplit("-", 1)[1]: role for wid, role in host.written_roles().items()}
         self.assertEqual(roles["256"], ("auto", ["progress"]))
 
+    def test_progress_settings_survive_the_shared_layout_in_another_process_and_in_this_one(self):
+        store.update_host(workers_enabled=True, max_workers=8)
+        settings = ":progress_strategy=threshold:progress_max_open=3:progress_skip=Drafts,Sandbox"
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:auto"), slot_groups.parse("2:codex:progress" + settings)]))
+        self.definitions()
+        # The group shrinks: worker 3 is outside every group and keeps its definition.
+        host.rpc(dict(action="slots", groups=[slot_groups.parse("1:auto"), slot_groups.parse("1:codex:progress" + settings)]))
+        _, workers = self.definitions()
+        progress = dict(progress_strategy="threshold", progress_max_open=3, progress_skip=["Drafts", "Sandbox"])
+        self.assertEqual({n: {k: w[k] for k in progress if k in w} for n, w in workers.items()},
+                         {1: {}, 2: progress, 3: progress})
+        path = store.config_dir() / "workers.toml"
+        text, signature = path.read_text(), host.manifest_signature()
+        summary = store.read(store.state_dir() / "worker-summary.json")
+        self.assertEqual(summary["workers"][2], dict(id=workers[3]["id"], agent="codex", only=["progress"], **progress))
+        writer = """
+import tomllib
+from unittest.mock import patch
+from tauceti_fleet import host, store
+with patch("tomllib.loads", side_effect=tomllib.loads) as loads:
+    plan, _ = host.worker_plan(store.host_config())
+    host.worker_config(store.host_config())
+print(loads.call_count, [group for _, _, group in plan])
+"""
+        result = subprocess.run([sys.executable, "-c", writer], cwd=Path(__file__).parents[1],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(None, 1), ["0", "[0, 1, None]\n"])
+        self.assertEqual((path.read_text(), host.manifest_signature()), (text, signature))
+        host._written.update(key=None)
+        with patch("tomllib.loads", side_effect=tomllib.loads) as loads:
+            ids = host.worker_config(store.host_config())
+        self.assertEqual(loads.call_count, 0)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual((path.read_text(), host.manifest_signature()), (text, signature))
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (

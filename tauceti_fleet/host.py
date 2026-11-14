@@ -413,9 +413,9 @@ def manifest_signature():
     return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
-# The id, agent and phases of each written definition, and the last plan
-# written, each kept with the manifest signature (and saved configuration) it
-# was built from.
+# The SUMMARY_KEYS of each written definition, and the last plan written,
+# each kept with the manifest signature (and saved configuration) it was built
+# from.
 _manifest = dict(signature=None, workers=[], roles={})
 _written = dict(key=None, ids=[])
 # What a later layout reads back from a written definition: its place, agent and each slot-group key.
@@ -423,7 +423,7 @@ SUMMARY_KEYS = ("id", "agent", *(name for name, *_ in slot_groups.KEYS.values())
 
 
 def written_workers():
-    """id, agent and only of each definition in workers.toml.
+    """The SUMMARY_KEYS of each definition in workers.toml.
 
     Other processes share them through a summary keyed by the manifest's
     signature, which any change to the file (a hand edit included) invalidates;
