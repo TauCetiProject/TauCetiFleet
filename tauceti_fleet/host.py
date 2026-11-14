@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, mathlib_store, native_runner, vm
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -343,6 +343,25 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
+def start_mathlib_store():
+    argv = " ".join(unit_argument(a) for a in [*command(), "warm-mathlib-store"])
+    environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"), PYTHONPATH=RUNNING_RELEASE)
+    for name in ("TAUCETI_FLEET_CONFIG", "TAUCETI_FLEET_STATE", "TAUCETI_FLEET_DATA"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    # A sibling of the CI and worker slices: it yields CPU to CI, and what it
+    # unpacks is not charged to the workers' memory limit. The umask keeps
+    # entries readable inside the containers that mount them.
+    (units() / mathlib_store.UNIT).write_text(
+        "[Unit]\nDescription=TauCeti fleet Mathlib store\n\n[Service]\nType=oneshot\nExecStart=" + argv
+        + "\nSlice=tauceti-fleet.slice\nCPUWeight=10\nNice=10\nUMask=0022\nTimeoutStartSec=8h\n"
+        + "".join("Environment=" + unit_argument(k + "=" + v) + "\n" for k, v in environment.items())
+    )
+    run(["systemctl", "--user", "daemon-reload"])
+    # A pass still running absorbs this start.
+    run(["systemctl", "--user", "start", "--no-block", mathlib_store.UNIT])
+
+
 def run_workers():
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
@@ -364,6 +383,8 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
+    if mathlib_store.enabled(config):
+        os.environ["TAUCETI_MATHLIB_STORE"] = str(mathlib_store.mounted(config))
     os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -891,6 +912,7 @@ def daemon():
         ids = []
         last_results = 0
         memory_paused = False
+        store_warmer = mathlib_store.Warmer(start_mathlib_store)
         previous_tasks = None
         while not stopping:
             config = host_config()
@@ -1036,6 +1058,7 @@ def daemon():
                 )
                 for slot in slots.values():
                     slot.next_vm = max(slot.next_vm, time.time() + 60)
+            store_warmer.step(config, time.time())
             for _ in range(10):
                 if stopping:
                     break
@@ -1133,6 +1156,14 @@ def rpc(payload):
         result["status"] = read(state_dir() / "status.json", {})
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
+    if action == "mathlib-store":
+        result = mathlib_store.configure(payload)
+        if result["mathlib_store"] and "directory" in payload:
+            try:
+                start_mathlib_store()
+            except (FleetError, OSError):
+                pass  # The controller starts a pass within its usual interval.
+        return result
     if action == "status":
         config = host_config()
         pressure = read(state_dir() / "lean-host-pressure.json", {})
@@ -1157,5 +1188,6 @@ def rpc(payload):
             status=read(state_dir() / "status.json", {}),
             activity=activity.cached(config["machine_id"]),
             ci_overview=ci_overview.cached(config),
+            **({"mathlib_store": mathlib_store.cached(config)} if config.get("mathlib_store") else {}),
         )
     raise FleetError("Unknown host operation")

@@ -12,7 +12,7 @@ def executable(name):
     return str(local) if local.is_file() else shutil.which(name)
 
 
-def run(args, *, input=None, timeout=30, check=True, env=None):
+def run(args, *, input=None, timeout=30, check=True, env=None, cwd=None):
     try:
         result = subprocess.run(
             [str(v) for v in args],
@@ -21,6 +21,7 @@ def run(args, *, input=None, timeout=30, check=True, env=None):
             text=not isinstance(input, bytes),
             timeout=timeout,
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         raise FleetError(f"Required executable {args[0]} is missing; run tauceti-fleet doctor") from None

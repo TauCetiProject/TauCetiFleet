@@ -499,6 +499,98 @@ worker ceiling remains under the ordinary controller and budget checks. Queue
 overload, an OOM kill, disabled workers, or lost observations can explicitly
 pause new work. Stopping the experiment itself preserves the current ceiling.
 
+## Mathlib store
+
+A host whose workers run rounds in the `bubble` sandbox can keep one built
+Mathlib per pinned revision for every container to mount read-only, in place of
+each round unpacking its own copy:
+
+```sh
+tauceti-fleet mathlib-store big-server --dir /srv/fleet/mathlib-store
+tauceti-fleet mathlib-store big-server           # show the saved setting
+tauceti-fleet mathlib-store big-server --clear   # stop maintaining it
+```
+
+The host saves this as `mathlib_store` in `host.json`, unset by default, and
+refuses it unless the profile's `sandbox` is `bubble`, since only Bubble rounds
+mount the store; a saved setting does nothing while the sandbox is anything
+else. Saving it needs no drain. `DIR` holds three directories on one filesystem:
+`DIR/store`, the store itself, which is all that containers see; `DIR/staging`,
+where an entry is built, and where an entry being removed is moved before it is
+deleted, so an interrupted removal leaves nothing in the store; and
+`DIR/downloads`, for Mathlib's archives.
+
+While the setting is present, a background pass runs when the setting is saved,
+when the controller starts and every 30 minutes after that. The pass is its own
+user unit, `tauceti-fleet-mathlib-store.service`, placed in `tauceti-fleet.slice`
+beside the CI and worker slices with a CPU weight of 10; the controller loop
+starts it and never waits for it. One pass:
+
+- Finds the Mathlib revision and Lean toolchain pinned by TauCeti `main` and by
+  each open pull request of this host's workers. The pull requests come from the
+  worker's prepared inventory (`tauceti activity --inventory`), a local read. One
+  `git fetch` then brings `main` and the pull-request heads that moved since the
+  last pass into a shallow, blobless cache under Fleet's data directory, and
+  `lake-manifest.json` and `lean-toolchain` are read from it; a version of
+  either file the cache has not seen costs one more fetch. If a head is no longer
+  on the remote, `main` and each moved head are fetched separately. A pull
+  request whose pin files cannot be read keeps the revision the last pass found
+  for it. A pull request the inventory lists without an observed state or head,
+  or last observed open more than 30 minutes ago, is read from its pull-request
+  ref as if open, and makes the check incomplete.
+  The pass makes no GitHub API requests.
+- Builds only trusted revisions. Building runs code from the Mathlib checkout
+  (its Lake configuration and the `cache` program) as the Fleet account, and
+  GitHub serves commits of forks' pull requests through the Mathlib repository
+  too, so a revision is trusted only if it is in the history of Mathlib's
+  `master` branch (an ancestor of it, or its tip), the branch TauCeti's
+  `lakefile.toml` names. This is decided on a local commits-only clone of
+  `master` under Fleet's data directory, fetched when a revision is missing,
+  never by asking the server for the pinned commit. A revision that is not
+  trusted is not built and is listed in `status` as untrusted with the pull
+  requests that pin it; it does not hold up or remove other entries.
+- Publishes each trusted pinned revision that is missing as `DIR/store/<revision>/`, an
+  entry of the worker's
+  [read-only Mathlib store](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/mathlib-store.md):
+  a shallow Mathlib checkout made under `DIR/staging`, in which it runs
+  `lake exe cache get` and `lake build --no-build Mathlib` with
+  `LAKE_ARTIFACT_CACHE` unset, writes `.tauceti-store-ready` last and renames the
+  checkout into the store. A failed attempt publishes nothing and is retried by
+  the next pass.
+- Withdraws an entry when a check finds its revision unpinned, by deleting its
+  `.tauceti-store-ready` so that no new round links it, and removes the entry
+  three hours later: twice the worker's default `TAUCETI_ROUND_TIMEOUT`, or twice
+  the value the profile's `env` gives its workers if that is larger, so that
+  rounds that linked it before the withdrawal have ended. If any check finds
+  the revision pinned again before then, the marker is written back and the
+  entry serves rounds again without a rebuild. Only a complete check, one that
+  read the pins of `main` and every open pull request, withdraws or removes
+  anything; after any failed read the pass does neither. An entry whose
+  marker someone else deleted is removed that long after the deletion, by a
+  complete check, and, if still pinned, built again.
+
+An entry takes about 7 GB. No build starts while the filesystem has less than
+20 GiB free; when `DIR/downloads` is what leaves less, it is deleted and the
+build goes ahead if that freed enough. Downloaded archives otherwise stay in
+`DIR/downloads` until every trusted pinned revision is published and are then
+deleted. The commits-only clone of Mathlib `master` holds commits and no files.
+One controller maintains a given directory.
+
+The worker manager sets `TAUCETI_MATHLIB_STORE` to `DIR/store` for the
+workers. It reads the setting when it starts, so a running
+manager keeps what it had. `--clear` stops the passes and leaves the directory
+and its contents in place.
+
+While the setting is present, `status` adds one line:
+
+```text
+Mathlib store: 1 of 2 pinned revisions ready (checked 4 min ago); building 0493595ecd (leanprover/lean4:v4.25.0; #1812, #1820)
+```
+
+A revision that could not be published is listed with the reason, as is one whose
+entry was built with a different toolchain from the head that pins it, which the
+worker does not link.
+
 ## GitHub CI setup
 
 The controller reconciles each guest with the existing GitHub runner inventory.
