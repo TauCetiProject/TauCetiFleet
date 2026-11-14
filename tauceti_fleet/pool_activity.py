@@ -165,6 +165,11 @@ def display(report, *, now=None, all_jobs=False):
         absent = "unknown" if value.get("partial") else "—"
         for pool in value["pools"]:
             builds = pool["all" if all_jobs else "builds"]
+            if (pool["pool"] == "unknown" and not any(builds[key] for key in (
+                    "running", "waiting", "latest_completion", "oldest_running", "oldest_waiting"))
+                    and len(builds["windows"]) == len(WINDOWS)
+                    and not any(window[key] for window in builds["windows"] for key in OUTCOMES)):
+                continue
             last = builds["latest_completion"]
             latest = age(last["completed_at"], now) + " " + (last["conclusion"] or "unknown") if last else absent
             windows = {window["seconds"]: window for window in builds["windows"]}
