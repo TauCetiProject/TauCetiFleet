@@ -64,6 +64,12 @@ def parser():
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--json", action="store_true")
+    schedule = sub.add_parser("schedule", help="admit new worker rounds only inside weekly time slots")
+    schedule.add_argument("host")
+    schedule.add_argument("slots", nargs="*", metavar="SLOT", help='for example "Mon 23:00 -> Thu 07:00"; omit to show the saved schedule')
+    schedule.add_argument("--timezone", help="IANA zone the slot times are in (default: the host's local time)")
+    schedule.add_argument("--clear", action="store_true")
+    schedule.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
     focus.add_argument("--percent", type=int)
@@ -226,6 +232,11 @@ def main(argv=None, *, _status_results=None):
                     payload["self_tested"] = args.self_tested
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "schedule":
+                slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
+                if (args.clear and slots) or (args.timezone and not slots):
+                    raise FleetError("Give --timezone together with slots, and --clear alone")
+                payload.update(dict(clear=True) if args.clear else dict(slots=slots, timezone=args.timezone) if slots else {})
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -411,6 +422,10 @@ def main(argv=None, *, _status_results=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    if status.get("worker_schedule"):
+                        from . import schedule
+
+                        print(schedule.describe(status["worker_schedule"]))
                     if status.get("roadmap_focus_error"):
                         print("Roadmap focus disabled: " + status["roadmap_focus_error"])
                     focus = status.get("roadmap_focus", {})

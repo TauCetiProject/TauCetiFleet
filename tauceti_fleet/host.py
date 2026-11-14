@@ -947,6 +947,12 @@ def daemon():
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
                 if lease_expired:
                     maximum = 0
+                from . import schedule
+
+                window = schedule.state(config)
+                outside = window.get("reason") if config["workers_enabled"] else None
+                if outside:
+                    maximum = 0
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
                     memory["tasks"] = task_observation(memory.get("tasks") or {}, previous_tasks, time.time())
@@ -960,7 +966,7 @@ def daemon():
                 pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
-                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
+                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else outside)
                 )
                 target, reason = scaler.step(
                     now=time.time(),
@@ -1001,6 +1007,7 @@ def daemon():
                         roadmap_focus_error=roadmap_focus.get("error"),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
+                        worker_schedule=window,
                         worker_memory=memory,
                         memory_pressure=pressure,
                         resources=caps,
@@ -1121,6 +1128,10 @@ def rpc(payload):
         return focus.configure(payload)
     if action == "workers":
         return set_worker_policy(payload)
+    if action == "schedule":
+        from . import schedule
+
+        return schedule.configure(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"])
     if action == "drain":
