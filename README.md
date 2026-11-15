@@ -966,3 +966,17 @@ sealed batches `sealed, waiting`. A sealed batch has fixed membership even when
 its preparation has finished; only unsealed batches receive incoming PRs.
 
 Enable locally verified PR labeling with `tauceti-fleet workers HOST --self-tested`, or disable it with `--no-self-tested`. This persists `self_tested = true` in the host’s generated worker definitions. Workers apply the `self-tested` label only after the normal successful local verification; reviews and staging tests remain required. Install a Worker release supporting `--self-tested` and hand over the running manager to that runtime, preserving worker scopes, before enabling this setting. The command checks the installed runtime and running manager for support. The admission ceiling and active rounds are preserved.
+
+Gradually move worker slots to Forgejo with `tauceti-fleet workers HOST --forgejo-workers 1`.
+The highest-numbered selected slots discover, maintain and author PRs on Forgejo using the ordinary
+worker source flags; remaining slots continue on GitHub. Set the count to `0` to return
+them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
+This does not change the admission ceiling, CI routing or active rounds.
+The installed Worker and running manager must advertise source-selection support;
+changes take effect between rounds. Provision the existing private Forgejo worker
+credential before enabling native slots. Increase the count only after checking useful
+work, queue admission, Forgejo latency and server resource pressure.
+Before downgrading to a Worker release without source-selection support, set the count
+to `0` and wait for those workers to adopt their GitHub definitions. Keep at least one
+native worker elsewhere while native PRs still need maintenance. A routing rollback
+takes effect at safe idle windows; it is not an emergency stop for an active round.
