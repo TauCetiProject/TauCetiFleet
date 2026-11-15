@@ -982,6 +982,8 @@ Gradually move worker slots to Forgejo with `tauceti-fleet workers HOST --forgej
 The highest-numbered selected slots discover, maintain and author PRs on Forgejo using the ordinary
 worker source flags; remaining slots continue on GitHub. Set the count to `0` to return
 them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
+With [slot groups](#slot-groups), the selected slots are the last ones admitted under the
+ceiling, and each keeps its group's agent and phases.
 This does not change the admission ceiling, CI routing or active rounds.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker

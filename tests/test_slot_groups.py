@@ -522,6 +522,16 @@ print(loads.call_count)
         roles = {wid.rsplit("-", 1)[1]: role for wid, role in host.written_roles().items()}
         self.assertEqual(roles["256"], ("auto", ["progress"]))
 
+    def test_forgejo_routing_takes_the_last_admissions_and_keeps_their_group(self):
+        host.configure(dict(slots=MIXED))
+        store.update_host(forgejo_workers=2)
+        order, workers = self.definitions()
+        routed = {n for n, w in workers.items() if w.get("forgejo")}
+        self.assertEqual(routed, set(order[6:8]))
+        for n in routed:
+            self.assertEqual((workers[n]["github"], workers[n]["new_pr_forge"]), (False, "forgejo"))
+        self.assertEqual({n: self.shape(workers)[n] for n in routed}, {5: ("auto", ""), 8: ("claude", "review")})
+
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
         with (
