@@ -484,17 +484,19 @@ class Attention(unittest.TestCase):
         value = self.listed(lookup=True)
         self.assertEqual(sorted(c.args[0] for c in self.github.call_args_list), [
             f"repos/{REPOSITORY}/issues/{n}" for n in (398, 400, 401)] + [f"repos/{REPOSITORY}/pulls/{n}" for n in (412, 413)])
-        self.assertEqual(value["lookup"], dict(asked=5, error=None))
+        self.assertEqual(value["lookup"], dict(asked=5, error=f"https://github.com answered HTTP 404 for {REPOSITORY}#401"))
         self.assertEqual([i["id"] for i in value["items"]], ["412"])
         self.assertEqual(value["cleared"][0]["cleared"], "closed")
-        self.assertEqual([(n["pr"], n["state"]) for n in value["items"][0]["named"]],
-                         [(398, "MERGED"), (400, "OPEN"), (401, "NOT FOUND")])
+        self.assertEqual([(n["pr"], n.get("state")) for n in value["items"][0]["named"]],
+                         [(398, "MERGED"), (400, "OPEN"), (401, None)])
         self.assertEqual((path.read_text(), json.loads(other.read_text())["mentions"]), (text, [398]))
         self.assertIn(f"{REPOSITORY}#398", store.read(attention.notes_path(path.name))["prs"])
         self.github.reset_mock()
         code, output = self.cli("attention", "box", "--lookup")
-        self.assertEqual(sorted(c.args[0].split("/")[-1] for c in self.github.call_args_list), ["400", "412", "413"])
-        self.assertIn("Looked up 3 pull requests", output)
+        self.assertEqual(sorted(c.args[0].split("/")[-1] for c in self.github.call_args_list),
+                         ["400", "401", "412", "413"])
+        self.assertIn("Looked up 4 pull requests", output)
+        self.assertIn(f"   mentions: #401  https://github.com/{REPOSITORY}/pull/401  (its forge answered HTTP 404)", output)
         self.assertIn("   subsumed by: #398  MERGED  2026-01-14  Title 398  (someone)", output)
         self.github.side_effect = store.FleetError("GitHub request unavailable")
         value = self.listed(lookup=True)
@@ -766,7 +768,7 @@ class Attention(unittest.TestCase):
             FORGEJO_REQUEST("http://[::1]:3000", "repos/O/R/pulls/5")
         self.assertEqual(seen, ["http://[::1]:3000/api/v1/repos/O/R/pulls/5"])
 
-    def test_only_a_missing_number_is_remembered_as_not_found(self):
+    def test_a_named_number_that_answers_404_stays_an_attempt(self):
         self.on()
         self.record("declined", "fix", 7, summary="see #8", mentions=[8])
 
@@ -784,7 +786,62 @@ class Attention(unittest.TestCase):
         self.assertNotIn("state", value["items"][0]["named"][0])
         status = 404
         value = self.listed(lookup=True)
-        self.assertEqual((value["lookup"]["error"], value["items"][0]["named"][0]["state"]), (None, "NOT FOUND"))
+        named = value["items"][0]["named"][0]
+        self.assertIn("HTTP 404", value["lookup"]["error"])
+        self.assertEqual((named.get("state"), named["attempt"]["status"]), (None, 404))
+
+    def test_a_named_pull_request_its_forge_stops_showing_is_asked_again(self):
+        origin = "https://forge.example"
+        for forge in ("github", "forgejo"):
+            with self.subTest(forge=forge):
+                for path in attention.incidents_dir().glob("*.json"):
+                    path.unlink()
+                shutil.rmtree(store.state_dir() / "attention", ignore_errors=True)
+                self.on()
+                where = {} if forge == "github" else dict(forge=dict(kind="forgejo", url=origin), suffix=".000000000007")
+                self.record("declined", "fix", 7, summary="see #8", mentions=[8], **where)
+                named = ["open"]
+
+                def answer(*args, named=named, **_):
+                    path = args[-1]
+                    if named[0] == "hidden":
+                        error = store.FleetError("HTTP 404")
+                        error.status = 404
+                        raise error
+                    if "/pulls/" in path:
+                        return dict(state="open", merged=False, merged_at=None, head=dict(sha="a" * 40))
+                    merged = "2026-01-16T00:00:00Z" if named[0] == "merged" else None
+                    return dict(state="closed" if merged else "open", title="Named",
+                                pull_request=dict(merged=bool(merged), merged_at=merged))
+
+                mock = self.github if forge == "github" else self.forgejo
+                mock.side_effect = answer
+                self.assertEqual(self.listed(lookup=True)["items"][0]["named"][0]["state"], "OPEN")
+                named[0] = "hidden"
+                self.assertEqual(self.listed(lookup=True)["items"][0]["named"][0]["state"], "OPEN")
+                named[0] = "merged"
+                mock.reset_mock()
+                value = self.listed(lookup=True)
+                self.assertIn("issues/8", " ".join(str(c.args) for c in mock.call_args_list))
+                self.assertEqual(value["items"][0]["named"][0]["state"], "MERGED")
+
+    def test_a_named_pull_request_remembered_as_not_found_is_asked_again(self):
+        self.on()
+        path = self.record("declined", "fix", 7, summary="see #8", mentions=[8])
+        store.atomic(attention.notes_path(path.name),
+                     dict(version=1, prs={f"{REPOSITORY}#8": dict(state="NOT FOUND", observed=time.time())}))
+
+        def answer(path, **_):
+            if "/pulls/" in path:
+                return dict(state="open", merged_at=None, head=dict(sha="a" * 40))
+            return dict(state="closed", title="Named", pull_request=dict(merged_at="2026-01-16T00:00:00Z"))
+
+        self.github.side_effect = answer
+        self.assertNotIn("state", self.listed()["items"][0]["named"][0])
+        value = self.listed(lookup=True)
+        self.assertEqual(sorted(c.args[0].split("/", 3)[-1] for c in self.github.call_args_list),
+                         ["issues/8", "pulls/7"])
+        self.assertEqual(value["items"][0]["named"][0]["state"], "MERGED")
 
     def test_status_shows_the_prepared_count_and_the_command(self):
         config = self.on()
