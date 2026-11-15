@@ -73,7 +73,7 @@ class Isolated(unittest.TestCase):
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(path))
                 server.listen(1)
-                def serve():
+                def serve(reply=reply):
                     connection, _ = server.accept()
                     with connection:
                         connection.recv(4096)
@@ -109,6 +109,74 @@ class Isolated(unittest.TestCase):
                 self.assertEqual(call.call_args.args[1], dict(action="workers", self_tested=enabled))
             self.assertEqual(main(["workers", "test", "--max", "4", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", maximum=4))
+
+    def test_gradual_forgejo_routing_preserves_admissions_and_other_slots(self):
+        import tomllib
+        original = store.update_host(max_workers=6, workers_enabled=True, ci_enabled=True)
+        lease = store.state_dir() / "admission.json"
+        store.atomic(lease, dict(expires_at=12345, workers=["already-admitted"]))
+        for count in (1, 3, 6, 0):
+            with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+                value = host.set_worker_policy(dict(forgejo_workers=count))
+            self.assertEqual(value["forgejo_workers"], count)
+            self.assertEqual(store.host_config(), {**original, "forgejo_workers": count})
+            self.assertEqual(store.read(lease), dict(expires_at=12345, workers=["already-admitted"]))
+            specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+            self.assertEqual(len(specs), 6)
+            for index, spec in enumerate(specs):
+                if index >= 6 - count:
+                    self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]),
+                                     (False, True, "forgejo"))
+                else:
+                    self.assertFalse({"github", "forgejo", "new_pr_forge"} & spec.keys())
+        with patch.object(host, "require_source_selection_support", side_effect=store.FleetError("old manager")):
+            with self.assertRaisesRegex(store.FleetError, "old manager"):
+                host.set_worker_policy(dict(forgejo_workers=1, maximum=3))
+        self.assertEqual(store.host_config(), {**original, "forgejo_workers": 0})
+
+    def test_forgejo_routing_validates_before_any_capacity_change(self):
+        original = store.update_host(max_workers=6, workers_enabled=True)
+        for count in (True, -1, 4097, "1", 7):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(forgejo_workers=count, maximum=6))
+            self.assertEqual(store.host_config(), original)
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(forgejo_workers=3))
+        with self.assertRaises(store.FleetError):
+            host.set_worker_policy(dict(maximum=2))
+        host.worker_config(original)
+        import tomllib
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(sum(s.get("forgejo", False) for s in specs), 3)
+
+    def test_forgejo_credentials_are_checked_without_publishing_or_changing_policy(self):
+        original = store.update_host(max_workers=6, workers_enabled=True)
+        with patch.object(Path, "home", return_value=self.root):
+            token = self.root / ".config/tauceti-forgejo/worker-token"
+            with patch.object(host, "require_source_selection_support"):
+                with self.assertRaisesRegex(store.FleetError, "credential"):
+                    host.set_worker_policy(dict(forgejo_workers=1))
+            self.assertEqual(store.host_config(), original)
+            token.parent.mkdir(parents=True)
+            token.write_text("test-token\n")
+            token.chmod(0o644)
+            with self.assertRaises(store.FleetError):
+                host.require_forgejo_credential()
+            token.chmod(0o600)
+            host.require_forgejo_credential()
+            token.unlink()
+            token.symlink_to("missing-token")
+            with self.assertRaises(store.FleetError):
+                host.require_forgejo_credential()
+
+    def test_forgejo_count_cli_preserves_explicit_zero(self):
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            for count in (1, 3, 0):
+                self.assertEqual(main(["workers", "test", "--forgejo-workers", str(count), "--json"]), 0)
+                self.assertEqual(call.call_args.args[1], dict(action="workers", forgejo_workers=count))
 
     def test_identity_and_private_configuration_survive_reinstallation(self):
         one = store.host_config()
@@ -174,7 +242,7 @@ class Isolated(unittest.TestCase):
         store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
         payload = remote.profile("subscription")
         self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
-        store.update_host(max_workers=2, anthropic_api_key_file="/private/earlier-api-key")
+        store.update_host(max_workers=2, forgejo_workers=1, anthropic_api_key_file="/private/earlier-api-key")
         with patch.object(host, "install_service"):
             host.configure(dict(payload, profile="subscription", ci_allowed=False))
         host.worker_config(store.host_config())
@@ -183,6 +251,8 @@ class Isolated(unittest.TestCase):
         for worker in workers:
             self.assertEqual({k: worker[k] for k in shape}, shape)
             self.assertFalse({"budget", "anthropic_api_key_file"} & set(worker))
+        self.assertFalse({"github", "forgejo", "new_pr_forge"} & set(workers[0]))
+        self.assertEqual((workers[1]["github"], workers[1]["forgejo"], workers[1]["new_pr_forge"]), (False, True, "forgejo"))
         with (
             patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
             patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
