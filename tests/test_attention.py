@@ -1286,6 +1286,11 @@ class Attention(unittest.TestCase):
             env = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]["env"]
             self.assertEqual(env, {"TAUCETI_INCIDENTS_DIR": str(self.root / "state/incidents"),
                                    "TAUCETI_HOLD_DECLINED": "1", "TAUCETI_DECIDE_CLOSE": "1"})
+            store.update_host(max_workers=2, forgejo_workers=1)
+            host.worker_config(store.host_config())
+            routed = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][1]
+            self.assertEqual((routed["github"], routed["forgejo"], routed["new_pr_forge"], routed["env"]), (False, True, "forgejo", env))
+            store.update_host(max_workers=1, forgejo_workers=0)
             host.configure(dict(decide_close=False, decide_max_closes_per_day=0))
             host.worker_config(store.host_config())
             env = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]["env"]
