@@ -313,6 +313,11 @@ def incident_items(config):
                 numbers = words.get(relation) if isinstance(words.get(relation), list) else []
                 for number in [n for n in numbers if type(n) is int and n > 0][:20]:
                     known = cached.get(f"{repository}#{number}")
+                    # A forge also answers 404 for what it will not show, so an answer stored as NOT FOUND
+                    # is only an attempt to be repeated.
+                    if isinstance(known, dict) and known.get("state") == "NOT FOUND":
+                        at = known.get("observed")
+                        known = {"attempt": dict(status=404, at=at)} if isinstance(at, int | float) else None
                     # Only a merge cannot be undone; any other answer from before this record is asked again.
                     # The last attempt stays, so the next lookup still knows when this one was last asked.
                     if (isinstance(known, dict) and known.get("state") != "MERGED"
@@ -480,9 +485,7 @@ def ask(config, repository, number, *, named, forge="github", origin=GITHUB):
             value["head"] = data["head"]["sha"]
     except FleetError as error:
         status = getattr(error, "status", None)
-        if named and status == 404:
-            value = dict(state="NOT FOUND")
-        elif status in (UNREADABLE_GITHUB if forge == "github" else UNREADABLE_FORGEJO):
+        if status in (UNREADABLE_GITHUB if forge == "github" else UNREADABLE_FORGEJO):
             value = dict(state="UNREADABLE", status=status)
         else:
             raise
@@ -781,6 +784,8 @@ def display(name, value):
                     detail = "  ".join(str(v) for v in (
                         named["state"], (named.get("merged_at") or "")[:10], named.get("title"),
                         f"({named['author']})" if named.get("author") else "") if v)
+                elif isinstance(named.get("attempt"), dict):
+                    detail = f"{pr_url(item, named['pr'])}  (its forge answered HTTP {named['attempt'].get('status')})"
                 else:
                     detail = f"{pr_url(item, named['pr'])}  (--lookup for state and title)"
                 print(f"   {label}: #{named['pr']}  {detail}")
