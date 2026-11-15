@@ -157,6 +157,15 @@ print(json.dumps(dict(version=1, prs=[dict(r) for r in db.execute("SELECT * FROM
         self.assertEqual(self.definitions(), plain)
         self.assertTrue(stored.exists())
 
+    def test_forgejo_slots_keep_their_routing_under_a_list(self):
+        store.update_host(max_workers=2, forgejo_workers=1)
+        targets.configure(dict(text=EXAMPLE), [])
+        github, forgejo = tomllib.loads(self.definitions())["workers"]
+        self.assertEqual({w["roadmap_targets"] for w in (github, forgejo)}, {str(targets.stored())})
+        self.assertEqual({k: forgejo[k] for k in ("github", "forgejo", "new_pr_forge")},
+                         dict(github=False, forgejo=True, new_pr_forge="forgejo"))
+        self.assertFalse({"github", "forgejo", "new_pr_forge"} & github.keys())
+
     def test_list_on_the_host_is_read_in_place(self):
         shared = self.root / "checkout/list.md"
         shared.parent.mkdir()
