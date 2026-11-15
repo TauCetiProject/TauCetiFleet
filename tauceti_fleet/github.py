@@ -89,7 +89,8 @@ def runner_policy(config):
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f"}
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
@@ -116,7 +117,8 @@ def protected_policy(config, data):
             "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@" + revision
             for name in ("pr-build.yml", "publish-lake-cache.yml")
             for revision in ("150b56c3ab743b1f2a120f0639d98586455d7f2a",
-                             "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f")
+                             "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
+                             "a7662ab81f900586db3586ec3a11c38a5f46962d")
         }
         selected = set(data.get("selected_workflows", []))
         if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
