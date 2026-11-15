@@ -28,5 +28,7 @@ class NightlyRunnerPolicy(unittest.TestCase):
     def test_exact_source_harness_pin_is_allowed_but_mutable_or_other_pins_are_not(self):
         source = "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa"
         self.assertEqual(self.check([BUILD, NIGHTLY, source]), 3)
+        control_source = source.rsplit("@", 1)[0] + "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
+        self.assertEqual(self.check([BUILD, NIGHTLY, source, control_source]), 3)
         for bad in (source.rsplit("@", 1)[0] + "@refs/heads/main", source[:-1] + "0"):
             with self.assertRaises(FleetError): self.check([BUILD, bad])

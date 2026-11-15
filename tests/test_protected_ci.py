@@ -130,8 +130,15 @@ class QueueControlCI(unittest.TestCase):
         repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
         with patch.object(github, "request", return_value=repos):
             self.assertEqual(github.protected_policy(control, group), 6)
+            source = ["TauCetiProject/TauCetiTools/.github/workflows/" + name +
+                      "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
+                      for name in ("pr-build.yml", "publish-lake-cache.yml")]
+            self.assertEqual(github.protected_policy(
+                control, dict(group, selected_workflows=list(workflows) + source)), 6)
             for bad in (dict(group, restricted_to_workflows=False),
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
+                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/main"]),
+                        dict(group, selected_workflows=list(workflows)+[source[1][:-1]+"0"]),
                         dict(group, selected_workflows=[])):
                 with self.assertRaises(store.FleetError):
                     github.protected_policy(control, bad)

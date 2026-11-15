@@ -87,7 +87,8 @@ def runner_policy(config):
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa"}
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
@@ -109,8 +110,14 @@ def protected_policy(config, data):
     if kind == "queue-control":
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
-        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != allowed:
-            raise FleetError("Queue control runners require exactly the trusted main picker, build and publisher workflows")
+        required = allowed
+        allowed = allowed | {
+            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
+            for name in ("pr-build.yml", "publish-lake-cache.yml")
+        }
+        selected = set(data.get("selected_workflows", []))
+        if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
+            raise FleetError("Queue control runners require trusted main workflows and only approved source-CI harness pins")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1
