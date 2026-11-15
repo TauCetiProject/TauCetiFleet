@@ -317,6 +317,10 @@ class Wiring(unittest.TestCase):
         for worker in workers:
             self.assertEqual((worker["targets_fallback_max_open"], worker["targets_fallback_cap_file"], worker["roadmap_targets"]),
                              (4, str(self.root / "state/outside-list-cap"), "/srv/list.md"))
+        store.update_host(forgejo_workers=1)
+        routed = tomllib.loads(self.definitions())["workers"][1]
+        self.assertEqual((routed["forgejo"], routed["github"], routed["targets_fallback_max_open"], routed["targets_fallback_cap_file"]),
+                         (True, False, 4, str(self.root / "state/outside-list-cap")))
         self.pace(start=0)
         self.assertEqual(tomllib.loads(self.definitions())["workers"][0]["targets_fallback_max_open"], 1)
         self.protocol = dict(version=1, roadmap_targets=1)
