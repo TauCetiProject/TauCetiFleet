@@ -68,7 +68,8 @@ export class GitHub {
       'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa',
       'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f']);
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f',
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
         !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();
