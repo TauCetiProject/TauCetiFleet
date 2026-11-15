@@ -88,7 +88,8 @@ def runner_policy(config):
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a"}
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@4ed6c4eed064df2eda78ac1a659090fbe787c61d"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
@@ -112,8 +113,10 @@ def protected_policy(config, data):
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
         required = allowed
         allowed = allowed | {
-            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
+            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@" + revision
             for name in ("pr-build.yml", "publish-lake-cache.yml")
+            for revision in ("150b56c3ab743b1f2a120f0639d98586455d7f2a",
+                             "4ed6c4eed064df2eda78ac1a659090fbe787c61d")
         }
         selected = set(data.get("selected_workflows", []))
         if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:

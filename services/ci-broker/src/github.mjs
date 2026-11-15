@@ -67,7 +67,8 @@ export class GitHub {
     const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a']);
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a',
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@4ed6c4eed064df2eda78ac1a659090fbe787c61d']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
         !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();

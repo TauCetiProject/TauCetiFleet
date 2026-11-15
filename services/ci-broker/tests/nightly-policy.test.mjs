@@ -26,6 +26,8 @@ test('source staging permits exactly the reviewed shared harness revision',async
  assert.deepEqual(await client([build,nightly,source]).policy({fresh:true}),{runner_group_id:3});
  const controlSource=source.split('@')[0]+'@150b56c3ab743b1f2a120f0639d98586455d7f2a';
  assert.deepEqual(await client([build,nightly,source,controlSource]).policy({fresh:true}),{runner_group_id:3});
+ const proofSource=source.split('@')[0]+'@4ed6c4eed064df2eda78ac1a659090fbe787c61d';
+ assert.deepEqual(await client([build,nightly,source,controlSource,proofSource]).policy({fresh:true}),{runner_group_id:3});
  for (const bad of [source.split('@')[0]+'@refs/heads/main',source.slice(0,-1)+'0'])
   await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
 });
