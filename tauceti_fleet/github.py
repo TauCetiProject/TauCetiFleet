@@ -85,7 +85,12 @@ def runner_policy(config):
         if kinds in (["roadmap"], ["control"], ["queue-control"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main"}
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
@@ -93,7 +98,7 @@ def runner_policy(config):
         or required not in selected
         or not selected <= allowed
     ):
-        raise FleetError("Runner group must allow only pr-build.yml and optional fleet-smoke.yml at refs/heads/main")
+        raise FleetError("Runner group must allow only trusted main project workflows and the approved source-CI harness pin")
     return group
 
 
@@ -107,8 +112,17 @@ def protected_policy(config, data):
     if kind == "queue-control":
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
-        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != allowed:
-            raise FleetError("Queue control runners require exactly the trusted main picker, build and publisher workflows")
+        required = allowed
+        allowed = allowed | {
+            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@" + revision
+            for name in ("pr-build.yml", "publish-lake-cache.yml")
+            for revision in ("150b56c3ab743b1f2a120f0639d98586455d7f2a",
+                             "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
+                             "a7662ab81f900586db3586ec3a11c38a5f46962d")
+        }
+        selected = set(data.get("selected_workflows", []))
+        if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
+            raise FleetError("Queue control runners require trusted main workflows and only approved source-CI harness pins")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1
