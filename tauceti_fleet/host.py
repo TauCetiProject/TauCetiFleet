@@ -305,6 +305,8 @@ CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
 # The worker sets these from its forge selection and, each round, from its Forgejo token.
 FORGE_OWNED_ENV = {"TAUCETI_WORKER_FORGES", "TAUCETI_NEW_PR_FORGE", "TAUCETI_FORGEJO_USER_ID"}
 FORGES = ("github", "forgejo")
+# require_forgejo_credential() checks only the default credential for the canonical repository.
+ROUTED_SLOT_ENV = {"TAUCETI_FORGEJO_ORIGIN", "TAUCETI_FORGEJO_REPO", "TAUCETI_FORGEJO_REPOSITORY_ID", "TAUCETI_FORGEJO_TOKEN_FILE"}
 # worker_sources.native_source supplies these for the canonical repository only.
 CANONICAL_REPOSITORY = "taucetiproject/tauceti"
 CANONICAL_FORGEJO_ORIGIN = "https://git.taucetiproject.org"
@@ -411,6 +413,16 @@ def worker_fields(config):
             "env must not set " + ", ".join(sorted(owned & set(env)))
             + ": the worker derives them from forges, new_pr_forge and its Forgejo token, and forgejo_token_file supplies the token"
         )
+    if config.get("forgejo_workers"):
+        if config.get("forges") is not None or config.get("new_pr_forge") is not None:
+            raise FleetError("forges and new_pr_forge select every slot's forges, and --forgejo-workers routes some slots to "
+                             "Forgejo; use one: remove them from the profile or set --forgejo-workers 0")
+        if ROUTED_SLOT_ENV & set(env):
+            raise FleetError(
+                "env must not set " + ", ".join(sorted(ROUTED_SLOT_ENV & set(env)))
+                + " while --forgejo-workers routes slots: routed slots use the canonical Forgejo repository and the "
+                "credential Fleet checks; select forges in the profile for another server or credential"
+            )
     forges = forge_fields(config, env)
     fields = dict(
         agent=agent,
@@ -718,6 +730,7 @@ def set_worker_policy(payload):
         if selected > ceiling:
             raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
     if native:
+        worker_fields(dict(host_config(), forgejo_workers=native))
         require_source_selection_support()
         require_forgejo_credential()
     if local is True:

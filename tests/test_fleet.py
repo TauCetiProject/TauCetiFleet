@@ -386,6 +386,30 @@ class Isolated(unittest.TestCase):
                 with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
                     host.configure(shape)
 
+    def test_profile_forges_and_slot_routing_are_exclusive(self):
+        original = store.update_host(max_workers=2, forgejo_workers=1)
+        connection = ({"TAUCETI_FORGEJO_ORIGIN": "https://forge.example"}, {"TAUCETI_FORGEJO_REPO": "Example/Fork"},
+                      {"TAUCETI_FORGEJO_REPOSITORY_ID": "7"}, {"TAUCETI_FORGEJO_TOKEN_FILE": "/elsewhere"})
+        with patch.object(host, "install_service"):
+            for shape in (dict(forges=["github"]), dict(forges=["github", "forgejo"]), dict(new_pr_forge="github")):
+                with self.assertRaisesRegex(store.FleetError, "use one: remove them from the profile", msg=shape):
+                    host.configure(shape)
+            for env in connection:
+                with self.assertRaisesRegex(store.FleetError, "while --forgejo-workers routes slots", msg=env):
+                    host.configure(dict(env=env))
+            self.assertEqual(store.host_config(), original)
+            host.configure(dict(env={"TAUCETI_FORGEJO_FORK": "operator/TauCeti"}))
+            store.update_host(forgejo_workers=0, env=None)
+            host.configure(dict(forges=["forgejo"], env=connection[3]))
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            with self.assertRaisesRegex(store.FleetError, "use one"):
+                host.set_worker_policy(dict(forgejo_workers=1))
+            self.assertEqual(store.host_config()["forgejo_workers"], 0)
+            store.update_host(forges=None, env=connection[0])
+            with self.assertRaisesRegex(store.FleetError, "TAUCETI_FORGEJO_ORIGIN while --forgejo-workers"):
+                host.set_worker_policy(dict(forgejo_workers=1))
+            self.assertEqual(store.host_config()["forgejo_workers"], 0)
+
     def test_forgejo_profile_transfers_its_token_and_writes_forge_fields(self):
         store.atomic(store.config_dir() / "profiles.json", {
             "forgejo": dict(self.forgejo_secrets(), forges=["forgejo"], new_pr_forge="forgejo",

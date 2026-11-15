@@ -214,6 +214,14 @@ GitHub credential stays required. Fleet makes no Forgejo requests itself:
 Forgejo token file is present and private, and `status` prints the selected
 forges. Changing either key takes a drain before repeating `add`.
 
+These keys select the same forges for every slot, while `workers HOST
+--forgejo-workers N` routes the highest-numbered slots to the canonical Forgejo repository with the
+credential it checks. Use one or the other: with a nonzero count, `forges`,
+`new_pr_forge` and the `env` settings `TAUCETI_FORGEJO_ORIGIN`,
+`TAUCETI_FORGEJO_REPO`, `TAUCETI_FORGEJO_REPOSITORY_ID` and
+`TAUCETI_FORGEJO_TOKEN_FILE` are refused, and a profile with them refuses a
+nonzero count.
+
 ## Protected roadmap capacity
 
 Two existing CI slots can be reserved without another scheduler. The host's
