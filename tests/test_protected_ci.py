@@ -97,6 +97,51 @@ class ProtectedCI(unittest.TestCase):
                     with self.assertRaises(store.FleetError):
                         github.protected_policy(config, group)
 
+class PRStatusCI(unittest.TestCase):
+    def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
+        config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,
+                      ci_idle_pool=True, ci_kinds=["pr", "staging"], runner_group_id=3,
+                      ci_protected_slots={"3": dict(kind="pr-status", runner_group_id=7)})
+        status = capacity.for_slot(config, 3)
+        status["unit"] = "status-guest"
+        self.assertEqual(capacity.kinds(status), ["pr-status"])
+        self.assertEqual(capacity.guest_shape(status), dict(vcpus=2, memory_gib=4))
+        labels = github.runner_labels(dict(status, machine_id="a"*32), "fleet-"+"b"*16)
+        self.assertIn("tauceti-fleet-pr-status", labels)
+        for label in ("tauceti-fleet-pr", "tauceti-fleet-staging", "tauceti-fleet-queue-control"):
+            self.assertNotIn(label, labels)
+        busy = [dict(slot=i, runner_id=i+100, busy=True) for i in range(3)]
+        self.assertEqual(ci_pool.plan(config, busy, [], None), set(range(4)))
+        self.assertEqual(ci_pool.recovery_slots(config, busy, [], dict(queued=[]),
+                         [dict(instance="a"*16, ci_kinds=["pr"])]), {})
+        self.assertFalse(native_runner.selected(status))
+        with patch.object(vm, "start_memory_available", return_value=6*1024**3):
+            self.assertTrue(vm.start_memory_ok(status))
+        with patch.object(ci_priority, "run"), patch.object(github, "ci_read") as metadata:
+            ci_priority.classify(config, status, 100)
+        metadata.assert_not_called()
+        self.assertEqual(status["cpu_weight"], 10000)
+
+    def test_status_group_never_accepts_candidate_or_other_control_workflows(self):
+        config = dict(ci_kinds=["pr-status"], ci_slot_runner_group_id=7)
+        workflows = ["TauCetiProject/TauCeti/.github/workflows/"+name+"@refs/heads/main"
+                     for name in ("pr-status.yml", "pr-labels.yml")]
+        group = dict(name="TauCetiPRStatus", visibility="selected", restricted_to_workflows=True,
+                     selected_workflows=workflows)
+        repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
+        with patch.object(github, "request", return_value=repos):
+            self.assertEqual(github.protected_policy(config, group), 7)
+            for invalid in (dict(group, restricted_to_workflows=False),
+                            dict(group, selected_workflows=workflows[:1]),
+                            dict(group, selected_workflows=workflows+["TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"]),
+                            dict(group, selected_workflows=[w.replace("refs/heads/main", "refs/heads/untrusted") for w in workflows])):
+                with self.assertRaises(store.FleetError):
+                    github.protected_policy(config, invalid)
+        with patch.object(github, "request", return_value=dict(total_count=1, repositories=[dict(full_name="other/repo")])):
+            with self.assertRaises(store.FleetError):
+                github.protected_policy(config, group)
+
+
 class QueueControlCI(unittest.TestCase):
     def setUp(self):
         self.config = dict(ci_enabled=True, ci_max_jobs=15, ci_staging_slots=1,

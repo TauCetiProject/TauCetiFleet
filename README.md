@@ -193,6 +193,15 @@ need it. Replacing the base image remains a separate `prepare` operation. `prepa
 Existing releases and worker runtimes
 are retained while processes may still reference them.
 
+PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
+in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
+and 4 GiB RAM, stay warm independently of the build backlog, and cannot be borrowed
+by PR recovery. The group must select only `TauCetiProject/TauCeti` and exactly
+`pr-status.yml@refs/heads/main` and `pr-labels.yml@refs/heads/main`. They execute trusted
+base and pinned policy code, never candidate checkouts. This gives the label/App
+credentials their own runner boundary and preserves the existing queue-control
+guests for pickers and staging finalizers.
+
 An update deploys the version of Fleet running the command. To upgrade an older
 drain-only installation without draining, run the new CLI once from upstream:
 

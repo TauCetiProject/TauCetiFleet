@@ -329,7 +329,7 @@ def start_memory_ok(config=None):
     global _start_memory_deferred
     available = config["_ci_start_available"] if config and "_ci_start_available" in config else start_memory_available()
     required = STAGING_START_MEMORY_BYTES if (config or {}).get("ci_kinds") == ["staging"] else START_MEMORY_BYTES
-    if (config or {}).get("ci_kinds") == ["control"]:
+    if (config or {}).get("ci_kinds") in (["control"], ["pr-status"]):
         required = 5 * 1024**3
     if (config or {}).get("ci_kinds") == ["queue-control"]:
         required = 9 * 1024**3
@@ -494,7 +494,7 @@ def _start(config):
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
-                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"]) else "100"),
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"]) else "100"),
                 "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",
