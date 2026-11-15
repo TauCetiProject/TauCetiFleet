@@ -628,6 +628,18 @@ print(loads.call_count, [group for _, _, group in plan])
             self.assertEqual((workers[n]["github"], workers[n]["new_pr_forge"]), (False, "forgejo"))
         self.assertEqual({n: self.shape(workers)[n] for n in routed}, {5: ("auto", ""), 8: ("claude", "review")})
 
+    def test_a_routed_progress_slot_keeps_its_progress_settings_and_source(self):
+        source = dict(progress_repo="operator/TauCetiProgress", progress_ref="0123456789abcdef" * 2 + "01234567")
+        reports = dict(count=2, agent="codex", roles=["progress"], progress_strategy="threshold", progress_skip=["Drafts"])
+        host.configure(dict(slots=[dict(count=2, agent="auto"), reports], **source))
+        store.update_host(max_workers=4, forgejo_workers=4)
+        _, workers = self.definitions()
+        env = {"TAUCETI_PROGRESS_REPO": source["progress_repo"], "TAUCETI_PROGRESS_REF": source["progress_ref"]}
+        for n, worker in workers.items():
+            self.assertEqual((worker["github"], worker["forgejo"], worker["new_pr_forge"], worker["env"]),
+                             (False, True, "forgejo", env))
+            own = {k: worker[k] for k in ("progress_strategy", "progress_skip") if k in worker}
+            self.assertEqual(own, dict(progress_strategy="threshold", progress_skip=["Drafts"]) if n > 2 else {})
 
     def test_cli_sends_groups_clears_and_queries(self):
         entry = dict(target="machine", machine_id="one")
