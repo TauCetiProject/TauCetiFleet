@@ -117,6 +117,10 @@ def project(entry, value, transport_at=None, connected=False):
             k: number(memory.get(k))
             for k in ("working_set", "charged", "maximum", "high", "swap", "oom_kill", "stall_some", "stall_full")
         },
+        "worker_tasks": {
+            k: number((memory.get("tasks") or {}).get(k))
+            for k in ("current", "maximum", "peak", "rejected", "new_rejections", "sample_seconds", "last_rejection_at")
+        },
         "worker_admission": {
             "state": admission.get("state") if admission.get("state") in ("at_ceiling", "paused") else "unknown",
             "reason": reasons.get(admission.get("reason"), "unknown")
