@@ -5,20 +5,28 @@ const prefix='TauCetiProject/TauCeti/.github/workflows/';
 const build=prefix+'pr-build.yml@refs/heads/main';
 const nightly=prefix+'nightly-verify.yml@refs/heads/main';
 const smoke=prefix+'fleet-smoke.yml@refs/heads/main';
+const picker=prefix+'pick-runner.yml@refs/heads/main';
+const labelRouter=prefix+'full-lint-label.yml@refs/heads/main';
 function client(workflows) {
   const github=new GitHub({});
   github.request=async()=>({id:3,name:'TauCetiFleet',restricted_to_workflows:true,selected_workflows:workflows});
   return github;
 }
 test('old and expanded trusted policies allow a live update',async()=>{
-  for(const workflows of [[build],[build,smoke],[build,nightly],[build,smoke,nightly]])
+  for(const workflows of [[build],[build,smoke],[build,nightly],[build,smoke,nightly],
+    [build,picker],[build,labelRouter],[build,smoke,nightly,picker,labelRouter]])
     assert.deepEqual(await client(workflows).policy({fresh:true}),{runner_group_id:3});
 });
 test('nightly access never permits PR refs, other repos or arbitrary workflows',async()=>{
   for(const invalid of [nightly.replace('refs/heads/main','refs/pull/1/merge'),
-    nightly.replace('TauCetiProject/TauCeti/','someone/Other/'),prefix+'untrusted.yml@refs/heads/main'])
+    picker.replace('refs/heads/main','refs/pull/1/merge'),
+    labelRouter.replace('refs/heads/main','refs/pull/1/merge'),
+    nightly.replace('TauCetiProject/TauCeti/','someone/Other/'),
+    picker.replace('TauCetiProject/TauCeti/','someone/Other/'),
+    prefix+'untrusted.yml@refs/heads/main'])
     await assert.rejects(client([build,invalid]).policy({fresh:true}),PolicyError);
   await assert.rejects(client([nightly]).policy({fresh:true}),PolicyError);
+  await assert.rejects(client([picker,labelRouter]).policy({fresh:true}),PolicyError);
 });
 
 test('source staging permits exactly the reviewed shared harness revision',async()=>{
