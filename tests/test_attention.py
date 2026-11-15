@@ -849,6 +849,40 @@ class Attention(unittest.TestCase):
                          ["issues/8", "pulls/7"])
         self.assertEqual(value["items"][0]["named"][0]["state"], "MERGED")
 
+    def test_a_named_pull_request_remembered_as_not_found_that_still_fails_takes_its_turn(self):
+        self.on()
+        origin = "https://forge.example"
+        on_forgejo = dict(forge=dict(kind="forgejo", url=origin))
+        at = attention.epoch("2026-01-15T09:30:00Z")
+        first = self.record("declined", "fix", 7, summary="see #11 #12 #13", mentions=[11, 12, 13],
+                            suffix=".000000000007", **on_forgejo)
+        second = self.record("declined", "fix", 8, summary="no", suffix=".000000000008", **on_forgejo)
+        seen = dict(state="OPEN", head="a" * 40, observed=at + 120)
+        store.atomic(attention.notes_path(first.name), dict(version=1, prs={
+            f"{REPOSITORY}#7": seen, **{f"{REPOSITORY}#{n}": dict(state="NOT FOUND", observed=at + 60) for n in (11, 12, 13)}}))
+        store.atomic(attention.notes_path(second.name), dict(version=1, prs={f"{REPOSITORY}#8": seen}))
+        clock = [at + 3600]
+
+        def answer(_, path):
+            clock[0] += 15
+            if "/issues/" in path:
+                error = store.FleetError(f"{origin} GET returned HTTP 404")
+                error.status = 404
+                raise error
+            state = "open" if path.endswith("/7") else "closed"
+            return dict(state=state, merged=False, merged_at=None, head=dict(sha="a" * 40))
+
+        self.forgejo.side_effect = answer
+        asked = []
+        with (patch.object(attention.time, "time", side_effect=lambda: clock[0]),
+              patch.object(attention.time, "monotonic", side_effect=lambda: clock[0])):
+            for _ in range(2):
+                self.forgejo.reset_mock()
+                value = self.listed(lookup=True)
+                asked.append([c.args[1].split("/", 3)[-1] for c in self.forgejo.call_args_list])
+        self.assertEqual(asked, [["issues/11", "issues/12", "issues/13"], ["pulls/7", "pulls/8", "issues/11"]])
+        self.assertEqual([c["id"] for c in value["cleared"]], ["forge.example/TauCetiProject/TauCeti#8"])
+
     def test_status_shows_the_prepared_count_and_the_command(self):
         config = self.on()
         self.record("declined", "fix", 7, summary="no")
