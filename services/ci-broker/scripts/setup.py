@@ -101,7 +101,8 @@ def inspect():
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a"}
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@4ed6c4eed064df2eda78ac1a659090fbe787c61d"}
     workflows = set(group.get("selected_workflows", []))
     if group["name"] != "TauCetiFleet" or not group.get("restricted_to_workflows") or required not in workflows or not workflows <= allowed:
         raise SystemExit("Runner group 3 does not have the expected trusted-workflow restrictions")

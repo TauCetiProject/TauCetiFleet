@@ -135,6 +135,10 @@ class QueueControlCI(unittest.TestCase):
                       for name in ("pr-build.yml", "publish-lake-cache.yml")]
             self.assertEqual(github.protected_policy(
                 control, dict(group, selected_workflows=list(workflows) + source)), 6)
+            updated = [w.replace("150b56c3ab743b1f2a120f0639d98586455d7f2a",
+                                 "4ed6c4eed064df2eda78ac1a659090fbe787c61d") for w in source]
+            self.assertEqual(github.protected_policy(
+                control, dict(group, selected_workflows=list(workflows) + source + updated)), 6)
             for bad in (dict(group, restricted_to_workflows=False),
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
                         dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/main"]),
