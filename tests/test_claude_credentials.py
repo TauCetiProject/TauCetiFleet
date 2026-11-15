@@ -58,7 +58,7 @@ class ClaudeCredentials(unittest.TestCase):
         return text, tomllib.loads(text)["workers"]
 
     def test_token_and_usage_login_reach_workers_as_private_files(self):
-        store.update_host(max_workers=2)
+        store.update_host(max_workers=2, forgejo_workers=1)
         payload, result = self.add(env={"A": "1"})
         self.assertEqual(payload["credentials"]["claude_token_file"], TOKEN)
         secrets = store.config_dir() / "secrets"
@@ -75,6 +75,8 @@ class ClaudeCredentials(unittest.TestCase):
             self.assertEqual(worker["env"], {"A": "1", "CLAUDE_CONFIG_DIR": str(secrets / "claude"),
                                              "TAUCETI_CLAUDE_USAGE_CREDENTIALS": str(secrets / "claude-usage/.credentials.json")})
             self.assertIs(worker["auto_refresh"], True)
+        self.assertFalse({"github", "forgejo", "new_pr_forge"} & set(workers[0]))
+        self.assertEqual((workers[1]["github"], workers[1]["forgejo"], workers[1]["new_pr_forge"]), (False, True, "forgejo"))
         status = dict(claude_credentials=claude_credentials.report(store.host_config()), status={})
         clear = text + (store.config_dir() / "host.json").read_text() + json.dumps([result, status])
         for secret in (TOKEN, "access-1", "refresh-1"):

@@ -400,7 +400,7 @@ def worker_fields(config):
 def toml_value(value):
     if isinstance(value, dict):
         return "{" + ", ".join(k + " = " + json.dumps(v) for k, v in sorted(value.items())) + "}"
-    return "true" if value is True else json.dumps(value)
+    return str(value).lower() if isinstance(value, bool) else json.dumps(value)
 
 
 def worker_config(config):

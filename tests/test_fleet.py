@@ -243,7 +243,7 @@ class Isolated(unittest.TestCase):
         store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
         payload = remote.profile("subscription")
         self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
-        store.update_host(max_workers=2, anthropic_api_key_file="/private/earlier-api-key")
+        store.update_host(max_workers=2, forgejo_workers=1, anthropic_api_key_file="/private/earlier-api-key")
         with patch.object(host, "install_service"):
             host.configure(dict(payload, profile="subscription", ci_allowed=False))
         host.worker_config(store.host_config())
@@ -252,6 +252,8 @@ class Isolated(unittest.TestCase):
         for worker in workers:
             self.assertEqual({k: worker[k] for k in shape}, shape)
             self.assertFalse({"budget", "anthropic_api_key_file"} & set(worker))
+        self.assertFalse({"github", "forgejo", "new_pr_forge"} & set(workers[0]))
+        self.assertEqual((workers[1]["github"], workers[1]["forgejo"], workers[1]["new_pr_forge"]), (False, True, "forgejo"))
         with (
             patch.object(capabilities, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
             patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
