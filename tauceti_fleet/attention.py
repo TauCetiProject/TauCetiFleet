@@ -316,8 +316,9 @@ def incident_items(config):
                     # A forge also answers 404 for what it will not show, so an answer stored as NOT FOUND
                     # is only an attempt to be repeated.
                     if isinstance(known, dict) and known.get("state") == "NOT FOUND":
-                        at = known.get("observed")
-                        known = {"attempt": dict(status=404, at=at)} if isinstance(at, int | float) else None
+                        tries = [dict(status=404, at=known.get("observed")), known.get("attempt")]
+                        tries = [t for t in tries if isinstance(t, dict) and isinstance(t.get("at"), int | float)]
+                        known = {"attempt": max(tries, key=lambda t: t["at"])} if tries else None
                     # Only a merge cannot be undone; any other answer from before this record is asked again.
                     # The last attempt stays, so the next lookup still knows when this one was last asked.
                     if (isinstance(known, dict) and known.get("state") != "MERGED"
