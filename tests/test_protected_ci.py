@@ -136,7 +136,7 @@ class QueueControlCI(unittest.TestCase):
             self.assertEqual(github.protected_policy(
                 control, dict(group, selected_workflows=list(workflows) + source)), 6)
             updated = [w.replace("150b56c3ab743b1f2a120f0639d98586455d7f2a",
-                                 "4ed6c4eed064df2eda78ac1a659090fbe787c61d") for w in source]
+                                 "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f") for w in source]
             self.assertEqual(github.protected_policy(
                 control, dict(group, selected_workflows=list(workflows) + source + updated)), 6)
             for bad in (dict(group, restricted_to_workflows=False),

@@ -30,7 +30,7 @@ class NightlyRunnerPolicy(unittest.TestCase):
         self.assertEqual(self.check([BUILD, NIGHTLY, source]), 3)
         control_source = source.rsplit("@", 1)[0] + "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
         self.assertEqual(self.check([BUILD, NIGHTLY, source, control_source]), 3)
-        proof_source = source.rsplit("@", 1)[0] + "@4ed6c4eed064df2eda78ac1a659090fbe787c61d"
+        proof_source = source.rsplit("@", 1)[0] + "@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f"
         self.assertEqual(self.check([BUILD, NIGHTLY, source, control_source, proof_source]), 3)
         for bad in (source.rsplit("@", 1)[0] + "@refs/heads/main", source[:-1] + "0"):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
