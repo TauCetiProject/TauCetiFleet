@@ -64,6 +64,8 @@ def parser():
     workers.add_argument("--max", dest="maximum", type=int)
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
+    workers.add_argument("--forgejo-workers", type=int, default=None,
+                         help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
     workers.add_argument("--json", action="store_true")
     clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
     clear.add_argument("host")
@@ -195,8 +197,8 @@ def main(argv=None, *, _status_results=None):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
-        if args.command == "workers" and args.maximum is None and args.self_tested is None:
-            raise FleetError("Select --max, --self-tested, or --no-self-tested")
+        if args.command == "workers" and args.maximum is None and args.self_tested is None and args.forgejo_workers is None:
+            raise FleetError("Select --max, --self-tested, --no-self-tested, or --forgejo-workers")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.command == "attention" and args.ack and not args.host:
@@ -240,6 +242,8 @@ def main(argv=None, *, _status_results=None):
                     payload["maximum"] = args.maximum
                 if args.self_tested is not None:
                     payload["self_tested"] = args.self_tested
+                if args.forgejo_workers is not None:
+                    payload["forgejo_workers"] = args.forgejo_workers
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
             if args.command == "clear-halt":
