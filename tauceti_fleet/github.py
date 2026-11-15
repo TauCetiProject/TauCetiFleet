@@ -82,7 +82,7 @@ def runner_policy(config):
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
     if kinds := config.get("ci_kinds"):
-        if kinds in (["roadmap"], ["control"], ["queue-control"]):
+        if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
@@ -105,10 +105,10 @@ def runner_policy(config):
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
-    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl"}[kind]
+    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")
-    repository = "TauCetiProject/TauCeti" if kind == "queue-control" else "TauCetiProject/TauCetiRoadmap"
+    repository = "TauCetiProject/TauCeti" if kind in ("queue-control", "pr-status") else "TauCetiProject/TauCetiRoadmap"
     if kind == "queue-control":
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
@@ -123,6 +123,11 @@ def protected_policy(config, data):
         selected = set(data.get("selected_workflows", []))
         if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
             raise FleetError("Queue control runners require trusted main workflows and only approved source-CI harness pins")
+    if kind == "pr-status":
+        required = {repository + "/.github/workflows/" + name + "@refs/heads/main"
+                    for name in ("pr-status.yml", "pr-labels.yml")}
+        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != required:
+            raise FleetError("PR status runners require exactly the trusted main reconciliation workflows")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1

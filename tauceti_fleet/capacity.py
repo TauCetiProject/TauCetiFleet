@@ -12,7 +12,7 @@ def guest_shape(config, caps=None):
     """Expose shared host capacity, not a fixed fraction reserved per guest."""
     if config.get("ci_kinds") == ["queue-control"]:
         return dict(vcpus=4, memory_gib=8)
-    if config.get("ci_kinds") == ["control"]:
+    if config.get("ci_kinds") in (["control"], ["pr-status"]):
         return dict(vcpus=2, memory_gib=4)
     if config.get("ci_kinds") == ["roadmap"]:
         return dict(vcpus=16, memory_gib=32)
@@ -83,7 +83,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"]]:
+    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"], ["pr-status"]]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -109,7 +109,7 @@ def protected_slots(config):
         if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
                 or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
                 or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
-                or value["kind"] not in ("control", "roadmap", "queue-control")
+                or value["kind"] not in ("control", "roadmap", "queue-control", "pr-status")
                 or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
                 or value["runner_group_id"] == config.get("runner_group_id")
                 or config.get("ci_broker_url")):
