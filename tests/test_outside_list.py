@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -499,6 +500,18 @@ class Wiring(unittest.TestCase):
         self.assertEqual((block["held"], block["reason"]),
                          (True, "2 credentials have current usage readings and the active one cannot be told"))
         self.assertTrue(outside_list.describe(block, now).endswith("held, " + block["reason"]))
+        # A login whose token names its reading is one credential, held only until that token is first read under.
+        held = cache.parents[2] / ".credentials.json"
+        held.write_text(json.dumps(dict(claudeAiOauth=dict(accessToken="renewed"))))
+        with patch.object(subscription_usage, "KEYCHAIN", False):
+            pacer.state["at"] = now - outside_list.EVERY
+            self.assertEqual(pacer.tick(config, list, now=now)["reason"], "no usage reading under the current token yet")
+            fp = hashlib.sha256(b"renewed").hexdigest()[:16]
+            other.write_text(json.dumps(dict(fetched_at=now - 60, fp=fp, payload=windows)))
+            pacer.state["at"] = now - outside_list.EVERY
+            self.assertFalse(pacer.tick(config, list, now=now)["reason"].startswith(("2 credentials", "no usage reading")))
+        held.unlink()
+        other.write_text(json.dumps(dict(fetched_at=now - 60, fp="other", payload=windows)))
         store.update_host(pace="0:10,50:70")
         self.assertEqual(outside_list.pace_points(store.host_config()), [(0.0, 10.0), (50.0, 70.0), (100.0, 100.0)])
 

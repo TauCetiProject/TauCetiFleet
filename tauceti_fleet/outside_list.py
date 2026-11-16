@@ -312,7 +312,8 @@ class Pacer:
             session={key: windows["session"][key] for key in ("used", "resets_at")} if windows.get("session") else None,
             rounds=[count / self.passes for count in self.seen], curve=pace_points(config, inherited_pace()),
             limit_reached=bool(usage.get("limit_reached")),
-            missing=f"{several} credentials have current usage readings and the active one cannot be told" if several else "no usage reading yet",
+            missing=f"{several} credentials have current usage readings and the active one cannot be told" if several
+            else "no usage reading under the current token yet" if usage.get("awaiting_reading") else "no usage reading yet",
         )
         state["provider"] = provider
         self.save(state)
