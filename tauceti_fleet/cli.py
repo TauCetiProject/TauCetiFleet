@@ -236,12 +236,12 @@ def main(argv=None, *, _status_results=None):
                 if args.env or args.unset_env:
                     changes = {}
                     for item in args.env or []:
-                        name, sep, value = item.partition("=")
+                        variable, sep, value = item.partition("=")
                         if not sep:
                             raise FleetError(f"--env expects NAME=VALUE, got {item!r}")
-                        changes[name] = value
-                    for name in args.unset_env or []:
-                        changes[name] = None
+                        changes[variable] = value
+                    for variable in args.unset_env or []:
+                        changes[variable] = None
                     payload["worker_env"] = changes
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
