@@ -163,8 +163,11 @@ class Isolated(unittest.TestCase):
               patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
               patch.object(remote, "call", return_value={}) as call,
               patch("sys.stdout", new=io.StringIO())):
-            self.assertEqual(main(["workers", "test", "--env", "A=1=2", "--unset-env", "B", "--json"]), 0)
+            out = io.StringIO()
+            with patch("sys.stdout", new=out):
+                self.assertEqual(main(["workers", "test", "--env", "A=1=2", "--unset-env", "B", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", worker_env={"A": "1=2", "B": None}))
+            self.assertEqual(list(json.loads(out.getvalue())), ["test"])
             call.reset_mock()
             with patch("sys.stderr", new=io.StringIO()):
                 self.assertNotEqual(main(["workers", "test", "--env", "NOEQUALS", "--json"]), 0)
