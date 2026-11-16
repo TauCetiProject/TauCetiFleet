@@ -110,8 +110,8 @@ _REVIEWED_HARNESS = set()
 def reviewed_harness(revision, token_file):
     """Whether a harness revision is on TauCetiTools main. Main never rewinds, so a yes is cached.
 
-    TauCeti's harness-runner-groups workflow admits these entries for pin changes before
-    they merge, so the accepted set follows the project's pin instead of a release here.
+    The CI broker writes these entries from TauCeti main's `.tauceti/ci-source.json`, so the
+    accepted set follows the project's pin instead of a release here.
     """
     if revision in _REVIEWED_HARNESS:
         return True
