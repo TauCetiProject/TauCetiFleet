@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from tauceti_fleet import capacity, ci_autoscale, ci_pool, ci_priority, github, native_runner, store, vm
+from tests.test_nightly_runner_policy import harness_api
 
 
 class ProtectedCI(unittest.TestCase):
@@ -173,8 +174,13 @@ class QueueControlCI(unittest.TestCase):
         group = dict(name="TauCetiQueueControl", visibility="selected", restricted_to_workflows=True,
                      selected_workflows=list(workflows))
         repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
-        with patch.object(github, "request", return_value=repos):
+        github._REVIEWED_HARNESS.clear()
+        with patch.object(github, "request", side_effect=harness_api(repos)):
             self.assertEqual(github.protected_policy(control, group), 6)
+            pinned = ["TauCetiProject/TauCetiTools/.github/workflows/" + name + "@abf810bf5064bf549ba76fac568da9d1dbb32362"
+                      for name in ("pr-build.yml", "publish-lake-cache.yml")]
+            self.assertEqual(github.protected_policy(
+                control, dict(group, selected_workflows=list(workflows) + pinned)), 6)
             source = ["TauCetiProject/TauCetiTools/.github/workflows/" + name +
                       "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
                       for name in ("pr-build.yml", "publish-lake-cache.yml")]
@@ -191,6 +197,8 @@ class QueueControlCI(unittest.TestCase):
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
                         dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/main"]),
                         dict(group, selected_workflows=list(workflows)+[source[1][:-1]+"0"]),
+                        dict(group, selected_workflows=list(workflows)+[
+                            "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@abf810bf5064bf549ba76fac568da9d1dbb32362"]),
                         dict(group, selected_workflows=[])):
                 with self.assertRaises(store.FleetError):
                     github.protected_policy(control, bad)

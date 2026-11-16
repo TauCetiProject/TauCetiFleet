@@ -14,7 +14,7 @@ export class GitHub {
   constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=null; }
   async raw(path, token, method='GET', data) {
     const response=await fetch('https://api.github.com/'+path, {method,
-      headers:{Accept:'application/vnd.github+json', Authorization:'Bearer '+token,
+      headers:{Accept:'application/vnd.github+json', ...(token?{Authorization:'Bearer '+token}:{}),
         'User-Agent':'TauCetiFleet/broker', 'X-GitHub-Api-Version':'2022-11-28', 'Content-Type':'application/json'},
       body:data===undefined?undefined:JSON.stringify(data), signal:AbortSignal.timeout(20000)});
     if (!response.ok) throw new UpstreamError(response.status,response.headers.get('x-github-request-id'));
@@ -60,6 +60,28 @@ export class GitHub {
     }
     throw new InventoryError();
   }
+  anonymous(path) { return this.raw(path,null); }
+  async reviewedHarness(revision) {
+    this.reviewed??=new Set();
+    if (this.reviewed.has(revision)) return true;
+    const path=`repos/TauCetiProject/TauCetiTools/compare/${revision}...main?per_page=1`;
+    const absent=error=>error instanceof UpstreamError && (error.status===404 || error.status===422);
+    let value;
+    try {
+      value=await this.request(path);
+    } catch (error) {
+      if (absent(error)) return false;
+      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
+      // The installation selects only TauCeti; TauCetiTools is public, so retry anonymously.
+      try { value=await this.anonymous(path); } catch (retry) {
+        if (absent(retry)) return false;
+        throw retry;
+      }
+    }
+    if (value?.status!=='ahead' && value?.status!=='identical') return false;
+    this.reviewed.add(revision);
+    return true;
+  }
   async policy({fresh=false}={}) {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
@@ -67,14 +89,17 @@ export class GitHub {
     const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f',
-      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d']);
+      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
-    if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
-        !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();
+    if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows || !selected.includes(required))
+      throw new PolicyError();
+    for (const workflow of selected) {
+      if (allowed.has(workflow)) continue;
+      // TauCeti's harness-runner-groups workflow admits pin changes before they merge; any
+      // shared-harness revision on TauCetiTools main is reviewed, so no broker release is needed.
+      const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/pr-build\.yml@([0-9a-f]{40})$/.exec(workflow);
+      if (!match || !await this.reviewedHarness(match[1])) throw new PolicyError();
+    }
     const value={runner_group_id:3};
     this.cachedPolicy={expires:Date.now()+60000,value};
     return value;
