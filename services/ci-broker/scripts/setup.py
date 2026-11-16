@@ -105,7 +105,7 @@ def inspect():
     workflows = set(group.get("selected_workflows", []))
 
     def reviewed(entry):
-        # Shared-harness pins are admitted by TauCeti's harness-runner-groups workflow;
+        # The broker admits TauCeti main's `.tauceti/ci-source.json` harness revision;
         # any revision on TauCetiTools main is reviewed.
         match = re.fullmatch(r"TauCetiProject/TauCetiTools/\.github/workflows/pr-build\.yml@([0-9a-f]{40})", entry)
         if not match:
