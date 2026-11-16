@@ -100,6 +100,8 @@ def inspect():
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f"}
