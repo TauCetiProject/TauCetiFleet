@@ -1,15 +1,26 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {GitHub,PolicyError} from '../src/github.mjs';
+import {GitHub,PolicyError,UpstreamError} from '../src/github.mjs';
 const prefix='TauCetiProject/TauCeti/.github/workflows/';
 const build=prefix+'pr-build.yml@refs/heads/main';
 const nightly=prefix+'nightly-verify.yml@refs/heads/main';
 const smoke=prefix+'fleet-smoke.yml@refs/heads/main';
 const picker=prefix+'pick-runner.yml@refs/heads/main';
 const labelRouter=prefix+'full-lint-label.yml@refs/heads/main';
-function client(workflows) {
+const reviewed=new Set(['8902fa12a4faafc7bb512ab0baa9a452249b93aa','150b56c3ab743b1f2a120f0639d98586455d7f2a',
+  'fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f','a7662ab81f900586db3586ec3a11c38a5f46962d',
+  'abf810bf5064bf549ba76fac568da9d1dbb32362']);
+function client(workflows,calls=[]) {
   const github=new GitHub({});
-  github.request=async()=>({id:3,name:'TauCetiFleet',restricted_to_workflows:true,selected_workflows:workflows});
+  github.request=async path=>{
+    calls.push(path);
+    const compare=/^repos\/TauCetiProject\/TauCetiTools\/compare\/([0-9a-f]{40})\.\.\.main\?per_page=1$/.exec(path);
+    if (compare) {
+      if (!reviewed.has(compare[1])) throw new UpstreamError(404);
+      return {status:'ahead'};
+    }
+    return {id:3,name:'TauCetiFleet',restricted_to_workflows:true,selected_workflows:workflows};
+  };
   return github;
 }
 test('old and expanded trusted policies allow a live update',async()=>{
@@ -39,5 +50,18 @@ test('source staging permits exactly the reviewed shared harness revision',async
  const finalizerSource=source.split('@')[0]+'@a7662ab81f900586db3586ec3a11c38a5f46962d';
  assert.deepEqual(await client([build,nightly,source,controlSource,proofSource,finalizerSource]).policy({fresh:true}),{runner_group_id:3});
  for (const bad of [source.split('@')[0]+'@refs/heads/main',source.slice(0,-1)+'0'])
+  await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
+});
+
+test('any harness revision on TauCetiTools main is accepted without a broker release',async()=>{
+ const pinned='TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@abf810bf5064bf549ba76fac568da9d1dbb32362';
+ const calls=[];
+ const github=client([build,pinned],calls);
+ assert.deepEqual(await github.policy({fresh:true}),{runner_group_id:3});
+ assert.deepEqual(await github.policy({fresh:true}),{runner_group_id:3});
+ assert.equal(calls.filter(c=>c.includes('/compare/')).length,1);
+ for (const bad of ['TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@'+'0'.repeat(40),
+   'TauCetiProject/TauCetiTools/.github/workflows/publish-lake-cache.yml@abf810bf5064bf549ba76fac568da9d1dbb32362',
+   'someone/TauCetiTools/.github/workflows/pr-build.yml@abf810bf5064bf549ba76fac568da9d1dbb32362'])
   await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
 });

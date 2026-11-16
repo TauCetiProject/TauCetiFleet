@@ -1,6 +1,7 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -88,20 +89,49 @@ def runner_policy(config):
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d"}
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
+    token_file = config.get("ci_token_file") or config.get("github_token_file")
     if (
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not selected <= allowed
+        or not trusted_entries(selected - allowed, ("pr-build.yml",), token_file)
     ):
-        raise FleetError("Runner group must allow only trusted main project workflows and the approved source-CI harness pin")
+        raise FleetError("Runner group must allow only trusted main project workflows and reviewed source-CI harness pins")
     return group
+
+
+HARNESS = "TauCetiProject/TauCetiTools"
+HARNESS_ENTRY = re.compile(r"TauCetiProject/TauCetiTools/\.github/workflows/([A-Za-z0-9_.-]+)@([0-9a-f]{40})")
+_REVIEWED_HARNESS = set()
+
+
+def reviewed_harness(revision, token_file):
+    """Whether a harness revision is on TauCetiTools main. Main never rewinds, so a yes is cached.
+
+    TauCeti's harness-runner-groups workflow admits these entries for pin changes before
+    they merge, so the accepted set follows the project's pin instead of a release here.
+    """
+    if revision in _REVIEWED_HARNESS:
+        return True
+    try:
+        value = request(f"repos/{HARNESS}/compare/{revision}...main?per_page=1", token_file=token_file)
+    except FleetError:
+        return False
+    if isinstance(value, dict) and value.get("status") in ("ahead", "identical"):
+        _REVIEWED_HARNESS.add(revision)
+        return True
+    return False
+
+
+def trusted_entries(entries, workflows, token_file):
+    """Every entry names one of `workflows` in the shared harness at a revision on its main."""
+    for entry in entries:
+        match = HARNESS_ENTRY.fullmatch(entry)
+        if not match or match.group(1) not in workflows or not reviewed_harness(match.group(2), token_file):
+            return False
+    return True
 
 
 def protected_policy(config, data):
@@ -115,16 +145,11 @@ def protected_policy(config, data):
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
         required = allowed
-        allowed = allowed | {
-            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@" + revision
-            for name in ("pr-build.yml", "publish-lake-cache.yml")
-            for revision in ("150b56c3ab743b1f2a120f0639d98586455d7f2a",
-                             "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
-                             "a7662ab81f900586db3586ec3a11c38a5f46962d")
-        }
         selected = set(data.get("selected_workflows", []))
-        if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
-            raise FleetError("Queue control runners require trusted main workflows and only approved source-CI harness pins")
+        token_file = config.get("ci_token_file") or config.get("github_token_file")
+        if (not data.get("restricted_to_workflows") or not required <= selected
+                or not trusted_entries(selected - allowed, ("pr-build.yml", "publish-lake-cache.yml"), token_file)):
+            raise FleetError("Queue control runners require trusted main workflows and only reviewed source-CI harness pins")
     if kind == "pr-status":
         required = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                     for name in ("pr-status.yml", "pr-labels.yml")}
