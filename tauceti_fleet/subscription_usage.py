@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from .store import data_dir, state_dir
 SESSION, WEEK = 5 * 3600.0, 7 * 86400.0
 # How long a worker keeps serving its cached reading for the credential it was fetched under.
 SERVED = dict(claude=3600.0, codex=600.0)
+# Where the worker takes a Claude token from the Keychain first, the login's file does not name the token in use.
+KEYCHAIN = sys.platform == "darwin"
 
 
 def providers(config):
@@ -171,6 +174,47 @@ def credential(fp):
     return hashlib.sha256(fp.encode()).hexdigest()[:8] if isinstance(fp, str) and fp else None
 
 
+def active_credential(login):
+    """The label of the token a Claude login holds now, as the worker's cache names it; None when a file cannot tell.
+
+    The worker starts a cache file per access token, so a login's renewed token
+    leaves the earlier token's reading behind. Only the label leaves this function.
+    """
+    if KEYCHAIN:
+        return None
+    try:
+        token = json.loads((login / ".credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return credential(hashlib.sha256(token.encode()).hexdigest()[:16]) if isinstance(token, str) and token else None
+
+
+def claude_entries(config, now):
+    """Claude cache entries with those of a login's earlier tokens left out, and the label of each login still to be read under its token.
+
+    A reading kept under the worker state cannot be tied to a login, so it is
+    left out only when every login's token is known and none matches it.
+    """
+    logins = claude_logins(config)
+    active = {login: active_credential(login) for login in logins}
+    known = set(active.values()) if all(active.values()) else None
+    entries, awaiting = [], []
+    for login in logins:
+        mine = list(filter(None, (cached(path, now) for path in login.glob(".tauceti-quota/usage/quota-claude-*.json"))))
+        if active[login] is None:
+            entries += mine
+            continue
+        kept = [entry for entry in mine if entry["credential"] == active[login]]
+        entries += kept
+        if not kept and any(is_current("claude", entry, now) for entry in mine):
+            awaiting.append(active[login])
+    for path in (path for root in worker_roots(config) for path in root.glob("state/.quota-usage/*/quota-claude-*.json")):
+        entry = cached(path, now)
+        if entry and (known is None or entry["credential"] in known):
+            entries.append(entry)
+    return entries, [label for label in awaiting if label not in {entry["credential"] for entry in entries}]
+
+
 def cached(path, now):
     try:
         value = json.loads(path.read_text())
@@ -197,6 +241,13 @@ def exhausted(payload, windows, now):
                for item in windows.values())
 
 
+def is_current(provider, entry, now):
+    payload, fetched_at = entry["payload"], entry["fetched_at"]
+    windows = claude_windows(payload, now) if provider == "claude" else codex_windows(payload, fetched_at, now)
+    served = now - fetched_at <= SERVED[provider] and (entry["valid_until"] is None or now < entry["valid_until"])
+    return served or exhausted(payload, windows, now)
+
+
 def readings(config, now=None):
     """The cached readings per provider the profile uses, as plain data.
 
@@ -208,23 +259,29 @@ def readings(config, now=None):
     would still serve it or while a spent window in it has not reset. While more than
     one credential has a current reading, the provider's value is {credentials:
     [reading, ...]}, newest first, since the active one cannot be told from the caches.
+    A Claude login whose token was renewed counts once: readings under its earlier
+    tokens are left out, and until a worker reads usage under the new token its
+    reading is {credential, awaiting_reading: True} with no fetched_at or windows.
     """
     now = time.time() if now is None else now
     result = {}
     for provider in providers(config):
         newest = {}
-        for entry in filter(None, (cached(path, now) for path in reading_files(config, provider))):
+        if provider == "claude":
+            entries, awaiting = claude_entries(config, now)
+        else:
+            entries, awaiting = filter(None, (cached(path, now) for path in reading_files(config, provider))), []
+        for entry in entries:
             if entry["fetched_at"] > newest.get(entry["credential"], {}).get("fetched_at", -math.inf):
                 newest[entry["credential"]] = entry
-        found = []
+        found = [(True, dict(credential=label, awaiting_reading=True)) for label in awaiting]
         for entry in sorted(newest.values(), key=lambda entry: entry["fetched_at"], reverse=True):
             payload, fetched_at = entry["payload"], entry["fetched_at"]
             windows = claude_windows(payload, now) if provider == "claude" else codex_windows(payload, fetched_at, now)
-            served = now - fetched_at <= SERVED[provider] and (entry["valid_until"] is None or now < entry["valid_until"])
             reading = dict(credential=entry["credential"], fetched_at=fetched_at, windows=windows)
             if provider == "codex":
                 reading["limit_reached"] = limit_reached(payload)
-            found.append((served or exhausted(payload, windows, now), reading))
+            found.append((is_current(provider, entry, now), reading))
         current = [reading for is_current, reading in found if is_current]
         if len(current) > 1:
             result[provider] = dict(credentials=current)
@@ -249,6 +306,8 @@ def span(seconds):
 
 
 def windows_text(reading, now):
+    if reading.get("awaiting_reading"):
+        return "no reading under the current token yet"
     parts = []
     for name, item in sorted(reading["windows"].items(), key=lambda pair: pair[1]["seconds"] or 0):
         seconds, resets_at = item["seconds"], item["resets_at"]

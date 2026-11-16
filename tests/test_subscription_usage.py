@@ -196,6 +196,59 @@ class SubscriptionUsage(unittest.TestCase):
         self.codex(self.runtime("a" * 40) / "state/fleet-2/cache/quota-codex.json", 60, (5, 5 * hour, hour))
         self.assertEqual(subscription_usage.readings(dict(agent="codex"), NOW)["codex"]["fetched_at"], NOW - 30)
 
+    def test_a_login_whose_token_was_renewed_counts_once(self):
+        hour, config = 3600, dict(claude_billing="subscription")
+
+        def fp(token):
+            return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+        def label(token):
+            return hashlib.sha256(fp(token).encode()).hexdigest()[:8]
+
+        def claude(usage, token, used, age):
+            name = hashlib.sha256(fp(token).encode()).hexdigest()[:16]
+            self.cache(usage / f"quota-claude-{name}.json", flat(dict(utilization=used, resets_at=iso(NOW + hour)), None), age, fp=fp(token))
+
+        def hold(login, token):
+            login.mkdir(parents=True, exist_ok=True)
+            (login / ".credentials.json").write_text(json.dumps(dict(claudeAiOauth=dict(accessToken=token))))
+
+        home = self.root / "home/.claude"
+        claude(self.login, "earlier", 40, 600)
+        claude(self.login, "renewed", 45, 60)
+        hold(home, "renewed")
+        with patch.object(subscription_usage, "KEYCHAIN", True):
+            self.assertEqual(len(subscription_usage.readings(config, NOW)["claude"]["credentials"]), 2)
+        with patch.object(subscription_usage, "KEYCHAIN", False):
+            value = subscription_usage.readings(config, NOW)["claude"]
+            self.assertEqual((value["credential"], value["other_credentials"], value["windows"]["session"]["left"]),
+                             (label("renewed"), 0, 55.0))
+
+            # Until a worker reads usage under the renewed token, the earlier token's figures are not passed off as current.
+            hold(home, "again")
+            value = subscription_usage.readings(config, NOW)["claude"]
+            self.assertEqual(value, dict(credential=label("again"), awaiting_reading=True, other_credentials=0))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                subscription_usage.display(dict(claude=value), NOW)
+            self.assertEqual(output.getvalue(), "Claude usage: no reading under the current token yet\n")
+
+            (home / ".credentials.json").write_text("{")
+            self.assertEqual(len(subscription_usage.readings(config, NOW)["claude"]["credentials"]), 2)
+
+            # Two logins, each read under its own token, are still two credentials.
+            hold(home, "renewed")
+            other = self.root / "other"
+            marker = self.runtime("a" * 40) / "state/fleet-1/home/.claude/.tauceti-creds-source"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(f"{other}\n")
+            hold(other, "second")
+            claude(other / ".tauceti-quota/usage", "second", 10, 30)
+            claude(other / ".tauceti-quota/usage", "before", 90, 900)
+            claude(self.runtime("a" * 40) / "state/.quota-usage/0011223344556677", "earlier", 40, 500)
+            value = subscription_usage.readings(config, NOW)["claude"]
+            self.assertEqual([each["credential"] for each in value["credentials"]], [label("second"), label("renewed")])
+
     def test_an_expired_reading_with_an_exhausted_window_stays_attributed_until_that_window_resets(self):
         hour = 3600
 

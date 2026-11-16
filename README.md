@@ -748,7 +748,11 @@ limit reached, the line says so before the percentages, and the JSON reading has
 `limit_reached`. Claude readings are looked for beside `~/.claude` and beside
 every login a worker recorded as the source of its isolated copy, which is where
 a worker started with `CLAUDE_CONFIG_DIR` in its launcher's environment keeps
-them. The caches are kept per credential, and Fleet does not read credentials, so it cannot tell which one is
+them. The caches are kept per access token. Where a login's `.credentials.json`
+names its token (not on macOS, where the worker reads the Keychain first), Fleet
+hashes it to pick that login's reading: readings under the login's earlier tokens
+are left out, and until a worker reads usage under a renewed token the login shows
+`no reading under the current token yet` (`"awaiting_reading": true`). Otherwise Fleet cannot tell which credential is
 active. A reading is current while the worker would still use it (an hour for
 Claude, ten minutes for Codex) or while a window it shows spent has not reset.
 While more than one credential has a current reading, each is printed on its own
