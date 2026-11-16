@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -280,7 +281,7 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers"):
+        for field in ("self_tested", "forgejo_workers", "worker_env"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
@@ -301,6 +302,8 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -319,7 +322,10 @@ def _worker_config(config):
         if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
-            if value is not None:
+            if isinstance(value, dict):
+                pairs = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items())
+                lines.append(key + " = { " + pairs + " }")
+            elif value is not None:
                 lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else json.dumps(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
@@ -543,12 +549,35 @@ def require_forgejo_credential():
         raise FleetError(f"Provision an owned, private Forgejo worker credential at {path} before enabling native slots") from None
 
 
+WORKER_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
+
+
+def merged_worker_env(current, changes):
+    """Apply `changes` (a value sets a variable, None removes it) to the host's worker environment."""
+    if not isinstance(changes, dict) or not changes:
+        raise FleetError("worker_env must be a non-empty JSON object")
+    env = dict(current or {})
+    for name, value in changes.items():
+        if not isinstance(name, str) or not WORKER_ENV_NAME.fullmatch(name):
+            raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
+        if value is None:
+            env.pop(name, None)
+        elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+            raise FleetError(f"Worker environment value for {name} must be a single-line string")
+        else:
+            env[name] = value
+    return env
+
+
 def set_worker_policy(payload):
     maximum = payload.get("maximum")
     local = payload.get("self_tested")
     native = payload.get("forgejo_workers")
-    if maximum is None and local is None and native is None:
-        raise FleetError("Select a worker maximum, self-tested prompting or Forgejo worker count")
+    environment = payload.get("worker_env")
+    if maximum is None and local is None and native is None and environment is None:
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count or worker environment")
+    if environment is not None:
+        environment = merged_worker_env(host_config().get("worker_env"), environment)
     if local is not None and type(local) is not bool:
         raise FleetError("self_tested must be a boolean")
     if maximum is not None and (type(maximum) is not int or not 0 <= maximum <= 4096):
@@ -573,6 +602,8 @@ def set_worker_policy(payload):
         changes["self_tested"] = local
     if native is not None:
         changes["forgejo_workers"] = native
+    if environment is not None:
+        changes["worker_env"] = environment
     if changes:
         config = update_host(**changes)
         worker_config(config)

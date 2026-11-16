@@ -900,6 +900,12 @@ The highest-numbered selected slots discover, maintain and author PRs on Forgejo
 worker source flags; remaining slots continue on GitHub. Set the count to `0` to return
 them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
 This does not change the admission ceiling, CI routing or active rounds.
+
+Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
+and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
+writes them into each generated worker definition's `env` table, so they survive the controller
+regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
+between rounds.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful
