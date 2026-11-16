@@ -245,6 +245,34 @@ def prepare_image(config=None):
 
 # Shared across CI slots, including replacements and recovery attempts.
 CI_START_GAP_SECONDS = 10
+CONTROL_START_GAP_SECONDS = 2
+SMALL_CONTROL_KINDS = (["control"], ["queue-control"], ["pr-status"])
+
+
+def control_boot_reservation():
+    """Reserve untouched RAM of small guests until online or accepting a job.
+
+    Their measured RSS can still be tiny immediately after launch. Counting
+    their remaining shape prevents faster starts from overfilling the slice.
+    Already charged cgroup RAM is present in the measured slice usage.
+    """
+    reserved = 0
+    for index in slots_in_use():
+        value = read(slot_file({"ci_slot": index}, "vm.json"), {})
+        if (value.get("ci_kinds") not in SMALL_CONTROL_KINDS
+                or value.get("online_observed_at") or value.get("busy")):
+            continue
+        charged = 0
+        if value.get("unit"):
+            result = run(["systemctl", "--user", "show", value["unit"], "-p", "ControlGroup", "--value"], check=False)
+            relative = (result.stdout or "").strip() if result.returncode == 0 else ""
+            if relative:
+                try:
+                    charged = max(0, int((Path("/sys/fs/cgroup") / relative.lstrip("/") / "memory.current").read_text()))
+                except (OSError, ValueError):
+                    pass  # Unknown usage retains the full conservative reservation.
+        reserved += max(0, value.get("memory_gib", 8) * 1024**3 - charged)
+    return reserved
 
 
 def start(config):
@@ -282,8 +310,15 @@ def start(config):
                     return {}
             from . import native_runner
             available = start_memory_available()
+            boot_reservation = control_boot_reservation()
+            small_control = config.get("ci_kinds") in SMALL_CONTROL_KINDS
+            fast_control = small_control and available is not None
+            measured_available = available
+            if available is not None:
+                available = max(0, available - boot_reservation)
             native = native_runner.choose(config, available)
-            config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available)
+            config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available,
+                          _ci_start_measured_available=measured_available, _ci_start_boot_reservation=boot_reservation)
             if native:
                 config["ci_kinds"] = ["pr"]
             if not start_memory_ok(config):
@@ -291,7 +326,12 @@ def start(config):
                 return {}
 
             def reserve(*, starting=False):
-                atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + CI_START_GAP_SECONDS, starting=starting))
+                # Heavy guests keep their existing ten-second settling time.
+                # Small, isolated control VMs need only two seconds, backed by
+                # explicit reservations for every unobserved control boot.
+                gap = CONTROL_START_GAP_SECONDS if fast_control and not starting else CI_START_GAP_SECONDS
+                atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + gap, starting=starting,
+                                  measured_available_bytes=measured_available, boot_reserved_bytes=boot_reservation))
 
             # Reserve before registration for crash safety, then measure the
             # interval from launch completion (or a failed attempt).
@@ -335,8 +375,10 @@ def start_memory_ok(config=None):
         required = 9 * 1024**3
     deferred = available is not None and available < required
     if deferred and not _start_memory_deferred:
+        reservation = (config or {}).get("_ci_start_boot_reservation", 0)
+        detail = f" ({config['_ci_start_measured_available'] / 1024**3:.1f} GiB measured, {reservation / 1024**3:.1f} GiB reserved for control boots)" if reservation else ""
         print(
-            f"CI guest start deferred: {available / 1024**3:.1f} GiB available, "
+            f"CI guest start deferred: {available / 1024**3:.1f} GiB available{detail}, "
             f"{required / 1024**3:.0f} GiB required",
             flush=True,
         )
