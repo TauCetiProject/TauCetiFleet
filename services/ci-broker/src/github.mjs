@@ -60,18 +60,21 @@ export class GitHub {
     }
     throw new InventoryError();
   }
+  anonymous(path) { return this.raw(path,null); }
   async reviewedHarness(revision) {
     this.reviewed??=new Set();
     if (this.reviewed.has(revision)) return true;
     const path=`repos/TauCetiProject/TauCetiTools/compare/${revision}...main?per_page=1`;
+    const absent=error=>error instanceof UpstreamError && (error.status===404 || error.status===422);
     let value;
     try {
       value=await this.request(path);
     } catch (error) {
-      if (!(error instanceof UpstreamError)) throw error;
+      if (absent(error)) return false;
+      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
       // The installation selects only TauCeti; TauCetiTools is public, so retry anonymously.
-      try { value=await this.raw(path,null); } catch (retry) {
-        if (retry instanceof UpstreamError && retry.status===404) return false;
+      try { value=await this.anonymous(path); } catch (retry) {
+        if (absent(retry)) return false;
         throw retry;
       }
     }

@@ -21,6 +21,7 @@ function client(workflows,calls=[]) {
     }
     return {id:3,name:'TauCetiFleet',restricted_to_workflows:true,selected_workflows:workflows};
   };
+  github.anonymous=async()=>{ throw new Error('tests never reach the network'); };
   return github;
 }
 test('old and expanded trusted policies allow a live update',async()=>{
@@ -64,4 +65,19 @@ test('any harness revision on TauCetiTools main is accepted without a broker rel
    'TauCetiProject/TauCetiTools/.github/workflows/publish-lake-cache.yml@abf810bf5064bf549ba76fac568da9d1dbb32362',
    'someone/TauCetiTools/.github/workflows/pr-build.yml@abf810bf5064bf549ba76fac568da9d1dbb32362'])
   await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
+});
+
+test('a token that cannot read TauCetiTools falls back to the public compare',async()=>{
+ const pinned='TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@abf810bf5064bf549ba76fac568da9d1dbb32362';
+ const github=client([build,pinned]);
+ const request=github.request;
+ github.request=async path=>{ if(path.includes('/compare/')) throw new UpstreamError(403); return request(path); };
+ const anonymous=[];
+ github.anonymous=async path=>{ anonymous.push(path); return {status:'identical'}; };
+ assert.deepEqual(await github.policy({fresh:true}),{runner_group_id:3});
+ assert.equal(anonymous.length,1);
+ const refused=client([build,pinned]);
+ refused.request=async path=>{ if(path.includes('/compare/')) throw new UpstreamError(403); return request(path); };
+ refused.anonymous=async()=>{ throw new UpstreamError(404); };
+ await assert.rejects(refused.policy({fresh:true}),PolicyError);
 });
