@@ -60,28 +60,6 @@ export class GitHub {
     }
     throw new InventoryError();
   }
-  anonymous(path) { return this.raw(path,null); }
-  async reviewedHarness(revision) {
-    this.reviewed??=new Set();
-    if (this.reviewed.has(revision)) return true;
-    const path=`repos/TauCetiProject/TauCetiTools/compare/${revision}...main?per_page=1`;
-    const absent=error=>error instanceof UpstreamError && (error.status===404 || error.status===422);
-    let value;
-    try {
-      value=await this.request(path);
-    } catch (error) {
-      if (absent(error)) return false;
-      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
-      // The installation selects only TauCeti; TauCetiTools is public, so retry anonymously.
-      try { value=await this.anonymous(path); } catch (retry) {
-        if (absent(retry)) return false;
-        throw retry;
-      }
-    }
-    if (value?.status!=='ahead' && value?.status!=='identical') return false;
-    this.reviewed.add(revision);
-    return true;
-  }
   async policy({fresh=false}={}) {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
@@ -89,18 +67,13 @@ export class GitHub {
     const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main']);
+      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main',
+      // TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows || !selected.includes(required))
       throw new PolicyError();
-    for (const workflow of selected) {
-      if (allowed.has(workflow)) continue;
-      // TauCeti runs the shared harness from TauCetiTools main. A revision on that main stays
-      // acceptable only until the group drops the entries of the earlier pinned callers.
-      if (workflow==='TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main') continue;
-      const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/pr-build\.yml@([0-9a-f]{40})$/.exec(workflow);
-      if (!match || !await this.reviewedHarness(match[1])) throw new PolicyError();
-    }
+    if (selected.some(workflow=>!allowed.has(workflow))) throw new PolicyError();
     const value={runner_group_id:3};
     this.cachedPolicy={expires:Date.now()+60000,value};
     return value;

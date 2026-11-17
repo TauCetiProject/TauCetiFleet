@@ -180,9 +180,8 @@ TauCeti runs its shared harness from TauCetiTools `main`. `TauCetiFleet` admits
 `TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main`, and
 `TauCetiQueueControl` admits that and `publish-lake-cache.yml@refs/heads/main`.
 These are static entries an organization owner sets once; the broker never edits
-runner groups. Host and broker policy accept no other branch and no fork. Entries
-for exact revisions on TauCetiTools main are still accepted until the groups drop
-the ones the earlier pinned callers needed.
+runner groups. Host and broker policy accept no other harness entry: no exact
+revision, no other branch and no fork.
 
 
 ```sh
