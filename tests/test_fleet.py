@@ -143,13 +143,14 @@ class Isolated(unittest.TestCase):
         host.worker_config(original)
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
         self.assertEqual(len(specs), 3)
-        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        shared = {"TAUCETI_SHARED_ATTEMPTS_DIR": str(store.state_dir() / "worker-attempts")}
+        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1", **shared} for s in specs))
         host.set_worker_policy(dict(worker_env={"OTHER": None}))
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
-        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1", **shared} for s in specs))
         host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": None}))
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
-        self.assertFalse(any("env" in s for s in specs))
+        self.assertTrue(all(s["env"] == shared for s in specs))
 
     def test_worker_env_rejects_unsafe_names_and_values(self):
         original = store.update_host(max_workers=2, workers_enabled=True)
@@ -357,29 +358,28 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
 
-    def test_workers_share_one_attempt_budget_under_the_fleet_state(self):
-        secret = self.root / "token"
-        secret.write_text("fake-selected-token")
-        store.update_host(github_token_file=str(secret))
-        attempts = store.state_dir() / "worker-attempts"
-        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
-            host.run_workers()
-            self.assertEqual(os.environ["TAUCETI_SHARED_ATTEMPTS_DIR"], str(attempts))
-        self.assertTrue(attempts.is_dir())
-        self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
+    def test_worker_definitions_carry_the_shared_attempt_budget_and_its_overrides(self):
+        import tomllib
 
-    def test_worker_env_disables_the_shared_attempt_budget(self):
-        secret = self.root / "token"
-        secret.write_text("fake-selected-token")
-        store.update_host(github_token_file=str(secret))
+        def generated():
+            return tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+
+        name = "TAUCETI_SHARED_ATTEMPTS_DIR"
+        attempts = store.state_dir() / "worker-attempts"
+        store.update_host(max_workers=2, workers_enabled=True, worker_env={"OTHER": "1"})
+        # The Worker manager replaces a surviving worker only when its definition changes, so the
+        # default must change the definitions written before it, which held only worker_env.
         with patch.object(host, "worker_statuses", return_value=[]):
-            host.set_worker_policy(dict(worker_env={"TAUCETI_SHARED_ATTEMPTS_DIR": ""}))
-        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
-            host.run_workers()
-        self.assertFalse((store.state_dir() / "worker-attempts").exists())
-        # Each worker applies its definition's env table over the manager's environment.
-        workers = (store.config_dir() / "workers.toml").read_text()
-        self.assertIn('env = { "TAUCETI_SHARED_ATTEMPTS_DIR" = "" }', workers)
+            host.set_worker_policy(dict(worker_env={name: ""}))
+            self.assertEqual([s["env"] for s in generated()], [{name: "", "OTHER": "1"}] * 2)
+            self.assertFalse(attempts.exists())
+            host.set_worker_policy(dict(worker_env={name: "/elsewhere"}))
+            self.assertEqual([s["env"][name] for s in generated()], ["/elsewhere"] * 2)
+            self.assertFalse(attempts.exists())
+            host.set_worker_policy(dict(worker_env={name: None}))
+            specs = generated()
+        self.assertEqual([s["env"] for s in specs], [{name: str(attempts), "OTHER": "1"}] * 2)
+        self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")

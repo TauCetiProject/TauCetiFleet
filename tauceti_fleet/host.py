@@ -287,6 +287,9 @@ def worker_config(config):
         return _worker_config(config)
 
 
+SHARED_ATTEMPTS_ENV = "TAUCETI_SHARED_ATTEMPTS_DIR"
+
+
 def _worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = dict(
@@ -302,8 +305,15 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
-    if config.get("worker_env"):
-        fields["env"] = dict(sorted(config["worker_env"].items()))
+    # An install's workers act as one account, so they share one repair attempt budget per PR. It
+    # lives in each definition, not the manager's environment, so the changed spec replaces workers
+    # that outlive a manager restart. worker_env overrides it; an empty value turns sharing off.
+    env = dict(config.get("worker_env") or {})
+    if SHARED_ATTEMPTS_ENV not in env:
+        attempts = state_dir() / "worker-attempts"
+        attempts.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env[SHARED_ATTEMPTS_ENV] = str(attempts)
+    fields["env"] = dict(sorted(env.items()))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -382,12 +392,6 @@ def run_workers():
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
     os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
-    # An install's workers act as one account, so they share one repair attempt budget per PR.
-    # A worker_env entry for the variable takes precedence in each worker; an empty one turns it off.
-    attempts = state_dir() / "worker-attempts"
-    if "TAUCETI_SHARED_ATTEMPTS_DIR" not in (config.get("worker_env") or {}):
-        attempts.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.environ["TAUCETI_SHARED_ATTEMPTS_DIR"] = str(attempts)
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
