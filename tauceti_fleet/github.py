@@ -86,8 +86,7 @@ def runner_policy(config):
         if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))

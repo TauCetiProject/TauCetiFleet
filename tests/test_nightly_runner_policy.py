@@ -6,7 +6,7 @@ from tauceti_fleet.store import FleetError
 PREFIX = "TauCetiProject/TauCeti/.github/workflows/"
 BUILD = PREFIX + "pr-build.yml@refs/heads/main"
 NIGHTLY = PREFIX + "nightly-verify.yml@refs/heads/main"
-SMOKE = PREFIX + "fleet-smoke.yml@refs/heads/main"
+SMOKE = PREFIX + "fleet-smoke.yml@refs/heads/main"  # deleted from TauCeti; no longer admitted
 PICKER = PREFIX + "pick-runner.yml@refs/heads/main"
 LABEL_ROUTER = PREFIX + "full-lint-label.yml@refs/heads/main"
 
@@ -28,9 +28,8 @@ class NightlyRunnerPolicy(unittest.TestCase):
             return github.runner_policy(dict(runner_group_id=3))
 
     def test_live_update_accepts_old_and_new_policy(self):
-        for workflows in ([BUILD], [BUILD, SMOKE], [BUILD, NIGHTLY], [BUILD, NIGHTLY, SMOKE],
-                          [BUILD, PICKER], [BUILD, LABEL_ROUTER],
-                          [BUILD, NIGHTLY, SMOKE, PICKER, LABEL_ROUTER]):
+        for workflows in ([BUILD], [BUILD, NIGHTLY], [BUILD, PICKER], [BUILD, LABEL_ROUTER],
+                          [BUILD, NIGHTLY, PICKER, LABEL_ROUTER]):
             self.assertEqual(self.check(workflows), 3)
 
     def test_no_pr_refs_other_repositories_or_untrusted_workflows(self):
@@ -39,7 +38,7 @@ class NightlyRunnerPolicy(unittest.TestCase):
                     LABEL_ROUTER.replace("refs/heads/main", "refs/pull/1/merge"),
                     NIGHTLY.replace("TauCetiProject/TauCeti/", "someone/Other/"),
                     PICKER.replace("TauCetiProject/TauCeti/", "someone/Other/"),
-                    PREFIX + "untrusted.yml@refs/heads/main"):
+                    PREFIX + "untrusted.yml@refs/heads/main", SMOKE):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
         with self.assertRaises(FleetError): self.check([NIGHTLY])
         with self.assertRaises(FleetError): self.check([PICKER, LABEL_ROUTER])

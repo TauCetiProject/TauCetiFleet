@@ -64,8 +64,7 @@ export class GitHub {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
     const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
-    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
+    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main',
       // TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.

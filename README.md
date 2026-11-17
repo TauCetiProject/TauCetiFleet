@@ -536,15 +536,14 @@ extends the existing runner picker. Worker integration is in
 `FLEET_CI_ENABLED` unset/false, production routing is unchanged. Before enabling:
 
 1. Configure an organization runner group named `TauCetiFleet`, restricted to
-   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main` and,
-   optionally, `fleet-smoke.yml` at the same trusted branch. The host verifies
-   this policy before registration.
+   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main`. The
+   host verifies this policy before registration.
 2. Supply the host profile's `runner_group_id` and a credential with organization
    self-hosted-runner write permission. Worker GitHub permissions alone may not
    provide this. Only an encoded, single-job JIT configuration reaches a guest. Use a fine-grained or App token
    scoped to Self-hosted runners; do not use a broadly scoped admin token for CI reads.
 3. Keep production routing disabled while enabling a prepared host's CI role and
-   manually dispatching `fleet-smoke.yml` on main. This registers a disposable
+   manually dispatching `nightly-verify.yml` on main. This registers a disposable
    runner but starts no paid agent. Verify runner acquisition and completion.
 4. Configure TauCeti's `FLEET_RUNNER_GROUP_ID` variable and `FLEET_READ_TOKEN`
    secret (runner read permission), then explicitly set `FLEET_CI_ENABLED=true`.

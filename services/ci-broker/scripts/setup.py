@@ -98,8 +98,7 @@ def inspect():
     # Verify the actual runner policy before enabling any host.
     group = api("https://api.github.com/orgs/TauCetiProject/actions/runner-groups/3", token=grant["token"])
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main"}

@@ -4,7 +4,7 @@ import {GitHub,PolicyError} from '../src/github.mjs';
 const prefix='TauCetiProject/TauCeti/.github/workflows/';
 const build=prefix+'pr-build.yml@refs/heads/main';
 const nightly=prefix+'nightly-verify.yml@refs/heads/main';
-const smoke=prefix+'fleet-smoke.yml@refs/heads/main';
+const smoke=prefix+'fleet-smoke.yml@refs/heads/main'; // deleted from TauCeti; no longer admitted
 const picker=prefix+'pick-runner.yml@refs/heads/main';
 const labelRouter=prefix+'full-lint-label.yml@refs/heads/main';
 function client(workflows,calls=[]) {
@@ -16,8 +16,8 @@ function client(workflows,calls=[]) {
   return github;
 }
 test('old and expanded trusted policies allow a live update',async()=>{
-  for(const workflows of [[build],[build,smoke],[build,nightly],[build,smoke,nightly],
-    [build,picker],[build,labelRouter],[build,smoke,nightly,picker,labelRouter]])
+  for(const workflows of [[build],[build,nightly],[build,picker],[build,labelRouter],
+    [build,nightly,picker,labelRouter]])
     assert.deepEqual(await client(workflows).policy({fresh:true}),{runner_group_id:3});
 });
 test('nightly access never permits PR refs, other repos or arbitrary workflows',async()=>{
@@ -26,7 +26,7 @@ test('nightly access never permits PR refs, other repos or arbitrary workflows',
     labelRouter.replace('refs/heads/main','refs/pull/1/merge'),
     nightly.replace('TauCetiProject/TauCeti/','someone/Other/'),
     picker.replace('TauCetiProject/TauCeti/','someone/Other/'),
-    prefix+'untrusted.yml@refs/heads/main'])
+    prefix+'untrusted.yml@refs/heads/main',smoke])
     await assert.rejects(client([build,invalid]).policy({fresh:true}),PolicyError);
   await assert.rejects(client([nightly]).policy({fresh:true}),PolicyError);
   await assert.rejects(client([picker,labelRouter]).policy({fresh:true}),PolicyError);
