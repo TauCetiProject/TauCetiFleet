@@ -4,7 +4,6 @@ import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
 import {MAX_JOBS,capacity,validKinds,slots,labels} from './capacity.mjs';
 import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
-import {HarnessAdmission,report} from './harness.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'"};
@@ -43,7 +42,6 @@ export class FleetRegistry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map();
     this.recovery=new RegistrationRecovery(ctx.storage,this.github);
-    this.harness=new HarnessAdmission(ctx.storage,this.github);
   }
   admit(id, maximum=1) {
     const now=Date.now();
@@ -70,25 +68,9 @@ export class FleetRegistry extends DurableObject {
       return telemetry(req, this.env, this.ctx.storage);
     return this.serialize(()=>this.handle(req));
   }
-  // One alarm serves both duties. Recovery may clear it when nothing is pending, so the
-  // harness reconciliation runs last and always leaves its own wakeup in place.
-  alarm() {
-    return this.serialize(async()=>{
-      try { await this.recovery.run(); } finally { await this.harness.tick(); }
-    });
-  }
+  alarm() { return this.serialize(()=>this.recovery.run()); }
   async handle(req) {
     const url = new URL(req.url);
-    // Any request restores the reconciliation wakeup, including the first after deployment.
-    await this.harness.schedule();
-    // Public and read-only: the answer comes from protected main and GitHub, never the caller.
-    // The queue asks immediately before each staging dispatch and refuses to send until ready.
-    if (url.pathname==='/v1/harness' && req.method==='GET') {
-      if (!this.admit('harness-status',REQUEST_BURST)) return json({error:'request limit reached; retry after ten seconds'},429);
-      const revision=url.searchParams.get('revision');
-      if (revision!==null && !/^[0-9a-f]{40}$/.test(revision)) return json({error:'invalid revision'},400);
-      return json(await this.harness.status(revision));
-    }
     // All mutations and authorization checks run on one strongly consistent object.
     if (url.pathname === '/healthz') {
       const hosts=await this.recovery.hosts();
@@ -97,11 +79,8 @@ export class FleetRegistry extends DurableObject {
       const pending=hosts.flatMap(h=>Object.values(slots(h)).filter(s=>s.pending).map(s=>s.pending));
       const stuck=pending.filter(p=>Date.now()-p.at>=STUCK_AFTER).length;
       const configured=Boolean(this.env.GITHUB_APP_ID && this.env.GITHUB_INSTALLATION_ID && this.env.GITHUB_PRIVATE_KEY);
-      const state=await this.harness.state(), harness=report(state,state.main);
       return json({service:'tauceti-ci-broker',app_configured:configured,
-        pending_registrations:pending.length,stuck_registrations:stuck,
-        harness:{revision:harness.main_revision,ready:harness.ready,checked_at:harness.checked_at,error:harness.error}},
-        configured && !stuck ? 200 : 503);
+        pending_registrations:pending.length,stuck_registrations:stuck},configured && !stuck ? 200 : 503);
     }
     if (url.pathname === '/setup/register' && req.method === 'GET') {
       return html(`<title>Register TauCeti Fleet</title><h1>Register the TauCeti Fleet GitHub App</h1>

@@ -66,7 +66,17 @@ class NightlyRunnerPolicy(unittest.TestCase):
         self.assertEqual(self.check([BUILD, NIGHTLY, source, control_source, proof_source]), 3)
         finalizer_source = source.rsplit("@", 1)[0] + "@a7662ab81f900586db3586ec3a11c38a5f46962d"
         self.assertEqual(self.check([BUILD, NIGHTLY, source, control_source, proof_source, finalizer_source]), 3)
-        for bad in (source.rsplit("@", 1)[0] + "@refs/heads/main", source[:-1] + "0"):
+        for bad in (source.rsplit("@", 1)[0] + "@refs/heads/other", source[:-1] + "0"):
+            with self.assertRaises(FleetError): self.check([BUILD, bad])
+
+    def test_shared_harness_at_tools_main_is_allowed_but_no_other_branch_or_fork(self):
+        main = HARNESS + "pr-build.yml@refs/heads/main"
+        calls = []
+        self.assertEqual(self.check([BUILD, NIGHTLY, main], calls=calls), 3)
+        self.assertFalse(any("/compare/" in c for c in calls))
+        for bad in (HARNESS + "pr-build.yml@main", HARNESS + "pr-build.yml@refs/heads/other",
+                    "someone/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main",
+                    HARNESS + "publish-lake-cache.yml@refs/heads/main"):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
 
     def test_any_harness_revision_on_tools_main_is_accepted_without_a_release(self):

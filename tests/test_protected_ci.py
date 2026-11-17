@@ -190,12 +190,17 @@ class QueueControlCI(unittest.TestCase):
                                  "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f") for w in source]
             self.assertEqual(github.protected_policy(
                 control, dict(group, selected_workflows=list(workflows) + source + updated)), 6)
+            main = [w.rsplit("@", 1)[0] + "@refs/heads/main" for w in source]
+            self.assertEqual(github.protected_policy(control, dict(group, selected_workflows=list(workflows) + main)), 6)
             finalizer = [w.replace("fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f", "a7662ab81f900586db3586ec3a11c38a5f46962d") for w in updated]
             self.assertEqual(github.protected_policy(
                 control, dict(group, selected_workflows=list(workflows) + source + updated + finalizer)), 6)
             for bad in (dict(group, restricted_to_workflows=False),
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
-                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/main"]),
+                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/other"]),
+                        dict(group, selected_workflows=list(workflows)+[main[0].replace("TauCetiProject/", "someone/")]),
+                        dict(group, selected_workflows=list(workflows)+[
+                            "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@refs/heads/main"]),
                         dict(group, selected_workflows=list(workflows)+[source[1][:-1]+"0"]),
                         dict(group, selected_workflows=list(workflows)+[
                             "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@abf810bf5064bf549ba76fac568da9d1dbb32362"]),

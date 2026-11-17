@@ -103,6 +103,8 @@ def runner_policy(config):
 
 
 HARNESS = "TauCetiProject/TauCetiTools"
+# TauCeti runs the shared harness from TauCetiTools main. Exact revisions are accepted only while
+# the runner groups still list them from the earlier pinned callers.
 HARNESS_ENTRY = re.compile(r"TauCetiProject/TauCetiTools/\.github/workflows/([A-Za-z0-9_.-]+)@([0-9a-f]{40})")
 _REVIEWED_HARNESS = set()
 
@@ -110,8 +112,7 @@ _REVIEWED_HARNESS = set()
 def reviewed_harness(revision, token_file):
     """Whether a harness revision is on TauCetiTools main. Main never rewinds, so a yes is cached.
 
-    The CI broker writes these entries from TauCeti main's `.tauceti/ci-source.json`, so the
-    accepted set follows the project's pin instead of a release here.
+    Accepted only until the runner groups drop their pinned entries for the `main` ones.
     """
     if revision in _REVIEWED_HARNESS:
         return True
@@ -126,8 +127,10 @@ def reviewed_harness(revision, token_file):
 
 
 def trusted_entries(entries, workflows, token_file):
-    """Every entry names one of `workflows` in the shared harness at a revision on its main."""
+    """Every entry names one of `workflows` in the shared harness at main (or a revision on it)."""
     for entry in entries:
+        if entry in {f"{HARNESS}/.github/workflows/{name}@refs/heads/main" for name in workflows}:
+            continue
         match = HARNESS_ENTRY.fullmatch(entry)
         if not match or match.group(1) not in workflows or not reviewed_harness(match.group(2), token_file):
             return False
