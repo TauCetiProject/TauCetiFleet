@@ -357,6 +357,30 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
 
+    def test_workers_share_one_attempt_budget_under_the_fleet_state(self):
+        secret = self.root / "token"
+        secret.write_text("fake-selected-token")
+        store.update_host(github_token_file=str(secret))
+        attempts = store.state_dir() / "worker-attempts"
+        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+            self.assertEqual(os.environ["TAUCETI_SHARED_ATTEMPTS_DIR"], str(attempts))
+        self.assertTrue(attempts.is_dir())
+        self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
+
+    def test_worker_env_disables_the_shared_attempt_budget(self):
+        secret = self.root / "token"
+        secret.write_text("fake-selected-token")
+        store.update_host(github_token_file=str(secret))
+        with patch.object(host, "worker_statuses", return_value=[]):
+            host.set_worker_policy(dict(worker_env={"TAUCETI_SHARED_ATTEMPTS_DIR": ""}))
+        with patch.object(host, "executable", return_value="/fake/tauceti"), patch.object(host.os, "execv"):
+            host.run_workers()
+        self.assertFalse((store.state_dir() / "worker-attempts").exists())
+        # Each worker applies its definition's env table over the manager's environment.
+        workers = (store.config_dir() / "workers.toml").read_text()
+        self.assertIn('env = { "TAUCETI_SHARED_ATTEMPTS_DIR" = "" }', workers)
+
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")
         output = io.StringIO()

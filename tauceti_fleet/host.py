@@ -382,6 +382,12 @@ def run_workers():
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
     os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
+    # An install's workers act as one account, so they share one repair attempt budget per PR.
+    # A worker_env entry for the variable takes precedence in each worker; an empty one turns it off.
+    attempts = state_dir() / "worker-attempts"
+    if "TAUCETI_SHARED_ATTEMPTS_DIR" not in (config.get("worker_env") or {}):
+        attempts.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.environ["TAUCETI_SHARED_ATTEMPTS_DIR"] = str(attempts)
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")

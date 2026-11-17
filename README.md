@@ -906,6 +906,14 @@ and remove one with `--unset-env NAME`; both repeat. The host stores them as `wo
 writes them into each generated worker definition's `env` table, so they survive the controller
 regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
 between rounds.
+
+A host's workers act as one account, so the worker manager gives them one repair attempt budget
+per PR: it sets `TAUCETI_SHARED_ATTEMPTS_DIR` to `worker-attempts/` in the Fleet state directory,
+created mode 0700, and takes effect when the manager next starts. Point the workers elsewhere with
+`--env TAUCETI_SHARED_ATTEMPTS_DIR=PATH` on a local filesystem, or give each worker its own budget
+again with `--env TAUCETI_SHARED_ATTEMPTS_DIR=`. The workers read the directory from their own
+process on the host, never from inside a Bubble sandbox, so it needs no mount. A Worker release
+without shared attempt budgets ignores the variable, so this is safe to deploy before it.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful
