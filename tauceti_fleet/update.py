@@ -139,6 +139,10 @@ def install(release, *, expected_machine_id):
         config = host_config()
         if config["machine_id"] != expected_machine_id:
             raise FleetError("Host identity differs from inventory; refusing live update")
+        try:
+            capacity.controller_config(config)
+        except FleetError as exc:
+            raise FleetError(f"Host configuration is invalid for the staged release ({exc}); previous release left running") from None
         release = Path(release).resolve()
         metadata = read(release / "release.json", {})
         current = data_dir() / "current"

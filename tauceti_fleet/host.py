@@ -979,6 +979,7 @@ def daemon():
         while not stopping:
             config = host_config()
             try:
+                capacity.controller_config(config)
                 caps = resources()
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)

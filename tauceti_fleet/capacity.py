@@ -118,6 +118,24 @@ def protected_slots(config):
     return result
 
 
+def controller_config(config):
+    """Configuration checks whose failure stops the controller loop.
+
+    The daemon runs these on every iteration; a live update runs the staged
+    release's copy before handover so an incompatible release is never started.
+    """
+    missing = [key for key in ("machine_id", "ci_enabled", "workers_enabled", "ci_allowed", "max_workers")
+               if key not in config]
+    if missing:
+        raise FleetError("Host configuration lacks " + ", ".join(missing))
+    jobs(config)
+    kinds(config)
+    if config.get("ci_memory_budget_gib") is not None:
+        memory_budget_gib(config)
+    if config["ci_enabled"]:
+        protected_slots(config)
+
+
 def reservation(config):
     """Report a corrupt reservation without stopping unrelated worker admissions."""
     try:

@@ -246,6 +246,87 @@ class LiveUpdate(unittest.TestCase):
         stage.assert_not_called()
         self.assert_work_preserved()
 
+    def test_config_the_staged_controller_rejects_refuses_before_any_change(self):
+        store.update_host(ci_protected_slots={"0": dict(kind="unknown", runner_group_id=7)})
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker") as stage, patch.object(update, "handover") as handover:
+            with self.assertRaisesRegex(store.FleetError, "invalid for the staged release.*Protected slots"):
+                self.install()
+        stage.assert_not_called()
+        handover.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        self.assertEqual(self.binary.read_text(), "old launcher")
+
+    def deploy_with(self, installed, shipped, order=None, **kwargs):
+        reply = io.StringIO(json.dumps(dict(installed=True)))
+        with patch.object(remote, "call"), \
+                patch.object(remote, "installed_revision", return_value=installed), \
+                patch.object(remote, "manifest", return_value=dict(version=1, revision=shipped)), \
+                patch.object(remote, "descends", return_value=order) as descends, \
+                patch.object(remote, "archive", return_value=b"release"), \
+                patch.object(remote, "ssh", return_value=subprocess.CompletedProcess([], 0, reply.getvalue(), "")) as ssh:
+            try:
+                return remote.deploy("server", live=True, expected_machine_id=self.config["machine_id"], **kwargs)
+            finally:
+                self.ssh, self.descends = ssh, descends
+
+    def test_update_refuses_a_release_that_does_not_descend_from_the_host(self):
+        with self.assertRaisesRegex(store.FleetError, "does not descend from the host's bbbbbbbbbbbb"):
+            self.deploy_with("b" * 40, "a" * 40, order=False)
+        self.descends.assert_called_once_with("b" * 40, "a" * 40)
+        self.ssh.assert_not_called()
+
+    def test_update_refuses_when_order_or_cli_revision_is_unknown(self):
+        with self.assertRaisesRegex(store.FleetError, "Cannot verify"):
+            self.deploy_with("b" * 40, "a" * 40, order=None)
+        self.ssh.assert_not_called()
+        with self.assertRaisesRegex(store.FleetError, "revision is unknown"):
+            self.deploy_with("b" * 40, None)
+        self.ssh.assert_not_called()
+
+    def test_update_ships_descendants_legacy_hosts_and_explicit_downgrades(self):
+        self.assertTrue(self.deploy_with("b" * 40, "a" * 40, order=True)["installed"])
+        self.ssh.assert_called_once()
+        self.assertTrue(self.deploy_with(None, None)["installed"])
+        self.descends.assert_not_called()
+        self.assertTrue(self.deploy_with("b" * 40, "a" * 40, order=False, allow_downgrade=True)["installed"])
+        self.descends.assert_not_called()
+        self.ssh.assert_called_once()
+
+    def test_update_downgrade_flag_reaches_deploy(self):
+        with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, \
+                patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cli.main(["update", "local", "--allow-downgrade", "--json"]), 0)
+        self.assertTrue(deploy.call_args.kwargs["allow_downgrade"])
+
+    def test_installed_revision_reads_the_host_release_metadata(self):
+        self.assertIsNone(remote.installed_revision("local"))
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="c" * 40))
+        self.assertEqual(remote.installed_revision("local"), "c" * 40)
+
+    def test_release_records_clean_checkout_revision_and_ancestry(self):
+        checkout = self.home / "checkout"
+        (checkout / "tauceti_fleet").mkdir(parents=True)
+        git = ["git", "-C", str(checkout), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        def commit(message):
+            (checkout / "tauceti_fleet/module.py").write_text(message)
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", message], check=True)
+            return subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        store.atomic(checkout / "release.json", dict(version=1))
+        base = commit("base")
+        newer = commit("newer")
+        subprocess.run(git + ["checkout", "-q", "-b", "side", base], check=True)
+        side = commit("side")
+        with patch.object(remote, "__file__", str(checkout / "tauceti_fleet/remote.py")):
+            self.assertEqual(remote.manifest(), dict(version=1, revision=side))
+            self.assertTrue(remote.descends(base, newer))
+            self.assertFalse(remote.descends(newer, base))
+            self.assertFalse(remote.descends(newer, side))
+            (checkout / "tauceti_fleet/module.py").write_text("local edit")
+            self.assertEqual(remote.manifest(), dict(version=1))
+
     def test_legacy_ssh_identity_is_verified_before_transferring_an_update(self):
         with patch.object(remote, "call", side_effect=store.FleetError("identity differs")), \
                 patch.object(remote, "ssh") as ssh:
@@ -388,7 +469,8 @@ class LiveUpdate(unittest.TestCase):
         with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, \
                 patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(cli.main(["update", "local", "--json"]), 0)
-        deploy.assert_called_once_with("local", live=True, expected_machine_id=self.config["machine_id"])
+        deploy.assert_called_once_with("local", live=True, expected_machine_id=self.config["machine_id"],
+                                       allow_downgrade=False)
         self.assertFalse((store.config_dir() / "inventory.json").exists())
         self.assert_work_preserved()
 

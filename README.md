@@ -184,6 +184,14 @@ failure restores the previous release and attempts to recover its controller.
 An interrupted SSH connection is not retried automatically: inspect `status`
 and the host's `current` release before repeating an update.
 
+Before handover, the staged release checks the host configuration with the same
+checks its controller applies on every loop, and refuses the update if they fail.
+Releases record the Fleet commit they were packaged from (a clean checkout or a
+`uv tool` install from git). `update` refuses to ship a release that does not
+descend from the commit recorded on the host, or whose own commit is unknown, unless
+`--allow-downgrade` is given. Hosts whose release predates these records are updated
+without the check.
+
 Already running worker managers and workers retain their existing Python runtime;
 the staged worker version takes effect at a future manager start. The update
 result reports that scope explicitly. Existing CI backing images are preserved;
