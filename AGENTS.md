@@ -6,4 +6,4 @@
 
 # Known issues: do not report
 
-- GitHub sometimes leaves TauCeti Actions runs reporting `queued` forever, with no jobs ("zombie runs"). They hold no runner, block no queue attempt and are harmless. `tauceti-fleet status` lists jobs queued for more than 24 hours on a separate "Stale queued (known GitHub zombies, nothing to do)" line, outside Run/Wait. Do not report them, investigate them or try to cancel them (cancel and force-cancel both return HTTP 409). TauCetiWorker `docs/queue/github-zombie-runs.md` records the known set and the human-approved cleanup.
+- About 750 TauCeti Actions runs (mostly created 2026-11-11) report `queued` forever with no jobs ("GitHub zombie runs"). They hold no runner, block no queue attempt and are harmless. Cancel and force-cancel return HTTP 409 and delete returns HTTP 403; only GitHub support can clear them. `tauceti-fleet status` lists jobs queued for more than 24 hours on a separate "Stale queued (known GitHub zombies, nothing to do)" line, outside Run/Wait. Do not report, investigate, cancel or delete them. TauCetiWorker `docs/queue/github-zombie-runs.md` has the record.
