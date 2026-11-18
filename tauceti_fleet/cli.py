@@ -31,6 +31,9 @@ def parser():
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--timezone", default="Australia/Sydney", help="merge-queue timestamp timezone (default: Australia/Sydney)")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+        if name == "update":
+            cmd.add_argument("--allow-downgrade", action="store_true",
+                             help="ship this CLI's release even if it does not descend from the host's release")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -257,7 +260,8 @@ def main(argv=None, *, _status_results=None):
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
             if args.command == "update":
-                options = dict(live=True, expected_machine_id=entry["machine_id"])
+                options = dict(live=True, expected_machine_id=entry["machine_id"],
+                               allow_downgrade=args.allow_downgrade)
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")

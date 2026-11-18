@@ -133,12 +133,24 @@ def handover(release, *, rollback=False, on_signal=None):
     raise FleetError("Controller did not publish a healthy status after live handover")
 
 
-def install(release, *, expected_machine_id):
-    """Runs from the staged release, including when the installed CLI is old."""
+def install(release, *, expected_machine_id, expected_revision=False):
+    """Runs from the staged release, including when the installed CLI is old.
+
+    expected_revision is the host revision the operator checked ancestry
+    against (None for a host without one); False skips the comparison.
+    """
     with locked(data_dir() / "update.lock"), locked(state_dir() / "worker-runtime-upgrade.lock"):
         config = host_config()
         if config["machine_id"] != expected_machine_id:
             raise FleetError("Host identity differs from inventory; refusing live update")
+        if expected_revision is not False:
+            recorded = read(data_dir() / "release.json", {})
+            if not isinstance(recorded, dict) or recorded.get("revision") != expected_revision:
+                raise FleetError("Host release changed after the ancestry check; inspect status and repeat the update")
+        try:
+            capacity.controller_config(config)
+        except (FleetError, OSError, KeyError, ValueError) as exc:
+            raise FleetError(f"Host configuration is invalid for the staged release ({exc}); previous release left running") from None
         release = Path(release).resolve()
         metadata = read(release / "release.json", {})
         current = data_dir() / "current"

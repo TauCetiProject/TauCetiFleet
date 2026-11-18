@@ -77,8 +77,9 @@ if len(sys.argv)>1 and sys.argv[1]=='live':
     sys.path.insert(0,str(release))
     from tauceti_fleet.update import install
     from tauceti_fleet.store import FleetError
+    checked={} if len(sys.argv)<4 else dict(expected_revision=None if sys.argv[3]=='none' else sys.argv[3])
     try:
-        result=install(release,expected_machine_id=sys.argv[2])
+        result=install(release,expected_machine_id=sys.argv[2],**checked)
     except FleetError as exc:
         result=dict(installed=False,error=str(exc))
     print(json.dumps(result))
@@ -99,6 +100,58 @@ print(json.dumps(dict(installed=True,release=digest)))
 """
 
 
+REVISION = re.compile(r"[a-f0-9]{40}")
+REPOSITORY = "TauCetiProject/TauCetiFleet"
+
+INSTALLED_REVISION = r"""import json,os,pathlib
+base=pathlib.Path(os.environ.get('TAUCETI_FLEET_DATA',pathlib.Path.home()/'.local/share/tauceti-fleet')).expanduser()
+try: value=json.loads((base/'release.json').read_text())
+except FileNotFoundError: value={}
+if not isinstance(value,dict): raise SystemExit('release.json is not an object')
+print(json.dumps(value.get('revision')))
+"""
+
+
+def probe(args, **kwargs):
+    """Run an optional lookup; a missing tool or timeout means unknown."""
+    try:
+        return run(args, check=False, **kwargs)
+    except FleetError:
+        return None
+
+
+def source_revision(root):
+    """The Fleet commit this package was built from, if it is known exactly."""
+    checkout = root.parent
+    if (checkout / ".git").exists():
+        head = probe(["git", "-C", checkout, "rev-parse", "HEAD"])
+        dirty = probe(["git", "-C", checkout, "status", "--porcelain", "--", "tauceti_fleet", "release.json"])
+        # Local edits are not the recorded commit; an unknown revision is safer.
+        if head and dirty and head.returncode == 0 and dirty.returncode == 0 and not dirty.stdout.strip():
+            revision = head.stdout.strip()
+            return revision if REVISION.fullmatch(revision) else None
+        return None
+    from importlib import metadata
+
+    try:
+        distribution = metadata.distribution("tauceti-fleet")
+        if Path(distribution.locate_file("tauceti_fleet")).resolve() != root:
+            return None
+        revision = json.loads(distribution.read_text("direct_url.json") or "{}").get("vcs_info", {}).get("commit_id")
+    except (metadata.PackageNotFoundError, ValueError, AttributeError):
+        return None
+    return revision if isinstance(revision, str) and REVISION.fullmatch(revision) else None
+
+
+def manifest():
+    root = Path(__file__).resolve().parent
+    value = read(root / "release.json", read(root.parent / "release.json", {}))
+    revision = source_revision(root)
+    if revision:
+        value = dict(value, revision=revision)
+    return value
+
+
 def archive():
     root = Path(__file__).resolve().parent
     stream = io.BytesIO()
@@ -111,9 +164,62 @@ def archive():
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zipped:
         for path in sorted(root.glob("*.py")):
             member(zipped, "tauceti_fleet/" + path.name, path.read_bytes())
-        manifest = read(root / "release.json", read(root.parent / "release.json", {}))
-        member(zipped, "release.json", json.dumps(manifest, sort_keys=True))
+        member(zipped, "release.json", json.dumps(manifest(), sort_keys=True))
     return stream.getvalue()
+
+
+def installed_revision(target):
+    """The Fleet commit recorded by the host's current release, if any."""
+    if target == "local":
+        import sys
+
+        result = run([getattr(sys, "_base_executable", sys.executable), "-c", INSTALLED_REVISION])
+    else:
+        result = ssh(target, "python3 -c " + shlex.quote(INSTALLED_REVISION))
+    try:
+        revision = json.loads(result.stdout)
+    except ValueError:
+        raise FleetError("Cannot read the host's installed Fleet release") from None
+    # Absent means a release from before revisions were recorded; anything
+    # else unexpected must not silently disable the ancestry check.
+    if revision is not None and not (isinstance(revision, str) and REVISION.fullmatch(revision)):
+        raise FleetError("Host release records an invalid Fleet revision; inspect it or pass --allow-downgrade")
+    return revision
+
+
+def descends(ancestor, revision):
+    """True or False when known; None when neither git nor GitHub can decide."""
+    if ancestor == revision:
+        return True
+    checkout = Path(__file__).resolve().parent.parent
+    if (checkout / ".git").exists():
+        result = probe(["git", "-C", checkout, "merge-base", "--is-ancestor", ancestor, revision])
+        shallow = probe(["git", "-C", checkout, "rev-parse", "--is-shallow-repository"])
+        complete = shallow is not None and shallow.returncode == 0 and shallow.stdout.strip() == "false"
+        # Truncated history can hide a real ancestor; only a positive answer is final.
+        if result and (result.returncode == 0 or result.returncode == 1 and complete):
+            return result.returncode == 0
+    result = probe(["gh", "api", f"repos/{REPOSITORY}/compare/{ancestor}...{revision}", "--jq", ".status"], timeout=60)
+    status = result.stdout.strip() if result and result.returncode == 0 else ""
+    return {"identical": True, "ahead": True, "behind": False, "diverged": False}.get(status)
+
+
+def check_release_order(target, revision):
+    """Refuse to replace the host's release with one that is not its descendant."""
+    installed = installed_revision(target)
+    if installed is None:
+        return None  # Releases installed before revisions were recorded.
+    if revision is None:
+        raise FleetError(f"Host runs Fleet {installed[:12]}, but this CLI's revision is unknown; update from a clean "
+                         "TauCetiFleet checkout or pass --allow-downgrade")
+    order = descends(installed, revision)
+    if order is None:
+        raise FleetError(f"Cannot verify that Fleet {revision[:12]} descends from the host's {installed[:12]}; "
+                         "fetch the checkout or pass --allow-downgrade")
+    if not order:
+        raise FleetError(f"Fleet {revision[:12]} does not descend from the host's {installed[:12]}; refusing to "
+                         "replace a newer release (update from current main or pass --allow-downgrade)")
+    return installed
 
 
 def profile(name):
@@ -180,13 +286,17 @@ def resolve(name):
     raise FleetError(f"Unknown fleet host {name!r}; use add or enroll first")
 
 
-def deploy(target, *, live=False, expected_machine_id=None):
+def deploy(target, *, live=False, expected_machine_id=None, allow_downgrade=False):
     """Install this release on the explicitly selected machine."""
     args = ["live", expected_machine_id] if live else []
     if live:
         if not expected_machine_id:
             raise FleetError("Live update requires the installed host identity")
         call(target, dict(action="status"), expected_machine_id=expected_machine_id)
+        if not allow_downgrade:
+            # The host rechecks this under its update lock, so a concurrent
+            # update cannot slip an older release past the ancestry check.
+            args.append(check_release_order(target, manifest().get("revision")) or "none")
     if target != "local":
         command = "python3 -c " + shlex.quote(BOOTSTRAP)
         command += "".join(" " + shlex.quote(a) for a in args)
