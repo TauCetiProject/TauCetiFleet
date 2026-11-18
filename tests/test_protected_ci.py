@@ -174,29 +174,21 @@ class QueueControlCI(unittest.TestCase):
         group = dict(name="TauCetiQueueControl", visibility="selected", restricted_to_workflows=True,
                      selected_workflows=list(workflows))
         repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
-        github._REVIEWED_HARNESS.clear()
         with patch.object(github, "request", side_effect=harness_api(repos)):
             self.assertEqual(github.protected_policy(control, group), 6)
-            pinned = ["TauCetiProject/TauCetiTools/.github/workflows/" + name + "@abf810bf5064bf549ba76fac568da9d1dbb32362"
-                      for name in ("pr-build.yml", "publish-lake-cache.yml")]
-            self.assertEqual(github.protected_policy(
-                control, dict(group, selected_workflows=list(workflows) + pinned)), 6)
+            main = ["TauCetiProject/TauCetiTools/.github/workflows/" + name + "@refs/heads/main"
+                    for name in ("pr-build.yml", "publish-lake-cache.yml")]
+            self.assertEqual(github.protected_policy(control, dict(group, selected_workflows=list(workflows) + main)), 6)
             source = ["TauCetiProject/TauCetiTools/.github/workflows/" + name +
                       "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
                       for name in ("pr-build.yml", "publish-lake-cache.yml")]
-            self.assertEqual(github.protected_policy(
-                control, dict(group, selected_workflows=list(workflows) + source)), 6)
-            updated = [w.replace("150b56c3ab743b1f2a120f0639d98586455d7f2a",
-                                 "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f") for w in source]
-            self.assertEqual(github.protected_policy(
-                control, dict(group, selected_workflows=list(workflows) + source + updated)), 6)
-            finalizer = [w.replace("fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f", "a7662ab81f900586db3586ec3a11c38a5f46962d") for w in updated]
-            self.assertEqual(github.protected_policy(
-                control, dict(group, selected_workflows=list(workflows) + source + updated + finalizer)), 6)
             for bad in (dict(group, restricted_to_workflows=False),
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
-                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/main"]),
-                        dict(group, selected_workflows=list(workflows)+[source[1][:-1]+"0"]),
+                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/other"]),
+                        dict(group, selected_workflows=list(workflows)+[main[0].replace("TauCetiProject/", "someone/")]),
+                        dict(group, selected_workflows=list(workflows)+[
+                            "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@refs/heads/main"]),
+                        dict(group, selected_workflows=list(workflows)+main+source),
                         dict(group, selected_workflows=list(workflows)+[
                             "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@abf810bf5064bf549ba76fac568da9d1dbb32362"]),
                         dict(group, selected_workflows=[])):

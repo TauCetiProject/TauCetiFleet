@@ -174,34 +174,15 @@ Keeping Fleet administration credentials on the broker does not remove that
 existing trust in the build server. Invitations should be issued only for hosts
 whose operators are trusted with the CI workflow's credentials and results.
 
-## Shared-harness allow-lists
+## Shared-harness entries
 
-TauCeti main's `.tauceti/ci-source.json` `harness_revision` is the only record of the
-TauCetiTools revision that staging runs. The broker derives the restricted runner
-groups' harness entries from it: `TauCetiFleet` admits
-`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@<revision>`, and
-`TauCetiQueueControl` admits that and `publish-lake-cache.yml@<revision>`. No one
-edits those entries by hand. Every other entry is left alone.
+TauCeti runs its shared harness from TauCetiTools `main`. `TauCetiFleet` admits
+`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main`, and
+`TauCetiQueueControl` admits that and `publish-lake-cache.yml@refs/heads/main`.
+These are static entries an organization owner sets once; the broker never edits
+runner groups. Host and broker policy accept no other harness entry: no exact
+revision, no other branch and no fork.
 
-The Durable Object reconciles once a minute on its alarm, using conditional reads,
-so an unchanged main costs no rate limit. Any request restores the alarm after a
-deployment. A revision is admitted only if it is on TauCetiTools main and the policy
-names the enrolled TauCeti and TauCetiTools repositories. A hand-removed entry is
-restored at the next check. An entry is pruned once main, an unfinished run of the
-policy's caller workflow and the group itself have not needed that revision for
-24 hours. If the run listing is incomplete, nothing is pruned.
-
-`GET /v1/harness?revision=<sha>` is public and read-only. It reports main's revision,
-the admitted revisions per group and whether the requested revision is ready
-everywhere, re-reading GitHub (at most every five seconds) when it is not. The
-merge queue asks immediately before each staging dispatch and does not send until
-the answer is ready. `/healthz` includes the same state for main's revision.
-
-The App already has organization Self-hosted runners/write, which covers updating
-runner groups. Reading the public policy needs no contents permission: a refused
-authenticated read is retried anonymously, like the harness compare.
-
-## App registration and deployment
 
 ```sh
 npm ci

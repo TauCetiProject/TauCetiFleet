@@ -98,26 +98,13 @@ def inspect():
     # Verify the actual runner policy before enabling any host.
     group = api("https://api.github.com/orgs/TauCetiProject/actions/runner-groups/3", token=grant["token"])
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main"}
     workflows = set(group.get("selected_workflows", []))
-
-    def reviewed(entry):
-        # The broker admits TauCeti main's `.tauceti/ci-source.json` harness revision;
-        # any revision on TauCetiTools main is reviewed.
-        match = re.fullmatch(r"TauCetiProject/TauCetiTools/\.github/workflows/pr-build\.yml@([0-9a-f]{40})", entry)
-        if not match:
-            return False
-        try:
-            status = api(f"https://api.github.com/repos/TauCetiProject/TauCetiTools/compare/{match[1]}...main?per_page=1")["status"]
-        except (SystemExit, OSError, KeyError, ValueError):
-            return False
-        return status in ("ahead", "identical")
-
     if (group["name"] != "TauCetiFleet" or not group.get("restricted_to_workflows") or required not in workflows
-            or not all(reviewed(w) for w in workflows - allowed)):
+            or not workflows <= allowed):
         raise SystemExit("Runner group 3 does not have the expected trusted-workflow restrictions")
     value = {"installation_id": installation["id"], "repository_id": selected["repositories"][0]["id"], "runner_group_id": 3}
     private(DIRECTORY / "installation.json", json.dumps(value, indent=2))

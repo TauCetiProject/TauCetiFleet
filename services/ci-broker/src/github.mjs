@@ -13,29 +13,15 @@ const encode=value=>b64(encoder.encode(JSON.stringify(value)));
 export class GitHub {
   constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=null; }
   async raw(path, token, method='GET', data) {
-    return (await this.exchange(path,token,{method,data})).value;
-  }
-  async exchange(path, token, {method='GET',data,etag}={}) {
     const response=await fetch('https://api.github.com/'+path, {method,
       headers:{Accept:'application/vnd.github+json', ...(token?{Authorization:'Bearer '+token}:{}),
-        ...(etag?{'If-None-Match':etag}:{}),
         'User-Agent':'TauCetiFleet/broker', 'X-GitHub-Api-Version':'2022-11-28', 'Content-Type':'application/json'},
       body:data===undefined?undefined:JSON.stringify(data), signal:AbortSignal.timeout(20000)});
-    if (etag && response.status===304) return {status:304,etag};
     if (!response.ok) throw new UpstreamError(response.status,response.headers.get('x-github-request-id'));
-    if (response.status===204) return {status:204,value:null};
+    if (response.status===204) return null;
     const text=await response.text();
     if (text.length>4*1024*1024) throw new Error('GitHub response exceeds limit');
-    return {status:response.status,etag:response.headers.get('etag'),value:JSON.parse(text)};
-  }
-  // Conditional GETs: an unchanged 304 costs no rate limit, so the alarm can poll cheaply.
-  async cached(path, token) {
-    this.etags??=new Map();
-    const prior=this.etags.get(path);
-    const result=await this.exchange(path,token,{etag:prior?.etag});
-    if (result.status===304) return structuredClone(prior.value);
-    if (result.etag) this.etags.set(path,{etag:result.etag,value:result.value});
-    return structuredClone(result.value);
+    return JSON.parse(text);
   }
   async token(kind) {
     const cached=this.tokens.get(kind);
@@ -74,88 +60,19 @@ export class GitHub {
     }
     throw new InventoryError();
   }
-  anonymous(path) { return this.raw(path,null); }
-  async reviewedHarness(revision) {
-    this.reviewed??=new Set();
-    if (this.reviewed.has(revision)) return true;
-    const path=`repos/TauCetiProject/TauCetiTools/compare/${revision}...main?per_page=1`;
-    const absent=error=>error instanceof UpstreamError && (error.status===404 || error.status===422);
-    let value;
-    try {
-      value=await this.request(path);
-    } catch (error) {
-      if (absent(error)) return false;
-      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
-      // The installation selects only TauCeti; TauCetiTools is public, so retry anonymously.
-      try { value=await this.anonymous(path); } catch (retry) {
-        if (absent(retry)) return false;
-        throw retry;
-      }
-    }
-    if (value?.status!=='ahead' && value?.status!=='identical') return false;
-    this.reviewed.add(revision);
-    return true;
-  }
-  // TauCeti is public. Its installation grant has no contents permission, so a refused
-  // authenticated read retries anonymously, exactly like the harness compare above.
-  async harnessSource() {
-    const path='repos/TauCetiProject/TauCeti/contents/.tauceti/ci-source.json?ref=main';
-    let value;
-    try { value=await this.cached(path,await this.token('read')); }
-    catch (error) {
-      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
-      value=await this.cached(path,null);
-    }
-    if (value?.type!=='file' || value.encoding!=='base64' || typeof value.content!=='string' || value.size>65536)
-      throw new PolicyError();
-    return new TextDecoder().decode(Uint8Array.from(atob(value.content.replace(/\s/g,'')),c=>c.charCodeAt(0)));
-  }
-  async group(id,{fresh=false}={}) {
-    const path=`orgs/TauCetiProject/actions/runner-groups/${id}`;
-    const token=await this.token('runners');
-    return fresh?this.raw(path,token):this.cached(path,token);
-  }
-  async updateGroup(id,data) {
-    return this.request(`orgs/TauCetiProject/actions/runner-groups/${id}`,{kind:'runners',method:'PATCH',data});
-  }
-  // Harness revisions that unfinished runs of the protected caller reference. Null when the
-  // listing cannot be complete; the caller then retains everything.
-  async unfinishedHarness(workflow) {
-    const file=encodeURIComponent(workflow.split('/').at(-1));
-    const found=new Set();
-    for (const status of ['queued','in_progress','waiting','requested','pending']) {
-      const value=await this.cached(`repos/TauCetiProject/TauCeti/actions/workflows/${file}/runs?status=${status}&per_page=100`,
-        await this.token('read'));
-      if (!Array.isArray(value?.workflow_runs) || !Number.isInteger(value.total_count) ||
-          value.total_count>value.workflow_runs.length) return null;
-      for (const run of value.workflow_runs) {
-        if (!Array.isArray(run.referenced_workflows)) return null;
-        for (const reference of run.referenced_workflows) {
-          const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/[A-Za-z0-9_.-]+@([0-9a-f]{40})$/.exec(reference?.path || '');
-          if (match) found.add(match[1]);
-        }
-      }
-    }
-    return found;
-  }
   async policy({fresh=false}={}) {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
     const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
-    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
+    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
       'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main']);
+      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main',
+      // TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
     if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows || !selected.includes(required))
       throw new PolicyError();
-    for (const workflow of selected) {
-      if (allowed.has(workflow)) continue;
-      // HarnessAdmission writes main's harness revision here; any shared-harness revision on
-      // TauCetiTools main is reviewed, so no broker release is needed.
-      const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/pr-build\.yml@([0-9a-f]{40})$/.exec(workflow);
-      if (!match || !await this.reviewedHarness(match[1])) throw new PolicyError();
-    }
+    if (selected.some(workflow=>!allowed.has(workflow))) throw new PolicyError();
     const value={runner_group_id:3};
     this.cachedPolicy={expires:Date.now()+60000,value};
     return value;

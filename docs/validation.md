@@ -70,7 +70,7 @@ host/OS headroom. This shared host currently has other workloads, so readiness
 can block until memory is available or the operator selects a smaller shape.
 
 Before production routing, explicitly enable a prepared host's CI role and run
-the trusted `fleet-smoke.yml` while `FLEET_CI_ENABLED` remains off. Real GitHub
+the trusted `nightly-verify.yml` while `FLEET_CI_ENABLED` remains off. Real GitHub
 registration, acquisition, job completion, guest retirement, and a controlled
 unacquired-job fallback must be checked at that point. Static tests and local
 guests do not establish that live routing has passed.
