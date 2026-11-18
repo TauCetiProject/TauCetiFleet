@@ -726,8 +726,12 @@ def collect_ci_results(config):
                 # event/title. Guest events never claim PR versus staging trust.
                 if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
                     kind = "pr"
+            # The receipt's guest classes and the configured reservation must both say staging.
+            staging_slot = (value.get("ci_kinds", ["staging"]) == ["staging"]
+                            and value.get("slot", 0) < capacity.reservation(config)[0])
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
-                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None)
+                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None,
+                                   staging_slot=staging_slot)
             if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
