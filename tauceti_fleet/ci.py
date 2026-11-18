@@ -41,8 +41,11 @@ INFRA_PREFIXES = (
 )
 
 
-def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", memory_overcommit=False):
-    """Return a bounded, non-secret decision; missing/conflicting facts fail closed."""
+def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", memory_overcommit=False,
+             staging_slot=False):
+    """Return a bounded, non-secret decision; missing/conflicting facts fail closed.
+
+    `staging_slot`: the job ran on a slot reserved for staging (`ci_staging_slots`)."""
 
     def result(cooldown, reason, **evidence):
         return dict(cooldown=cooldown, reason=reason, evidence=evidence)
@@ -116,6 +119,12 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", 
     unknown = result(True, "cancellation_evidence_inconclusive")
     if host_health != "healthy":
         return result(True, "cancellation_host_health_unknown")
+    # The queue cancels a superseded staging run as soon as a newer candidate exists, and
+    # its runs carry no bors evidence. On a reserved staging slot, a clean host exit and a
+    # completed runner already show the guest healthy: a cooldown would only hold the
+    # replacement candidate behind the run it replaced. Other slots keep the strict test.
+    if staging_slot and by_name.get("Complete job", {}).get("conclusion") == "success":
+        return result(False, "staging_slot_cancelled", host_service="healthy")
     if not run or not isinstance(statuses, list):
         return unknown
     match = re.fullmatch(

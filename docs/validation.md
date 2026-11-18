@@ -102,6 +102,15 @@ these host/GitHub facts agree:
   publication does not establish a machine fault; runner completion and the
   host-service receipt supply the health evidence.
 
+A slot reserved for staging (`ci_staging_slots`, with a staging-only guest
+receipt) also exempts a cancellation (`staging_slot_cancelled`) when the QEMU
+service exited successfully, `Complete job` succeeded and no infrastructure
+step failed. The queue cancels a superseded staging run as soon as a newer
+candidate exists, and those runs carry no Bors evidence; on the reserved slot a
+cooldown would only hold the replacement candidate behind the run it replaced.
+A host fault, an unknown service result or an unfinished runner keeps the
+900-second circuit, and every other slot keeps the Bors requirement above.
+
 Metadata comes from bounded GitHub API reads using the existing host read
 credential. No logs, guest hook claims, candidate artifacts or new credentials
 establish health. Unknown/changed workflow shapes retain cooldown. Classification
