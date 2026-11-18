@@ -327,6 +327,64 @@ class LiveUpdate(unittest.TestCase):
             (checkout / "tauceti_fleet/module.py").write_text("local edit")
             self.assertEqual(remote.manifest(), dict(version=1))
 
+    def test_enabled_broker_credential_is_checked_before_any_change(self):
+        store.update_host(ci_broker_url="https://broker.example", ci_broker_token_file=str(self.home / "missing"))
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker") as stage:
+            with self.assertRaisesRegex(store.FleetError, "invalid for the staged release"):
+                self.install()
+            store.update_host(ci_broker_url="http://broker.example")
+            with self.assertRaisesRegex(store.FleetError, "HTTPS origin"):
+                self.install()
+        stage.assert_not_called()
+
+    def test_host_revision_is_rechecked_under_the_update_lock(self):
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="c" * 40))
+        with patch.object(update, "stage_worker") as stage:
+            with self.assertRaisesRegex(store.FleetError, "changed after the ancestry check"):
+                update.install(self.release, expected_machine_id=self.config["machine_id"], expected_revision="b" * 40)
+            with self.assertRaisesRegex(store.FleetError, "changed after the ancestry check"):
+                update.install(self.release, expected_machine_id=self.config["machine_id"], expected_revision=None)
+        stage.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+
+    def test_checked_host_revision_is_sent_to_the_staged_installer(self):
+        self.deploy_with("b" * 40, "a" * 40, order=True)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" live " + self.config["machine_id"] + " " + "b" * 40))
+        self.deploy_with(None, "a" * 40)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" none"))
+        self.deploy_with("b" * 40, "a" * 40, allow_downgrade=True)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" live " + self.config["machine_id"]))
+
+    def test_corrupt_host_revision_metadata_does_not_disable_the_check(self):
+        (store.data_dir() / "release.json").write_text("{")
+        with self.assertRaises(store.FleetError):
+            remote.installed_revision("local")
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="not-a-commit"))
+        with self.assertRaisesRegex(store.FleetError, "invalid Fleet revision"):
+            remote.installed_revision("local")
+
+    def test_shallow_negative_answer_falls_back_to_github(self):
+        checkout = self.home / "shallow"
+        (checkout / ".git").mkdir(parents=True)
+        answers = {"merge-base": subprocess.CompletedProcess([], 1, "", ""),
+                   "rev-parse": subprocess.CompletedProcess([], 0, "true\n", ""),
+                   "api": subprocess.CompletedProcess([], 0, "ahead\n", "")}
+        def probe(args, **kwargs):
+            return next(v for k, v in answers.items() if k in map(str, args))
+        with patch.object(remote, "__file__", str(checkout / "tauceti_fleet/remote.py")), \
+                patch.object(remote, "probe", side_effect=probe):
+            self.assertTrue(remote.descends("b" * 40, "a" * 40))
+            answers["rev-parse"] = subprocess.CompletedProcess([], 0, "false\n", "")
+            self.assertFalse(remote.descends("b" * 40, "a" * 40))
+
+    def test_repackaged_release_keeps_its_recorded_revision(self):
+        package = self.home / "releases/extracted/tauceti_fleet"
+        package.mkdir(parents=True)
+        store.atomic(package.parent / "release.json", dict(version=1, revision="d" * 40))
+        with patch.object(remote, "__file__", str(package / "remote.py")):
+            self.assertEqual(remote.manifest()["revision"], "d" * 40)
+
     def test_legacy_ssh_identity_is_verified_before_transferring_an_update(self):
         with patch.object(remote, "call", side_effect=store.FleetError("identity differs")), \
                 patch.object(remote, "ssh") as ssh:

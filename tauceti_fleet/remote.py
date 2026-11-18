@@ -77,8 +77,9 @@ if len(sys.argv)>1 and sys.argv[1]=='live':
     sys.path.insert(0,str(release))
     from tauceti_fleet.update import install
     from tauceti_fleet.store import FleetError
+    checked={} if len(sys.argv)<4 else dict(expected_revision=None if sys.argv[3]=='none' else sys.argv[3])
     try:
-        result=install(release,expected_machine_id=sys.argv[2])
+        result=install(release,expected_machine_id=sys.argv[2],**checked)
     except FleetError as exc:
         result=dict(installed=False,error=str(exc))
     print(json.dumps(result))
@@ -105,8 +106,9 @@ REPOSITORY = "TauCetiProject/TauCetiFleet"
 INSTALLED_REVISION = r"""import json,os,pathlib
 base=pathlib.Path(os.environ.get('TAUCETI_FLEET_DATA',pathlib.Path.home()/'.local/share/tauceti-fleet')).expanduser()
 try: value=json.loads((base/'release.json').read_text())
-except (OSError,ValueError): value={}
-print(json.dumps(value.get('revision') if isinstance(value,dict) else None))
+except FileNotFoundError: value={}
+if not isinstance(value,dict): raise SystemExit('release.json is not an object')
+print(json.dumps(value.get('revision')))
 """
 
 
@@ -178,7 +180,11 @@ def installed_revision(target):
         revision = json.loads(result.stdout)
     except ValueError:
         raise FleetError("Cannot read the host's installed Fleet release") from None
-    return revision if isinstance(revision, str) and REVISION.fullmatch(revision) else None
+    # Absent means a release from before revisions were recorded; anything
+    # else unexpected must not silently disable the ancestry check.
+    if revision is not None and not (isinstance(revision, str) and REVISION.fullmatch(revision)):
+        raise FleetError("Host release records an invalid Fleet revision; inspect it or pass --allow-downgrade")
+    return revision
 
 
 def descends(ancestor, revision):
@@ -188,7 +194,10 @@ def descends(ancestor, revision):
     checkout = Path(__file__).resolve().parent.parent
     if (checkout / ".git").exists():
         result = probe(["git", "-C", checkout, "merge-base", "--is-ancestor", ancestor, revision])
-        if result and result.returncode in (0, 1):
+        shallow = probe(["git", "-C", checkout, "rev-parse", "--is-shallow-repository"])
+        complete = shallow is not None and shallow.returncode == 0 and shallow.stdout.strip() == "false"
+        # Truncated history can hide a real ancestor; only a positive answer is final.
+        if result and (result.returncode == 0 or result.returncode == 1 and complete):
             return result.returncode == 0
     result = probe(["gh", "api", f"repos/{REPOSITORY}/compare/{ancestor}...{revision}", "--jq", ".status"], timeout=60)
     status = result.stdout.strip() if result and result.returncode == 0 else ""
@@ -285,7 +294,9 @@ def deploy(target, *, live=False, expected_machine_id=None, allow_downgrade=Fals
             raise FleetError("Live update requires the installed host identity")
         call(target, dict(action="status"), expected_machine_id=expected_machine_id)
         if not allow_downgrade:
-            check_release_order(target, manifest().get("revision"))
+            # The host rechecks this under its update lock, so a concurrent
+            # update cannot slip an older release past the ancestry check.
+            args.append(check_release_order(target, manifest().get("revision")) or "none")
     if target != "local":
         command = "python3 -c " + shlex.quote(BOOTSTRAP)
         command += "".join(" " + shlex.quote(a) for a in args)

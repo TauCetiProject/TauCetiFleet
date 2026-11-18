@@ -134,6 +134,11 @@ def controller_config(config):
         memory_budget_gib(config)
     if config["ci_enabled"]:
         protected_slots(config)
+        if config.get("ci_broker_url"):
+            from . import broker
+
+            broker.validate_url(config["ci_broker_url"])
+            broker.credential(config)
 
 
 def reservation(config):
