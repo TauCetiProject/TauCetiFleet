@@ -290,6 +290,31 @@ def worker_config(config):
 SHARED_ATTEMPTS_ENV = "TAUCETI_SHARED_ATTEMPTS_DIR"
 
 
+def shared_attempts_ready(prior):
+    """Whether adding the shared attempt default to the definitions interrupts no round."""
+    import tomllib
+
+    try:
+        specs = tomllib.loads(prior.read_text()).get("workers", [])
+    except FileNotFoundError:
+        specs = []
+    except (OSError, ValueError):
+        return False
+    if any(SHARED_ATTEMPTS_ENV in (s.get("env") or {}) for s in specs):
+        return True
+    # A manager without graceful restarts stops a worker's round as soon as its definition changes.
+    running = running_manager_supports("graceful_restart")
+    if running is not None:
+        return running
+    # Workers that outlived their manager meet the installed runtime's manager next.
+    if not any(w.get("alive") for w in worker_statuses()):
+        return True
+    try:
+        return installed_worker_supports("graceful_restart")
+    except (FleetError, OSError, ValueError, AttributeError):
+        return False
+
+
 def _worker_config(config):
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = dict(
@@ -305,22 +330,23 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
+    import tomllib
+
+    prior = config_dir() / "workers.toml"
     # An install's workers act as one account, so they share one repair attempt budget per PR. It
     # lives in each definition, not the manager's environment, so the changed spec replaces workers
     # that outlive a manager restart. worker_env overrides it; an empty value turns sharing off.
     env = dict(config.get("worker_env") or {})
-    if SHARED_ATTEMPTS_ENV not in env:
+    if SHARED_ATTEMPTS_ENV not in env and shared_attempts_ready(prior):
         attempts = state_dir() / "worker-attempts"
         attempts.mkdir(parents=True, exist_ok=True, mode=0o700)
         env[SHARED_ATTEMPTS_ENV] = str(attempts)
-    fields["env"] = dict(sorted(env.items()))
+    if env:
+        fields["env"] = dict(sorted(env.items()))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
     # makes the manager terminate its worker, including an admitted paid session.
-    import tomllib
-
-    prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
     old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
     count = max(1, config["max_workers"], old_count)
@@ -515,23 +541,34 @@ def set_worker_maximum(maximum, *, lease_seconds=None):
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
-def require_worker_support(feature, description):
-    binary = executable("tauceti")
-    if not binary or json.loads(run([binary, "_fleet-protocol"]).stdout).get(feature) != 1:
-        raise FleetError(f"Install a Worker release supporting {description} before enabling it")
+def running_manager_supports(feature):
+    """True or False from the running worker manager's ping; None when no manager is running.
+    A manager that cannot be asked counts as unsupporting."""
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
-        return  # A future manager will use the installed, supporting runtime.
+        return None
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(5)
             client.connect(str(path))
             client.sendall(b'{"action":"ping"}\n')
             reply = client.makefile("rb").readline(65537)
-        if json.loads(reply).get(feature) == 1:
-            return
-    except (OSError, ValueError):
-        pass
+        return json.loads(reply).get(feature) == 1
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def installed_worker_supports(feature):
+    binary = executable("tauceti")
+    return bool(binary) and json.loads(run([binary, "_fleet-protocol"]).stdout).get(feature) == 1
+
+
+def require_worker_support(feature, description):
+    if not installed_worker_supports(feature):
+        raise FleetError(f"Install a Worker release supporting {description} before enabling it")
+    # With no manager running, a future manager will use the installed, supporting runtime.
+    if running_manager_supports(feature) is not False:
+        return
     raise FleetError(f"The running worker manager does not support {description}; hand over the manager to the installed runtime without stopping worker scopes")
 
 
