@@ -104,8 +104,11 @@ these host/GitHub facts agree:
 
 A slot reserved for staging (`ci_staging_slots`, with a staging-only guest
 receipt) also exempts a cancellation (`staging_slot_cancelled`) when the QEMU
-service exited successfully, `Complete job` succeeded and no infrastructure
-step failed. The queue cancels a superseded staging run as soon as a newer
+service exited successfully, no infrastructure step failed and the job's steps
+pass the same health checks as a Bors cancellation: unique names, every step
+completed with a known outcome, `Complete job` succeeded, and no failed step
+other than the cancellation finalizer (`Report build and bump-guard statuses to
+the PR head commit`). Only the Bors evidence is waived. The queue cancels a superseded staging run as soon as a newer
 candidate exists, and those runs carry no Bors evidence; on the reserved slot a
 cooldown would only hold the replacement candidate behind the run it replaced.
 A host fault, an unknown service result or an unfinished runner keeps the

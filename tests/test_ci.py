@@ -177,6 +177,33 @@ class Classification(unittest.TestCase):
                 failed["steps"].append(step(name + " fault", "failure", 5))
                 self.assertTrue(ci.classify(failed, host_health="healthy", staging_slot=True)["cooldown"])
 
+    def test_reserved_staging_slot_cancellation_keeps_the_step_health_checks(self):
+        job, _, _ = evidence()
+        finalized = copy.deepcopy(job)
+        finalized["steps"].insert(3, step(ci.REPORT, "failure", 5))
+        decision = ci.classify(finalized, host_health="healthy", staging_slot=True)
+        self.assertEqual((decision["cooldown"], decision["reason"]), (False, "staging_slot_cancelled"))
+        duplicate = copy.deepcopy(job)
+        duplicate["steps"].insert(1, step("Set up job", number=5))
+        unfinished = copy.deepcopy(job)
+        unfinished["steps"][2]["status"] = "in_progress"
+        unknown_outcome = copy.deepcopy(job)
+        unknown_outcome["steps"][2]["conclusion"] = "neutral"
+        unknown_failure = copy.deepcopy(job)
+        unknown_failure["steps"][2]["conclusion"] = "failure"
+        for broken, reason in (
+            (duplicate, "cancellation_steps_incomplete"),
+            (unfinished, "cancellation_steps_incomplete"),
+            (unknown_outcome, "cancellation_steps_incomplete"),
+            (unknown_failure, "cancellation_unknown_step_failed"),
+        ):
+            with self.subTest(reason=reason, steps=broken["steps"]):
+                decision = ci.classify(broken, host_health="healthy", staging_slot=True)
+                self.assertEqual((decision["cooldown"], decision["reason"]), (True, reason))
+        self.assertEqual(
+            ci.classify(unknown_failure, host_health="healthy", staging_slot=True)["evidence"], {"step_number": 3}
+        )
+
     def test_faults_override_authenticated_cancellation(self):
         for name in ("Set up job", "Fetch Mathlib", "Install bubblewrap", "Checkout current base"):
             with self.subTest(name=name):
