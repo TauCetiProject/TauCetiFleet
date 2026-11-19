@@ -1,5 +1,6 @@
 """Merge-queue activity from the prepared public snapshot; no GitHub or worker calls."""
 
+import copy
 import hashlib
 import re
 import socket
@@ -259,6 +260,72 @@ def build_progress(manifest, attempt):
     return max(found, key=lambda p: timestamp(p["observed_at"])) if found else None
 
 
+COUNT_FIELDS = ("completed_tasks", "total_tasks", "tasks_per_minute", "estimated_total_tasks",
+                "estimate_source", "completed_modules")
+
+
+def carried_progress(progress, earlier, attempt):
+    """The head run's latest report, keeping the latest known counts when it has none or older ones.
+
+    A lookup can miss the run (a failed fetch, a job page published without its report) and a
+    report can lack counts; then the newest counts already seen for the same run attempt (in any
+    earlier snapshot) carry forward with the time they were reported, so status says how old they
+    are instead of dropping the line or going back to older counts."""
+    run = (attempt.get("run_id"), attempt.get("run_attempt", 1))
+
+    def counted_at(value):
+        if (not isinstance(value, dict) or (value.get("run_id"), value.get("run_attempt", 1)) != run
+                or value.get("completed_tasks") is None):
+            return None
+        try:
+            return timestamp(value.get("counts_observed_at"))
+        except (ValueError, TypeError):
+            return None
+
+    def reported_at(value):
+        if not isinstance(value, dict) or (value.get("run_id"), value.get("run_attempt", 1)) != run:
+            return None
+        try:
+            return timestamp(value.get("observed_at"))
+        except (ValueError, TypeError):
+            return None
+
+    if progress and progress.get("run_id") is None:
+        progress = dict(progress, run_id=run[0], run_attempt=run[1])
+        if progress.get("completed_tasks") is not None:
+            progress["counts_observed_at"] = progress["observed_at"]
+    values = [progress, *(earlier or [])]
+    counted = [(counted_at(v), v) for v in values if counted_at(v) is not None]
+    reports = [(reported_at(v), v) for v in values if reported_at(v) is not None]
+    if not reports:
+        return progress
+    # The newest report's phase and time, with the newest counts seen for this run attempt.
+    latest = max(reports, key=lambda item: item[0])[1]
+    if not counted:
+        return dict(latest)
+    newest = max(counted, key=lambda item: item[0])[1]
+    return dict(latest, **{key: newest.get(key) for key in COUNT_FIELDS},
+                counts_observed_at=newest["counts_observed_at"])
+
+
+def retain_progress(value, candidates, fresh=None):
+    """Each running head's build progress: its fresh report (when looked up) merged with the
+    newest counts the candidate snapshots hold for the same batch and run attempt."""
+    for batch in value.get("batches") or []:
+        attempt = batch.get("latest_attempt") or {}
+        if batch.get("state") != "head" or attempt.get("status") != "in_progress" or not attempt.get("run_id"):
+            continue
+        earlier = [b.get("build_progress") for c in candidates for b in (c.get("value") or {}).get("batches") or []
+                   if isinstance(b, dict) and b.get("id") == batch["id"]]
+        own = fresh(batch, attempt) if fresh else batch.get("build_progress")
+        progress = carried_progress(own, earlier, attempt)
+        if progress:
+            batch["build_progress"] = progress
+        else:
+            batch.pop("build_progress", None)
+    return value
+
+
 def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
     """"build: phase build, 44,180 jobs done, ~54% of ~81.8k jobs (from last PR build), 905/min,
     ETA ~19 Nov 20:10 AEDT". Lake's own total grows as it discovers jobs, so the percentage and ETA
@@ -269,8 +336,11 @@ def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
     if progress.get("phase"):
         parts.append("phase " + REPORTED_PHASES[progress["phase"]])
     done, total = progress.get("completed_tasks"), progress.get("total_tasks")
+    counted = progress.get("counts_observed_at") or progress["observed_at"]
     if done is not None and total:
         parts.append(f"{done:,} jobs done")
+        if now - timestamp(counted) > 120:
+            parts[-1] += f" as of {int(now - timestamp(counted)) // 60} min ago"
         building = progress.get("phase") == "build"
         estimate = progress.get("estimated_total_tasks")
         # An estimate Lake's own count has reached is no longer an estimate of the final count.
@@ -283,7 +353,7 @@ def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
             parts.append(f"{rate:,.0f}/min")
             if remaining > 0:
                 try:
-                    eta = timestamp(progress["observed_at"]) + remaining * 60 / rate
+                    eta = timestamp(counted) + remaining * 60 / rate
                     parts.append("ETA ~" + datetime.fromtimestamp(eta, ZoneInfo(timezone)).strftime("%d %b %H:%M %Z"))
                 except (ZeroDivisionError, OverflowError, OSError, ValueError):
                     pass  # No usable ETA from this rate; the counters stand alone.
@@ -293,7 +363,8 @@ def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
     if not parts:
         return None
     age = now - timestamp(progress["observed_at"])
-    if age > 120:
+    # Counts already say their age; the report's own age matters when it is newer than they are.
+    if age > 120 and not (done is not None and total and counted == progress["observed_at"]):
         parts.append(f"reported {int(age) // 60}m ago")
     return "build: " + ", ".join(parts)
 
@@ -314,9 +385,11 @@ def refresh(manifest, previous=None):
     # Older status clients still rewrite pool-activity.json without queue fields. Keep this
     # observation separately so an old follow process cannot erase a newer client's facts.
     saved = cached()
+    # Either snapshot may hold the head's latest counts, whichever was saved last.
+    candidates = [snapshot for snapshot in (previous, saved) if isinstance(snapshot, dict)]
     if saved.get("value") and (not previous or saved.get("checked_at", 0) >= previous.get("checked_at", 0)):
         previous = saved
-    report = _refresh(manifest, previous)
+    report = _refresh(manifest, previous, candidates)
     try:
         atomic(cache_path(), report)
     except (OSError, ValueError):
@@ -324,10 +397,12 @@ def refresh(manifest, previous=None):
     return report
 
 
-def _refresh(manifest, previous=None):
+def _refresh(manifest, previous=None, candidates=None):
     previous = previous or {}
     if previous.get("scope") != manifest.get("scope"):
         previous = {}
+    candidates = [c for c in (candidates if candidates is not None else [previous])
+                  if c.get("scope") == manifest.get("scope")]
     try:
         root = ci_overview.fetch(object_url(manifest, manifest.get("domains", {}).get("queue")), timeout=3)
         value = parse(manifest, root)
@@ -351,20 +426,21 @@ def _refresh(manifest, previous=None):
                         batch["previous_preparation"] = max(settled, key=lambda t: int(t["id"]))
             except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
                 batch["history_unavailable"] = True
-        for batch in value["batches"]:
-            attempt = batch.get("latest_attempt") or {}
-            if batch["state"] != "head" or attempt.get("status") != "in_progress" or not attempt.get("run_id"):
-                continue
+        def fresh(_batch, attempt):
             # Live progress is optional: without it the head shows its running step alone.
             try:
-                progress = build_progress(manifest, attempt)
-                if progress:
-                    batch["build_progress"] = progress
+                return build_progress(manifest, attempt)
             except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
-                pass
+                return None
+
+        retain_progress(value, candidates, fresh)
         return dict(value=value, scope=manifest.get("scope"), checked_at=time.time())
     except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
-        return dict(previous, error="Queue refresh failed (" + type(error).__name__ + ")", checked_at=time.time())
+        report = dict(previous, error="Queue refresh failed (" + type(error).__name__ + ")", checked_at=time.time())
+        if isinstance(previous.get("value"), dict):
+            # The fallback snapshot keeps the newest counts any candidate snapshot holds.
+            report["value"] = retain_progress(copy.deepcopy(previous["value"]), candidates)
+        return report
 
 
 def activity(batch, claims, names, now, timezone):
