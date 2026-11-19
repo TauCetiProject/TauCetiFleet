@@ -47,6 +47,17 @@ class Enrollment(unittest.TestCase):
         self.assertEqual(path.read_text().strip(), observed[0])
         self.assertEqual(store.host_config()["ci_broker_token_file"], str(path))
 
+    def test_enrollment_keeps_the_host_special_slot_map(self):
+        slots = {"7": dict(kind="queue-control", runner_group_id=6), "11": dict(kind="pr-status", runner_group_id=7)}
+        config = store.update_host(ci_max_jobs=15, ci_staging_slots=1, ci_kinds=["pr", "staging"],
+                                   runner_group_id=3, ci_protected_slots=slots)
+        with patch.object(broker, "request", return_value=dict(machine_id=config["machine_id"], runner_group_id=3)), \
+                patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+            broker.enroll(code="i" * 64)
+        value = store.host_config()
+        self.assertEqual(value["ci_broker_url"], broker.DEFAULT_URL)
+        self.assertEqual(value["ci_protected_slots"], slots)
+
     def test_ci_enrollment_preserves_an_existing_worker_profile_and_identity(self):
         prior = store.update_host(profile="science", github_account="worker-science", max_open_prs=128)
         with patch.object(broker, "request", return_value=dict(machine_id=prior["machine_id"], runner_group_id=3)), patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):

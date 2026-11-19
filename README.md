@@ -145,6 +145,14 @@ Every job runs in a disposable VM; ordinary builds select the roadmap class or
 Namespace, while small automation selects the control class. This setup uses the operator host's existing
 direct runner credential, not the volunteer registration broker.
 
+A broker-enrolled host may also reserve `queue-control` and `pr-status` slots
+when its enrollment allows those classes. The host keeps its slot map; the broker
+registers `queue-control` runners in group 6 and `pr-status` runners in group 7,
+and `/v1/policy` reports that mapping in `groups`. The host refuses to start a
+reserved slot whose class the enrollment lacks or whose `runner_group_id`
+differs from the broker's group. `control` and `roadmap` slots still require
+direct runner credentials.
+
 The control guest has 2 CPUs and 4 GiB; the roadmap guest has 16 CPUs and 32 GiB.
 Both slots stay warm independently of TauCeti's capacity discovery and cannot
 be borrowed by its builds or recovery. The existing slot ceiling, launch pacing,
