@@ -1,4 +1,4 @@
-import {slots} from './capacity.mjs';
+import {slots,hostGroups} from './capacity.mjs';
 import {UpstreamError} from './github.mjs';
 
 /** JIT labels are read-only. Block replacement registrations, retire idle
@@ -9,7 +9,7 @@ export async function suspendHost(storage,github,host,suspend) {
   host.suspension_cleanup_pending=suspend;
   await storage.put('host:'+host.machine_id,host);
   if (!suspend) return {suspended:false,cleanup_pending:false,retired_runners:[],active_runners:[],pending_runners:[]};
-  const inventory=await github.runners();
+  const inventory=await github.runners(hostGroups(host));
   const owned=new Set(Object.values(slots(host)).filter(s=>s.runner_id).map(s=>s.runner_id));
   const runners=inventory.filter(r=>owned.has(r.id) || (r.labels || []).some(l=>l.name==='fleet-'+host.machine_id));
   const retired=[],active=[],pending=[];

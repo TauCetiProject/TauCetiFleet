@@ -70,7 +70,7 @@ host/OS headroom. This shared host currently has other workloads, so readiness
 can block until memory is available or the operator selects a smaller shape.
 
 Before production routing, explicitly enable a prepared host's CI role and run
-the trusted `fleet-smoke.yml` while `FLEET_CI_ENABLED` remains off. Real GitHub
+the trusted `nightly-verify.yml` while `FLEET_CI_ENABLED` remains off. Real GitHub
 registration, acquisition, job completion, guest retirement, and a controlled
 unacquired-job fallback must be checked at that point. Static tests and local
 guests do not establish that live routing has passed.
@@ -101,6 +101,18 @@ these host/GitHub facts agree:
   and without requiring successful guard-status writes. A failed GitHub
   publication does not establish a machine fault; runner completion and the
   host-service receipt supply the health evidence.
+
+A slot reserved for staging (`ci_staging_slots`, with a staging-only guest
+receipt) also exempts a cancellation (`staging_slot_cancelled`) when the QEMU
+service exited successfully, no infrastructure step failed and the job's steps
+pass the same health checks as a Bors cancellation: unique names, every step
+completed with a known outcome, `Complete job` succeeded, and no failed step
+other than the cancellation finalizer (`Report build and bump-guard statuses to
+the PR head commit`). Only the Bors evidence is waived. The queue cancels a superseded staging run as soon as a newer
+candidate exists, and those runs carry no Bors evidence; on the reserved slot a
+cooldown would only hold the replacement candidate behind the run it replaced.
+A host fault, an unknown service result or an unfinished runner keeps the
+900-second circuit, and every other slot keeps the Bors requirement above.
 
 Metadata comes from bounded GitHub API reads using the existing host read
 credential. No logs, guest hook claims, candidate artifacts or new credentials
