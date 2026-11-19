@@ -69,9 +69,16 @@ def runner_policy(config):
     if config.get("ci_broker_url"):
         from .broker import request as broker_request
 
-        group = broker_request(config, "/v1/policy")["runner_group_id"]
+        policy = broker_request(config, "/v1/policy")
+        group = policy["runner_group_id"]
         if group != config.get("runner_group_id"):
             raise FleetError("CI broker returned a different runner group")
+        if config.get("ci_slot_runner_group_id") is not None:
+            # A special slot (for_slot): its kind must map to the configured group.
+            from .capacity import broker_slot_group
+
+            return broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                                     runner_group_id=config["ci_slot_runner_group_id"]), policy)
         return group
     group = config.get("ci_slot_runner_group_id", config.get("runner_group_id"))
     if not isinstance(group, int) or group <= 0:
@@ -141,6 +148,8 @@ def jit_config(config, name):
         from .broker import request as broker_request
         from .capacity import kinds
 
+        if config.get("ci_slot_runner_group_id") is not None:
+            runner_policy(config)  # Refuse a special slot whose group differs from the broker's.
         value = broker_request(config, "/v1/runners", method="POST",
                                data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
         return value["runner_id"], value["encoded_jit_config"]

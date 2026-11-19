@@ -1,0 +1,84 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {GitHub,PolicyError} from '../src/github.mjs';
+import {hostKinds,runnerKinds,groupFor,labels} from '../src/capacity.mjs';
+import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
+
+const workflow=(repo,name)=>'TauCetiProject/'+repo+'/.github/workflows/'+name+'@refs/heads/main';
+const queue=[workflow('TauCeti','pick-runner.yml'),workflow('TauCeti','pr-build.yml'),workflow('TauCeti','publish-lake-cache.yml')];
+const harness=[workflow('TauCetiTools','pr-build.yml'),workflow('TauCetiTools','publish-lake-cache.yml')];
+const status=[workflow('TauCeti','pr-status.yml'),workflow('TauCeti','pr-labels.yml')];
+const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus'};
+function client(group,{workflows,visibility='selected',restricted=true,repositories=['TauCetiProject/TauCeti'],name=names[group]},calls=[]) {
+  const github=new GitHub({});
+  github.request=async path=>{
+    calls.push(path);
+    if (path.startsWith(`orgs/TauCetiProject/actions/runner-groups/${group}/repositories`))
+      return {total_count:repositories.length,repositories:repositories.map(full_name=>({full_name}))};
+    assert.equal(path,`orgs/TauCetiProject/actions/runner-groups/${group}`);
+    return {id:group,name,visibility,restricted_to_workflows:restricted,selected_workflows:workflows};
+  };
+  return github;
+}
+
+test('runner classes are build classes together or exactly one special class',()=>{
+  for (const kinds of [['pr'],['staging'],['pr','staging'],['queue-control'],['pr-status']]) assert.ok(runnerKinds(kinds));
+  for (const kinds of [['pr','pr-status'],['queue-control','pr-status'],['staging','queue-control'],['control'],['roadmap'],[],['pr','pr'],null])
+    assert.ok(!runnerKinds(kinds));
+  assert.ok(hostKinds(['pr','staging','queue-control','pr-status']));
+  for (const kinds of [['control'],['pr','pr'],[],'pr',['__proto__']]) assert.ok(!hostKinds(kinds));
+  assert.deepEqual([['pr'],['staging','pr'],['queue-control'],['pr-status']].map(groupFor),[3,3,6,7]);
+  assert.deepEqual(labels('a'.repeat(32),'fleet-x-'+'b'.repeat(16),['queue-control'],'Tauchonki2'),
+    ['self-hosted','linux','x64','fleet-'+'a'.repeat(32),'fleet-instance-'+'b'.repeat(16),'fleet-host-tauchonki2','tauceti-fleet-queue-control']);
+});
+test('queue-control requires its main workflows, admits only the shared harness at main and only TauCeti',async()=>{
+  const calls=[];
+  assert.deepEqual(await client(6,{workflows:queue},calls).policy({group:6,fresh:true}),{runner_group_id:6});
+  assert.deepEqual(calls,['orgs/TauCetiProject/actions/runner-groups/6','orgs/TauCetiProject/actions/runner-groups/6/repositories?per_page=100']);
+  assert.deepEqual(await client(6,{workflows:[...queue,...harness]}).policy({group:6,fresh:true}),{runner_group_id:6});
+  for (const settings of [{workflows:queue.slice(1)},{workflows:[...queue,workflow('TauCeti','pr-status.yml')]},
+    {workflows:[...queue,workflow('TauCetiTools','pick-runner.yml')]},
+    {workflows:[...queue,harness[0].replace('refs/heads/main','refs/heads/other')]},
+    {workflows:[...queue,harness[0].replace('TauCetiProject/','someone/')]},
+    {workflows:queue,visibility:'all'},{workflows:queue,restricted:false},{workflows:queue,name:'TauCetiFleet'},
+    {workflows:queue,repositories:['TauCetiProject/TauCeti','TauCetiProject/TauCetiRoadmap']},
+    {workflows:queue,repositories:['TauCetiProject/TauCetiRoadmap']},{workflows:queue,repositories:[]}])
+    await assert.rejects(client(6,settings).policy({group:6,fresh:true}),PolicyError);
+});
+test('pr-status requires exactly its two main workflows on TauCeti',async()=>{
+  assert.deepEqual(await client(7,{workflows:status}).policy({group:7,fresh:true}),{runner_group_id:7});
+  for (const settings of [{workflows:status.slice(1)},{workflows:[...status,queue[1]]},{workflows:[...status,harness[0]]},
+    {workflows:status.map(w=>w.replace('refs/heads/main','refs/pull/1/merge'))},
+    {workflows:status,visibility:'all'},{workflows:status,restricted:false},
+    {workflows:status,repositories:['TauCetiProject/TauCeti','someone/Other']}])
+    await assert.rejects(client(7,settings).policy({group:7,fresh:true}),PolicyError);
+});
+test('policy is cached per group, and unknown groups are refused without a request',async()=>{
+  const calls=[];
+  const github=client(6,{workflows:queue},calls);
+  await github.policy({group:6});await github.policy({group:6});
+  assert.equal(calls.length,2);
+  await github.policy({group:6,fresh:true});
+  assert.equal(calls.length,4);
+  for (const group of [1,4,5,'6']) await assert.rejects(github.policy({group,fresh:true}),PolicyError);
+  assert.equal(calls.length,4);
+});
+test('inventory lists organization runners, including special groups',async()=>{
+  const github=new GitHub({});const paths=[];
+  github.request=async path=>{paths.push(path);return {total_count:1,runners:[{id:1,name:'special'}]};};
+  assert.deepEqual(await github.runners(),[{id:1,name:'special'}]);
+  assert.deepEqual(paths,['orgs/TauCetiProject/actions/runners?per_page=100&page=1']);
+});
+test('recovery rechecks the group recorded with the reservation, or group 3 for older ones',async()=>{
+  for (const [pending,expected] of [[{group:6},6],[{group:7},7],[{},3]]) {
+    const name='fleet-'+'1'.repeat(12)+'-'+'a'.repeat(16);
+    const host={machine_id:'1'.repeat(32),slots:{0:{pending:{name,at:Date.now()-RECOVERY_DELAY-1000,...pending}}}};
+    const records=new Map([['host:'+host.machine_id,host]]);
+    const storage={get:async k=>records.get(k),put:async(k,v)=>records.set(k,v),list:async()=>records,
+      getAlarm:async()=>null,setAlarm:async()=>{},deleteAlarm:async()=>{},transaction:async f=>f(storage)};
+    const groups=[];
+    const github={policy:async({group,fresh})=>{assert.equal(fresh,true);groups.push(group);},runners:async()=>[],request:async()=>null};
+    assert.deepEqual(await new RegistrationRecovery(storage,github).reconcile(host,0),{reconciled:true,removed:[]});
+    assert.deepEqual(groups,[expected]);
+  }
+});

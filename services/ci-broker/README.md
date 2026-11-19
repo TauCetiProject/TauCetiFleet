@@ -174,6 +174,33 @@ Keeping Fleet administration credentials on the broker does not remove that
 existing trust in the build server. Invitations should be issued only for hosts
 whose operators are trusted with the CI workflow's credentials and results.
 
+## Special runner classes
+
+Operator hosts can be authorized for `queue-control` and `pr-status` as well as
+`pr` and `staging`:
+
+```sh
+python3 scripts/setup.py invite --name tauchonki2 --kinds pr,staging,queue-control,pr-status --expires-in-days 1
+```
+
+The broker, never the host, chooses each runner's group: `pr` and `staging` go to
+group 3 (`TauCetiFleet`), `queue-control` to group 6 (`TauCetiQueueControl`) and
+`pr-status` to group 7 (`TauCetiPRStatus`). One runner carries either build
+classes or exactly one special class. Before each registration and each recovery
+the broker freshly checks the target group: its name, workflow restriction and
+selected workflows, and for groups 6 and 7 selected-repository visibility with
+exactly `TauCetiProject/TauCeti`. Group 6 must select TauCeti's `pick-runner.yml`,
+`pr-build.yml` and `publish-lake-cache.yml` at main, and may add only the shared
+harness entries below. Group 7 must select exactly TauCeti's `pr-status.yml` and
+`pr-labels.yml` at main. A widened group stops registration in that group only.
+Pending reservations record their group, and recovery rechecks it; reservations
+from before this change are group 3. Runner inventory lists organization runners,
+so special runners can be observed, retired, suspended and recovered like any
+other. `/v1/policy` keeps `runner_group_id: 3` and adds
+`groups: {"queue-control": 6, "pr-status": 7}`, which hosts compare with their
+local `ci_protected_slots`. The `control` and `roadmap` classes (TauCetiRoadmap)
+are outside the App installation and stay unsupported.
+
 ## Shared-harness entries
 
 TauCeti runs its shared harness from TauCetiTools `main`. `TauCetiFleet` admits

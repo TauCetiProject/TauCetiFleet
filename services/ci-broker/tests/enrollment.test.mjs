@@ -13,6 +13,16 @@ const token1='a'.repeat(64), token2='b'.repeat(64), token3='c'.repeat(64);
 const runners=new Map();
 const upstream=[];
 let nextId=100,failRegistration=false,rejectRegistration=0,trustedPolicy=true,failRunnerRemoval=false,startJobOnRemoval=0;
+const workflow=(repo,name)=>'TauCetiProject/'+repo+'/.github/workflows/'+name+'@refs/heads/main';
+// Live settings of the special groups (checked 2026-11-19); tests widen them to simulate drift.
+const trustedGroups=()=>({
+  6:{id:6,name:'TauCetiQueueControl',visibility:'selected',restricted_to_workflows:true,
+    selected_workflows:[workflow('TauCeti','pick-runner.yml'),workflow('TauCeti','pr-build.yml'),
+      workflow('TauCeti','publish-lake-cache.yml'),workflow('TauCetiTools','pr-build.yml'),
+      workflow('TauCetiTools','publish-lake-cache.yml')]},
+  7:{id:7,name:'TauCetiPRStatus',visibility:'selected',restricted_to_workflows:true,
+    selected_workflows:[workflow('TauCeti','pr-labels.yml'),workflow('TauCeti','pr-status.yml')]}});
+let groups=trustedGroups(),groupRepositories={6:['TauCetiProject/TauCeti'],7:['TauCetiProject/TauCeti']};
 const hash=value=>createHash('sha256').update(value).digest('hex');
 before(async()=>{
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
@@ -51,7 +61,12 @@ before(async()=>{
       else assert.equal(req.headers.get('Authorization'),'Bearer read-grant');
       if (url.pathname==='/orgs/TauCetiProject/actions/runner-groups/3') return respond({id:3,name:'TauCetiFleet',
         restricted_to_workflows:trustedPolicy,selected_workflows:['TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main']});
-      if (url.pathname==='/orgs/TauCetiProject/actions/runner-groups/3/runners') {
+      const special=url.pathname.match(/^\/orgs\/TauCetiProject\/actions\/runner-groups\/([67])(\/repositories)?$/);
+      if (special) {
+        const names=groupRepositories[special[1]];
+        return respond(special[2]?{total_count:names.length,repositories:names.map(full_name=>({full_name}))}:groups[special[1]]);
+      }
+      if (url.pathname==='/orgs/TauCetiProject/actions/runners') {
         const all=[...runners.values()],page=Number(url.searchParams.get('page') || 1);
         return respond({total_count:all.length,runners:all.slice((page-1)*100,page*100)});
       }
@@ -59,8 +74,9 @@ before(async()=>{
         if (rejectRegistration) return respond({error:'rejected'},rejectRegistration);
         if (failRegistration) return respond({error:'internal error'},500);
         const input=await req.json();
-        assert.equal(input.runner_group_id,3);
-        const runner={id:nextId++,name:input.name,status:'online',busy:false,labels:input.labels.map(name=>({name}))};
+        assert.ok([3,6,7].includes(input.runner_group_id));
+        const runner={id:nextId++,name:input.name,status:'online',busy:false,runner_group_id:input.runner_group_id,
+          labels:input.labels.map(name=>({name}))};
         runners.set(runner.id,runner);
         return respond({runner,encoded_jit_config:'single-job-'+runner.id});
       }
@@ -123,7 +139,8 @@ test('one-time enrollment binds a durable credential to one machine',async()=>{
   await enroll(id2,token2,'invite-two');
   assert.equal((await hostRequest(id1,token2,'/v1/policy')).status,401);
   assert.equal((await hostRequest(id2,token1,'/v1/policy')).status,401);
-  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),{runner_group_id:3,max_jobs:4096,kinds:['staging']});
+  assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),
+    {runner_group_id:3,groups:{'queue-control':6,'pr-status':7},max_jobs:4096,kinds:['staging']});
 });
 test('concurrent registration creates one runner and cannot change its group, labels, or machine',async()=>{
   const name='fleet-'+id1.slice(0,12)+'-'+'a'.repeat(16);
@@ -406,4 +423,117 @@ test('a job acquiring its runner during suspension retirement keeps running with
  const value=await (await adminRequest('/admin/hosts/'+id+'/suspend','POST')).json();
  assert.equal(value.cleanup_pending,false);assert.deepEqual(value.active_runners,[runner_id]);assert.equal(runners.get(runner_id).busy,true);
  const hosts=await (await adminRequest('/admin/hosts')).json();assert.equal(hosts.hosts.find(h=>h.machine_id===id).slots[0].runner_id,runner_id);
+});
+
+const specialKinds=['pr','staging','queue-control','pr-status'];
+const jitPosts=()=>upstream.filter(x=>x.path.endsWith('/generate-jitconfig')).length;
+test('invitations and capacity accept special classes only as named classes',async()=>{
+  for (const kinds of [['control'],['roadmap'],['queue-control','queue-control'],[],'pr'])
+    assert.equal((await adminRequest('/admin/invites','POST',{name:'bad-special',hash:hash('bad-special-invite'),kinds})).status,400);
+  assert.equal((await adminRequest('/admin/invites','POST',{name:'tauchonki2',hash:hash('special-invite'),kinds:specialKinds,expires_in:24*3600})).status,200);
+});
+test('special classes register in their own groups, appear in inventory and can be retired',async()=>{
+  const id='4a'.repeat(16),token='q'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await enroll(id,token,'special-host',{kinds:specialKinds});
+  const policy=await (await hostRequest(id,token,'/v1/policy')).json();
+  assert.deepEqual(policy,{runner_group_id:3,groups:{'queue-control':6,'pr-status':7},max_jobs:4096,kinds:specialKinds});
+  const register=(slot,kinds,n)=>hostRequest(id,token,'/v1/runners','POST',{slot,kinds,name:prefix+String(n).repeat(16)});
+  for (const kinds of [['pr','pr-status'],['queue-control','pr-status'],['staging','queue-control'],['control']])
+    assert.equal((await register(9,kinds,1)).status,403);
+  const results={};
+  for (const [slot,kinds,group,n] of [[0,['staging'],3,2],[2,['pr','staging'],3,3],[7,['queue-control'],6,4],[11,['pr-status'],7,5]]) {
+    const response=await register(slot,kinds,n);
+    assert.equal(response.status,200);
+    const value=await response.json();
+    const runner=runners.get(value.runner_id);
+    assert.equal(runner.runner_group_id,group);
+    results[slot]={...value,labels:runner.labels.map(l=>l.name)};
+  }
+  for (const [slot,kind] of [[7,'queue-control'],[11,'pr-status']]) {
+    assert.deepEqual(results[slot].labels,['self-hosted','linux','x64','fleet-'+id,
+      'fleet-instance-'+results[slot].labels[4].slice('fleet-instance-'.length),'fleet-host-test-4','tauceti-fleet-'+kind]);
+  }
+  assert.ok(results[0].labels.includes('tauceti-fleet'));
+  // A replayed request returns the same runner; a changed class cannot reuse the slot.
+  assert.equal((await (await register(7,['queue-control'],4)).json()).runner_id,results[7].runner_id);
+  assert.equal((await register(7,['pr-status'],4)).status,409);
+  const inventory=(await (await hostRequest(id,token,'/v1/runners')).json()).runners.map(r=>r.id).sort((a,b)=>a-b);
+  assert.deepEqual(inventory,Object.values(results).map(r=>r.runner_id).sort((a,b)=>a-b));
+  const listed=(await (await adminRequest('/admin/hosts')).json()).hosts.find(h=>h.machine_id===id);
+  assert.deepEqual(Object.fromEntries(listed.slots.map(s=>[s.slot,s.runner_group_id])),{0:3,2:3,7:6,11:7});
+  assert.equal((await hostRequest(id,token,'/v1/runners/'+results[7].runner_id,'DELETE')).status,200);
+  assert.ok(!runners.has(results[7].runner_id));
+  // Suspension retires idle special runners like any other.
+  runners.get(results[11].runner_id).busy=true;
+  const suspended=await (await adminRequest('/admin/hosts/'+id+'/suspend','POST')).json();
+  assert.deepEqual(suspended.active_runners,[results[11].runner_id]);
+  assert.deepEqual(suspended.retired_runners,[results[0].runner_id,results[2].runner_id].sort((a,b)=>a-b));
+  runners.get(results[11].runner_id).busy=false;
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/suspend','POST')).status,200);
+  assert.ok(!runners.has(results[11].runner_id));
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/resume','POST')).status,200);
+});
+test('a build-only host cannot register special runners',async()=>{
+  const id='5b'.repeat(16),token='r'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'1'.repeat(16);
+  await enroll(id,token,'build-only-host',{kinds:['pr','staging']});
+  const before=jitPosts();
+  for (const kinds of [['queue-control'],['pr-status']])
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:7,kinds})).status,403);
+  assert.equal(jitPosts(),before);
+});
+test('widened special groups block their registrations and leave other groups working',async()=>{
+  const id='6c'.repeat(16),token='s'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await enroll(id,token,'drift-host',{kinds:specialKinds});
+  const extra=workflow('TauCeti','untrusted.yml');
+  const drifts=[
+    ()=>{groups[6].visibility='all';},()=>{groups[6].restricted_to_workflows=false;},
+    ()=>{groups[6].selected_workflows.push(extra);},()=>{groups[6].selected_workflows.splice(0,1);},
+    ()=>{groups[6].name='TauCetiFleet';},()=>{groupRepositories[6]=['TauCetiProject/TauCeti','TauCetiProject/Other'];},
+    ()=>{groupRepositories[6]=['TauCetiProject/Other'];},
+    ()=>{groups[7].selected_workflows.push(workflow('TauCeti','pr-build.yml'));},
+    ()=>{groups[7].selected_workflows.pop();},()=>{groupRepositories[7]=[];},
+  ];
+  for (const [i,drift] of drifts.entries()) {
+    drift();
+    const affected=groups[7].selected_workflows.length!==2 || groupRepositories[7].length!==1 ? 7 : 6;
+    const kinds=[affected===6?'queue-control':'pr-status'];
+    const before=jitPosts();
+    const name=prefix+i.toString(16).repeat(16);
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:7,kinds})).status,503);
+    assert.equal(jitPosts(),before);
+    const hosts=(await (await adminRequest('/admin/hosts')).json()).hosts;
+    assert.ok(!hosts.find(h=>h.machine_id===id).slots.find(s=>s.slot===7)?.registration_pending);
+    const other=await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'f'.repeat(15)+i.toString(16),slot:20+i,
+      kinds:affected===6?['pr-status']:['queue-control']});
+    assert.equal(other.status,200);
+    const build=await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'e'.repeat(15)+i.toString(16),slot:40+i,kinds:['pr']});
+    assert.equal(build.status,200);
+    groups=trustedGroups();groupRepositories={6:['TauCetiProject/TauCeti'],7:['TauCetiProject/TauCeti']};
+  }
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'d'.repeat(16),slot:7,kinds:['queue-control']})).status,200);
+});
+test('an ambiguous special registration records its group and recovery rechecks that group',async()=>{
+  const namespace=await mf.getDurableObjectNamespace('REGISTRY');
+  const registry=namespace.get(namespace.idFromName('fleet'));
+  const id='7d'.repeat(16),token='t'.repeat(64),name='fleet-'+id.slice(0,12)+'-'+'a'.repeat(16);
+  await enroll(id,token,'ambiguous-special',{kinds:specialKinds});
+  failRegistration=true;
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:11,kinds:['pr-status']})).status,503);
+  failRegistration=false;
+  let listed=(await (await adminRequest('/admin/hosts')).json()).hosts.find(h=>h.machine_id===id).slots.find(s=>s.slot===11);
+  assert.equal(listed.registration_pending,true);assert.equal(listed.runner_group_id,7);
+  // Age the reservation, then widen group 7: recovery must not trust a drifted group.
+  const host=(await (await adminRequest('/admin/hosts')).json()).hosts.find(h=>h.machine_id===id);
+  await registry.seed({machine_id:id,name:'test-7',hash:hash(token),issued:[],kinds:specialKinds,created_at:host.created_at,
+    slots:{11:{pending:{name,at:Date.now()-200000,group:7}}}});
+  groupRepositories[7]=['TauCetiProject/TauCeti','TauCetiProject/Other'];
+  const start=upstream.length;
+  await registry.fireRecovery();
+  assert.ok(upstream.slice(start).some(x=>x.path==='/orgs/TauCetiProject/actions/runner-groups/7/repositories'));
+  listed=(await (await adminRequest('/admin/hosts')).json()).hosts.find(h=>h.machine_id===id).slots.find(s=>s.slot===11);
+  assert.equal(listed.registration_pending,true);
+  assert.deepEqual(listed.recovery_error,{kind:'untrusted_runner_policy'});
+  groupRepositories[7]=['TauCetiProject/TauCeti'];
+  assert.equal((await adminRequest('/admin/hosts/'+id+'/reconcile','POST',{slot:11})).status,200);
+  assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:11,kinds:['pr-status']})).status,200);
 });

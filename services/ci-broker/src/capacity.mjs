@@ -5,9 +5,21 @@ export function capacity(host) {
   // slot-index bound, never a per-host permission; local --max-jobs is authoritative.
   return {max_jobs:MAX_JOBS,kinds:host.kinds ?? ['staging']};
 }
-export function validKinds(kinds) {
-  return Array.isArray(kinds) && kinds.length>=1 && kinds.length<=2 &&
-    new Set(kinds).size===kinds.length && kinds.every(k=>['pr','staging'].includes(k));
+// Build classes share the TauCetiFleet group. Each special class has its own
+// selected-repository group; the broker, never the host, chooses the group.
+export const GROUPS={pr:3,staging:3,'queue-control':6,'pr-status':7};
+export const SPECIAL_GROUPS={'queue-control':6,'pr-status':7};
+/** Classes an operator may authorize for a host. */
+export function hostKinds(kinds) {
+  return Array.isArray(kinds) && kinds.length>=1 && new Set(kinds).size===kinds.length &&
+    kinds.every(k=>Object.hasOwn(GROUPS,k));
+}
+/** Classes of one runner: build classes together, or exactly one special class. */
+export function runnerKinds(kinds) {
+  return hostKinds(kinds) && (kinds.length===1 || kinds.every(k=>GROUPS[k]===3));
+}
+export function groupFor(kinds) {
+  return GROUPS[kinds[0]];
 }
 export function slots(host) {
   if (!host.slots) {

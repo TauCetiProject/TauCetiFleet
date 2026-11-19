@@ -43,7 +43,8 @@ export class RegistrationRecovery {
     const slot=slots(host)[String(index)];
     if (!slot?.pending) throw new RecoveryBlocked('no_pending_registration');
     if (Date.now()-slot.pending.at<RECOVERY_DELAY) throw new RecoveryBlocked('registration_settling');
-    await this.github.policy({fresh:true});
+    // Reservations made before special groups existed were all in group 3.
+    await this.github.policy({group:slot.pending.group ?? 3,fresh:true});
     // A complete inventory is required even when there are no matching runners.
     const matches=(await this.github.runners()).filter(r=>r.name===slot.pending.name);
     if (matches.some(r=>r.busy || r.status!=='offline')) throw new RecoveryBlocked('runner_active');
