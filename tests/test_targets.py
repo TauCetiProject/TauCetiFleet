@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import tomllib
@@ -160,6 +161,27 @@ class TargetLists(unittest.TestCase):
             self.assertEqual(targets.summarize(CANONICAL, [worker])["inflight"], 2)
         worker.update(state="verification-pending", next_action_at=1)
         self.assertEqual(targets.summarize(CANONICAL, [worker])["inflight"], 1)
+
+    def test_controller_publishes_list_errors_without_suppressing_valid_admissions(self):
+        targets.configure(dict(text=EXAMPLE), [])
+        store.update_host(workers_enabled=True, max_workers=2)
+        handlers, written = {}, {}
+        with (
+            patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
+            patch.object(host.time, "sleep", side_effect=lambda _: handlers[signal.SIGTERM]()),
+            patch.object(host, "cpu_sample", side_effect=[(1, 0), (2, 1)]),
+            patch.object(host, "resources", return_value=dict(cpus=8, memory_total=64 * 1024**3, memory_available=64 * 1024**3)),
+            patch.object(host, "worker_memory", return_value=None),
+            patch.object(host, "start_workers"),
+            patch.object(host, "worker_statuses", return_value=[]),
+            patch.object(host, "atomic", side_effect=lambda path, value: written.setdefault(Path(path).name, value)),
+            patch.object(targets, "inspect_file", side_effect=FleetError("strict list error")),
+        ):
+            host.daemon()
+        self.assertEqual(written["status.json"]["roadmap_targets"]["error"], "strict list error")
+        self.assertEqual(len(written["admission.json"]["workers"]), 2, {k: written["status.json"].get(k) for k in ("scaling_reason", "worker_admission", "error")})
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual({s["roadmap_targets"] for s in specs}, {str(targets.stored())})
 
     def test_status_error_is_reported_without_disrupting_admission(self):
         with patch.object(targets, "inspect_file", side_effect=FleetError("list invalid")):
