@@ -58,8 +58,8 @@ class ClaudeCredentials(unittest.TestCase):
         return text, tomllib.loads(text)["workers"]
 
     def test_token_and_usage_login_reach_workers_as_private_files(self):
-        store.update_host(max_workers=2, forgejo_workers=1)
-        payload, result = self.add(env={"A": "1"})
+        store.update_host(max_workers=2, forgejo_workers=1, worker_env={"A": "1"})
+        payload, result = self.add()
         self.assertEqual(payload["credentials"]["claude_token_file"], TOKEN)
         secrets = store.config_dir() / "secrets"
         stored = json.loads((secrets / "claude/.credentials.json").read_text())["claudeAiOauth"]
@@ -84,10 +84,12 @@ class ClaudeCredentials(unittest.TestCase):
 
         self.add(claude_usage_credentials_file=None)
         worker = self.workers()[1][0]
-        self.assertEqual(worker["env"], {"CLAUDE_CONFIG_DIR": str(secrets / "claude")})
+        self.assertEqual(worker["env"], {"A": "1", "CLAUDE_CONFIG_DIR": str(secrets / "claude")})
         self.assertNotIn("auto_refresh", worker)
         self.add(claude_token_file=None, claude_usage_credentials_file=None)
-        self.assertFalse({"env", "auto_refresh"} & set(self.workers()[1][0]))
+        worker = self.workers()[1][0]
+        self.assertEqual(worker["env"], {"A": "1"})
+        self.assertNotIn("auto_refresh", worker)
 
     def test_repeated_add_keeps_a_login_the_host_has_renewed(self):
         self.add()
@@ -271,12 +273,18 @@ class ClaudeCredentials(unittest.TestCase):
         cases = [
             (dict(claude_billing=None), "require claude_billing subscription"),
             (dict(claude_token_file=None), "requires claude_token_file"),
-            (dict(env={"TAUCETI_CLAUDE_USAGE_CREDENTIALS": "/elsewhere"}), "env must not set TAUCETI_CLAUDE_USAGE_CREDENTIALS"),
-            (dict(env={"A": "x" * (16 * 1024 - 3)}), "credential paths Fleet adds to it exceed 16 KB"),
         ]
         for changes, message in cases:
             with self.assertRaisesRegex(store.FleetError, message, msg=changes):
                 self.add(**changes)
+        for environment, message in (
+            ({"TAUCETI_CLAUDE_USAGE_CREDENTIALS": "/elsewhere"}, "worker_env must not set TAUCETI_CLAUDE_USAGE_CREDENTIALS"),
+            ({f"A{n}": "x" * 4089 for n in range(4)}, "credential paths Fleet adds to it exceed 16 KB"),
+        ):
+            store.update_host(worker_env=environment)
+            with self.assertRaisesRegex(store.FleetError, message, msg=environment):
+                self.add()
+        store.update_host(worker_env=None)
         for name, text, message in (("token", "sk-ant-api03-key", "setup-token"), ("token", TOKEN + " x", "setup-token"),
                                     ("usage", TOKEN, "claude auth login"), ("usage", json.dumps(login(refresh=None)), "claude auth login")):
             self.write(name, text)

@@ -214,8 +214,8 @@ def worker_env(config):
         env["CLAUDE_CONFIG_DIR"] = str(Path(token).parent)
     if usage:
         env["TAUCETI_CLAUDE_USAGE_CREDENTIALS"] = usage
-    if clash := set(env) & set(config.get("env") or {}):
-        raise FleetError("env must not set " + " or ".join(sorted(clash)) + " beside the profile's Claude credential files")
+    if clash := set(env) & set(config.get("worker_env") or {}):
+        raise FleetError("worker_env must not set " + " or ".join(sorted(clash)) + " beside the profile's Claude credential files")
     return env
 
 
