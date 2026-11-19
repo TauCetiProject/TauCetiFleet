@@ -85,6 +85,9 @@ test('hosts inventory only the groups of their classes and registered slots',()=
   assert.deepEqual(hostGroups({slots:{}}),[3]);
   assert.deepEqual(hostGroups({kinds:['pr','staging','queue-control','pr-status'],slots:{}}),[3,6,7]);
   assert.deepEqual(hostGroups({kinds:['pr'],slots:{4:{runner_id:1,kinds:['pr-status']}}}),[3,7]);
+  assert.deepEqual(hostGroups({kinds:['pr'],slots:{4:{pending:{name:'x',at:1,group:6}}}}),[3,6]);
+  // Retired slots keep their last classes but no longer widen the inventory.
+  assert.deepEqual(hostGroups({kinds:['pr'],slots:{4:{kinds:['queue-control'],runner_name:'old'}}}),[3]);
 });
 test('recovery rechecks the group recorded with the reservation, or group 3 for older ones',async()=>{
   for (const [pending,expected] of [[{group:6},6],[{group:7},7],[{},3]]) {

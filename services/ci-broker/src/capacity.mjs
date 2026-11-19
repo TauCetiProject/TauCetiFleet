@@ -21,10 +21,14 @@ export function runnerKinds(kinds) {
 export function groupFor(kinds) {
   return GROUPS[kinds[0]];
 }
-/** Groups a host's runners can be in: its classes' and its registered slots'. */
+/** Groups a host's runners can be in: its classes' and its live or reserved slots'. */
 export function hostGroups(host) {
-  const kinds=[...(host.kinds ?? ['staging']),...Object.values(slots(host)).flatMap(s=>s.kinds || ['staging'])];
-  return [...new Set(kinds.filter(k=>Object.hasOwn(GROUPS,k)).map(k=>GROUPS[k]))].sort((a,b)=>a-b);
+  const groups=(host.kinds ?? ['staging']).filter(k=>Object.hasOwn(GROUPS,k)).map(k=>GROUPS[k]);
+  for (const slot of Object.values(slots(host))) {
+    if (slot.pending) groups.push(slot.pending.group ?? 3);
+    if (slot.runner_id) groups.push(groupFor(slot.kinds || ['staging']));
+  }
+  return [...new Set(groups.filter(g=>g!==undefined))].sort((a,b)=>a-b);
 }
 export function slots(host) {
   if (!host.slots) {
