@@ -268,6 +268,16 @@ class ClaudeCredentials(unittest.TestCase):
         entry = next(e for e in claude_credentials.report(store.host_config()) if e["name"] == "claude-usage-login")
         self.assertEqual((entry["status"], entry["evidence"]), ("ok", "usage login renews for another 28 days"))
 
+    def test_a_worker_environment_that_clashes_with_the_credentials_is_not_saved(self):
+        self.add()
+        for environment, message in (
+            ({"TAUCETI_CLAUDE_USAGE_CREDENTIALS": "/elsewhere"}, "must not set TAUCETI_CLAUDE_USAGE_CREDENTIALS"),
+            ({f"A{n}": "x" * 4089 for n in range(4)}, "exceed 16 KB"),
+        ):
+            with self.assertRaisesRegex(store.FleetError, message):
+                host.rpc(dict(action="workers", worker_env=environment))
+            self.assertFalse(store.host_config().get("worker_env"))
+
     def test_rejected_profiles_store_nothing(self):
         store.host_config()
         cases = [
