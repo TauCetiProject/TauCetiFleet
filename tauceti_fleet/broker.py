@@ -41,15 +41,23 @@ def validate_url(value):
     return value.rstrip("/")
 
 
+def credential(config):
+    """The machine's own broker credential; the controller needs it every loop."""
+    file = Path(config["ci_broker_token_file"])
+    if file.stat().st_mode & 0o077:
+        raise FleetError("CI enrollment credential must be private; use chmod 600")
+    token = file.read_text().strip()
+    if not token or any(c.isspace() for c in token):
+        raise FleetError("Invalid CI enrollment credential")
+    return token
+
+
 def request(config, path, *, method="GET", data=None, token=None):
     origin = validate_url(config["ci_broker_url"])
     if not path.startswith("/v1/") or "?" in path or "#" in path:
         raise FleetError("Invalid CI broker endpoint")
     if token is None:
-        file = Path(config["ci_broker_token_file"])
-        if file.stat().st_mode & 0o077:
-            raise FleetError("CI enrollment credential must be private; use chmod 600")
-        token = file.read_text().strip()
+        token = credential(config)
     if not token or any(c.isspace() for c in token):
         raise FleetError("Invalid CI enrollment credential")
     req = urllib.request.Request(

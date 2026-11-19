@@ -1,6 +1,7 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -82,33 +83,51 @@ def runner_policy(config):
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
     if kinds := config.get("ci_kinds"):
-        if kinds in (["roadmap"], ["control"], ["queue-control"]):
+        if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main"}
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not selected <= allowed
+        or not trusted_entries(selected - allowed, ("pr-build.yml",))
     ):
-        raise FleetError("Runner group must allow only pr-build.yml and optional fleet-smoke.yml at refs/heads/main")
+        raise FleetError("Runner group must allow only trusted main project workflows and the shared harness at main")
     return group
+
+
+HARNESS = "TauCetiProject/TauCetiTools"
+
+
+def trusted_entries(entries, workflows):
+    """Every entry names one of `workflows` in the shared harness at TauCetiTools main."""
+    return set(entries) <= {f"{HARNESS}/.github/workflows/{name}@refs/heads/main" for name in workflows}
 
 
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
-    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl"}[kind]
+    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")
-    repository = "TauCetiProject/TauCeti" if kind == "queue-control" else "TauCetiProject/TauCetiRoadmap"
+    repository = "TauCetiProject/TauCeti" if kind in ("queue-control", "pr-status") else "TauCetiProject/TauCetiRoadmap"
     if kind == "queue-control":
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
-        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != allowed:
-            raise FleetError("Queue control runners require exactly the trusted main picker, build and publisher workflows")
+        required = allowed
+        selected = set(data.get("selected_workflows", []))
+        if (not data.get("restricted_to_workflows") or not required <= selected
+                or not trusted_entries(selected - allowed, ("pr-build.yml", "publish-lake-cache.yml"))):
+            raise FleetError("Queue control runners require trusted main workflows and only the shared harness at main")
+    if kind == "pr-status":
+        required = {repository + "/.github/workflows/" + name + "@refs/heads/main"
+                    for name in ("pr-status.yml", "pr-labels.yml")}
+        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != required:
+            raise FleetError("PR status runners require exactly the trusted main reconciliation workflows")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1

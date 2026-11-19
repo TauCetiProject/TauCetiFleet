@@ -71,10 +71,13 @@ def parse(manifest, jobs):
                     if seconds in windows:
                         raise ValueError("Duplicate pool activity window")
                     windows[seconds] = {key: count(window.get(key)) for key in OUTCOMES}
+            # Servers before stale_waiting existed count every queued job as waiting.
             row[category] = dict(running=count(source.get("running")), waiting=count(source.get("waiting")),
+                                 stale_waiting=count(source.get("stale_waiting", 0)),
                                  latest_completion=job(source.get("latest_completion"), "completed_at"),
                                  oldest_running=job(source.get("oldest_running"), "started_at"),
                                  oldest_waiting=job(source.get("oldest_waiting"), "created_at"),
+                                 oldest_stale_waiting=job(source.get("oldest_stale_waiting"), "created_at"),
                                  windows=[dict(seconds=seconds, **value) for seconds, value in windows.items()])
         pools.append(row)
     # Aggregate coverage is independent of the bounded job-detail pages.
@@ -183,6 +186,14 @@ def display(report, *, now=None, all_jobs=False):
         widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
         for row in rows:
             print("  " + "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
+        stale = [(pool["pool"], pool["all" if all_jobs else "builds"]) for pool in value["pools"]]
+        stale = [f"{name} {scope.get('stale_waiting', 0)}" + (
+                    f" (oldest {age(scope['oldest_stale_waiting']['created_at'], now)})"
+                    if scope.get("oldest_stale_waiting") else "")
+                 for name, scope in stale if scope.get("stale_waiting")]
+        if stale:
+            print("  Stale queued (known GitHub zombies, nothing to do): " + ", ".join(stale)
+                  + ". Queued over 24h; excluded from Run/Wait. Do not report them.")
         print("  Run/Wait = running/waiting. Windows: finished (incl skipped/other); f=failures, c=cancellations.")
         print("  — = none observed; unknown = incomplete coverage. Oldest columns show ages; --json includes job identities/URLs.")
         if not value["pools"]:

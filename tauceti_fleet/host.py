@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -279,8 +280,10 @@ def worker_config(config):
     # Serialize controller and operator rewrites, and never restore an old label policy.
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
-        if "self_tested" in current:
-            config = dict(config, self_tested=current["self_tested"])
+        config = dict(config)
+        for field in ("self_tested", "forgejo_workers", "worker_env"):
+            if field in current:
+                config[field] = current[field]
         return _worker_config(config)
 
 
@@ -299,6 +302,8 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
         if config.get(key):
             fields[key] = config[key]
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -313,9 +318,15 @@ def _worker_config(config):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
-        for key, value in fields.items():
-            if value is not None:
-                lines.append(key + " = " + ("true" if value is True else json.dumps(value)))
+        worker_fields = dict(fields)
+        if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
+            worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
+        for key, value in worker_fields.items():
+            if isinstance(value, dict):
+                pairs = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items())
+                lines.append(key + " = { " + pairs + " }")
+            elif value is not None:
+                lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else json.dumps(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -494,10 +505,10 @@ def set_worker_maximum(maximum, *, lease_seconds=None):
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
-def require_self_tested_support():
+def require_worker_support(feature, description):
     binary = executable("tauceti")
-    if not binary or json.loads(run([binary, "_fleet-protocol"]).stdout).get("self_tested") != 1:
-        raise FleetError("Install a Worker release supporting --self-tested before enabling it")
+    if not binary or json.loads(run([binary, "_fleet-protocol"]).stdout).get(feature) != 1:
+        raise FleetError(f"Install a Worker release supporting {description} before enabling it")
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
         return  # A future manager will use the installed, supporting runtime.
@@ -507,29 +518,96 @@ def require_self_tested_support():
             client.connect(str(path))
             client.sendall(b'{"action":"ping"}\n')
             reply = client.makefile("rb").readline(65537)
-        if json.loads(reply).get("self_tested") == 1:
+        if json.loads(reply).get(feature) == 1:
             return
     except (OSError, ValueError):
         pass
-    raise FleetError("The running worker manager does not support --self-tested; hand over the manager to the installed runtime without stopping worker scopes")
+    raise FleetError(f"The running worker manager does not support {description}; hand over the manager to the installed runtime without stopping worker scopes")
+
+
+def require_self_tested_support():
+    require_worker_support("self_tested", "--self-tested")
+
+
+def require_source_selection_support():
+    require_worker_support("source_selection", "Forgejo source selection")
+
+
+def require_forgejo_credential():
+    import stat
+
+    path = Path.home() / ".config/tauceti-forgejo/worker-token"
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 4097:
+                raise ValueError
+            token = stream.read(4097).strip()
+            if not token or len(token) > 4096 or any(byte < 33 or byte > 126 for byte in token):
+                raise ValueError
+    except (OSError, ValueError):
+        raise FleetError(f"Provision an owned, private Forgejo worker credential at {path} before enabling native slots") from None
+
+
+WORKER_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
+
+
+def merged_worker_env(current, changes):
+    """Apply `changes` (a value sets a variable, None removes it) to the host's worker environment."""
+    if not isinstance(changes, dict) or not changes:
+        raise FleetError("worker_env must be a non-empty JSON object")
+    env = dict(current or {})
+    for name, value in changes.items():
+        if not isinstance(name, str) or not WORKER_ENV_NAME.fullmatch(name):
+            raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
+        if value is None:
+            env.pop(name, None)
+        elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+            raise FleetError(f"Worker environment value for {name} must be a single-line string")
+        else:
+            env[name] = value
+    return env
 
 
 def set_worker_policy(payload):
     maximum = payload.get("maximum")
     local = payload.get("self_tested")
-    if maximum is None and local is None:
-        raise FleetError("Select a worker maximum or self-tested prompting")
+    native = payload.get("forgejo_workers")
+    environment = payload.get("worker_env")
+    if maximum is None and local is None and native is None and environment is None:
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count or worker environment")
+    if environment is not None:
+        environment = merged_worker_env(host_config().get("worker_env"), environment)
     if local is not None and type(local) is not bool:
         raise FleetError("self_tested must be a boolean")
     if maximum is not None and (type(maximum) is not int or not 0 <= maximum <= 4096):
         raise FleetError("Worker maximum must be an integer from 0 to 4096")
+    if native is not None:
+        if type(native) is not int or not 0 <= native <= 4096:
+            raise FleetError("Forgejo worker count must be an integer from 0 to 4096")
+    if maximum is not None or native is not None:
+        current = host_config()
+        ceiling = maximum if maximum is not None else current["max_workers"]
+        selected = native if native is not None else current.get("forgejo_workers", 0)
+        if selected > ceiling:
+            raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
+    if native:
+        require_source_selection_support()
+        require_forgejo_credential()
     if local is True:
         require_self_tested_support()
     result = set_worker_maximum(maximum) if maximum is not None else {}
+    changes = {}
     if local is not None:
-        config = update_host(self_tested=local)
+        changes["self_tested"] = local
+    if native is not None:
+        changes["forgejo_workers"] = native
+    if environment is not None:
+        changes["worker_env"] = environment
+    if changes:
+        config = update_host(**changes)
         worker_config(config)
-        result.update(self_tested=local, detail="Self-tested prompting changes between rounds; active work continues")
+        result.update(changes, detail="Worker policy changes between rounds; active work continues")
     return result
 
 
@@ -641,15 +719,19 @@ def collect_ci_results(config):
                     continue
             started, completed = timestamp(job["started_at"]), timestamp(job["completed_at"])
             created = timestamp(job.get("created_at"))
-            kind = "pr" if value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"]) else "staging"
+            kind = "pr" if value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]) else "staging"
             if "pr" in value.get("ci_kinds", ["staging"]) and value.get("host_health") != "fault":
                 run = github.ci_read(config, f"repos/TauCetiProject/TauCeti/actions/runs/{value['run_id']}")
                 # The immutable receipt supplies the run ID, GitHub supplies its
                 # event/title. Guest events never claim PR versus staging trust.
                 if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
                     kind = "pr"
+            # The receipt's guest classes and the configured reservation must both say staging.
+            staging_slot = (value.get("ci_kinds", ["staging"]) == ["staging"]
+                            and value.get("slot", 0) < capacity.reservation(config)[0])
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
-                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None)
+                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None,
+                                   staging_slot=staging_slot)
             if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
@@ -830,7 +912,9 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
-                         or (time.time() - value["started_at"] > 180 and own.get("status") != "online"))
+                         or (not value.get("ci_bootstrap_waiting")
+                             and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
+                             and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
                 if config.get("ci_idle_pool"):
                     value["routing_labels"] = ci_pool.labels(value, own)
@@ -895,6 +979,7 @@ def daemon():
         while not stopping:
             config = host_config()
             try:
+                capacity.controller_config(config)
                 caps = resources()
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)

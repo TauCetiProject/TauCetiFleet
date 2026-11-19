@@ -4,9 +4,7 @@ permissions:
   contents: read
 jobs:
   ci-broker:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: services/ci-broker
@@ -20,9 +18,7 @@ jobs:
       - run: npm ci
       - run: npm test
   test:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python: ['3.11', '3.13']
