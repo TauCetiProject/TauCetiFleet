@@ -9,7 +9,20 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, native_runner, vm
+from . import (
+    activity,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    focus,
+    github,
+    native_runner,
+    targets,
+    vm,
+    worker_view,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
@@ -276,12 +289,18 @@ def write_slices(config, caps):
     return worker
 
 
+def toml_value(value):
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def worker_config(config):
     # Serialize controller and operator rewrites, and never restore an old label policy.
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "worker_env"):
+        for field in ("self_tested", "forgejo_workers", "worker_env", "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
@@ -295,7 +314,7 @@ def shared_attempts_ready(prior):
     import tomllib
 
     try:
-        specs = tomllib.loads(prior.read_text()).get("workers", [])
+        specs = tomllib.loads(prior.read_text(encoding="utf-8")).get("workers", [])
     except FileNotFoundError:
         specs = []
     except (OSError, ValueError):
@@ -316,6 +335,8 @@ def shared_attempts_ready(prior):
 
 
 def _worker_config(config):
+    if config.get("roadmap_targets"):
+        targets.require_support()
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = dict(
         agent="claude",
@@ -327,7 +348,7 @@ def _worker_config(config):
     )
     if config.get("self_tested"):
         fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
         if config.get(key):
             fields[key] = config[key]
     import tomllib
@@ -348,7 +369,7 @@ def _worker_config(config):
     # Keep existing definitions when reducing admissions: removing a definition
     # makes the manager terminate its worker, including an admitted paid session.
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    old_count = len(tomllib.loads(prior.read_text(encoding="utf-8")).get("workers", [])) if preserve and prior.exists() else 0
     count = max(1, config["max_workers"], old_count)
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
@@ -359,13 +380,13 @@ def _worker_config(config):
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
             if isinstance(value, dict):
-                pairs = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items())
+                pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
             elif value is not None:
-                lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else json.dumps(value)))
+                lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     return ids
@@ -384,10 +405,34 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
+        # systemd's default PATH lacks ~/.local/bin, where doctor finds uvx and bubble from the installing shell.
+        + "\nEnvironment="
+        + unit_argument("PATH=" + os.environ.get("PATH", "/usr/bin:/bin"))
         + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=100\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+
+
+def manager_ping():
+    """Read capabilities from the live manager, rather than its installed replacement."""
+    path = state_dir() / "worker-runtime/manager.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(path))
+            client.sendall(b'{"action":"ping"}\n')
+            reply = json.loads(client.makefile("rb").readline(65537))
+            return reply if isinstance(reply, dict) and reply.get("ok") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
 
 
 def run_workers():
@@ -397,8 +442,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -423,6 +467,19 @@ def run_workers():
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def manager_process():
+    """The running manager's argv, or None when its service process cannot be identified."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    if not pid.isdigit() or pid == "0":
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return [os.fsdecode(a) for a in argv if a], {}
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -547,15 +604,7 @@ def running_manager_supports(feature):
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
         return None
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(5)
-            client.connect(str(path))
-            client.sendall(b'{"action":"ping"}\n')
-            reply = client.makefile("rb").readline(65537)
-        return json.loads(reply).get(feature) == 1
-    except (OSError, ValueError, AttributeError):
-        return False
+    return manager_ping().get(feature) == 1
 
 
 def installed_worker_supports(feature):
@@ -643,6 +692,11 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
+    current = host_config()
+    spec_changes = local is not None or native is not None or environment is not None
+    growing = maximum is not None and maximum > current["max_workers"]
+    if current.get("roadmap_targets") and (spec_changes or growing):
+        targets.require_support()  # Admission-only decreases need no definition change.
     result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:
@@ -665,11 +719,13 @@ def worker_statuses():
         if value.get("id"):
             status = {k: value.get(k) for k in (
                 "id", "state", "alive", "heartbeat_at", "phase", "target", "detail",
-                "wrapper_pid", "scope_unit", "isolation_error", "restart_count",
+                "wrapper_pid", "scope_unit", "isolation_error", "restart_count", "agent", "log_file",
             )}
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("roadmap_target"):
+                status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
     return values
 
@@ -773,8 +829,12 @@ def collect_ci_results(config):
                 # event/title. Guest events never claim PR versus staging trust.
                 if run.get("event") != "repository_dispatch" or not str(run.get("display_title", "")).startswith("bors branch="):
                     kind = "pr"
+            # The receipt's guest classes and the configured reservation must both say staging.
+            staging_slot = (value.get("ci_kinds", ["staging"]) == ["staging"]
+                            and value.get("slot", 0) < capacity.reservation(config)[0])
             decision = ci.classify(job, host_health=value.get("host_health"), kind=kind,
-                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None)
+                                   memory_overcommit=config.get("ci_memory_budget_gib") is not None,
+                                   staging_slot=staging_slot)
             if value.get("operator_recovery"):
                 decision = dict(cooldown=False, reason="operator_memory_recovery", evidence={})
             if job.get("conclusion") == "cancelled" and decision["reason"] == "cancellation_evidence_inconclusive":
@@ -1016,12 +1076,15 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied_targets = None
         last_results = 0
         memory_paused = False
+        export = StatusExport()
         previous_tasks = None
         while not stopping:
             config = host_config()
             try:
+                capacity.controller_config(config)
                 caps = resources()
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
@@ -1065,14 +1128,21 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    listed = config.get("roadmap_targets")
+                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
+                        ids, applied_targets = worker_config(config), listed
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
                 lease = read(state_dir() / "worker-admission-lease.json")
                 lease_expired = lease is not None and time.time() >= lease.get("expires_at", 0)
                 if lease_expired:
+                    maximum = 0
+                from . import schedule
+
+                window = schedule.state(config)
+                outside = window.get("reason") if config["workers_enabled"] else None
+                if outside:
                     maximum = 0
                 memory = worker_memory() if config["workers_enabled"] or any(w.get("alive") for w in worker_statuses()) else None
                 if memory:
@@ -1087,7 +1157,7 @@ def daemon():
                 pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
-                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else None)
+                    "; ".join(pressure) if pressure else ("worker admission lease expired" if lease_expired else outside)
                 )
                 target, reason = scaler.step(
                     now=time.time(),
@@ -1126,13 +1196,16 @@ def daemon():
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
+                        worker_schedule=window,
                         worker_memory=memory,
                         memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,
-                        workers=worker_statuses(),
+                        workers=worker_view.rows(worker_statuses()),
+                        worker_events=worker_view.events(state_dir() / "worker-events.jsonl"),
                         worker_isolation=worker_isolation(),
                         error=None,
                         ci_vm=next((v for v in values if v.get("slot", 0) == 0), None),
@@ -1163,6 +1236,7 @@ def daemon():
                 )
                 for slot in slots.values():
                     slot.next_vm = max(slot.next_vm, time.time() + 60)
+            export.step(config, time.time())
             for _ in range(10):
                 if stopping:
                     break
@@ -1177,6 +1251,74 @@ def daemon():
         if handover:
             binary = str(Path.home() / ".local/bin/tauceti-fleet")
             os.execv(binary, [binary, "host-daemon"])
+
+
+def status_report(config):
+    pressure = read(state_dir() / "lean-host-pressure.json", {})
+    pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
+    return dict(
+        machine_id=config["machine_id"],
+        profile=config["profile"],
+        ci_allowed=config["ci_allowed"],
+        ci_enabled=config["ci_enabled"],
+        ci_kinds=capacity.kinds(config),
+        ci_max_jobs=capacity.jobs(config),
+        ci_memory_budget_gib=capacity.memory_budget_gib(config),
+        ci_staging_slots=capacity.reservation(config)[0],
+        ci_staging_reservation_error=capacity.reservation(config)[1],
+        ci_enrolled=bool(config.get("ci_broker_url")),
+        workers_enabled=config["workers_enabled"],
+        max_workers=config["max_workers"],
+        self_tested=config.get("self_tested", False),
+        lean_host_pressure=pressure,
+        lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
+        ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
+        status=read(state_dir() / "status.json", {}),
+        activity=activity.cached(config["machine_id"]),
+        ci_overview=ci_overview.cached(config),
+    )
+
+
+def configure_status_export(payload):
+    if payload.get("clear"):
+        directory = None
+    elif "directory" in payload:
+        directory = payload["directory"]
+        if not isinstance(directory, str) or not Path(directory).is_absolute() or not Path(directory).is_dir():
+            raise FleetError("Status export needs an existing directory given as an absolute path")
+    else:
+        return dict(status_export=host_config().get("status_export"))
+    update_host(status_export=directory)
+    return dict(status_export=directory)
+
+
+class StatusExport:
+    """World-readable copy of the status object, for readers without access to this account."""
+
+    INTERVAL = 30
+
+    def __init__(self):
+        self.attempted = 0
+        self.error = None
+
+    def step(self, config, now):
+        directory = config.get("status_export")
+        if not directory or now - self.attempted < self.INTERVAL:
+            return
+        self.attempted = now
+        try:
+            # store.atomic would create a missing directory private to this account.
+            if not Path(directory).is_dir():
+                raise FleetError(f"{directory} is not a directory")
+            atomic(Path(directory) / (config["machine_id"] + ".json"),
+                   dict(status_report(config), exported_at=now), mode=0o644)
+            self.error = None
+        except Exception as exc:
+            # An OSError from mkstemp names a fresh temporary file on every attempt.
+            key = (directory, type(exc), exc.errno) if isinstance(exc, OSError) and exc.errno else (directory, str(exc))
+            if key != self.error:
+                print(f"tauceti-fleet: status export failed: {exc}", file=sys.stderr, flush=True)
+                self.error = key
 
 
 def budget(payload):
@@ -1246,8 +1388,14 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_policy(payload)
+    if action == "schedule":
+        from . import schedule
+
+        return schedule.configure(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"])
     if action == "drain":
@@ -1260,29 +1408,8 @@ def rpc(payload):
         result["status"] = read(state_dir() / "status.json", {})
         result["activity"] = activity.cached(host_config()["machine_id"])
         return result
+    if action == "status-export":
+        return configure_status_export(payload)
     if action == "status":
-        config = host_config()
-        pressure = read(state_dir() / "lean-host-pressure.json", {})
-        pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
-        return dict(
-            machine_id=config["machine_id"],
-            profile=config["profile"],
-            ci_allowed=config["ci_allowed"],
-            ci_enabled=config["ci_enabled"],
-            ci_kinds=capacity.kinds(config),
-            ci_max_jobs=capacity.jobs(config),
-            ci_memory_budget_gib=capacity.memory_budget_gib(config),
-            ci_staging_slots=capacity.reservation(config)[0],
-            ci_staging_reservation_error=capacity.reservation(config)[1],
-            ci_enrolled=bool(config.get("ci_broker_url")),
-            workers_enabled=config["workers_enabled"],
-            max_workers=config["max_workers"],
-            self_tested=config.get("self_tested", False),
-            lean_host_pressure=pressure,
-            lean_statistics=read(state_dir() / 'lean-statistics-report.json', {}),
-            ci_autoscale=read(state_dir() / "ci-autoscale.json", {}),
-            status=read(state_dir() / "status.json", {}),
-            activity=activity.cached(config["machine_id"]),
-            ci_overview=ci_overview.cached(config),
-        )
+        return status_report(host_config())
     raise FleetError("Unknown host operation")

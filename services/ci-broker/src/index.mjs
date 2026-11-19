@@ -2,9 +2,8 @@ import {suspendHost} from './suspension.mjs';
 import {telemetry} from './monitoring.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
-import {MAX_JOBS,capacity,validKinds,slots,labels} from './capacity.mjs';
+import {MAX_JOBS,SPECIAL_GROUPS,capacity,hostKinds,runnerKinds,groupFor,hostGroups,slots,labels} from './capacity.mjs';
 import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
-import {HarnessAdmission,report} from './harness.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'"};
@@ -43,7 +42,6 @@ export class FleetRegistry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env); this.github=new GitHub(env); this.queue=Promise.resolve(); this.buckets=new Map();
     this.recovery=new RegistrationRecovery(ctx.storage,this.github);
-    this.harness=new HarnessAdmission(ctx.storage,this.github);
   }
   admit(id, maximum=1) {
     const now=Date.now();
@@ -70,25 +68,9 @@ export class FleetRegistry extends DurableObject {
       return telemetry(req, this.env, this.ctx.storage);
     return this.serialize(()=>this.handle(req));
   }
-  // One alarm serves both duties. Recovery may clear it when nothing is pending, so the
-  // harness reconciliation runs last and always leaves its own wakeup in place.
-  alarm() {
-    return this.serialize(async()=>{
-      try { await this.recovery.run(); } finally { await this.harness.tick(); }
-    });
-  }
+  alarm() { return this.serialize(()=>this.recovery.run()); }
   async handle(req) {
     const url = new URL(req.url);
-    // Any request restores the reconciliation wakeup, including the first after deployment.
-    await this.harness.schedule();
-    // Public and read-only: the answer comes from protected main and GitHub, never the caller.
-    // The queue asks immediately before each staging dispatch and refuses to send until ready.
-    if (url.pathname==='/v1/harness' && req.method==='GET') {
-      if (!this.admit('harness-status',REQUEST_BURST)) return json({error:'request limit reached; retry after ten seconds'},429);
-      const revision=url.searchParams.get('revision');
-      if (revision!==null && !/^[0-9a-f]{40}$/.test(revision)) return json({error:'invalid revision'},400);
-      return json(await this.harness.status(revision));
-    }
     // All mutations and authorization checks run on one strongly consistent object.
     if (url.pathname === '/healthz') {
       const hosts=await this.recovery.hosts();
@@ -97,11 +79,8 @@ export class FleetRegistry extends DurableObject {
       const pending=hosts.flatMap(h=>Object.values(slots(h)).filter(s=>s.pending).map(s=>s.pending));
       const stuck=pending.filter(p=>Date.now()-p.at>=STUCK_AFTER).length;
       const configured=Boolean(this.env.GITHUB_APP_ID && this.env.GITHUB_INSTALLATION_ID && this.env.GITHUB_PRIVATE_KEY);
-      const state=await this.harness.state(), harness=report(state,state.main);
       return json({service:'tauceti-ci-broker',app_configured:configured,
-        pending_registrations:pending.length,stuck_registrations:stuck,
-        harness:{revision:harness.main_revision,ready:harness.ready,checked_at:harness.checked_at,error:harness.error}},
-        configured && !stuck ? 200 : 503);
+        pending_registrations:pending.length,stuck_registrations:stuck},configured && !stuck ? 200 : 503);
     }
     if (url.pathname === '/setup/register' && req.method === 'GET') {
       return html(`<title>Register TauCeti Fleet</title><h1>Register the TauCeti Fleet GitHub App</h1>
@@ -165,7 +144,7 @@ export class FleetRegistry extends DurableObject {
         const prior=await this.ctx.storage.get(key);
         if (prior?.machine_id) return json({error:'cannot extend a redeemed invitation'},409);
         const kinds=input.kinds ?? prior?.kinds ?? ['staging'];
-        if (!validKinds(kinds)) return json({error:'invalid CI classes'},400);
+        if (!hostKinds(kinds)) return json({error:'invalid CI classes'},400);
         const expires=Date.now()+lifetime*1000;
         await this.ctx.storage.put(key,{name:input.name,expires,kinds});
         return json({expires_in:lifetime,expires_at:expires});
@@ -178,7 +157,8 @@ export class FleetRegistry extends DurableObject {
             registration_pending:!!s.pending,pending_since:s.pending?.at ?? null,
             registration_failure:s.pending?.failure ?? null,recovery_error:s.pending?.recovery_error ?? null,
             recovery_attempts:s.pending?.attempts ?? 0,last_recovery:s.last_recovery ?? null,
-            kinds:s.kinds || ['staging']})),created_at:h.created_at}))});
+            kinds:s.kinds || ['staging'],runner_group_id:s.pending?.group ?? groupFor(s.kinds || ['staging'])})),
+          created_at:h.created_at}))});
       }
       const suspension=url.pathname.match(/^\/admin\/hosts\/([a-f0-9]{32})\/(suspend|resume)$/);
       if (suspension && req.method==='POST') {
@@ -193,7 +173,7 @@ export class FleetRegistry extends DurableObject {
         const host=await this.ctx.storage.get('host:'+policy[1]);
         if (!host) return json({error:'not found'},404);
         const input=await req.json();
-        if (!validKinds(input.kinds)) return json({error:'invalid CI classes'},400);
+        if (!hostKinds(input.kinds)) return json({error:'invalid CI classes'},400);
         const previous=capacity(host).kinds;
         const unchanged=input.kinds.length===previous.length && input.kinds.every(k=>previous.includes(k));
         if (!unchanged && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
@@ -279,10 +259,16 @@ export class FleetRegistry extends DurableObject {
       if (!this.admit(id,Math.max(1,Math.min(REQUEST_BURST,active)))) return json({error:'host request limit reached; retry after ten seconds'},429);
       delete host.max_jobs; // Discard obsolete enrollment ceilings on the next save.
       const save=()=>this.ctx.storage.put('host:'+id,host);
-      if (url.pathname==='/v1/policy' && req.method==='GET') return json({...await this.github.policy(),...capacity(host)});
+      // Hosts compare their local special-slot map with these broker-chosen groups.
+      if (url.pathname==='/v1/policy' && req.method==='GET')
+        return json({...await this.github.policy(),groups:SPECIAL_GROUPS,...capacity(host)});
+      // The same mapping without the group 3 check, so group 3 drift cannot stop
+      // special slots; registration still checks the target group freshly.
+      if (url.pathname==='/v1/groups' && req.method==='GET')
+        return json({groups:SPECIAL_GROUPS,kinds:capacity(host).kinds});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
         const owned=Object.values(slots(host)).filter(s=>s.runner_id);
-        const found=owned.length?await this.github.runners():[];
+        const found=owned.length?await this.github.runners(hostGroups(host)):[];
         const runners=[];
         for (const slot of owned) {
           const runner=found.find(r=>r.id===slot.runner_id);
@@ -302,7 +288,7 @@ export class FleetRegistry extends DurableObject {
         const allowed=capacity(host);
         if (!Number.isInteger(index) || index<0 || index>=MAX_JOBS)
           return json({error:'slot must be an integer between 0 and '+(MAX_JOBS-1)},400);
-        if (!validKinds(kinds) || kinds.some(k=>!allowed.kinds.includes(k)))
+        if (!runnerKinds(kinds) || kinds.some(k=>!allowed.kinds.includes(k)))
           return json({error:'job class exceeds this machine policy'},403);
         const registrations=slots(host);
         const slot=registrations[String(index)] ||= {};
@@ -318,15 +304,17 @@ export class FleetRegistry extends DurableObject {
             return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
           return json({error:'host already has registered capacity'},409);
         }
-        await this.github.policy({fresh:true});
+        const group=groupFor(kinds);
+        await this.github.policy({group,fresh:true});
         // Reserve before the non-idempotent GitHub POST. An ambiguous result fails
-        // closed instead of silently creating extra runners on a retry.
-        slot.pending={name:input.name,at:Date.now()};
+        // closed instead of silently creating extra runners on a retry. Recovery
+        // rechecks the group recorded here.
+        slot.pending={name:input.name,at:Date.now(),group};
         await this.recovery.reserve(host);
         let value;
         try {
           value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
-            data:{name:input.name,runner_group_id:3,labels:labels(id,input.name,kinds,host.name),work_folder:'_work'}});
+            data:{name:input.name,runner_group_id:group,labels:labels(id,input.name,kinds,host.name),work_folder:'_work'}});
         } catch (e) {
           if (e instanceof UpstreamError && [400,401,403,404,409,422,429].includes(e.status)) {
             // These are definite rejections, so no runner was created. Only

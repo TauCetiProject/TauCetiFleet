@@ -98,26 +98,13 @@ def inspect():
     # Verify the actual runner policy before enabling any host.
     group = api("https://api.github.com/orgs/TauCetiProject/actions/runner-groups/3", token=grant["token"])
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
+               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main"}
     workflows = set(group.get("selected_workflows", []))
-
-    def reviewed(entry):
-        # The broker admits TauCeti main's `.tauceti/ci-source.json` harness revision;
-        # any revision on TauCetiTools main is reviewed.
-        match = re.fullmatch(r"TauCetiProject/TauCetiTools/\.github/workflows/pr-build\.yml@([0-9a-f]{40})", entry)
-        if not match:
-            return False
-        try:
-            status = api(f"https://api.github.com/repos/TauCetiProject/TauCetiTools/compare/{match[1]}...main?per_page=1")["status"]
-        except (SystemExit, OSError, KeyError, ValueError):
-            return False
-        return status in ("ahead", "identical")
-
     if (group["name"] != "TauCetiFleet" or not group.get("restricted_to_workflows") or required not in workflows
-            or not all(reviewed(w) for w in workflows - allowed)):
+            or not workflows <= allowed):
         raise SystemExit("Runner group 3 does not have the expected trusted-workflow restrictions")
     value = {"installation_id": installation["id"], "repository_id": selected["repositories"][0]["id"], "runner_group_id": 3}
     private(DIRECTORY / "installation.json", json.dumps(value, indent=2))
@@ -161,11 +148,19 @@ def main():
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
     parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
     parser.add_argument("--ci", choices=("pr", "staging", "both"), help="allowed CI job classes")
+    parser.add_argument("--kinds", help="comma-separated CI classes, replacing --ci; also accepts queue-control and pr-status")
     parser.add_argument("--slot", type=int, default=0, help="slot to reconcile (default: 0)")
     args = parser.parse_args()
     limits = {}
+    if args.ci and args.kinds:
+        raise SystemExit("Use either --ci or --kinds")
     if args.ci:
         limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
+    if args.kinds:
+        kinds = args.kinds.split(",")
+        if len(set(kinds)) != len(kinds) or not set(kinds) <= {"pr", "staging", "queue-control", "pr-status"}:
+            raise SystemExit("--kinds takes distinct classes from pr, staging, queue-control and pr-status")
+        limits["kinds"] = kinds
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
         if (DIRECTORY / "github-app.json").exists():
@@ -242,8 +237,8 @@ process.stdout.write(createPrivateKey(pem).export({type:'pkcs8',format:'pem'}));
         if not re.fullmatch(r"[a-f0-9]{32}", args.machine_id or ""):
             raise SystemExit("Use --machine-id from the hosts command")
         if args.action == "capacity":
-            if not args.ci:
-                raise SystemExit("Specify --ci pr|staging|both")
+            if not limits:
+                raise SystemExit("Specify --ci pr|staging|both or --kinds")
             result = api(ORIGIN + "/admin/hosts/" + args.machine_id + "/capacity", token=admin(), data=limits)
             print(json.dumps(result))
         elif args.action == "revoke":

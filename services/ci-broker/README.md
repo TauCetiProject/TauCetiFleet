@@ -174,34 +174,45 @@ Keeping Fleet administration credentials on the broker does not remove that
 existing trust in the build server. Invitations should be issued only for hosts
 whose operators are trusted with the CI workflow's credentials and results.
 
-## Shared-harness allow-lists
+## Special runner classes
 
-TauCeti main's `.tauceti/ci-source.json` `harness_revision` is the only record of the
-TauCetiTools revision that staging runs. The broker derives the restricted runner
-groups' harness entries from it: `TauCetiFleet` admits
-`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@<revision>`, and
-`TauCetiQueueControl` admits that and `publish-lake-cache.yml@<revision>`. No one
-edits those entries by hand. Every other entry is left alone.
+Operator hosts can be authorized for `queue-control` and `pr-status` as well as
+`pr` and `staging`:
 
-The Durable Object reconciles once a minute on its alarm, using conditional reads,
-so an unchanged main costs no rate limit. Any request restores the alarm after a
-deployment. A revision is admitted only if it is on TauCetiTools main and the policy
-names the enrolled TauCeti and TauCetiTools repositories. A hand-removed entry is
-restored at the next check. An entry is pruned once main, an unfinished run of the
-policy's caller workflow and the group itself have not needed that revision for
-24 hours. If the run listing is incomplete, nothing is pruned.
+```sh
+python3 scripts/setup.py invite --name tauchonki2 --kinds pr,staging,queue-control,pr-status --expires-in-days 1
+```
 
-`GET /v1/harness?revision=<sha>` is public and read-only. It reports main's revision,
-the admitted revisions per group and whether the requested revision is ready
-everywhere, re-reading GitHub (at most every five seconds) when it is not. The
-merge queue asks immediately before each staging dispatch and does not send until
-the answer is ready. `/healthz` includes the same state for main's revision.
+The broker, never the host, chooses each runner's group: `pr` and `staging` go to
+group 3 (`TauCetiFleet`), `queue-control` to group 6 (`TauCetiQueueControl`) and
+`pr-status` to group 7 (`TauCetiPRStatus`). One runner carries either build
+classes or exactly one special class. Before each registration and each recovery
+the broker freshly checks the target group: its name, workflow restriction and
+selected workflows, and for groups 6 and 7 selected-repository visibility with
+exactly `TauCetiProject/TauCeti`. Group 6 must select TauCeti's `pick-runner.yml`,
+`pr-build.yml` and `publish-lake-cache.yml` at main, and may add only the shared
+harness entries below. Group 7 must select exactly TauCeti's `pr-status.yml` and
+`pr-labels.yml` at main. A widened group stops registration in that group only.
+Pending reservations record their group, and recovery rechecks it and removes
+only same-named runners in that group; reservations from before this change are
+group 3. Runner inventory lists the groups of a host's classes and registered
+slots (group 3 alone for build-only hosts), so special runners can be observed,
+retired, suspended and recovered like any other, a special group's outage does not
+affect build-only hosts, and runners in other groups are never touched. `/v1/policy` keeps `runner_group_id: 3` and adds
+`groups: {"queue-control": 6, "pr-status": 7}`, which hosts compare with their
+local `ci_protected_slots`. `/v1/groups` returns that mapping and the host's
+classes without the group 3 check, so group 3 drift does not stop special slots. The `control` and `roadmap` classes (TauCetiRoadmap)
+are outside the App installation and stay unsupported.
 
-The App already has organization Self-hosted runners/write, which covers updating
-runner groups. Reading the public policy needs no contents permission: a refused
-authenticated read is retried anonymously, like the harness compare.
+## Shared-harness entries
 
-## App registration and deployment
+TauCeti runs its shared harness from TauCetiTools `main`. `TauCetiFleet` admits
+`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main`, and
+`TauCetiQueueControl` admits that and `publish-lake-cache.yml@refs/heads/main`.
+These are static entries an organization owner sets once; the broker never edits
+runner groups. Host and broker policy accept no other harness entry: no exact
+revision, no other branch and no fork.
+
 
 ```sh
 npm ci

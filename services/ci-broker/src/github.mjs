@@ -7,35 +7,34 @@ export class InventoryError extends Error {
 export class PolicyError extends Error {
   constructor() { super('Untrusted runner policy'); }
 }
+const TAUCETI='TauCetiProject/TauCeti/.github/workflows/';
+// TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.
+const HARNESS='TauCetiProject/TauCetiTools/.github/workflows/';
+const main=(prefix,names)=>names.map(name=>prefix+name+'@refs/heads/main');
+const expect=(name,required,optional,repository=null)=>({name,required,allowed:new Set([...required,...optional]),repository});
+// Expected settings of each runner group the broker registers runners in.
+export const CHECKS={
+  3:expect('TauCetiFleet',main(TAUCETI,['pr-build.yml']),
+    [...main(TAUCETI,['nightly-verify.yml','pick-runner.yml','full-lint-label.yml']),...main(HARNESS,['pr-build.yml'])]),
+  6:expect('TauCetiQueueControl',main(TAUCETI,['pick-runner.yml','pr-build.yml','publish-lake-cache.yml']),
+    main(HARNESS,['pr-build.yml','publish-lake-cache.yml']),'TauCetiProject/TauCeti'),
+  7:expect('TauCetiPRStatus',main(TAUCETI,['pr-status.yml','pr-labels.yml']),[],'TauCetiProject/TauCeti'),
+};
 const encoder=new TextEncoder();
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
 const encode=value=>b64(encoder.encode(JSON.stringify(value)));
 export class GitHub {
-  constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=null; }
+  constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=new Map(); }
   async raw(path, token, method='GET', data) {
-    return (await this.exchange(path,token,{method,data})).value;
-  }
-  async exchange(path, token, {method='GET',data,etag}={}) {
     const response=await fetch('https://api.github.com/'+path, {method,
       headers:{Accept:'application/vnd.github+json', ...(token?{Authorization:'Bearer '+token}:{}),
-        ...(etag?{'If-None-Match':etag}:{}),
         'User-Agent':'TauCetiFleet/broker', 'X-GitHub-Api-Version':'2022-11-28', 'Content-Type':'application/json'},
       body:data===undefined?undefined:JSON.stringify(data), signal:AbortSignal.timeout(20000)});
-    if (etag && response.status===304) return {status:304,etag};
     if (!response.ok) throw new UpstreamError(response.status,response.headers.get('x-github-request-id'));
-    if (response.status===204) return {status:204,value:null};
+    if (response.status===204) return null;
     const text=await response.text();
     if (text.length>4*1024*1024) throw new Error('GitHub response exceeds limit');
-    return {status:response.status,etag:response.headers.get('etag'),value:JSON.parse(text)};
-  }
-  // Conditional GETs: an unchanged 304 costs no rate limit, so the alarm can poll cheaply.
-  async cached(path, token) {
-    this.etags??=new Map();
-    const prior=this.etags.get(path);
-    const result=await this.exchange(path,token,{etag:prior?.etag});
-    if (result.status===304) return structuredClone(prior.value);
-    if (result.etag) this.etags.set(path,{etag:result.etag,value:result.value});
-    return structuredClone(result.value);
+    return JSON.parse(text);
   }
   async token(kind) {
     const cached=this.tokens.get(kind);
@@ -57,10 +56,24 @@ export class GitHub {
   async request(path, {kind='read',method='GET',data}={}) {
     return this.raw(path, await this.token(kind),method,data);
   }
-  async runners() {
+  // Runners of the given broker groups (by default 3 only), each tagged with
+  // its group. Runners in other groups are never observed or removed, and a
+  // special group's outage cannot affect hosts that do not use it.
+  async runners(groups=[3]) {
+    const found=[];
+    for (const group of groups) {
+      if (!Object.hasOwn(CHECKS,group)) throw new InventoryError();
+      for (const runner of await this.groupRunners(group)) {
+        if (found.some(r=>r.id===runner.id)) throw new InventoryError();
+        found.push({...runner,runner_group_id:group});
+      }
+    }
+    return found;
+  }
+  async groupRunners(group) {
     const found=[],ids=new Set();let total;
     for(let page=1;page<=20;page++) {
-      const value=await this.request(`orgs/TauCetiProject/actions/runner-groups/3/runners?per_page=100&page=${page}`,{kind:'runners'});
+      const value=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}/runners?per_page=100&page=${page}`,{kind:'runners'});
       if(!Array.isArray(value.runners) || !Number.isInteger(value.total_count) || value.total_count<0 ||
          total!==undefined && total!==value.total_count)throw new InventoryError();
       for (const runner of value.runners) {
@@ -74,90 +87,26 @@ export class GitHub {
     }
     throw new InventoryError();
   }
-  anonymous(path) { return this.raw(path,null); }
-  async reviewedHarness(revision) {
-    this.reviewed??=new Set();
-    if (this.reviewed.has(revision)) return true;
-    const path=`repos/TauCetiProject/TauCetiTools/compare/${revision}...main?per_page=1`;
-    const absent=error=>error instanceof UpstreamError && (error.status===404 || error.status===422);
-    let value;
-    try {
-      value=await this.request(path);
-    } catch (error) {
-      if (absent(error)) return false;
-      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
-      // The installation selects only TauCeti; TauCetiTools is public, so retry anonymously.
-      try { value=await this.anonymous(path); } catch (retry) {
-        if (absent(retry)) return false;
-        throw retry;
-      }
-    }
-    if (value?.status!=='ahead' && value?.status!=='identical') return false;
-    this.reviewed.add(revision);
-    return true;
-  }
-  // TauCeti is public. Its installation grant has no contents permission, so a refused
-  // authenticated read retries anonymously, exactly like the harness compare above.
-  async harnessSource() {
-    const path='repos/TauCetiProject/TauCeti/contents/.tauceti/ci-source.json?ref=main';
-    let value;
-    try { value=await this.cached(path,await this.token('read')); }
-    catch (error) {
-      if (!(error instanceof UpstreamError) || (error.status!==401 && error.status!==403)) throw error;
-      value=await this.cached(path,null);
-    }
-    if (value?.type!=='file' || value.encoding!=='base64' || typeof value.content!=='string' || value.size>65536)
+  async policy({group=3,fresh=false}={}) {
+    const cached=this.cachedPolicy.get(group);
+    if (!fresh && cached?.expires>Date.now()) return cached.value;
+    if (!Number.isInteger(group) || !Object.hasOwn(CHECKS,group)) throw new PolicyError();
+    const settings=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}`,{kind:'runners'});
+    const check=CHECKS[group];
+    const selected=settings.selected_workflows || [];
+    if (settings.id!==group || settings.name!==check.name || !settings.restricted_to_workflows ||
+        check.required.some(workflow=>!selected.includes(workflow)) ||
+        selected.some(workflow=>!check.allowed.has(workflow)))
       throw new PolicyError();
-    return new TextDecoder().decode(Uint8Array.from(atob(value.content.replace(/\s/g,'')),c=>c.charCodeAt(0)));
-  }
-  async group(id,{fresh=false}={}) {
-    const path=`orgs/TauCetiProject/actions/runner-groups/${id}`;
-    const token=await this.token('runners');
-    return fresh?this.raw(path,token):this.cached(path,token);
-  }
-  async updateGroup(id,data) {
-    return this.request(`orgs/TauCetiProject/actions/runner-groups/${id}`,{kind:'runners',method:'PATCH',data});
-  }
-  // Harness revisions that unfinished runs of the protected caller reference. Null when the
-  // listing cannot be complete; the caller then retains everything.
-  async unfinishedHarness(workflow) {
-    const file=encodeURIComponent(workflow.split('/').at(-1));
-    const found=new Set();
-    for (const status of ['queued','in_progress','waiting','requested','pending']) {
-      const value=await this.cached(`repos/TauCetiProject/TauCeti/actions/workflows/${file}/runs?status=${status}&per_page=100`,
-        await this.token('read'));
-      if (!Array.isArray(value?.workflow_runs) || !Number.isInteger(value.total_count) ||
-          value.total_count>value.workflow_runs.length) return null;
-      for (const run of value.workflow_runs) {
-        if (!Array.isArray(run.referenced_workflows)) return null;
-        for (const reference of run.referenced_workflows) {
-          const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/[A-Za-z0-9_.-]+@([0-9a-f]{40})$/.exec(reference?.path || '');
-          if (match) found.add(match[1]);
-        }
-      }
+    if (check.repository) {
+      // Special groups run privileged TauCeti workflows; they must select only TauCeti.
+      if (settings.visibility!=='selected') throw new PolicyError();
+      const repositories=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}/repositories?per_page=100`,{kind:'runners'});
+      const names=(repositories?.repositories || []).map(r=>r.full_name);
+      if (repositories?.total_count!==1 || names.length!==1 || names[0]!==check.repository) throw new PolicyError();
     }
-    return found;
-  }
-  async policy({fresh=false}={}) {
-    if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
-    const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
-    const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
-    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
-      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main']);
-    const selected=group.selected_workflows || [];
-    if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows || !selected.includes(required))
-      throw new PolicyError();
-    for (const workflow of selected) {
-      if (allowed.has(workflow)) continue;
-      // HarnessAdmission writes main's harness revision here; any shared-harness revision on
-      // TauCetiTools main is reviewed, so no broker release is needed.
-      const match=/^TauCetiProject\/TauCetiTools\/\.github\/workflows\/pr-build\.yml@([0-9a-f]{40})$/.exec(workflow);
-      if (!match || !await this.reviewedHarness(match[1])) throw new PolicyError();
-    }
-    const value={runner_group_id:3};
-    this.cachedPolicy={expires:Date.now()+60000,value};
+    const value={runner_group_id:group};
+    this.cachedPolicy.set(group,{expires:Date.now()+60000,value});
     return value;
   }
 }

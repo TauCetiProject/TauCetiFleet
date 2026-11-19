@@ -69,9 +69,16 @@ def runner_policy(config):
     if config.get("ci_broker_url"):
         from .broker import request as broker_request
 
-        group = broker_request(config, "/v1/policy")["runner_group_id"]
+        policy = broker_request(config, "/v1/policy")
+        group = policy["runner_group_id"]
         if group != config.get("runner_group_id"):
             raise FleetError("CI broker returned a different runner group")
+        if config.get("ci_slot_runner_group_id") is not None:
+            # A special slot (for_slot): its kind must map to the configured group.
+            from .capacity import broker_slot_group
+
+            return broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                                     runner_group_id=config["ci_slot_runner_group_id"]), policy)
         return group
     group = config.get("ci_slot_runner_group_id", config.get("runner_group_id"))
     if not isinstance(group, int) or group <= 0:
@@ -86,52 +93,26 @@ def runner_policy(config):
         if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
-    token_file = config.get("ci_token_file") or config.get("github_token_file")
     if (
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not trusted_entries(selected - allowed, ("pr-build.yml",), token_file)
+        or not trusted_entries(selected - allowed, ("pr-build.yml",))
     ):
-        raise FleetError("Runner group must allow only trusted main project workflows and reviewed source-CI harness pins")
+        raise FleetError("Runner group must allow only trusted main project workflows and the shared harness at main")
     return group
 
 
 HARNESS = "TauCetiProject/TauCetiTools"
-HARNESS_ENTRY = re.compile(r"TauCetiProject/TauCetiTools/\.github/workflows/([A-Za-z0-9_.-]+)@([0-9a-f]{40})")
-_REVIEWED_HARNESS = set()
 
 
-def reviewed_harness(revision, token_file):
-    """Whether a harness revision is on TauCetiTools main. Main never rewinds, so a yes is cached.
-
-    The CI broker writes these entries from TauCeti main's `.tauceti/ci-source.json`, so the
-    accepted set follows the project's pin instead of a release here.
-    """
-    if revision in _REVIEWED_HARNESS:
-        return True
-    try:
-        value = request(f"repos/{HARNESS}/compare/{revision}...main?per_page=1", token_file=token_file)
-    except FleetError:
-        return False
-    if isinstance(value, dict) and value.get("status") in ("ahead", "identical"):
-        _REVIEWED_HARNESS.add(revision)
-        return True
-    return False
-
-
-def trusted_entries(entries, workflows, token_file):
-    """Every entry names one of `workflows` in the shared harness at a revision on its main."""
-    for entry in entries:
-        match = HARNESS_ENTRY.fullmatch(entry)
-        if not match or match.group(1) not in workflows or not reviewed_harness(match.group(2), token_file):
-            return False
-    return True
+def trusted_entries(entries, workflows):
+    """Every entry names one of `workflows` in the shared harness at TauCetiTools main."""
+    return set(entries) <= {f"{HARNESS}/.github/workflows/{name}@refs/heads/main" for name in workflows}
 
 
 def protected_policy(config, data):
@@ -146,10 +127,9 @@ def protected_policy(config, data):
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
         required = allowed
         selected = set(data.get("selected_workflows", []))
-        token_file = config.get("ci_token_file") or config.get("github_token_file")
         if (not data.get("restricted_to_workflows") or not required <= selected
-                or not trusted_entries(selected - allowed, ("pr-build.yml", "publish-lake-cache.yml"), token_file)):
-            raise FleetError("Queue control runners require trusted main workflows and only reviewed source-CI harness pins")
+                or not trusted_entries(selected - allowed, ("pr-build.yml", "publish-lake-cache.yml"))):
+            raise FleetError("Queue control runners require trusted main workflows and only the shared harness at main")
     if kind == "pr-status":
         required = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                     for name in ("pr-status.yml", "pr-labels.yml")}
@@ -168,6 +148,13 @@ def jit_config(config, name):
         from .broker import request as broker_request
         from .capacity import kinds
 
+        if config.get("ci_slot_runner_group_id") is not None:
+            # Refuse a special slot whose kind or group differs from the broker's.
+            # /v1/groups needs no group 3 check, so group 3 drift cannot stop it.
+            from .capacity import broker_slot_group
+
+            broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                              runner_group_id=config["ci_slot_runner_group_id"]), broker_request(config, "/v1/groups"))
         value = broker_request(config, "/v1/runners", method="POST",
                                data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
         return value["runner_id"], value["encoded_jit_config"]
