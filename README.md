@@ -555,8 +555,8 @@ Each cycle the controller writes `<machine_id>.json` there, mode 0644:
 {"version": 1, "expires_at": 1762750000.0, "workers": 8, "ci_busy": false}
 ```
 
-`workers` is the install's worker ceiling while workers are enabled, or the
-number of its workers still alive if that is larger. `ci_busy` reports a CI job
+`workers` is the install's worker ceiling while workers are enabled and inside
+any weekly schedule, or the number of its workers still alive if that is larger. `ci_busy` reports a CI job
 running in that install. A claim expires after 15 seconds, so an install whose
 controller has stopped drops out. Each cycle starts by publishing the claim from
 the install's own job records and the job starts its guests have announced,

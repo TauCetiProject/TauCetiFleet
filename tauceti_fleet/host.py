@@ -252,8 +252,11 @@ def host_share(config, heartbeat, *, ci_busy):
     if not directory:
         heartbeat.clear()
         return None
+    from . import schedule
+
     # A paused or draining pool still holds memory, so it keeps its part while any worker lives.
-    workers = max(config["max_workers"] if config["workers_enabled"] else 0,
+    admitting = config["workers_enabled"] and not schedule.state(config).get("reason")
+    workers = max(config["max_workers"] if admitting else 0,
                   sum(bool(w.get("alive")) for w in worker_statuses()))
     return heartbeat.step(directory, config["machine_id"], workers=workers, ci_busy=ci_busy)
 

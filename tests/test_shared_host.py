@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, cli, host, native_runner, remote, shared_host, store
+from tauceti_fleet import capabilities, cli, host, native_runner, remote, schedule, shared_host, store
 from tauceti_fleet.capabilities import GIB
 
 
@@ -160,6 +160,12 @@ class SharedHost(unittest.TestCase):
         with patch.object(host, "worker_statuses", return_value=alive):
             status, _ = self.run_controller_once(70 * GIB, cgroup)
         self.assertEqual((status["shared_host"]["workers"], status["shared_host"]["share"]), (6, 0.2))
+
+        # Outside its weekly schedule the install keeps only the part of the workers still alive.
+        outside = dict(active=False, reason="outside the weekly schedule")
+        with patch.object(host, "worker_statuses", return_value=alive[:1]), patch.object(schedule, "state", return_value=outside):
+            status, _ = self.run_controller_once(70 * GIB, cgroup)
+        self.assertEqual((status["shared_host"]["workers"], status["shared_host"]["share"]), (1, 1 / 25))
 
     def run_controller_offline(self, clock, runners, stop):
         """Five-second cycles on a fake clock; every runner-inventory request goes to `runners`."""
