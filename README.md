@@ -295,6 +295,16 @@ The shared job ceiling and worker admissions stay enabled. Existing guests finis
 with their original classes, and the command reports slots awaiting replacement.
 Use `--slots 0` to remove the reservation as guests are replaced.
 
+Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
+host they and the other CI guests together overcommit its RAM. `--memory-gib N`
+gives future reserved staging guests exactly N GiB of virtual RAM instead
+(`--memory-gib 0` restores the shared ceiling), for example
+`tauceti-fleet reserve-staging HOST --slots 1 --memory-gib 64`. Running guests
+keep their size and are reported as awaiting replacement. Staging compiler starts
+skip memory admission, so choose N above the staging build's measured peak RAM,
+with room for its growth: a build that needs more than N GiB is OOM-killed inside
+the guest rather than slowed.
+
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
 slots independently. Enabling does not restart the controller. Changes to guest

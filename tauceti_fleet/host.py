@@ -502,25 +502,39 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
                 ci_memory_budget_gib=capacity.memory_budget_gib(value))
 
 
-def reserve_staging(maximum):
-    """Change future guest classes without stopping guests or either admission role."""
+def reserve_staging(maximum, memory_gib=None):
+    """Change future guest classes without stopping guests or either admission role.
+
+    ``memory_gib`` sets the reserved guests' virtual RAM (0 restores the shared CI
+    ceiling); None keeps the current setting. Running guests keep their size.
+    """
     config = host_config()
-    proposed = dict(config, ci_staging_slots=maximum)
-    capacity.staging_slots(proposed)
+    changes = dict(ci_staging_slots=maximum)
+    if memory_gib is not None:
+        changes["ci_staging_memory_gib"] = memory_gib or None
+    proposed = dict(config, **changes)
+
+    def validate(value):
+        capacity.staging_slots(value)
+        capacity.staging_memory_gib(value)
+
+    validate(proposed)
     if config["ci_enabled"]:
         native_runner.prepare_for_ci(proposed)
-    value = update_host(ci_staging_slots=maximum, validate=capacity.staging_slots)
+    value = update_host(validate=validate, **changes)
+    staging_memory = capacity.staging_memory_gib(value)
     pending = []
     for index in range(maximum):
         guest = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
-        if guest and guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]:
+        if guest and (guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]
+                      or (staging_memory is not None and guest.get("memory_gib") != staging_memory)):
             pending.append(index)
         elif not guest:
             intent = read(vm.slot_file({"ci_slot": index}, "ci-registration.json"), {})
             if intent and intent.get("ci_kinds") != ["staging"]:
                 pending.append(index)
-    event("ci_staging_reservation", staging_slots=maximum, pending_slots=pending)
-    return dict(ci_staging_slots=maximum, ci_max_jobs=capacity.jobs(value),
+    event("ci_staging_reservation", staging_slots=maximum, staging_memory_gib=staging_memory, pending_slots=pending)
+    return dict(ci_staging_slots=maximum, ci_staging_memory_gib=staging_memory, ci_max_jobs=capacity.jobs(value),
                 ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 pending_slots=pending)
 
@@ -1168,6 +1182,7 @@ def daemon():
                         ci_memory_budget_gib=capacity.memory_budget_gib(config, caps),
                         ci_kinds=capacity.kinds(config),
                         ci_staging_slots=capacity.reservation(config)[0],
+                        ci_staging_memory_gib=config.get("ci_staging_memory_gib"),
                         ci_staging_reservation_error=capacity.reservation(config)[1],
                         ci_errors=slot_errors,
                     ),
@@ -1218,6 +1233,7 @@ def status_report(config):
         ci_max_jobs=capacity.jobs(config),
         ci_memory_budget_gib=capacity.memory_budget_gib(config),
         ci_staging_slots=capacity.reservation(config)[0],
+        ci_staging_memory_gib=config.get("ci_staging_memory_gib"),
         ci_staging_reservation_error=capacity.reservation(config)[1],
         ci_enrolled=bool(config.get("ci_broker_url")),
         workers_enabled=config["workers_enabled"],
@@ -1350,7 +1366,7 @@ def rpc(payload):
 
         return schedule.configure(payload)
     if action == "reserve-staging":
-        return reserve_staging(payload["maximum"])
+        return reserve_staging(payload["maximum"], payload.get("memory_gib"))
     if action == "drain":
         return drain()
     if action == "budget":

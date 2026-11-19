@@ -159,3 +159,60 @@ class StagingReservations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StagingGuestMemory(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        environment = patch.dict(os.environ, {"TAUCETI_FLEET_" + key.upper(): str(self.root / key)
+                                             for key in ("config", "state", "data")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        prepare = patch.object(host.native_runner, "prepare", return_value={})
+        prepare.start()
+        self.addCleanup(prepare.stop)
+        self.config = store.update_host(ci_enabled=True, workers_enabled=True, max_workers=40, ci_max_jobs=2,
+                                        ci_kinds=["pr", "staging"], ci_vcpus=16, ci_memory_gib=32)
+        self.caps = dict(cpus=96, memory_total=125 * 1024**3)
+
+    def test_reserved_staging_guest_gets_the_configured_memory_and_others_the_ceiling(self):
+        shared = capacity.guest_shape(capacity.for_slot(dict(self.config, ci_staging_slots=1), 0), self.caps)
+        self.assertEqual(shared, dict(vcpus=96, memory_gib=112))
+        host.reserve_staging(1, 64)
+        config = store.host_config()
+        self.assertEqual(capacity.guest_shape(capacity.for_slot(config, 0), self.caps), dict(vcpus=96, memory_gib=64))
+        self.assertEqual(capacity.guest_shape(capacity.for_slot(config, 1), self.caps), dict(vcpus=96, memory_gib=112))
+        self.assertEqual(capacity.guest_shape(config, self.caps), dict(vcpus=96, memory_gib=112))
+        capacity.controller_config(config)
+
+    def test_memory_setting_is_kept_by_default_and_cleared_by_zero(self):
+        self.assertEqual(host.reserve_staging(1, 64)["ci_staging_memory_gib"], 64)
+        self.assertEqual(host.rpc(dict(action="reserve-staging", maximum=1))["ci_staging_memory_gib"], 64)
+        self.assertEqual(host.rpc(dict(action="status"))["ci_staging_memory_gib"], 64)
+        self.assertIsNone(host.rpc(dict(action="reserve-staging", maximum=1, memory_gib=0))["ci_staging_memory_gib"])
+        config = store.host_config()
+        self.assertEqual(capacity.guest_shape(capacity.for_slot(config, 0), self.caps)["memory_gib"], 112)
+
+    def test_running_guest_of_another_size_is_reported_and_left_running(self):
+        guest = dict(slot=0, unit="vm-0", directory=str(self.root / "guest"), runner_id=100, started_at=0,
+                     phase="ready", busy=True, run_id=42, ci_kinds=["staging"], vcpus=96, memory_gib=112)
+        store.atomic(vm.slot_file(self.config, "vm.json"), guest)
+        with patch.object(host, "run") as run, patch.object(vm, "retire") as retire:
+            result = host.reserve_staging(1, 64)
+        run.assert_not_called()
+        retire.assert_not_called()
+        self.assertEqual(result["pending_slots"], [0])
+        self.assertEqual(store.read(vm.slot_file(self.config, "vm.json")), guest)
+        store.atomic(vm.slot_file(self.config, "vm.json"), dict(guest, memory_gib=64))
+        self.assertEqual(host.reserve_staging(1)["pending_slots"], [])
+
+    def test_invalid_memory_settings_change_nothing(self):
+        before = store.host_config()
+        for value in (-1, True, 1.5, "64", 4097):
+            with self.assertRaises(store.FleetError):
+                host.reserve_staging(1, value)
+        self.assertEqual(store.host_config(), before)
+        with self.assertRaises(store.FleetError):
+            capacity.controller_config(dict(before, ci_staging_memory_gib="64"))
