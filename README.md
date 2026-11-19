@@ -1070,7 +1070,11 @@ Set an environment variable for every worker with `tauceti-fleet workers HOST --
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
 regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
-between rounds.
+between rounds. Names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and
+runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service,
+`GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`,
+`TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `HOME` are refused; a worker keeps the login it was first seeded from.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful

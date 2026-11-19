@@ -153,7 +153,10 @@ class Isolated(unittest.TestCase):
 
     def test_worker_env_rejects_unsafe_names_and_values(self):
         original = store.update_host(max_workers=2, workers_enabled=True)
-        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097}):
+        reserved = sorted(host.WORKER_OWNED_ENV | host.FLEET_OWNED_ENV | host.CREDENTIAL_SOURCE_ENV) + [
+            "TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR", "CODEX_HOME", "TAUCETI_FLEET_ADMISSION_FILE"]
+        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097},
+                    *({name: "/elsewhere"} for name in reserved)):
             with self.assertRaises(store.FleetError):
                 host.set_worker_policy(dict(worker_env=env))
             self.assertEqual(store.host_config(), original)

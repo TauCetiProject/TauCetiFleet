@@ -626,6 +626,8 @@ def merged_worker_env(current, changes):
             raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
         if value is None:
             env.pop(name, None)
+        elif name in WORKER_OWNED_ENV | FLEET_OWNED_ENV | CREDENTIAL_SOURCE_ENV or name.startswith("TAUCETI_FLEET_"):
+            raise FleetError(f"{name} is set by the worker or Fleet, or names a login source, and cannot be a worker environment variable")
         elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
             raise FleetError(f"Worker environment value for {name} must be a single-line string")
         else:
