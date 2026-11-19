@@ -134,6 +134,45 @@ class Isolated(unittest.TestCase):
                 host.set_worker_policy(dict(forgejo_workers=1, maximum=3))
         self.assertEqual(store.host_config(), {**original, "forgejo_workers": 0})
 
+    def test_worker_env_survives_controller_rewrites(self):
+        import tomllib
+        original = store.update_host(max_workers=3, workers_enabled=True)
+        value = host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": "1", "OTHER": 'a "b"'}))
+        self.assertEqual(value["worker_env"], {"TAUCETI_ROUND_WORKTREES": "1", "OTHER": 'a "b"'})
+        # A controller rewrite from an older snapshot keeps the newer environment.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(specs), 3)
+        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        host.set_worker_policy(dict(worker_env={"OTHER": None}))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": None}))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertFalse(any("env" in s for s in specs))
+
+    def test_worker_env_rejects_unsafe_names_and_values(self):
+        original = store.update_host(max_workers=2, workers_enabled=True)
+        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097}):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(worker_env=env))
+            self.assertEqual(store.host_config(), original)
+
+    def test_worker_cli_passes_env_changes(self):
+        with (patch.object(remote, "inventory", return_value={"test": dict(target="target", machine_id="m")}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            out = io.StringIO()
+            with patch("sys.stdout", new=out):
+                self.assertEqual(main(["workers", "test", "--env", "A=1=2", "--unset-env", "B", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", worker_env={"A": "1=2", "B": None}))
+            self.assertEqual(list(json.loads(out.getvalue())), ["test"])
+            call.reset_mock()
+            with patch("sys.stderr", new=io.StringIO()):
+                self.assertNotEqual(main(["workers", "test", "--env", "NOEQUALS", "--json"]), 0)
+            call.assert_not_called()
+
     def test_forgejo_routing_validates_before_any_capacity_change(self):
         original = store.update_host(max_workers=6, workers_enabled=True)
         for count in (True, -1, 4097, "1", 7):
@@ -438,11 +477,13 @@ class Isolated(unittest.TestCase):
     def test_release_archive_contains_only_code_and_manifest(self):
         import zipfile
 
-        with zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
+        revision = "a" * 40
+        with patch.object(remote, "source_revision", return_value=revision), \
+                zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
             self.assertIn("release.json", zipped.namelist())
             self.assertTrue(all(n.startswith("tauceti_fleet/") or n == "release.json" for n in zipped.namelist()))
             manifest = json.loads(zipped.read("release.json"))
-            self.assertEqual(manifest, {"version": 1})
+            self.assertEqual(manifest, {"version": 1, "revision": revision})
 
     def test_duplicate_hosts_cannot_double_count_reports(self):
         pr = dict(

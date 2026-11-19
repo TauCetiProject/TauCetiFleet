@@ -148,6 +148,34 @@ class ActivityTests(unittest.TestCase):
         pr_start = next(i for i, line in enumerate(lines) if line.startswith("PRs authored"))
         self.assertEqual(lines[pr_start - 1], "")
 
+    def test_own_pr_closures_are_combined_and_shown_apart_from_failures(self):
+        def host(closed):
+            return dict(
+                prepared_at=100,
+                history_since=1,
+                rounds={w: {"rebase": dict(finished=3, failed=1, unknown=0, closed=closed)} for w in activity.WINDOWS},
+                pr_windows={w: dict(authored=0, landed=0) for w in activity.WINDOWS},
+                running=0,
+                open_prs=0,
+                unknown_prs=0,
+                unknown_landings=0,
+            )
+
+        combined = activity_summary.combine(
+            [dict(available=True, summary=host(2)), dict(available=True, summary=host(1))]
+        )
+        self.assertEqual(combined["summary"]["rounds"]["1h"]["rebase"], dict(finished=6, failed=2, unknown=0, closed=3))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            activity.display(combined)
+        self.assertRegex(output.getvalue(), r"\n    failed/timed out +2 ")
+        self.assertRegex(output.getvalue(), r"\n    closed own PR +3 ")
+        older = host(0)
+        for row in older["rounds"].values():
+            del row["rebase"]["closed"]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            activity.display(dict(available=True, summary=older))
+        self.assertNotIn("closed own PR", output.getvalue())
+
     def test_storage_and_expansion_status_uses_only_prepared_data(self):
         summary = dict(
             prepared_at=100,

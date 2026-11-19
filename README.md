@@ -67,7 +67,7 @@ An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 persistent user service on the SSH control host. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
-and compiler headroom. Guest launches still obey the host's ten-second spacing and
+and compiler headroom. Build guest launches still obey the host's ten-second settling interval and
 startup memory gate. One general slot is retained alongside staging reservations, even when reducing
 capacity; an existing staging-only ceiling can recover a general slot when memory
 allows it. The configured maximum is an experimental ceiling, not a reservation; normal worker and CI admissions remain enabled.
@@ -145,6 +145,14 @@ Every job runs in a disposable VM; ordinary builds select the roadmap class or
 Namespace, while small automation selects the control class. This setup uses the operator host's existing
 direct runner credential, not the volunteer registration broker.
 
+A broker-enrolled host may also reserve `queue-control` and `pr-status` slots
+when its enrollment allows those classes. The host keeps its slot map; the broker
+registers `queue-control` runners in group 6 and `pr-status` runners in group 7,
+and `/v1/policy` reports that mapping in `groups`. The host refuses to start a
+reserved slot whose class the enrollment lacks or whose `runner_group_id`
+differs from the broker's group. `control` and `roadmap` slots still require
+direct runner credentials.
+
 The control guest has 2 CPUs and 4 GiB; the roadmap guest has 16 CPUs and 32 GiB.
 Both slots stay warm independently of TauCeti's capacity discovery and cannot
 be borrowed by its builds or recovery. The existing slot ceiling, launch pacing,
@@ -184,6 +192,14 @@ failure restores the previous release and attempts to recover its controller.
 An interrupted SSH connection is not retried automatically: inspect `status`
 and the host's `current` release before repeating an update.
 
+Before handover, the staged release checks the host configuration with the same
+checks its controller applies on every loop, and refuses the update if they fail.
+Releases record the Fleet commit they were packaged from (a clean checkout or a
+`uv tool` install from git). `update` refuses to ship a release that does not
+descend from the commit recorded on the host, or whose own commit is unknown, unless
+`--allow-downgrade` is given. Hosts whose release predates these records are updated
+without the check.
+
 Already running worker managers and workers retain their existing Python runtime;
 the staged worker version takes effect at a future manager start. The update
 result reports that scope explicitly. Existing CI backing images are preserved;
@@ -192,6 +208,15 @@ need it. Replacing the base image remains a separate `prepare` operation. `prepa
 `main`, rather than restoring a revision recorded by an older Fleet release.
 Existing releases and worker runtimes
 are retained while processes may still reference them.
+
+PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
+in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
+and 4 GiB RAM, stay warm independently of the build backlog, and cannot be borrowed
+by PR recovery. The group must select only `TauCetiProject/TauCeti` and exactly
+`pr-status.yml@refs/heads/main` and `pr-labels.yml@refs/heads/main`. They execute trusted
+base and pinned policy code, never candidate checkouts. This gives the label/App
+credentials their own runner boundary and preserves the existing queue-control
+guests for pickers and staging finalizers.
 
 An update deploys the version of Fleet running the command. To upgrade an older
 drain-only installation without draining, run the new CLI once from upstream:
@@ -282,8 +307,13 @@ registration intent, state, event
 socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
-the controller starts the remaining slots after the role is enabled, with at least
-ten seconds between CI guest startup attempts across the host. Deferred starts do
+the controller starts the remaining slots after the role is enabled. Build starts
+hold the shared gate for ten seconds after launch. Small isolated control,
+queue-control, and PR-status VMs hold it for two seconds when memory can be
+measured, and ten otherwise. Until each control VM is observed online or starts
+a job, admission reserves its configured RAM minus memory already charged to its
+cgroup. The pacing file records measured memory and the boot reservation;
+interrupted starts retain ten-second crash recovery. Deferred starts do
 not block the controller. The shared gate survives controller restarts and also
 covers enable, retries, and recovered placements; existing guests are adopted
 immediately without consuming another startup turn.
@@ -522,15 +552,14 @@ extends the existing runner picker. Worker integration is in
 `FLEET_CI_ENABLED` unset/false, production routing is unchanged. Before enabling:
 
 1. Configure an organization runner group named `TauCetiFleet`, restricted to
-   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main` and,
-   optionally, `fleet-smoke.yml` at the same trusted branch. The host verifies
-   this policy before registration.
+   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main`. The
+   host verifies this policy before registration.
 2. Supply the host profile's `runner_group_id` and a credential with organization
    self-hosted-runner write permission. Worker GitHub permissions alone may not
    provide this. Only an encoded, single-job JIT configuration reaches a guest. Use a fine-grained or App token
    scoped to Self-hosted runners; do not use a broadly scoped admin token for CI reads.
 3. Keep production routing disabled while enabling a prepared host's CI role and
-   manually dispatching `fleet-smoke.yml` on main. This registers a disposable
+   manually dispatching `nightly-verify.yml` on main. This registers a disposable
    runner but starts no paid agent. Verify runner acquisition and completion.
 4. Configure TauCeti's `FLEET_RUNNER_GROUP_ID` variable and `FLEET_READ_TOKEN`
    secret (runner read permission), then explicitly set `FLEET_CI_ENABLED=true`.
@@ -589,6 +618,7 @@ tauceti-fleet status
 tauceti-fleet status server1
 tauceti-fleet status --json
 tauceti-fleet status --all-jobs
+tauceti-fleet status --workers
 tauceti-fleet status -f
 tauceti-fleet status server1 --follow
 ```
@@ -622,6 +652,25 @@ pool aggregate every 30 seconds; redraws read its prepared cache. Disconnected h
 snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
+
+`--workers` adds a table under each host's worker summary, one row per worker:
+state, stage, the PR or target it holds, agent, time in the current round and
+its last log line. The workers' latest PR events follow it: opened, pushed,
+replied, closed, and a finished round. It combines with `-f`. `status --json`
+always carries the same facts: every entry of `status.workers` has `agent`,
+`provider` (the agent of the round in progress), `pr`, `round_started_at` and
+`log_line`, and `status.worker_events` holds the last 15 events. The controller
+prepares them with each report, about every five seconds, from the worker
+status files, the last 64 KiB of each worker's console log and the last 128 KiB
+of `worker-events.jsonl`; it makes no GitHub request. A round's start is the
+time on its opening log line, read in the controller's time zone, and is
+unknown once that line lies before the part of the log that is read or when
+the latest opening line names another stage or target (a worker closing a PR
+after spent repair attempts logs none). Stage,
+target and round time appear while a worker reports `running`, `verifying` or
+`working`; stage and target also during the back-off after a failed round.
+GitHub writes that are neither a reply nor a closure, such as label changes,
+are left out of the events.
 
 The first lines report running jobs by runner pool,
 the PR-build and other-workflow backlogs, and account authoring pressure
@@ -715,6 +764,63 @@ missing-landing warning.
 history in background. Fleet only collects the small prepared summaries.
 Neither status nor LOC preparation issues new GitHub API requests. The `budget`
 command remains the explicit interface for grants and replenishment changes.
+
+## Status export
+
+A host can keep a world-readable copy of its status for programs run by other
+Unix accounts on the same machine, which have neither SSH access to the fleet
+account nor a Fleet configuration of their own:
+
+```sh
+tauceti-fleet status-export big-server --dir /srv/fleet-status
+tauceti-fleet status-export big-server           # show the saved setting
+tauceti-fleet status-export big-server --clear   # stop exporting
+```
+
+The host saves this as `status_export` in `host.json`. It is unset by default and
+changes take effect without a restart or any change to admissions. While it is
+set, the controller writes `DIR/<machine_id>.json` at most once every 30 seconds:
+a finished temporary file in the same directory, mode 0644, renamed into place,
+so a reader never sees a partial file. The directory must already exist. Fleet
+never creates it or changes its permissions, so the operator decides who may
+read it; several fleet accounts can share one directory they can all write to,
+since their machine ids differ. A failed write is reported once in the
+controller's log and retried at the next interval; admissions and CI continue.
+Use local storage: the write happens inside the controller loop. `--clear` stops
+the updates and leaves the last file for the operator to remove.
+
+The file is the per-host object of `tauceti-fleet status --json` (the value under
+each host name) with one added key, `exported_at`, the Unix time of the write.
+`machine_id` identifies the host; `exported_at` dates the file and
+`status.observed_at` dates the controller report inside it. The object holds no
+credential contents. It does hold the account's spending, budget balance and PR
+counts (`activity`), its GitHub account name (`ci_overview`), and worker and
+runner identities, process ids, and paths under the fleet account's home
+directory and cgroup (`status`), so export only to a directory whose readers may
+see those.
+
+`tauceti_fleet.status_view.render(objects)` returns the text of `tauceti-fleet
+status` for a `{label: object}` dictionary of such objects:
+
+```python
+import json
+from pathlib import Path
+
+from tauceti_fleet import status_view
+
+objects = {path.stem: json.loads(path.read_text()) for path in Path("/srv/fleet-status").glob("*.json")}
+print(status_view.render(objects), end="")
+```
+
+It uses its argument alone: no Fleet configuration or cached observations, no
+SSH, no network requests and no credentials. It therefore draws every section
+whose data hosts prepare (running jobs, backlog and authoring pressure, the
+per-host report, activity, cost and budget tables, fleet totals across distinct
+machines, Bors batches and history, and host diagnostics) and omits the three
+that the operator client fetches from public sources: the CI pool activity
+table, the merge-queue table and queue history. Labels are the caller's; a
+reader that tracks freshness compares `exported_at` with its own clock. The file
+format and `render` are interfaces other tools may build on.
 
 ## Development
 
@@ -876,6 +982,48 @@ A worker under a target list takes no roadmap focus. With both set, `focus`,
 `targets` and `status` say that the focus share is not applied; it applies again
 after `targets HOST --clear`.
 
+## Weekly schedule
+
+Admit new worker rounds only during chosen parts of the week:
+
+```sh
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00"
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00" "Sat 09:00 -> Sun 21:00" --timezone Europe/Berlin
+tauceti-fleet schedule big-server          # show the saved slots, the current slot and the next boundary
+tauceti-fleet schedule big-server --clear  # admit at any time again
+```
+
+The host saves the slots in `host.json` as `worker_schedule`; a host without one
+behaves as before. Outside every slot the controller uses a worker ceiling of
+zero in its ordinary admission decision: admitted rounds finish, no new round
+starts, and the manager, the worker definitions, `workers --max` and CI
+admissions are untouched. Inside a slot the schedule changes nothing. A change
+applies on the controller's next pass, a few seconds later, without a restart or
+a timer unit.
+
+Slot times are wall-clock times in the host's local time zone, the zone its
+controller runs in. `--timezone` names an IANA zone to use instead and is saved
+with the slots; setting slots without it returns to host local time. Across a
+daylight-saving change a slot is an hour shorter or longer, and a time the
+change skips counts as the end of the skipped hour. Days are English
+names or their first three letters and times are 24-hour. A slot whose end is
+earlier in the week than its start runs past Sunday midnight, and slots that
+touch or overlap count as one. Several slots are separate arguments or one
+comma-separated argument, given before any option.
+
+`status` shows the zone, the current slot and the next boundary:
+
+```
+Starting new work: paused; outside the weekly schedule
+Weekly schedule (host local time): outside every slot; next slot starts Mon 23:00 CET (in 2d 3h)
+```
+
+JSON status has the same facts under `status.worker_schedule`, with the boundary
+as `boundary_at` in epoch seconds. A saved schedule the controller cannot read
+admits nothing and is reported there; `--clear` or a new set of slots replaces
+it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
+admission time left in the current slot.
+
 ## Public operations telemetry
 
 The existing Tau Ceti `/ci` page can display approved host observations alongside
@@ -972,6 +1120,12 @@ The highest-numbered selected slots discover, maintain and author PRs on Forgejo
 worker source flags; remaining slots continue on GitHub. Set the count to `0` to return
 them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
 This does not change the admission ceiling, CI routing or active rounds.
+
+Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
+and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
+writes them into each generated worker definition's `env` table, so they survive the controller
+regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
+between rounds.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful
