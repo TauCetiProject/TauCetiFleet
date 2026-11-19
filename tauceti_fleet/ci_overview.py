@@ -470,8 +470,9 @@ def display(value, *, section="all"):
             held = data["held"] if data.get("held") is not None else "unknown"
             total = sum(b["size"] for b in batches)
             print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
-        from . import queue_status
-        queue_status.display(value.get("queue", {}), timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
+        if "queue" in value:
+            from . import queue_status
+            queue_status.display(value["queue"], timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
         data, note = source("bors_history")
         if "queue_history" in value:
             from . import queue_history
