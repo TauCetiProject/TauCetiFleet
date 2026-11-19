@@ -27,6 +27,17 @@ SANDBOX_STEPS = (
 )
 
 
+# The live build reporter's phases (TauCetiTools ci_live_progress.py), as status names them.
+REPORTED_PHASES = {
+    "cache-unpack": "cache unpack", "build": "build", "audit-setup": "audit setup",
+    "audit-import": "audit import", "audit-duplicates": "duplicate audit", "audit-axioms": "axiom audit",
+    "audit-module-system": "module system", "lint-env": "environment lint", "lint-style": "style lint",
+    "declaration-names": "record declaration names", "stage-cache": "stage cache", "end": "finished",
+}
+REPORTED = "untrusted_counters_trusted_reporter"
+MAX_JOB_PAGES = 5
+
+
 def sandbox_step(name):
     """The status label of a sandboxed build step, or None for any other step."""
     low = name.lower()
@@ -121,6 +132,9 @@ def parse(manifest, queue):
                 raise ValueError("Mismatched queue attempt")
             row["latest_attempt"] = {key: attempt.get(key) for key in
                                      ("status", "outcome", "conclusion", "started_at", "completed_at", "verdicts")}
+            if attempt.get("run_id") is not None:
+                row["latest_attempt"]["run_id"] = identity(attempt["run_id"])
+                row["latest_attempt"]["run_attempt"] = count(attempt.get("run_attempt", 1))
             row["latest_attempt"]["phases"] = []
             for phase in (attempt.get("phases") or [])[:100]:
                 row["latest_attempt"]["phases"].append(dict(name=text(phase["name"], 500),
@@ -194,6 +208,73 @@ def task(original, batch_id):
     return result
 
 
+def reported_progress(value):
+    """The bounded numeric fields of a public job's live build report, or None without one."""
+    if not isinstance(value, dict) or value.get("coverage") != REPORTED:
+        return None
+    timestamp(value.get("observed_at"))
+    phase = value.get("phase")
+    result = dict(observed_at=value["observed_at"], phase=phase if phase in REPORTED_PHASES else None,
+                  completed_tasks=None, total_tasks=None, tasks_per_minute=None, completed_modules=None)
+    modules = value.get("completed_modules")
+    if type(modules) is int and 0 <= modules <= 10_000_000:
+        result["completed_modules"] = modules
+    done, total = value.get("completed_tasks"), value.get("total_tasks")
+    if done is not None and total is not None and count(done) <= count(total) and total > 0:
+        result.update(completed_tasks=done, total_tasks=total)
+    rate = value.get("tasks_per_minute")
+    if type(rate) in (int, float) and 0 <= rate <= 10_000_000:
+        result["tasks_per_minute"] = float(rate)
+    return result
+
+
+def build_progress(manifest, attempt):
+    """The head attempt's live build report from the public jobs pages; active jobs come first."""
+    from . import pool_activity
+
+    root = ci_overview.fetch(pool_activity.jobs_url(manifest), timeout=3)
+    found = []
+    for reference in (root.get("job_pages") or [])[:MAX_JOB_PAGES]:
+        records = ci_overview.fetch(object_url(manifest, reference), timeout=3).get("records") or []
+        for job in records:
+            if (isinstance(job, dict) and str(job.get("run_id")) == attempt["run_id"]
+                    and job.get("run_attempt", 1) == attempt.get("run_attempt", 1)):
+                progress = reported_progress(job.get("progress"))
+                if progress:
+                    found.append(progress)
+        if found or not any(isinstance(job, dict) and job.get("active") for job in records):
+            break
+    return max(found, key=lambda p: timestamp(p["observed_at"])) if found else None
+
+
+def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
+    """"build: phase build, 113,917/113,955 Lake jobs (99.9%), 850/min, ETA 19 Nov 15:40 AEDT"."""
+    now = time.time() if now is None else now
+    parts = []
+    if progress.get("phase"):
+        parts.append("phase " + REPORTED_PHASES[progress["phase"]])
+    done, total = progress.get("completed_tasks"), progress.get("total_tasks")
+    if done is not None and total:
+        percent = 100 * done / total
+        percent = min(percent, 99.9) if done < total else 100.0
+        parts.append(f"{done:,}/{total:,} Lake jobs ({percent:.1f}%)")
+        rate = progress.get("tasks_per_minute")
+        if rate is not None and progress.get("phase") == "build" and done < total:
+            parts.append(f"{rate:,.0f}/min")
+            if rate > 0:
+                eta = timestamp(progress["observed_at"]) + (total - done) * 60 / rate
+                parts.append("ETA " + datetime.fromtimestamp(eta, ZoneInfo(timezone)).strftime("%d %b %H:%M %Z"))
+    elif progress.get("completed_modules") and progress.get("phase") == "build":
+        # Reporters before Lake's job counter count only built TauCeti modules, with no total.
+        parts.append(f"{progress['completed_modules']:,} TauCeti modules built")
+    if not parts:
+        return None
+    age = now - timestamp(progress["observed_at"])
+    if age > 120:
+        parts.append(f"reported {int(age) // 60}m ago")
+    return "build: " + ", ".join(parts)
+
+
 def cache_path():
     return config_dir() / "status-cache" / "merge-queue.json"
 
@@ -247,6 +328,17 @@ def _refresh(manifest, previous=None):
                         batch["previous_preparation"] = max(settled, key=lambda t: int(t["id"]))
             except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
                 batch["history_unavailable"] = True
+        for batch in value["batches"]:
+            attempt = batch.get("latest_attempt") or {}
+            if batch["state"] != "head" or attempt.get("status") != "in_progress" or not attempt.get("run_id"):
+                continue
+            # Live progress is optional: without it the head shows its running step alone.
+            try:
+                progress = build_progress(manifest, attempt)
+                if progress:
+                    batch["build_progress"] = progress
+            except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
         return dict(value=value, scope=manifest.get("scope"), checked_at=time.time())
     except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         return dict(previous, error="Queue refresh failed (" + type(error).__name__ + ")", checked_at=time.time())
@@ -378,6 +470,13 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
         print("  Batch   PRs  State             Activity")
         for number, size, role, doing in rows:
             print(f"  {number:>5} {size:>5}  {role:<17} {doing}")
+            batch = next(b for b in value["batches"] if b["id"] == number)
+            progress = batch.get("build_progress")
+            attempt = batch.get("latest_attempt") or {}
+            if progress and attempt.get("status") == "in_progress" and attempt.get("outcome") != "pass":
+                line = progress_text(progress, timezone, now)
+                if line:
+                    print(" " * 33 + line)
         if not rows:
             print("  No active batches observed" + (" (partial coverage)" if value.get("partial") else ""))
         if not any(b["state"] == "head" for b in value["batches"]):
