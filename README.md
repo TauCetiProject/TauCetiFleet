@@ -67,7 +67,7 @@ An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
 persistent user service on the SSH control host. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
-and compiler headroom. Guest launches still obey the host's ten-second spacing and
+and compiler headroom. Build guest launches still obey the host's ten-second settling interval and
 startup memory gate. One general slot is retained alongside staging reservations, even when reducing
 capacity; an existing staging-only ceiling can recover a general slot when memory
 allows it. The configured maximum is an experimental ceiling, not a reservation; normal worker and CI admissions remain enabled.
@@ -184,6 +184,14 @@ failure restores the previous release and attempts to recover its controller.
 An interrupted SSH connection is not retried automatically: inspect `status`
 and the host's `current` release before repeating an update.
 
+Before handover, the staged release checks the host configuration with the same
+checks its controller applies on every loop, and refuses the update if they fail.
+Releases record the Fleet commit they were packaged from (a clean checkout or a
+`uv tool` install from git). `update` refuses to ship a release that does not
+descend from the commit recorded on the host, or whose own commit is unknown, unless
+`--allow-downgrade` is given. Hosts whose release predates these records are updated
+without the check.
+
 Already running worker managers and workers retain their existing Python runtime;
 the staged worker version takes effect at a future manager start. The update
 result reports that scope explicitly. Existing CI backing images are preserved;
@@ -192,6 +200,15 @@ need it. Replacing the base image remains a separate `prepare` operation. `prepa
 `main`, rather than restoring a revision recorded by an older Fleet release.
 Existing releases and worker runtimes
 are retained while processes may still reference them.
+
+PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
+in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
+and 4 GiB RAM, stay warm independently of the build backlog, and cannot be borrowed
+by PR recovery. The group must select only `TauCetiProject/TauCeti` and exactly
+`pr-status.yml@refs/heads/main` and `pr-labels.yml@refs/heads/main`. They execute trusted
+base and pinned policy code, never candidate checkouts. This gives the label/App
+credentials their own runner boundary and preserves the existing queue-control
+guests for pickers and staging finalizers.
 
 An update deploys the version of Fleet running the command. To upgrade an older
 drain-only installation without draining, run the new CLI once from upstream:
@@ -282,8 +299,13 @@ registration intent, state, event
 socket, and startup retry. Drain, prepare, and enrollment inspect all
 slots, including a guest left outside the current configured limit. A fault's
 cooldown remains shared by the machine. Enabling fresh CI registers and starts the first guest;
-the controller starts the remaining slots after the role is enabled, with at least
-ten seconds between CI guest startup attempts across the host. Deferred starts do
+the controller starts the remaining slots after the role is enabled. Build starts
+hold the shared gate for ten seconds after launch. Small isolated control,
+queue-control, and PR-status VMs hold it for two seconds when memory can be
+measured, and ten otherwise. Until each control VM is observed online or starts
+a job, admission reserves its configured RAM minus memory already charged to its
+cgroup. The pacing file records measured memory and the boot reservation;
+interrupted starts retain ten-second crash recovery. Deferred starts do
 not block the controller. The shared gate survives controller restarts and also
 covers enable, retries, and recovered placements; existing guests are adopted
 immediately without consuming another startup turn.
@@ -522,15 +544,14 @@ extends the existing runner picker. Worker integration is in
 `FLEET_CI_ENABLED` unset/false, production routing is unchanged. Before enabling:
 
 1. Configure an organization runner group named `TauCetiFleet`, restricted to
-   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main` and,
-   optionally, `fleet-smoke.yml` at the same trusted branch. The host verifies
-   this policy before registration.
+   `TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main`. The
+   host verifies this policy before registration.
 2. Supply the host profile's `runner_group_id` and a credential with organization
    self-hosted-runner write permission. Worker GitHub permissions alone may not
    provide this. Only an encoded, single-job JIT configuration reaches a guest. Use a fine-grained or App token
    scoped to Self-hosted runners; do not use a broadly scoped admin token for CI reads.
 3. Keep production routing disabled while enabling a prepared host's CI role and
-   manually dispatching `fleet-smoke.yml` on main. This registers a disposable
+   manually dispatching `nightly-verify.yml` on main. This registers a disposable
    runner but starts no paid agent. Verify runner acquisition and completion.
 4. Configure TauCeti's `FLEET_RUNNER_GROUP_ID` variable and `FLEET_READ_TOKEN`
    secret (runner read permission), then explicitly set `FLEET_CI_ENABLED=true`.
@@ -922,3 +943,23 @@ sealed batches `sealed, waiting`. A sealed batch has fixed membership even when
 its preparation has finished; only unsealed batches receive incoming PRs.
 
 Enable locally verified PR labeling with `tauceti-fleet workers HOST --self-tested`, or disable it with `--no-self-tested`. This persists `self_tested = true` in the host’s generated worker definitions. Workers apply the `self-tested` label only after the normal successful local verification; reviews and staging tests remain required. Install a Worker release supporting `--self-tested` and hand over the running manager to that runtime, preserving worker scopes, before enabling this setting. The command checks the installed runtime and running manager for support. The admission ceiling and active rounds are preserved.
+
+Gradually move worker slots to Forgejo with `tauceti-fleet workers HOST --forgejo-workers 1`.
+The highest-numbered selected slots discover, maintain and author PRs on Forgejo using the ordinary
+worker source flags; remaining slots continue on GitHub. Set the count to `0` to return
+them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
+This does not change the admission ceiling, CI routing or active rounds.
+
+Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
+and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
+writes them into each generated worker definition's `env` table, so they survive the controller
+regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
+between rounds.
+The installed Worker and running manager must advertise source-selection support;
+changes take effect between rounds. Provision the existing private Forgejo worker
+credential before enabling native slots. Increase the count only after checking useful
+work, queue admission, Forgejo latency and server resource pressure.
+Before downgrading to a Worker release without source-selection support, set the count
+to `0` and wait for those workers to adopt their GitHub definitions. Keep at least one
+native worker elsewhere while native PRs still need maintenance. A routing rollback
+takes effect at safe idle windows; it is not an emergency stop for an active round.
