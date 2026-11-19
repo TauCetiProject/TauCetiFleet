@@ -1,5 +1,6 @@
 """Merge-queue activity from the prepared public snapshot; no GitHub or worker calls."""
 
+import copy
 import hashlib
 import re
 import socket
@@ -281,23 +282,48 @@ def carried_progress(progress, earlier, attempt):
         except (ValueError, TypeError):
             return None
 
-    if progress:
+    def reported_at(value):
+        if not isinstance(value, dict) or (value.get("run_id"), value.get("run_attempt", 1)) != run:
+            return None
+        try:
+            return timestamp(value.get("observed_at"))
+        except (ValueError, TypeError):
+            return None
+
+    if progress and progress.get("run_id") is None:
         progress = dict(progress, run_id=run[0], run_attempt=run[1])
         if progress.get("completed_tasks") is not None:
             progress["counts_observed_at"] = progress["observed_at"]
-    known = [(counted_at(value), value) for value in [progress, *(earlier or [])]]
-    known = [(at, value) for at, value in known if at is not None]
-    if not known:
+    values = [progress, *(earlier or [])]
+    counted = [(counted_at(v), v) for v in values if counted_at(v) is not None]
+    reports = [(reported_at(v), v) for v in values if reported_at(v) is not None]
+    if not reports:
         return progress
-    newest = max(known, key=lambda item: item[0])[1]
-    if not progress:
-        return dict(newest)
-    if newest is progress:
-        return progress
-    # The report's own phase and time stand, if it is the newer report; the counts are the newest.
-    base = progress if timestamp(progress["observed_at"]) >= timestamp(newest["observed_at"]) else newest
-    return dict(base, **{key: newest.get(key) for key in COUNT_FIELDS},
+    # The newest report's phase and time, with the newest counts seen for this run attempt.
+    latest = max(reports, key=lambda item: item[0])[1]
+    if not counted:
+        return dict(latest)
+    newest = max(counted, key=lambda item: item[0])[1]
+    return dict(latest, **{key: newest.get(key) for key in COUNT_FIELDS},
                 counts_observed_at=newest["counts_observed_at"])
+
+
+def retain_progress(value, candidates, fresh=None):
+    """Each running head's build progress: its fresh report (when looked up) merged with the
+    newest counts the candidate snapshots hold for the same batch and run attempt."""
+    for batch in value.get("batches") or []:
+        attempt = batch.get("latest_attempt") or {}
+        if batch.get("state") != "head" or attempt.get("status") != "in_progress" or not attempt.get("run_id"):
+            continue
+        earlier = [b.get("build_progress") for c in candidates for b in (c.get("value") or {}).get("batches") or []
+                   if isinstance(b, dict) and b.get("id") == batch["id"]]
+        own = fresh(batch, attempt) if fresh else batch.get("build_progress")
+        progress = carried_progress(own, earlier, attempt)
+        if progress:
+            batch["build_progress"] = progress
+        else:
+            batch.pop("build_progress", None)
+    return value
 
 
 def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
@@ -400,23 +426,21 @@ def _refresh(manifest, previous=None, candidates=None):
                         batch["previous_preparation"] = max(settled, key=lambda t: int(t["id"]))
             except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
                 batch["history_unavailable"] = True
-        for batch in value["batches"]:
-            attempt = batch.get("latest_attempt") or {}
-            if batch["state"] != "head" or attempt.get("status") != "in_progress" or not attempt.get("run_id"):
-                continue
+        def fresh(_batch, attempt):
             # Live progress is optional: without it the head shows its running step alone.
             try:
-                progress = build_progress(manifest, attempt)
+                return build_progress(manifest, attempt)
             except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError):
-                progress = None
-            earlier = [b.get("build_progress") for c in candidates for b in (c.get("value") or {}).get("batches") or []
-                       if isinstance(b, dict) and b.get("id") == batch["id"]]
-            progress = carried_progress(progress, earlier, attempt)
-            if progress:
-                batch["build_progress"] = progress
+                return None
+
+        retain_progress(value, candidates, fresh)
         return dict(value=value, scope=manifest.get("scope"), checked_at=time.time())
     except (FleetError, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
-        return dict(previous, error="Queue refresh failed (" + type(error).__name__ + ")", checked_at=time.time())
+        report = dict(previous, error="Queue refresh failed (" + type(error).__name__ + ")", checked_at=time.time())
+        if isinstance(previous.get("value"), dict):
+            # The fallback snapshot keeps the newest counts any candidate snapshot holds.
+            report["value"] = retain_progress(copy.deepcopy(previous["value"]), candidates)
+        return report
 
 
 def activity(batch, claims, names, now, timezone):

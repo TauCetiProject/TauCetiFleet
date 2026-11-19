@@ -466,6 +466,8 @@ class QueueStatus(unittest.TestCase):
         for patch_value in (dict(completed_tasks=None, total_tasks=None, tasks_per_minute=None),
                             dict(coverage="steps_only"), dict(completed_tasks=9, total_tasks=4)):
             with self.subTest(patch=patch_value):
+                # Each case is a first observation: no earlier snapshot to carry from.
+                queue.cache_path().unlink(missing_ok=True)
                 progress_copy = dict(progress, **patch_value)
                 page = dict(records=[dict(documents[3]["records"][2], progress=progress_copy)])
                 with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], page, dict(records=[])]):
@@ -475,10 +477,37 @@ class QueueStatus(unittest.TestCase):
                     self.assertNotIn("build: ", output)
                 else:
                     self.assertIn("build: phase build, 25,433 TauCeti modules built\n", output)
+        queue.cache_path().unlink(missing_ok=True)
         with patch.object(ci_overview, "fetch", side_effect=[*documents[:2], OSError]):
             output = self.render(queue.refresh(self.manifest))
         self.assertIn("CI building since 09 Nov 09:16 AEDT", output)
         self.assertNotIn("build: ", output)
+
+    def test_phase_never_goes_back_and_a_failed_queue_fetch_keeps_counts(self):
+        progress, documents = self.live_head()
+        record = documents[3]["records"][2]
+        with patch.object(ci_overview, "fetch", side_effect=documents):
+            first = queue.refresh(self.manifest)
+        later = dict(progress, observed_at="2026-11-08T23:39:00Z", phase="lint-env", completed_tasks=None,
+                     total_tasks=None, tasks_per_minute=None, estimated_total_tasks=None)
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], dict(records=[dict(record, progress=later)])]):
+            lint = queue.refresh(self.manifest, first)
+        # A delayed build report with newer counts updates the counts but not the phase.
+        delayed = dict(progress, observed_at="2026-11-08T23:37:00Z", completed_tasks=110000)
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], dict(records=[dict(record, progress=delayed)])]):
+            merged = queue.refresh(self.manifest, lint)["value"]["batches"][0]["build_progress"]
+        self.assertEqual((merged["phase"], merged["observed_at"], merged["completed_tasks"]),
+                         ("lint-env", "2026-11-08T23:39:00Z", 110000))
+        # The queue fetch itself fails while the newer saved cache lacks the counts.
+        without = copy.deepcopy(first)
+        without["checked_at"] += 60
+        del without["value"]["batches"][0]["build_progress"]
+        store.atomic(queue.cache_path(), without)
+        with patch.object(ci_overview, "fetch", side_effect=OSError):
+            failed = queue.refresh(self.manifest, first)
+        self.assertIn("error", failed)
+        self.assertEqual(failed["value"]["batches"][0]["build_progress"]["completed_tasks"], 103917)
+        self.assertEqual(queue.cached()["value"]["batches"][0]["build_progress"]["completed_tasks"], 103917)
 
     def test_bad_timezone_fails_before_any_host_calls(self):
         with patch.object(remote, "inventory", side_effect=AssertionError("network")), contextlib.redirect_stderr(io.StringIO()):
