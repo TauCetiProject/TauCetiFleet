@@ -860,6 +860,7 @@ existing global maintenance behavior. An explicit
 worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
 Workers require the corresponding TauCetiWorker focus support; older workers
 ignore the additional policy field.
+A worker that authors from a [target list](#target-lists) takes no focus.
 
 At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
 from the eligible focus areas at the start of each round. The other
@@ -895,6 +896,85 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Target lists
+
+Have every worker on a host author from an operator target list: a markdown file
+of milestones on the way to one goal, grouped by roadmap, each naming the items
+that have to land first. TauCetiWorker's `docs/target-lists.md` defines the
+format and how a worker chooses from it.
+
+```sh
+tauceti-fleet targets big-server --file goal.md                       # transfer this file
+tauceti-fleet targets big-server --file /srv/lists/goal.md --on-host  # use a file on the host
+tauceti-fleet targets big-server                                      # show the list and its counts
+tauceti-fleet targets big-server --audit                              # compare it with the host's files
+tauceti-fleet targets big-server --audit --apply                      # compatibility option; currently no automatic rewrites
+tauceti-fleet targets big-server --clear                              # workers choose areas themselves again
+```
+
+`--file PATH` reads the file on the machine where the command runs and stores a
+private copy on the host at `~/.config/tauceti-fleet/roadmap-targets.md`; a later
+transfer replaces that copy. With `--on-host`, `PATH` is an absolute path on the
+host and the workers read that file in place, which suits a list kept in a git
+checkout there or shared by several installs. A symlink is saved as the file it
+names when the list is set, since workers resolve the path when they start; after
+repointing the link, set the list again. A transferred list is at most 256 KiB,
+the room it has inside the request to the host; a list on the host may be up to
+16 MiB. Either way the list must carry the `<!-- tauceti-targets:v1 -->` marker.
+Fleet invokes the Worker's versioned, offline `_targets-inspect` interface: the
+same strict parser that workers use rejects duplicate slugs, malformed items,
+missing prerequisites and dependency cycles. Fleet has no separate list parser.
+The worker validates roadmap availability during selection.
+
+The host saves the path in `host.json`, and the controller writes it into every
+worker definition as `roadmap_targets` on its next pass. No drain is needed.
+The worker manager restarts a worker whose definition changes once its round in
+flight finishes, so setting, moving or clearing a list applies from each
+worker's next round; workers read the file at
+the start of each roadmap round, so new contents at the same path, including
+every repeated transfer, change no definition and restart nothing. The installed
+TauCetiWorker must report `roadmap_targets` and `targets_inspect` in its Fleet
+protocol. A running manager must also advertise those capabilities and
+`graceful_restart` through its live socket, which a live update leaves in
+place. Fleet refuses to set a list otherwise, because a worker manager that does
+not know the key loads no worker from definitions that name it; restarting
+`tauceti-fleet-workers.service` moves the manager to the installed runtime.
+Workers in their own scopes keep running and the new manager adopts them; a
+worker whose status shows degraded isolation runs inside the manager's service
+and its round ends with it.
+`doctor` blocks worker activation for the same reason or when the saved list has
+become unreadable.
+
+`status` adds the list under the focus line:
+
+```text
+Target list: 12 items in 3 areas: 4 done, 2 in flight, 3 eligible, 3 blocked
+  Counted from the file's marks and this host's rounds; workers separately resolve open and merged pull request markers at any age
+  Rounds in progress: fleet-0123abcd-3 Probability/strong-law
+```
+
+Done and in flight are the file's `[x]` and `[~]` marks, plus the items that
+rounds in progress on this host hold (each worker reports its item as
+`roadmap_target`). An open item is eligible when everything it needs is done
+and blocked otherwise. The controller reads only the list and the worker status
+files for this. Workers additionally treat an item as in flight while an open
+pull request carries its marker and as done once one has merged, so they may
+see fewer eligible items than this line. `targets HOST` prints the same counts
+per area.
+
+`--audit` validates the list with the canonical parser and reports active
+rounds whose item is missing or marked done. It is offline and does not rewrite
+the list. The old prepared activity inventory cannot prove a complete target
+marker or distinguish partial landings, so it is not evidence for ticking an
+item done. `--apply` remains accepted for compatibility but reports zero
+corrections. Workers resolve complete versus partial merged markers on the
+appropriate forge, including completion older than their broad listing window;
+Fleet's displayed file-only counts deliberately do not claim that live view.
+
+A worker under a target list takes no roadmap focus. With both set, `focus`,
+`targets` and `status` say that the focus share is not applied; it applies again
+after `targets HOST --clear`.
 
 ## Weekly schedule
 
