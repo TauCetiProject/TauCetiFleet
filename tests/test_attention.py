@@ -111,6 +111,12 @@ class Attention(unittest.TestCase):
             self.assertEqual([(w.get("github"), w.get("forgejo"), w.get("new_pr_forge"), w["env"]["TAUCETI_HOLD_DECLINED"])
                               for w in workers], [(None, None, None, "1"), (False, True, "forgejo", "1")])
             store.update_host(forgejo_workers=0)
+            store.update_host(worker_env={"EXTRA": "1", "TAUCETI_INCIDENTS_DIR": "/elsewhere"})
+            host.worker_config(store.host_config())
+            workers = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+            self.assertEqual(workers[0]["env"], {"EXTRA": "1", "TAUCETI_HOLD_DECLINED": "1",
+                                                 "TAUCETI_INCIDENTS_DIR": str(self.root / "state/incidents")})
+            store.update_host(worker_env={})
             host.configure(dict(hold_declined=False))
             host.worker_config(store.host_config())
             workers = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
