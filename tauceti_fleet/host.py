@@ -645,8 +645,11 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
-    if host_config().get("roadmap_targets"):
-        targets.require_support()  # Refuse before persisting any incompatible live policy.
+    current = host_config()
+    spec_changes = local is not None or native is not None or environment is not None
+    growing = maximum is not None and maximum > current["max_workers"]
+    if current.get("roadmap_targets") and (spec_changes or growing):
+        targets.require_support()  # Admission-only decreases need no definition change.
     result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:

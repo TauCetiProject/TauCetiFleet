@@ -166,8 +166,23 @@ class TargetLists(unittest.TestCase):
         self.assertEqual(store.host_config(), before)
         self.assertFalse((store.state_dir() / "worker-admission-lease.json").exists())
 
+    def test_admission_decreases_remain_available_when_the_manager_cannot_be_queried(self):
+        targets.configure(dict(text=EXAMPLE), [])
+        store.update_host(max_workers=4)
+        with patch.object(targets, "require_support", side_effect=FleetError("unavailable manager")):
+            self.assertEqual(host.set_worker_policy(dict(maximum=2))["max_workers"], 2)
+            self.assertEqual(host.set_worker_policy(dict(maximum=0))["max_workers"], 0)
+            self.assertEqual(store.read(store.state_dir() / "admission.json")["workers"], [])
+            with self.assertRaisesRegex(FleetError, "unavailable manager"):
+                host.set_worker_policy(dict(maximum=1))
+        self.assertEqual(store.host_config()["max_workers"], 0)
+
     def test_clear_does_not_require_installed_parser_but_requires_graceful_live_manager(self):
         targets.configure(dict(text=EXAMPLE), [])
+        with patch.object(targets, "running_manager", return_value="/old/bin/tauceti"), patch.object(host, "manager_ping", return_value={}):
+            with self.assertRaisesRegex(FleetError, "running worker manager"):
+                targets.configure(dict(clear=True), [])
+        self.assertIsNotNone(store.host_config()["roadmap_targets"])
         with patch.object(capabilities, "worker_protocol", return_value={}):
             self.assertIsNone(targets.configure(dict(clear=True), [])["roadmap_targets"])
 
