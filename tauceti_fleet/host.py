@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import (
     activity,
+    attention,
     capacity,
     ci,
     ci_overview,
@@ -115,6 +116,8 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "incidents",
+        "hold_declined",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -138,6 +141,7 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    attention.validate(updates)
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -323,8 +327,9 @@ def _worker_config(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
         if config.get(key):
             fields[key] = config[key]
-    if config.get("worker_env"):
-        fields["env"] = dict(sorted(config["worker_env"].items()))
+    env = {**config.get("worker_env", {}), **attention.worker_env(config)}
+    if env:
+        fields["env"] = dict(sorted(env.items()))
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -1048,6 +1053,7 @@ def daemon():
         ids = []
         applied_targets = None
         last_results = 0
+        last_attention = 0
         memory_paused = False
         export = StatusExport()
         previous_tasks = None
@@ -1059,6 +1065,9 @@ def daemon():
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
                     last_results = time.time()
+                if attention.enabled(config) and time.time() - last_attention >= 60:
+                    attention.prepare(config)
+                    last_attention = time.time()
                 current = cpu_sample()
                 idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
                 previous = current
@@ -1248,6 +1257,7 @@ def status_report(config):
         status=read(state_dir() / "status.json", {}),
         activity=activity.cached(config["machine_id"]),
         ci_overview=ci_overview.cached(config),
+        **({"attention": attention.prepared()} if attention.enabled(config) else {}),
     )
 
 
@@ -1360,6 +1370,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "attention":
+        return attention.host_action(payload)
     if action == "targets":
         return targets.configure(payload, worker_statuses())
     if action == "workers":
