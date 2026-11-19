@@ -64,7 +64,7 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("CI reporting results", output)
         self.assertIn("worker 2: preparation; Lake 36,611/38,051 tasks", output)
         self.assertIn("advanced 09 Nov 10:35 AEDT", output)
-        self.assertIn("Waiting for placement: 7 PRs", output)
+        self.assertIn("1795 PRs in batches (876+349+570); 7 waiting for placement.", output)
         self.assertIn("worker 1 alive / idle", output)
         self.assertNotIn("96%", output, "discovered build totals may grow")
 
@@ -124,7 +124,7 @@ class QueueStatus(unittest.TestCase):
         output = self.render(report)
         self.assertIn("worker 2: preparation (earlier membership); Lake 36,611/38,051 tasks", output)
         self.assertIn("CI reporting results", output)
-        self.assertIn("Waiting for placement: 7 PRs", output)
+        self.assertIn("7 waiting for placement.", output)
 
     def test_unclaimed_task_for_earlier_membership_waits_for_refresh(self):
         self.batch["version"] += 5
@@ -171,6 +171,48 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("partial", output)
         self.assertIn("cached", output)
         self.assertIn("refresh failed", output)
+
+    def test_rows_and_total_follow_landing_order_not_batch_number(self):
+        # An emergency head has the newest number; an unsealed batch can predate a sealed one.
+        self.head.update(id="395", latest_attempt=dict(self.head["latest_attempt"], batch_id="395"))
+        early = dict(self.open, id="390", size=11)
+        later = dict(self.batch, id="393", size=22, active_tasks=[])
+        self.document["batches"] = [early, self.batch, later, self.head, self.open]
+        output = self.render()
+        order = [line.split()[0] for line in output.splitlines() if line[:7].strip().isdigit() and line.split()[1].isdigit()]
+        self.assertEqual(order, ["395", "391", "393", "390", "392"])
+        self.assertIn("1828 PRs in batches (876+349+22+11+570); 7 waiting for placement.", output)
+
+    def test_single_batch_total_has_no_sum(self):
+        self.document["batches"] = [self.head]
+        self.assertIn("  876 PRs in batches; 7 waiting for placement.", self.render())
+
+    def test_partial_counts_only_collections_the_table_reads(self):
+        complete = dict(batches=True, members=True, inputs=True, attempts=True, tasks=True, events=False)
+        self.document.update(coverage="partial", truncated=True, collection_complete=complete,
+                             claim_history_truncated=False)
+        self.assertNotIn("partial", self.render().splitlines()[0])
+        for name in ("batches", "members", "tasks", "attempts"):
+            with self.subTest(name=name):
+                self.document["collection_complete"] = dict(complete, **{name: False})
+                self.assertIn("partial", self.render().splitlines()[0])
+        self.document.update(collection_complete=complete, claim_history_truncated=True)
+        self.assertIn("partial", self.render().splitlines()[0])
+        del self.document["collection_complete"]
+        self.assertIn("partial", self.render().splitlines()[0], "older snapshots keep their own coverage")
+
+    def test_stale_means_publication_stopped_not_slow_observation(self):
+        # The publisher observes, then uploads about 90s later, every two minutes or so.
+        self.document.update(observed_at="2026-11-08T23:32:30Z", received_at="2026-11-08T23:34:00Z")
+        header = self.render().splitlines()[0]
+        self.assertIn("210s old", header)
+        self.assertNotIn("STALE", header)
+        self.document["received_at"] = "2026-11-08T23:30:59Z"
+        self.assertIn("STALE", self.render().splitlines()[0])
+        del self.document["received_at"]
+        self.assertNotIn("STALE", self.render().splitlines()[0])
+        self.document["observed_at"] = "2026-11-08T23:28:59Z"
+        self.assertIn("STALE", self.render().splitlines()[0])
 
     def test_no_observation_reports_unknown_not_empty_queue(self):
         self.assertIn("unavailable", self.render({}))

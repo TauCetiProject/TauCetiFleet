@@ -219,7 +219,7 @@ class View(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             text = self.render(dict(alpha=value), home)
         self.assertIn("Alpha 2", text)
-        self.assertIn("Bors: 4=4; held 0", text)
+        self.assertIn("Bors feed (GitHub PRs only): 4 (", text)
         self.assertIn("Bors history (", text)
         self.assertIn("PRs landed", text)
         self.assertNotIn("Fleet totals:", text)

@@ -86,7 +86,8 @@ def bors(config):
         if (type(batch.get("id")) is not int or not isinstance(batch.get("state"), str)
                 or not re.fullmatch(r"[a-z_]{1,32}", batch["state"]) or not isinstance(batch.get("members"), list)):
             raise FleetError("Invalid Bors batch")
-        batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"])))
+        batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"]),
+                            sealed=batch.get("sealed") is True))
     held = value.get("held")
     return dict(batches=batches, held=len(held) if isinstance(held, list) else None), time.time()
 
@@ -368,7 +369,8 @@ def source_value(name, source):
         if name == "bors":
             if not isinstance(data.get("batches"), list) or not (data.get("held") is None or integer(data["held"])):
                 return None
-            if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"]) for b in data["batches"]):
+            if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"])
+                   or type(b.get("sealed", False)) is not bool for b in data["batches"]):
                 return None
         elif name == "bors_history":
             windows = data.get("windows")
@@ -461,15 +463,20 @@ def display(value, *, section="all"):
         return data, note
 
     if section != "overview":
-        data, note = source("bors")
-        if data is None:
-            print("Bors: unknown (background observation unavailable)")
-        else:
-            batches = sorted(data["batches"], key=lambda batch: batch["id"])
-            parts = [str(b["size"]) for b in batches]
-            held = data["held"] if data.get("held") is not None else "unknown"
-            total = sum(b["size"] for b in batches)
-            print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
+        queue = value.get("queue")
+        # The merge-queue table counts every member. Its Bors-compatible feed lists only GitHub
+        # pulls, so it is a fallback for when the queue snapshot is unavailable, not a second total.
+        if not (isinstance(queue, dict) and queue.get("value")):
+            data, note = source("bors")
+            if data is None:
+                print("Bors: unknown (background observation unavailable)")
+            else:
+                # Head (CI running) first, then sealed and unsealed batches, in landing order.
+                batches = sorted(data["batches"], key=lambda b: (b["state"] != "running", not b.get("sealed"), b["id"]))
+                parts = [str(b["size"]) for b in batches]
+                total = sum(b["size"] for b in batches)
+                print("Bors feed (GitHub PRs only): " + (f"{total}=" + "+".join(parts) if len(parts) > 1 else str(total))
+                      + (", head first" if len(parts) > 1 else "") + f" ({note})")
         if "queue" in value:
             from . import queue_status
             queue_status.display(value["queue"], timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
