@@ -187,20 +187,6 @@ class QueueStatus(unittest.TestCase):
         self.document["batches"] = [self.head]
         self.assertIn("  876 PRs in batches; 7 waiting for placement.", self.render())
 
-    def test_partial_counts_only_collections_the_table_reads(self):
-        complete = dict(batches=True, members=True, inputs=True, attempts=True, tasks=True, events=False)
-        self.document.update(coverage="partial", truncated=True, collection_complete=complete,
-                             claim_history_truncated=False)
-        self.assertNotIn("partial", self.render().splitlines()[0])
-        for name in ("batches", "members", "tasks", "attempts"):
-            with self.subTest(name=name):
-                self.document["collection_complete"] = dict(complete, **{name: False})
-                self.assertIn("partial", self.render().splitlines()[0])
-        self.document.update(collection_complete=complete, claim_history_truncated=True)
-        self.assertIn("partial", self.render().splitlines()[0])
-        del self.document["collection_complete"]
-        self.assertIn("partial", self.render().splitlines()[0], "older snapshots keep their own coverage")
-
     def test_stale_means_publication_stopped_not_slow_observation(self):
         # The publisher observes, then uploads about 90s later, every two minutes or so.
         self.document.update(observed_at="2026-11-08T23:32:30Z", received_at="2026-11-08T23:34:00Z")

@@ -145,24 +145,11 @@ def parse(manifest, queue):
     if received is not None:
         timestamp(received)
     return dict(observed_at=queue["observed_at"], status_observed_at=queue.get("status_observed_at"),
-                received_at=received, partial=partial(queue),
+                received_at=received,
+                partial=queue.get("coverage") != "observed" or bool(queue.get("truncated")),
                 batches=active, waiting=count(queue.get("counts", {}).get("waiting")),
                 workers=workers, claims=claims, stuck_heads=stuck_heads(queue.get("conditions")),
                 last_landing=max(landed, key=lambda b: timestamp(b["landed_at"])) if landed else None)
-
-
-# The collections the batch table reads. The event journal is capped at its newest rows, so the
-# snapshot as a whole is always "partial" once the journal is long; that says nothing about batches.
-TABLE_COLLECTIONS = ("batches", "members", "tasks", "attempts")
-
-
-def partial(queue):
-    """Whether the batch table may be missing facts: a collection it reads, or live claims, is incomplete."""
-    complete = queue.get("collection_complete")
-    if not isinstance(complete, dict):
-        return queue.get("coverage") != "observed" or bool(queue.get("truncated"))
-    return (any(complete.get(name) is not True for name in TABLE_COLLECTIONS)
-            or queue.get("claim_history_truncated") is not False)
 
 
 def stuck_heads(conditions):

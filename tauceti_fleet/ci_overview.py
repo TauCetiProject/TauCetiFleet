@@ -471,12 +471,12 @@ def display(value, *, section="all"):
             if data is None:
                 print("Bors: unknown (background observation unavailable)")
             else:
-                # Head (CI running) first, then sealed and unsealed batches, in landing order.
+                # The feed marks a head only while its CI runs; otherwise sealed before unsealed.
                 batches = sorted(data["batches"], key=lambda b: (b["state"] != "running", not b.get("sealed"), b["id"]))
                 parts = [str(b["size"]) for b in batches]
                 total = sum(b["size"] for b in batches)
                 print("Bors feed (GitHub PRs only): " + (f"{total}=" + "+".join(parts) if len(parts) > 1 else str(total))
-                      + (", head first" if len(parts) > 1 else "") + f" ({note})")
+                      + f" ({note})")
         if "queue" in value:
             from . import queue_status
             queue_status.display(value["queue"], timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))

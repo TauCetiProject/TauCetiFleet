@@ -299,7 +299,7 @@ class Overview(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(value)
-        self.assertIn("Bors feed (GitHub PRs only): 60=1+26+26+7, head first", out.getvalue())
+        self.assertIn("Bors feed (GitHub PRs only): 60=1+26+26+7 (", out.getvalue())
         self.assertIn("CI backlog: unknown", out.getvalue())
         self.assertNotIn("71 PR-build", out.getvalue())
 
