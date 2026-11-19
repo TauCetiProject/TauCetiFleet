@@ -868,7 +868,7 @@ def set_worker_policy(payload):
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
-        config = update_host(**changes)
+        config = update_host(validate=loadable_workers, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
     return result

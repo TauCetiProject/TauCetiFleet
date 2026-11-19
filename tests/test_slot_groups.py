@@ -237,10 +237,11 @@ class SlotGroups(unittest.TestCase):
                        progress_max_open=3, progress_skip=["Sandbox", "Drafts", "Sandbox"])
         source = dict(progress_repo="operator/TauCetiProgress", progress_ref="0123456789abcdef" * 2 + "01234567")
         store.atomic(store.config_dir() / "profiles.json", {
-            "reports": dict(github_account="operator", claude_billing="subscription", env={"A": "1"},
+            "reports": dict(github_account="operator", claude_billing="subscription",
                             slots=[dict(count=2, agent="auto"), reports], **source),
             "plain": dict(github_account="operator", claude_billing="subscription"),
         })
+        store.update_host(worker_env={"A": "1"})
         with patch.object(remote, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
             host.configure(dict(remote.profile("reports"), profile="reports", ci_allowed=False))
             plain = remote.profile("plain")
@@ -267,7 +268,8 @@ class SlotGroups(unittest.TestCase):
         # A profile without the two keys sends them empty, which returns the host to the worker's pin.
         host.configure(dict(plain, slots=None))
         _, workers = self.definitions()
-        self.assertFalse([k for w in workers.values() for k in w if k == "env" or k.startswith("progress_")])
+        self.assertFalse([k for w in workers.values() for k in w if k.startswith("progress_")])
+        self.assertEqual([w["env"] for w in workers.values()], [{"A": "1"}] * len(workers))
 
     def test_rejected_progress_settings(self):
         def group(**settings):
@@ -279,12 +281,22 @@ class SlotGroups(unittest.TestCase):
             group(progress_max_open=0), group(progress_max_open=True), group(progress_max_open="3"),
             group(progress_skip="PDE"), group(progress_skip=["a/b"]), group(progress_skip=[3]), group(progress_poll=60),
             dict(progress_repo="TauCetiProgress"), dict(progress_repo=["a/b"]), dict(progress_ref="main"),
-            dict(progress_ref="0123abc"), dict(progress_ref="f" * 40, env={"TAUCETI_PROGRESS_REF": "e" * 40}),
+            dict(progress_ref="0123abc"),
         ]
         for shape in rejected:
             with self.assertRaises(store.FleetError, msg=shape):
                 host.configure(shape)
-        self.assertFalse({"slots", "progress_repo", "progress_ref", "env"} & set(store.host_config()))
+        self.assertFalse({"slots", "progress_repo", "progress_ref"} & set(store.host_config()))
+        # The worker environment and the profile key cannot both name the variable, set in either order.
+        host.set_worker_policy(dict(worker_env={"TAUCETI_PROGRESS_REF": "e" * 40}))
+        with self.assertRaisesRegex(store.FleetError, "worker environment"):
+            host.configure(dict(progress_ref="f" * 40))
+        host.set_worker_policy(dict(worker_env={"TAUCETI_PROGRESS_REF": None}))
+        host.configure(dict(progress_ref="f" * 40))
+        with self.assertRaisesRegex(store.FleetError, "worker environment"):
+            host.set_worker_policy(dict(worker_env={"TAUCETI_PROGRESS_REF": "e" * 40}))
+        self.assertNotIn("TAUCETI_PROGRESS_REF", store.host_config().get("worker_env") or {})
+        host.configure(dict(progress_ref=None))
         host.configure(group(progress_strategy="threshold", roles=[]))
         self.assertEqual(store.host_config()["slots"], [dict(count=1, progress_strategy="threshold")])
         for text in ("1:codex:progress:review", "1:codex:progress:progress_poll=60", "1:codex:progress:progress_skip=A:progress_skip=B"):
