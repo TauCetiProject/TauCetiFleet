@@ -70,10 +70,21 @@ def stage_worker(revision):
 
 def service():
     result = run(["systemctl", "--user", "show", "tauceti-fleet.service",
-                  "-p", "MainPID", "-p", "Restart"], check=False)
+                  "-p", "MainPID", "-p", "Restart", "-p", "ActiveState"], check=False)
     if result.returncode:
         raise FleetError("Cannot inspect the Fleet controller service; run doctor")
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def controller_running(state):
+    """A controller systemd is running or about to restart, not one an operator stopped."""
+    return state.get("MainPID", "0") != "0" or state.get("ActiveState") in ("activating", "reloading")
+
+
+def reset_failed():
+    # systemd refuses to reset a unit that is not loaded or not failed; either
+    # way there is nothing to reset, and the following start reports real errors.
+    run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"], check=False)
 
 
 def extend_admission():
@@ -86,8 +97,12 @@ def extend_admission():
 def handover(release, *, rollback=False, on_signal=None):
     previous = read(state_dir() / "status.json", {})
     before = service()
+    if not rollback and not controller_running(before):
+        # A stopped controller stays stopped; it runs the new release when
+        # an operator starts it.
+        return None
     if rollback:
-        run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+        reset_failed()
     pid = before.get("MainPID", "0")
     if pid != "0":
         modern = (not rollback and previous.get("live_update_protocol") == 1
@@ -108,8 +123,10 @@ def handover(release, *, rollback=False, on_signal=None):
             run(["systemctl", "--user", "kill", "--kill-whom=main",
                  "--signal=" + ("SIGHUP" if modern else "SIGKILL"), "tauceti-fleet.service"])
     else:
+        # A rollback, or a controller in systemd's restart cycle: a stopped
+        # controller returned above.
         if not rollback:
-            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+            reset_failed()
         run(["systemctl", "--user", "start", "tauceti-fleet.service"])
     if on_signal:
         on_signal()
@@ -126,19 +143,31 @@ def handover(release, *, rollback=False, on_signal=None):
         if running == "0":
             # HUP before Python installs its handler is a clean systemd exit;
             # a crash loop can also exhaust the service's automatic retries.
-            run(["systemctl", "--user", "reset-failed", "tauceti-fleet.service"])
+            reset_failed()
             run(["systemctl", "--user", "start", "tauceti-fleet.service"])
         extend_admission()
         time.sleep(1)
     raise FleetError("Controller did not publish a healthy status after live handover")
 
 
-def install(release, *, expected_machine_id):
-    """Runs from the staged release, including when the installed CLI is old."""
+def install(release, *, expected_machine_id, expected_revision=False):
+    """Runs from the staged release, including when the installed CLI is old.
+
+    expected_revision is the host revision the operator checked ancestry
+    against (None for a host without one); False skips the comparison.
+    """
     with locked(data_dir() / "update.lock"), locked(state_dir() / "worker-runtime-upgrade.lock"):
         config = host_config()
         if config["machine_id"] != expected_machine_id:
             raise FleetError("Host identity differs from inventory; refusing live update")
+        if expected_revision is not False:
+            recorded = read(data_dir() / "release.json", {})
+            if not isinstance(recorded, dict) or recorded.get("revision") != expected_revision:
+                raise FleetError("Host release changed after the ancestry check; inspect status and repeat the update")
+        try:
+            capacity.controller_config(config)
+        except (FleetError, OSError, KeyError, ValueError) as exc:
+            raise FleetError(f"Host configuration is invalid for the staged release ({exc}); previous release left running") from None
         release = Path(release).resolve()
         metadata = read(release / "release.json", {})
         current = data_dir() / "current"
@@ -160,9 +189,13 @@ def install(release, *, expected_machine_id):
         revision = latest_worker_revision() if config["workers_enabled"] or old_worker else None
         worker = stage_worker(revision) if revision else None
         status = read(state_dir() / "status.json", {})
+        worker_current = not worker or (worker_link.resolve() == (worker / "bin/tauceti").resolve()
+                                         and (worker_metadata or {}).get("revision") == revision)
+        if previous == release and worker_current and not controller_running(controller):
+            return dict(installed=True, release=release.name, worker_revision=revision, unchanged=True,
+                        controller="stopped")
         if (previous == release and status.get("controller_release") == str(release)
-                and (not worker or (worker_link.resolve() == (worker / "bin/tauceti").resolve()
-                                    and (worker_metadata or {}).get("revision") == revision))
+                and worker_current
                 and not status.get("error") and status.get("observed_at", 0) > time.time() - 15
                 and controller.get("MainPID", "0") != "0"
                 and str(status.get("controller_pid")) == controller.get("MainPID")):
@@ -186,6 +219,9 @@ def install(release, *, expected_machine_id):
             launcher = "import os,sys; sys.path.insert(0,os.path.realpath(" + repr(str(current)) + ")); from tauceti_fleet.cli import main; raise SystemExit(main())"
             python = getattr(sys, "_base_executable", sys.executable)
             write_binary(binary, ("#!/bin/sh\nexec " + shlex.quote(python) + " -c " + shlex.quote(launcher) + ' "$@"\n').encode())
+            # handover() checks the controller after the switch: one started
+            # before it runs the old release and is handed over, one started
+            # later runs this release, and a stopped one stays stopped.
             result = handover(release, on_signal=did_signal)
         except BaseException as exc:
             symlink(current, previous)
@@ -211,6 +247,9 @@ def install(release, *, expected_machine_id):
             if not signalled:
                 raise FleetError("Live update failed before handover; previous release restored, controller left running") from exc
             raise FleetError("Live update failed; previous release restored and controller recovered") from exc
+        if result is None:
+            return dict(installed=True, release=release.name, controller="stopped", worker_revision=revision,
+                        worker_runtime_scope="future manager starts", image="preserved")
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
                     worker_revision=revision,
                     active_processes_preserved=True,
