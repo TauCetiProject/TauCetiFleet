@@ -20,8 +20,21 @@ def guest_shape(config, caps=None):
         from .capabilities import resources
 
         caps = resources()
-    return dict(vcpus=min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"]))),
-                memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
+    vcpus = min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"])))
+    staging_memory = staging_memory_gib(config)
+    if config.get("ci_staging_reserved") and staging_memory is not None:
+        # A reserved staging guest's RAM is set explicitly, which reduces how far
+        # it and the other CI on the host can overcommit the host between them.
+        return dict(vcpus=vcpus, memory_gib=staging_memory)
+    return dict(vcpus=vcpus, memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
+
+
+def staging_memory_gib(config):
+    """Virtual RAM of reserved staging guests; None exposes the shared CI ceiling."""
+    value = config.get("ci_staging_memory_gib")
+    if value is not None and (type(value) is not int or not 1 <= value <= 4096):
+        raise FleetError("ci_staging_memory_gib must be an integer between 1 and 4096")
+    return value
 
 
 def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -131,6 +144,7 @@ def controller_config(config):
     kinds(config)
     if config.get("ci_memory_budget_gib") is not None:
         memory_budget_gib(config)
+    staging_memory_gib(config)
     if config["ci_enabled"]:
         protected_slots(config)
         if config.get("ci_broker_url"):
@@ -154,7 +168,9 @@ def for_slot(config, index):
         return dict(config, ci_slot=index, ci_kinds=[protected["kind"]],
                     ci_slot_runner_group_id=protected["runner_group_id"])
     reserved, _ = reservation(config)
-    return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
+    if index < reserved:
+        return dict(config, ci_slot=index, ci_kinds=["staging"], ci_staging_reserved=True)
+    return dict(config, ci_slot=index, ci_kinds=kinds(config), ci_staging_reserved=False)
 
 
 def broker_slot_group(index, value, policy):

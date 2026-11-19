@@ -62,6 +62,8 @@ def parser():
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
+    reserve.add_argument("--memory-gib", type=int,
+                         help="GiB of virtual RAM for future reserved staging guests (0: the shared CI ceiling)")
     reserve.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change worker capacity or self-tested prompting without interrupting active work")
     workers.add_argument("host")
@@ -274,6 +276,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["worker_env"] = changes
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+                if args.memory_gib is not None:
+                    payload.update(memory_gib=args.memory_gib)
             if args.command == "schedule":
                 slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
                 if (args.clear and slots) or (args.timezone and not slots):
@@ -419,7 +423,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
                     if value.get("ci_staging_slots"):
-                        print(f"Reserved for staging: {value['ci_staging_slots']} slots")
+                        print(f"Reserved for staging: {value['ci_staging_slots']} slots"
+                              + (f", {value['ci_staging_memory_gib']} GiB RAM each" if value.get("ci_staging_memory_gib") else ""))
                     if value.get("ci_staging_reservation_error"):
                         print("Staging reservation invalid: " + value["ci_staging_reservation_error"])
                     memory = status.get("worker_memory")
