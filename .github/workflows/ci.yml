@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: TauCetiProject/TauCetiWorker
-          ref: main
+          ref: 205da3359574ee5b656aed11ebed916c57e1b164
           path: worker-contract
       - uses: actions/setup-python@v5
         with:
