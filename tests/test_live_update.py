@@ -432,6 +432,73 @@ class LiveUpdate(unittest.TestCase):
         self.assertIn("--signal=SIGHUP", calls[0])
         self.assertEqual([v[2] for v in calls[1:]], ["reset-failed", "start"])
 
+    def test_stopped_controller_gets_the_release_and_stays_stopped(self):
+        staged = store.data_dir() / "worker-runtimes" / self.revision
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1)
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        with (patch.object(update, "service", return_value=stopped),
+              patch.object(update, "stage_worker", return_value=staged),
+              patch.object(update, "run", side_effect=command)):
+            result = self.install()
+            self.assertEqual(calls, [])
+            self.assertEqual(result["controller"], "stopped")
+            self.assertNotIn("active_processes_preserved", result)
+            self.assertEqual((store.data_dir() / "current").resolve(), self.release.resolve())
+            self.assertEqual((store.data_dir() / "bin/tauceti").readlink(), staged / "bin/tauceti")
+            self.assertIn("os.path.realpath", self.binary.read_text())
+            (staged / "bin").mkdir(parents=True)
+            (staged / "bin/tauceti").write_text("new worker")
+            again = self.install()
+        self.assertTrue(again["unchanged"])
+        self.assertEqual(again["controller"], "stopped")
+        self.assertEqual(calls, [])
+
+    def test_failed_controller_is_not_restarted(self):
+        failed = dict(MainPID="0", Restart="on-failure", ActiveState="failed")
+        with (patch.object(update, "service", return_value=failed),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "run") as command):
+            self.assertEqual(self.install()["controller"], "stopped")
+        command.assert_not_called()
+
+    def test_controller_stopped_during_the_update_is_not_restarted(self):
+        active = dict(MainPID="42", Restart="on-failure", ActiveState="active")
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        with (patch.object(update, "service", side_effect=[active, stopped]),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "run") as command):
+            self.assertEqual(self.install()["controller"], "stopped")
+        command.assert_not_called()
+
+    def test_controller_started_during_the_update_is_handed_over(self):
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        started = dict(MainPID="42", Restart="on-failure", ActiveState="active")
+        with (patch.object(update, "service", side_effect=[stopped, started]),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "handover", return_value=dict(controller_release=str(self.release))) as handover):
+            result = self.install()
+        handover.assert_called_once()
+        self.assertTrue(result["active_processes_preserved"])
+
+    def test_restarting_controller_starts_even_when_reset_failed_is_refused(self):
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if "reset-failed" in argv:
+                self.assertFalse(kwargs.get("check", True))
+                return subprocess.CompletedProcess(argv, 1)
+            store.atomic(store.state_dir() / "status.json", dict(
+                observed_at=time.time() + 1, controller_release=str(self.release), controller_pid=43))
+            return subprocess.CompletedProcess(argv, 0)
+        restarting = dict(MainPID="0", Restart="on-failure", ActiveState="activating")
+        with patch.object(update, "service", side_effect=[restarting, dict(MainPID="43")]), \
+                patch.object(update, "run", side_effect=command):
+            update.handover(self.release)
+        self.assertEqual([v[2] for v in calls], ["reset-failed", "start"])
+
     def test_rollback_forces_kill_even_with_stale_modern_protocol_and_confirms_legacy(self):
         store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=1, controller_pid=42))
         calls = []
