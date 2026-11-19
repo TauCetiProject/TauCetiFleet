@@ -56,12 +56,22 @@ export class GitHub {
   async request(path, {kind='read',method='GET',data}={}) {
     return this.raw(path, await this.token(kind),method,data);
   }
-  // Organization-wide, so special-group runners appear too. Callers filter to
-  // the host's own runners.
+  // Runners of every group the broker registers in (3, 6 and 7), each tagged
+  // with its group. Runners in other groups are never observed or removed.
   async runners() {
+    const found=[];
+    for (const group of Object.keys(CHECKS).map(Number)) {
+      for (const runner of await this.groupRunners(group)) {
+        if (found.some(r=>r.id===runner.id)) throw new InventoryError();
+        found.push({...runner,runner_group_id:group});
+      }
+    }
+    return found;
+  }
+  async groupRunners(group) {
     const found=[],ids=new Set();let total;
     for(let page=1;page<=20;page++) {
-      const value=await this.request(`orgs/TauCetiProject/actions/runners?per_page=100&page=${page}`,{kind:'runners'});
+      const value=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}/runners?per_page=100&page=${page}`,{kind:'runners'});
       if(!Array.isArray(value.runners) || !Number.isInteger(value.total_count) || value.total_count<0 ||
          total!==undefined && total!==value.total_count)throw new InventoryError();
       for (const runner of value.runners) {

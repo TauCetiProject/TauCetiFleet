@@ -66,8 +66,10 @@ before(async()=>{
         const names=groupRepositories[special[1]];
         return respond(special[2]?{total_count:names.length,repositories:names.map(full_name=>({full_name}))}:groups[special[1]]);
       }
-      if (url.pathname==='/orgs/TauCetiProject/actions/runners') {
-        const all=[...runners.values()],page=Number(url.searchParams.get('page') || 1);
+      const listing=url.pathname.match(/^\/orgs\/TauCetiProject\/actions\/runner-groups\/(\d+)\/runners$/);
+      if (listing) {
+        assert.ok(['3','6','7'].includes(listing[1]));
+        const all=[...runners.values()].filter(r=>(r.runner_group_id ?? 3)===Number(listing[1])),page=Number(url.searchParams.get('page') || 1);
         return respond({total_count:all.length,runners:all.slice((page-1)*100,page*100)});
       }
       if (url.pathname.endsWith('/generate-jitconfig')) {
@@ -463,7 +465,10 @@ test('special classes register in their own groups, appear in inventory and can 
   assert.deepEqual(Object.fromEntries(listed.slots.map(s=>[s.slot,s.runner_group_id])),{0:3,2:3,7:6,11:7});
   assert.equal((await hostRequest(id,token,'/v1/runners/'+results[7].runner_id,'DELETE')).status,200);
   assert.ok(!runners.has(results[7].runner_id));
-  // Suspension retires idle special runners like any other.
+  // Suspension retires idle special runners like any other, but never touches
+  // groups the broker does not register in, even with this machine's label.
+  const foreign={id:99001,name:prefix+'9'.repeat(16),status:'offline',busy:false,runner_group_id:4,labels:[{name:'fleet-'+id}]};
+  runners.set(foreign.id,foreign);
   runners.get(results[11].runner_id).busy=true;
   const suspended=await (await adminRequest('/admin/hosts/'+id+'/suspend','POST')).json();
   assert.deepEqual(suspended.active_runners,[results[11].runner_id]);
@@ -471,6 +476,7 @@ test('special classes register in their own groups, appear in inventory and can 
   runners.get(results[11].runner_id).busy=false;
   assert.equal((await adminRequest('/admin/hosts/'+id+'/suspend','POST')).status,200);
   assert.ok(!runners.has(results[11].runner_id));
+  assert.ok(runners.has(foreign.id));runners.delete(foreign.id);
   assert.equal((await adminRequest('/admin/hosts/'+id+'/resume','POST')).status,200);
 });
 test('a build-only host cannot register special runners',async()=>{
@@ -536,4 +542,15 @@ test('an ambiguous special registration records its group and recovery rechecks 
   groupRepositories[7]=['TauCetiProject/TauCeti'];
   assert.equal((await adminRequest('/admin/hosts/'+id+'/reconcile','POST',{slot:11})).status,200);
   assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name,slot:11,kinds:['pr-status']})).status,200);
+});
+test('group 3 drift blocks build registrations but not the special-group mapping or special registrations',async()=>{
+  const id='8e'.repeat(16),token='u'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await enroll(id,token,'group3-drift',{kinds:specialKinds});
+  trustedPolicy=false;
+  try {
+    assert.deepEqual(await (await hostRequest(id,token,'/v1/groups')).json(),{groups:{'queue-control':6,'pr-status':7},kinds:specialKinds});
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'1'.repeat(16),slot:2,kinds:['pr']})).status,503);
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'2'.repeat(16),slot:7,kinds:['queue-control']})).status,200);
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'3'.repeat(16),slot:11,kinds:['pr-status']})).status,200);
+  } finally { trustedPolicy=true; }
 });

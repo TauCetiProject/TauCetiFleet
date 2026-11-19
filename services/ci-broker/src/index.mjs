@@ -262,6 +262,10 @@ export class FleetRegistry extends DurableObject {
       // Hosts compare their local special-slot map with these broker-chosen groups.
       if (url.pathname==='/v1/policy' && req.method==='GET')
         return json({...await this.github.policy(),groups:SPECIAL_GROUPS,...capacity(host)});
+      // The same mapping without the group 3 check, so group 3 drift cannot stop
+      // special slots; registration still checks the target group freshly.
+      if (url.pathname==='/v1/groups' && req.method==='GET')
+        return json({groups:SPECIAL_GROUPS,kinds:capacity(host).kinds});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
         const owned=Object.values(slots(host)).filter(s=>s.runner_id);
         const found=owned.length?await this.github.runners():[];

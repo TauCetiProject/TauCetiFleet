@@ -63,11 +63,17 @@ test('policy is cached per group, and unknown groups are refused without a reque
   for (const group of [1,4,5,'6']) await assert.rejects(github.policy({group,fresh:true}),PolicyError);
   assert.equal(calls.length,4);
 });
-test('inventory lists organization runners, including special groups',async()=>{
+test('inventory lists the broker groups and tags each runner with its group',async()=>{
   const github=new GitHub({});const paths=[];
-  github.request=async path=>{paths.push(path);return {total_count:1,runners:[{id:1,name:'special'}]};};
-  assert.deepEqual(await github.runners(),[{id:1,name:'special'}]);
-  assert.deepEqual(paths,['orgs/TauCetiProject/actions/runners?per_page=100&page=1']);
+  github.request=async path=>{
+    paths.push(path);
+    const group=Number(path.match(/runner-groups\/(\d+)\/runners/)[1]);
+    return {total_count:1,runners:[{id:group*10,name:'runner-'+group}]};
+  };
+  assert.deepEqual(await github.runners(),[3,6,7].map(g=>({id:g*10,name:'runner-'+g,runner_group_id:g})));
+  assert.deepEqual(paths,[3,6,7].map(g=>`orgs/TauCetiProject/actions/runner-groups/${g}/runners?per_page=100&page=1`));
+  github.request=async()=>({total_count:1,runners:[{id:1,name:'same'}]});
+  await assert.rejects(github.runners(),/Incomplete runner inventory/);
 });
 test('recovery rechecks the group recorded with the reservation, or group 3 for older ones',async()=>{
   for (const [pending,expected] of [[{group:6},6],[{group:7},7],[{},3]]) {
@@ -76,9 +82,13 @@ test('recovery rechecks the group recorded with the reservation, or group 3 for 
     const records=new Map([['host:'+host.machine_id,host]]);
     const storage={get:async k=>records.get(k),put:async(k,v)=>records.set(k,v),list:async()=>records,
       getAlarm:async()=>null,setAlarm:async()=>{},deleteAlarm:async()=>{},transaction:async f=>f(storage)};
-    const groups=[];
-    const github={policy:async({group,fresh})=>{assert.equal(fresh,true);groups.push(group);},runners:async()=>[],request:async()=>null};
-    assert.deepEqual(await new RegistrationRecovery(storage,github).reconcile(host,0),{reconciled:true,removed:[]});
-    assert.deepEqual(groups,[expected]);
+    const groups=[],deleted=[];
+    // Same-named offline runners in other groups are not this reservation's registration.
+    const inventory=[3,6,7].map(g=>({id:g,name,status:'offline',busy:false,runner_group_id:g}));
+    const github={policy:async({group,fresh})=>{assert.equal(fresh,true);groups.push(group);},runners:async()=>inventory,
+      request:async(path,{method}={})=>{const id=Number(path.split('/').at(-1));
+        if (method==='DELETE') { deleted.push(id); return null; } return inventory.find(r=>r.id===id);}};
+    assert.deepEqual(await new RegistrationRecovery(storage,github).reconcile(host,0),{reconciled:true,removed:[expected]});
+    assert.deepEqual(groups,[expected]);assert.deepEqual(deleted,[expected]);
   }
 });

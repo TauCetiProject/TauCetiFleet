@@ -149,7 +149,12 @@ def jit_config(config, name):
         from .capacity import kinds
 
         if config.get("ci_slot_runner_group_id") is not None:
-            runner_policy(config)  # Refuse a special slot whose group differs from the broker's.
+            # Refuse a special slot whose kind or group differs from the broker's.
+            # /v1/groups needs no group 3 check, so group 3 drift cannot stop it.
+            from .capacity import broker_slot_group
+
+            broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                              runner_group_id=config["ci_slot_runner_group_id"]), broker_request(config, "/v1/groups"))
         value = broker_request(config, "/v1/runners", method="POST",
                                data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
         return value["runner_id"], value["encoded_jit_config"]

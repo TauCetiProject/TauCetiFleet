@@ -211,6 +211,7 @@ class BrokerSpecialSlots(unittest.TestCase):
                                                "11": dict(kind="pr-status", runner_group_id=7)})
         self.policy = dict(runner_group_id=3, max_jobs=4096, groups={"queue-control": 6, "pr-status": 7},
                            kinds=["pr", "staging", "queue-control", "pr-status"])
+        self.groups = dict(groups=self.policy["groups"], kinds=self.policy["kinds"])
 
     def test_enrolled_host_may_reserve_special_slots(self):
         self.assertEqual(capacity.protected_slots(self.config),
@@ -224,7 +225,7 @@ class BrokerSpecialSlots(unittest.TestCase):
             with patch.object(github, "request", side_effect=AssertionError("No GitHub credential on this host")), \
                     patch.object(broker, "request") as call:
                 call.side_effect = lambda config, path, **kw: (
-                    self.policy if path == "/v1/policy" else dict(runner_id=9, encoded_jit_config="jit"))
+                    self.groups if path == "/v1/groups" else dict(runner_id=9, encoded_jit_config="jit"))
                 self.assertEqual(github.jit_config(slot, "fleet-" + "7" * 12 + "-" + "a" * 16), (9, "jit"))
             post = call.call_args
             self.assertEqual(post.args[1], "/v1/runners")
@@ -232,7 +233,7 @@ class BrokerSpecialSlots(unittest.TestCase):
             self.assertEqual(post.kwargs["data"]["kinds"], [kind] if kind else ["pr", "staging"])
             self.assertNotIn("runner_group_id", post.kwargs["data"])
             # Only special slots compare their group with the broker before registering.
-            self.assertEqual([c.args[1] for c in call.call_args_list][:-1], ["/v1/policy"] if kind else [])
+            self.assertEqual([c.args[1] for c in call.call_args_list][:-1], ["/v1/groups"] if kind else [])
 
     def test_a_disallowed_kind_or_different_group_refuses_the_slot(self):
         for policy in (dict(self.policy, kinds=["pr", "staging", "pr-status"]),
@@ -244,12 +245,23 @@ class BrokerSpecialSlots(unittest.TestCase):
             with patch.object(broker, "request", return_value=policy) as call:
                 with self.assertRaisesRegex(store.FleetError, "slot 7"):
                     github.jit_config(slot, "fleet-" + "7" * 12 + "-" + "b" * 16)
-            self.assertEqual([c.args[1] for c in call.call_args_list], ["/v1/policy"])
+            self.assertEqual([c.args[1] for c in call.call_args_list], ["/v1/groups"])
         # The build slots and the pr-status slot still start under a queue-control mismatch.
         mismatch = dict(self.policy, groups={"queue-control": 8, "pr-status": 7})
         with patch.object(broker, "request", return_value=mismatch):
             self.assertEqual(github.runner_policy(capacity.for_slot(self.config, 11)), 7)
             self.assertEqual(github.runner_policy(capacity.for_slot(self.config, 2)), 3)
+
+    def test_group_3_drift_does_not_stop_special_slots(self):
+        def answer(config, path, **kw):
+            if path == "/v1/policy":
+                raise store.FleetError("CI broker returned HTTP 503")
+            return self.groups if path == "/v1/groups" else dict(runner_id=9, encoded_jit_config="jit")
+
+        for index in (7, 11):
+            with patch.object(broker, "request", side_effect=answer):
+                self.assertEqual(github.jit_config(capacity.for_slot(self.config, index), "fleet-" + "7" * 12 + "-" + "c" * 16),
+                                 (9, "jit"))
 
     def test_direct_credential_hosts_keep_their_own_group_checks(self):
         config = {k: v for k, v in self.config.items() if k != "ci_broker_url"}
