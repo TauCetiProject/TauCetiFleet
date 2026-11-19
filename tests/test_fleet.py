@@ -533,7 +533,11 @@ class Isolated(unittest.TestCase):
                 for tail in (["work", "--worker-id", w, "--clear-halt"], ["workers", "--config", config, "restart", w])
             ]
 
-        with patch.object(host, "run", side_effect=fake), patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"):
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
+            patch.object(host, "manager_process", return_value=None),
+        ):
             with self.assertRaisesRegex(store.FleetError, "w2 is not halted"):
                 host.rpc(dict(action="clear-halt", worker="w2"))
             self.assertEqual(calls, [])
@@ -569,7 +573,7 @@ class Isolated(unittest.TestCase):
             calls.append([str(a) for a in args])
             return subprocess.CompletedProcess(args, 0)
 
-        with patch.object(host, "run", side_effect=fake):
+        with patch.object(host, "run", side_effect=fake), patch.object(host, "manager_process", return_value=None):
             host.rpc(dict(action="clear-halt"))
         config = str(store.config_dir() / "workers.toml")
         self.assertEqual(calls[1:], [
@@ -600,6 +604,17 @@ class Isolated(unittest.TestCase):
             host.rpc(dict(action="clear-halt"))
         self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
         self.assertIn(["/runtime/old/bin/tauceti", "work", "--worker-id", "w1", "--clear-halt"], calls)
+        del calls[:]
+        # The live process outranks a record left by an earlier manager.
+        store.atomic(store.state_dir() / "worker-manager.json",
+                     dict(binary="/runtime/stale/bin/tauceti", github_token_sha256=host.token_digest("token-z")))
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "manager_process", return_value=(argv, dict(GH_TOKEN="token-a"))),
+        ):
+            host.rpc(dict(action="clear-halt"))
+        self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
+        (store.state_dir() / "worker-manager.json").unlink()
         del calls[:]
         with (
             patch.object(host, "run", side_effect=fake),
@@ -642,7 +657,7 @@ class Isolated(unittest.TestCase):
             calls.append([str(a) for a in args])
             return subprocess.CompletedProcess(args, 2 if args[-1] == "--help" else 0)
 
-        with patch.object(host, "run", side_effect=fake):
+        with patch.object(host, "run", side_effect=fake), patch.object(host, "manager_process", return_value=None):
             with self.assertRaisesRegex(store.FleetError, "differs from the token the worker manager started with.*"
                                         "systemctl --user restart.*Workers in their own scopes keep running"):
                 host.rpc(dict(action="clear-halt"))
@@ -660,7 +675,10 @@ class Isolated(unittest.TestCase):
         with patch.object(host, "executable", return_value="/runtime/old/bin/tauceti"), patch.object(host.os, "execv"):
             host.run_workers()
         secret.write_text("token-b")
-        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0)):
+        with (
+            patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0)),
+            patch.object(host, "manager_process", return_value=None),
+        ):
             with self.assertRaisesRegex(store.FleetError, "which w1 would restart with"):
                 host.rpc(dict(action="clear-halt"))
             self.assertEqual(host.rpc(dict(action="clear-halt", worker="w2"))["cleared"], ["w2"])
