@@ -20,6 +20,7 @@ from . import (
     github,
     native_runner,
     slot_groups,
+    targets,
     vm,
     worker_view,
 )
@@ -357,7 +358,7 @@ def worker_fields(config):
     )
     if config.get("self_tested"):
         fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets", "sandbox", "pace"):
         if config.get(key):
             fields[key] = config[key]
     if config.get("worker_env"):
@@ -366,9 +367,9 @@ def worker_fields(config):
 
 
 def toml_value(value):
-    if isinstance(value, dict):
-        return "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items()) + " }"
-    return str(value).lower() if isinstance(value, bool) else json.dumps(value)
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def worker_plan(config):
@@ -429,7 +430,7 @@ def written_workers():
         remember_manifest(signature, workers, share=False)
     else:
         path = config_dir() / "workers.toml"
-        parsed = tomllib.loads(path.read_text()).get("workers", []) if signature[1:] else []
+        parsed = tomllib.loads(path.read_text(encoding="utf-8")).get("workers", []) if signature[1:] else []
         remember_manifest(signature, parsed, share=manifest_signature() == signature)
     return _manifest["workers"]
 
@@ -463,6 +464,8 @@ def write_worker_config(config):
     settings = json.dumps(config, sort_keys=True, default=str), preserve
     if _written["key"] == (*settings, manifest_signature()):
         return list(_written["ids"])
+    if config.get("roadmap_targets"):
+        targets.require_support()
     definitions, ids = worker_plan(config)
     before = written_roles()
     changed = {wid for wid, fields, _ in definitions
@@ -488,12 +491,15 @@ def write_worker_config(config):
         if wid in routed:
             slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in slot.items():
-            if value is not None:
-                lines.append(key + " = " + toml_value(value))
+            if isinstance(value, dict):
+                pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
+                lines.append(key + " = { " + pairs + " }")
+            elif value is not None:
+                lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
-    if not (path.exists() and path.read_text() == "\n".join(lines) + "\n"):
+    if not (path.exists() and path.read_text(encoding="utf-8") == "\n".join(lines) + "\n"):
         temporary = path.with_suffix(".tmp")
-        temporary.write_text("\n".join(lines) + "\n")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     signature = manifest_signature()
@@ -600,6 +606,27 @@ def start_workers():
     run(["systemctl", "--user", "start", target.name])
 
 
+def manager_ping():
+    """Read capabilities from the live manager, rather than its installed replacement."""
+    path = state_dir() / "worker-runtime/manager.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(path))
+            client.sendall(b'{"action":"ping"}\n')
+            reply = json.loads(client.makefile("rb").readline(65537))
+            return reply if isinstance(reply, dict) and reply.get("ok") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def manager_environment():
+    return dict(
+        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
+        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+    )
+
+
 def run_workers():
     config = host_config()
     os.environ["PATH"] = str(data_dir() / "bin") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
@@ -607,8 +634,7 @@ def run_workers():
         TAUCETI_FLEET_ADMISSION_FILE=str(state_dir() / "admission.json"),
         TAUCETI_FLEET_MACHINE_ID=config["machine_id"],
         TAUCETI_FLEET_EVENTS=str(state_dir() / "worker-events.jsonl"),
-        TAUCETI_WORKERS_STATE_DIR=str(state_dir() / "workers"),
-        TAUCETI_RUNTIME_DIR=str(state_dir() / "worker-runtime"),
+        **manager_environment(),
         TAUCETI_DATA_HOME=str(data_dir() / "worker-data"),
         TAUCETI_WORKER_SLICE="tauceti-fleet-workers.slice",
         # The manager runs at the user manager's floor (100). Each worker
@@ -633,6 +659,19 @@ def run_workers():
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
+
+
+def manager_process():
+    """The running manager's argv, or None when its service process cannot be identified."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    if not pid.isdigit() or pid == "0":
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return [os.fsdecode(a) for a in argv if a], {}
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -758,16 +797,8 @@ def require_worker_support(feature, description):
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
         return  # A future manager will use the installed, supporting runtime.
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(5)
-            client.connect(str(path))
-            client.sendall(b'{"action":"ping"}\n')
-            reply = client.makefile("rb").readline(65537)
-        if json.loads(reply).get(feature) == 1:
-            return
-    except (OSError, ValueError):
-        pass
+    if manager_ping().get(feature) == 1:
+        return
     raise FleetError(f"The running worker manager does not support {description}; hand over the manager to the installed runtime without stopping worker scopes")
 
 
@@ -844,6 +875,11 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
+    current = host_config()
+    spec_changes = local is not None or native is not None or environment is not None
+    growing = maximum is not None and maximum > current["max_workers"]
+    if current.get("roadmap_targets") and (spec_changes or growing):
+        targets.require_support()  # Admission-only decreases need no definition change.
     result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:
@@ -871,6 +907,8 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("roadmap_target"):
+                status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
     return values
 
@@ -1348,6 +1386,7 @@ def daemon():
                         active_worker_limit=len(admitted),
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_schedule=window,
@@ -1541,6 +1580,8 @@ def rpc(payload):
         return focus.configure(payload)
     if action == "slots":
         return configure_slots(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_policy(payload)
     if action == "schedule":
