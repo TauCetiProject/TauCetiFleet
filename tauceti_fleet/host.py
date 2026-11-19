@@ -22,6 +22,7 @@ from . import (
     focus,
     github,
     native_runner,
+    targets,
     vm,
     worker_view,
 )
@@ -367,7 +368,7 @@ def worker_fields(config):
     )
     if config.get("self_tested"):
         fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets", "sandbox", "pace"):
         if config.get(key):
             fields[key] = config[key]
     if config.get("worker_env"):
@@ -383,9 +384,9 @@ def worker_fields(config):
 
 
 def toml_value(value):
-    if isinstance(value, dict):
-        return "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items()) + " }"
-    return str(value).lower() if isinstance(value, bool) else json.dumps(value)
+    # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
+    # takes them literally but requires DEL escaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def worker_config(config):
@@ -393,13 +394,15 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "worker_env"):
+        for field in ("self_tested", "forgejo_workers", "worker_env", "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
 
 
 def _worker_config(config):
+    if config.get("roadmap_targets"):
+        targets.require_support()
     # Existing worker definitions and the operator's manager are never rewritten.
     fields = worker_fields(config)
     lines = ["version = 1"]
@@ -410,7 +413,7 @@ def _worker_config(config):
 
     prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    old_count = len(tomllib.loads(prior.read_text(encoding="utf-8")).get("workers", [])) if preserve and prior.exists() else 0
     count = max(1, config["max_workers"], old_count)
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
@@ -420,11 +423,14 @@ def _worker_config(config):
         if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in slot.items():
-            if value is not None:
-                lines.append(key + " = " + toml_value(value))
+            if isinstance(value, dict):
+                pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
+                lines.append(key + " = { " + pairs + " }")
+            elif value is not None:
+                lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     return ids
@@ -450,6 +456,20 @@ def start_workers():
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+
+
+def manager_ping():
+    """Read capabilities from the live manager, rather than its installed replacement."""
+    path = state_dir() / "worker-runtime/manager.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(path))
+            client.sendall(b'{"action":"ping"}\n')
+            reply = json.loads(client.makefile("rb").readline(65537))
+            return reply if isinstance(reply, dict) and reply.get("ok") else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def manager_environment():
@@ -500,31 +520,29 @@ def token_digest(token):
 
 
 def manager_process():
-    """The running worker manager's argv and environment, or None when /proc cannot show them."""
-    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False)
+    """The running manager's argv and environment, or None when its service process cannot be identified."""
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
     pid = result.stdout.strip() if result.returncode == 0 else ""
     if not pid.isdigit() or pid == "0":
         return None
     try:
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     except OSError:
         return None
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        environ = []
     return [os.fsdecode(a) for a in argv if a], dict(os.fsdecode(e).split("=", 1) for e in environ if b"=" in e)
 
 
 def running_manager():
-    """The runtime and token digest the running manager started with."""
+    """The runtime and token digest of the running manager, read from its process before its start record."""
     recorded = read(state_dir() / "worker-manager.json", {})
-    if recorded:
-        return recorded
-    # A manager started before the record existed: `run_workers` exec'd `<runtime>/bin/tauceti workers ...`.
-    process = manager_process()
-    if process is None:
-        return {}
-    argv, environ = process
+    argv, environ = manager_process() or ([], {})
     binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
-    return dict(binary=binary, github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else None)
+    return dict(binary=binary or recorded.get("binary"),
+                github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else recorded.get("github_token_sha256"))
 
 
 RESTART_MANAGER = (
@@ -722,16 +740,8 @@ def require_worker_support(feature, description):
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
         return  # A future manager will use the installed, supporting runtime.
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(5)
-            client.connect(str(path))
-            client.sendall(b'{"action":"ping"}\n')
-            reply = client.makefile("rb").readline(65537)
-        if json.loads(reply).get(feature) == 1:
-            return
-    except (OSError, ValueError):
-        pass
+    if manager_ping().get(feature) == 1:
+        return
     raise FleetError(f"The running worker manager does not support {description}; hand over the manager to the installed runtime without stopping worker scopes")
 
 
@@ -808,6 +818,11 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
+    current = host_config()
+    spec_changes = local is not None or native is not None or environment is not None
+    growing = maximum is not None and maximum > current["max_workers"]
+    if current.get("roadmap_targets") and (spec_changes or growing):
+        targets.require_support()  # Admission-only decreases need no definition change.
     result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:
@@ -839,6 +854,8 @@ def worker_statuses():
             if value.get("state") == "halted":
                 status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"),
                               halt_forge=halt_forge(value["halt_reason"])[0] if value.get("halt_reason") else None)
+            if value.get("roadmap_target"):
+                status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
     return values
 
@@ -1189,6 +1206,7 @@ def daemon():
         pool_error = None
         error = None
         ids = []
+        applied_targets = None
         last_results = 0
         last_attention = 0
         memory_paused = False
@@ -1244,8 +1262,9 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    if not ids or len(ids) < config["max_workers"]:
-                        ids = worker_config(config)
+                    listed = config.get("roadmap_targets")
+                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
+                        ids, applied_targets = worker_config(config), listed
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -1311,6 +1330,7 @@ def daemon():
                         active_worker_limit=target,
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
+                        roadmap_targets=targets.status(config, worker_statuses()),
                         scaling_reason=reason,
                         worker_admission=scaler.decision,
                         worker_schedule=window,
@@ -1506,6 +1526,8 @@ def rpc(payload):
         return focus.configure(payload)
     if action == "attention":
         return attention.host_action(payload)
+    if action == "targets":
+        return targets.configure(payload, worker_statuses())
     if action == "workers":
         return set_worker_policy(payload)
     if action == "schedule":
