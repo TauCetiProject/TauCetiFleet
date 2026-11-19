@@ -134,6 +134,45 @@ class Isolated(unittest.TestCase):
                 host.set_worker_policy(dict(forgejo_workers=1, maximum=3))
         self.assertEqual(store.host_config(), {**original, "forgejo_workers": 0})
 
+    def test_worker_env_survives_controller_rewrites(self):
+        import tomllib
+        original = store.update_host(max_workers=3, workers_enabled=True)
+        value = host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": "1", "OTHER": 'a "b"'}))
+        self.assertEqual(value["worker_env"], {"TAUCETI_ROUND_WORKTREES": "1", "OTHER": 'a "b"'})
+        # A controller rewrite from an older snapshot keeps the newer environment.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(specs), 3)
+        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        host.set_worker_policy(dict(worker_env={"OTHER": None}))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": None}))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertFalse(any("env" in s for s in specs))
+
+    def test_worker_env_rejects_unsafe_names_and_values(self):
+        original = store.update_host(max_workers=2, workers_enabled=True)
+        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097}):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(worker_env=env))
+            self.assertEqual(store.host_config(), original)
+
+    def test_worker_cli_passes_env_changes(self):
+        with (patch.object(remote, "inventory", return_value={"test": dict(target="target", machine_id="m")}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            out = io.StringIO()
+            with patch("sys.stdout", new=out):
+                self.assertEqual(main(["workers", "test", "--env", "A=1=2", "--unset-env", "B", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", worker_env={"A": "1=2", "B": None}))
+            self.assertEqual(list(json.loads(out.getvalue())), ["test"])
+            call.reset_mock()
+            with patch("sys.stderr", new=io.StringIO()):
+                self.assertNotEqual(main(["workers", "test", "--env", "NOEQUALS", "--json"]), 0)
+            call.assert_not_called()
+
     def test_forgejo_routing_validates_before_any_capacity_change(self):
         original = store.update_host(max_workers=6, workers_enabled=True)
         for count in (True, -1, 4097, "1", 7):
@@ -237,8 +276,7 @@ class Isolated(unittest.TestCase):
     def test_subscription_profile_transfers_no_api_key_and_writes_no_budget(self):
         import tomllib
 
-        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70",
-                     env={"TAUCETI_OVERLAP_BATCH_COMMITS": "80", "A": 'quoted "value"'})
+        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70")
         store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
         payload = remote.profile("subscription")
         self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
@@ -285,28 +323,16 @@ class Isolated(unittest.TestCase):
             dict(claude_billing="subscription", agent="auto", author_model="model"),
             dict(claude_billing="subscription", agent="auto", author_effort="high"),
             dict(sandbox="vm"),
-            dict(env=["A=1"]),
-            dict(env={"A": 1}),
-            dict(env={"A-B": "1"}),
-            dict(env={"A": "line\nbreak"}),
-            dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
-            dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
-            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
-            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
-                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
-            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
-              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
-            dict(env={"A": "x" * 16384}),
         ]
         with patch.object(host, "install_service"):
             for shape in rejected:
                 with self.assertRaises(store.FleetError, msg=shape):
                     host.configure(shape)
-            self.assertFalse({"agent", "claude_billing", "sandbox", "pace", "env"} & set(store.host_config()))
+            self.assertFalse({"agent", "claude_billing", "sandbox", "pace"} & set(store.host_config()))
             host.configure(dict(claude_billing="subscription", agent="codex", author_model="model"))
             store.update_host(workers_enabled=True)
             host.configure(dict(claude_billing="subscription", agent="codex"))
-            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(env={"A": "1"})):
+            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(sandbox="bubble")):
                 with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
                     host.configure(shape)
             store.update_host(workers_enabled=False)
@@ -552,11 +578,13 @@ class Isolated(unittest.TestCase):
     def test_release_archive_contains_only_code_and_manifest(self):
         import zipfile
 
-        with zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
+        revision = "a" * 40
+        with patch.object(remote, "source_revision", return_value=revision), \
+                zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
             self.assertIn("release.json", zipped.namelist())
             self.assertTrue(all(n.startswith("tauceti_fleet/") or n == "release.json" for n in zipped.namelist()))
             manifest = json.loads(zipped.read("release.json"))
-            self.assertEqual(manifest, {"version": 1})
+            self.assertEqual(manifest, {"version": 1, "revision": revision})
 
     def test_duplicate_hosts_cannot_double_count_reports(self):
         pr = dict(
