@@ -301,10 +301,11 @@ that slot as a second virtio disk with serial `tauceti-warm`. The disposable gue
 are otherwise unchanged. The trusted staging workflow decides what the disk holds:
 it keeps one batch's build tree for that batch's next attempt and reformats the disk
 for any other batch. No other slot sees the disk, and a slot deletes it when it next
-starts a guest without the staging reservation. Before each attach, `qemu-img check`
-runs: a corrupt disk is replaced by an empty one, and a disk that cannot be opened or
-created is left out, so the guest starts without it and the workflow takes its normal
-cold path.
+starts a guest without the staging reservation (before its free-space check). Before
+each attach, `qemu-img check` reads the disk's metadata: a corrupt disk is replaced by
+an empty one, and a disk that cannot be opened (for example one a QEMU still holds) or
+created is left alone, so the guest starts without it and the workflow takes its
+normal cold path.
 
 Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
 host they and the other CI guests together overcommit its RAM. `--memory-gib N`

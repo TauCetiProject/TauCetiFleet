@@ -328,3 +328,13 @@ class WarmStagingDisk(unittest.TestCase):
                  patch.object(vm, "executable", side_effect=lambda name: name):
                 self.assertEqual(vm.warm_disk(config), expected)
                 self.assertEqual(path.read_text(), content)
+        # A leftover that is still open somewhere stays; otherwise any other guest removes it,
+        # including a native guest on the former staging slot.
+        for code, attach, kept in ((1, True, True), (0, True, False), (0, False, False)):
+            path.write_text("old")
+            unreserved = dict(config, ci_staging_reserved=False) if attach else config
+            with self.subTest(code=code, attach=attach), \
+                 patch.object(vm, "run", return_value=SimpleNamespace(returncode=code, stdout="")), \
+                 patch.object(vm, "executable", side_effect=lambda name: name):
+                self.assertIsNone(vm.warm_disk(unreserved, attach=attach))
+                self.assertEqual(path.exists(), kept)

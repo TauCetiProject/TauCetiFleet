@@ -405,29 +405,26 @@ WARM_DISK = "warm.qcow2"
 WARM_SERIAL = "tauceti-warm"
 
 
-def warm_disk(config):
-    """The slot's persistent staging disk, or None (removing a leftover) for any other slot.
+def warm_disk(config, *, attach=True):
+    """The slot's persistent staging disk, or None (removing a leftover) for any other guest.
 
-    Called with the slot lock held and the slot's previous guest retired, so no QEMU
-    has the image open. Without the disk the guest takes its normal cold path, so no
-    failure here stops the slot.
+    Called with the slot lock held and the slot's previous guest retired. Without the
+    disk the guest takes its normal cold path, so no failure here stops the slot.
     """
     path = slot_file(config, WARM_DISK)
-    if not config.get("ci_staging_reserved"):
-        path.unlink(missing_ok=True)
-        return None
     try:
         if path.exists():
-            # 0 clean, 3 leaked clusters only; 2 is corruption, so start this batch afresh;
-            # 1 is an image QEMU could not open (for example still locked), which is left alone.
-            result = run([executable("qemu-img"), "check", "-q", path], timeout=300, check=False)
-            if result.returncode == 2:
-                print("Warm staging disk is corrupt; replacing it with an empty one", flush=True)
-                path.unlink()
-            elif result.returncode not in (0, 3):
-                print(f"Warm staging disk unusable (qemu-img check exited {result.returncode}); "
-                      "starting without it", flush=True)
+            # Metadata only, so this takes about a second. 0 is clean and 3 is leaked
+            # clusters only; 2 is corruption, so start afresh; 1 is an image that could not
+            # be opened (for example still locked by a QEMU that has not exited): leave it.
+            result = run([executable("qemu-img"), "check", "-q", path], timeout=60, check=False)
+            if result.returncode == 1:
+                print("Warm staging disk could not be opened; starting without it", flush=True)
                 return None
+            if result.returncode not in (0, 3) or not (attach and config.get("ci_staging_reserved")):
+                path.unlink()
+        if not (attach and config.get("ci_staging_reserved")):
+            return None
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = path.with_name(WARM_DISK + ".new")
@@ -486,6 +483,8 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
+    # Before the space check, so a former staging slot's disk is reclaimed first.
+    warm = warm_disk(config, attach=config.get("_ci_backend") != native_runner.RUNTIME)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
@@ -514,7 +513,6 @@ def _start(config):
         directory.mkdir(parents=True, mode=0o700)
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
-        warm = None if native else warm_disk(config)
         if native:
             runtime_fields = native_runner.stage(directory, jit)
         else:
