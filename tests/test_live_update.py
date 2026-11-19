@@ -248,6 +248,145 @@ class LiveUpdate(unittest.TestCase):
         stage.assert_not_called()
         self.assert_work_preserved()
 
+    def test_config_the_staged_controller_rejects_refuses_before_any_change(self):
+        store.update_host(ci_protected_slots={"0": dict(kind="unknown", runner_group_id=7)})
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker") as stage, patch.object(update, "handover") as handover:
+            with self.assertRaisesRegex(store.FleetError, "invalid for the staged release.*Protected slots"):
+                self.install()
+        stage.assert_not_called()
+        handover.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+        self.assertEqual(self.binary.read_text(), "old launcher")
+
+    def deploy_with(self, installed, shipped, order=None, **kwargs):
+        reply = io.StringIO(json.dumps(dict(installed=True)))
+        with patch.object(remote, "call"), \
+                patch.object(remote, "installed_revision", return_value=installed), \
+                patch.object(remote, "manifest", return_value=dict(version=1, revision=shipped)), \
+                patch.object(remote, "descends", return_value=order) as descends, \
+                patch.object(remote, "archive", return_value=b"release"), \
+                patch.object(remote, "ssh", return_value=subprocess.CompletedProcess([], 0, reply.getvalue(), "")) as ssh:
+            try:
+                return remote.deploy("server", live=True, expected_machine_id=self.config["machine_id"], **kwargs)
+            finally:
+                self.ssh, self.descends = ssh, descends
+
+    def test_update_refuses_a_release_that_does_not_descend_from_the_host(self):
+        with self.assertRaisesRegex(store.FleetError, "does not descend from the host's bbbbbbbbbbbb"):
+            self.deploy_with("b" * 40, "a" * 40, order=False)
+        self.descends.assert_called_once_with("b" * 40, "a" * 40)
+        self.ssh.assert_not_called()
+
+    def test_update_refuses_when_order_or_cli_revision_is_unknown(self):
+        with self.assertRaisesRegex(store.FleetError, "Cannot verify"):
+            self.deploy_with("b" * 40, "a" * 40, order=None)
+        self.ssh.assert_not_called()
+        with self.assertRaisesRegex(store.FleetError, "revision is unknown"):
+            self.deploy_with("b" * 40, None)
+        self.ssh.assert_not_called()
+
+    def test_update_ships_descendants_legacy_hosts_and_explicit_downgrades(self):
+        self.assertTrue(self.deploy_with("b" * 40, "a" * 40, order=True)["installed"])
+        self.ssh.assert_called_once()
+        self.assertTrue(self.deploy_with(None, None)["installed"])
+        self.descends.assert_not_called()
+        self.assertTrue(self.deploy_with("b" * 40, "a" * 40, order=False, allow_downgrade=True)["installed"])
+        self.descends.assert_not_called()
+        self.ssh.assert_called_once()
+
+    def test_update_downgrade_flag_reaches_deploy(self):
+        with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, \
+                patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(cli.main(["update", "local", "--allow-downgrade", "--json"]), 0)
+        self.assertTrue(deploy.call_args.kwargs["allow_downgrade"])
+
+    def test_installed_revision_reads_the_host_release_metadata(self):
+        self.assertIsNone(remote.installed_revision("local"))
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="c" * 40))
+        self.assertEqual(remote.installed_revision("local"), "c" * 40)
+
+    def test_release_records_clean_checkout_revision_and_ancestry(self):
+        checkout = self.home / "checkout"
+        (checkout / "tauceti_fleet").mkdir(parents=True)
+        git = ["git", "-C", str(checkout), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        def commit(message):
+            (checkout / "tauceti_fleet/module.py").write_text(message)
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", message], check=True)
+            return subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        store.atomic(checkout / "release.json", dict(version=1))
+        base = commit("base")
+        newer = commit("newer")
+        subprocess.run(git + ["checkout", "-q", "-b", "side", base], check=True)
+        side = commit("side")
+        with patch.object(remote, "__file__", str(checkout / "tauceti_fleet/remote.py")):
+            self.assertEqual(remote.manifest(), dict(version=1, revision=side))
+            self.assertTrue(remote.descends(base, newer))
+            self.assertFalse(remote.descends(newer, base))
+            self.assertFalse(remote.descends(newer, side))
+            (checkout / "tauceti_fleet/module.py").write_text("local edit")
+            self.assertEqual(remote.manifest(), dict(version=1))
+
+    def test_enabled_broker_credential_is_checked_before_any_change(self):
+        store.update_host(ci_broker_url="https://broker.example", ci_broker_token_file=str(self.home / "missing"))
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker") as stage:
+            with self.assertRaisesRegex(store.FleetError, "invalid for the staged release"):
+                self.install()
+            store.update_host(ci_broker_url="http://broker.example")
+            with self.assertRaisesRegex(store.FleetError, "HTTPS origin"):
+                self.install()
+        stage.assert_not_called()
+
+    def test_host_revision_is_rechecked_under_the_update_lock(self):
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="c" * 40))
+        with patch.object(update, "stage_worker") as stage:
+            with self.assertRaisesRegex(store.FleetError, "changed after the ancestry check"):
+                update.install(self.release, expected_machine_id=self.config["machine_id"], expected_revision="b" * 40)
+            with self.assertRaisesRegex(store.FleetError, "changed after the ancestry check"):
+                update.install(self.release, expected_machine_id=self.config["machine_id"], expected_revision=None)
+        stage.assert_not_called()
+        self.assertEqual((store.data_dir() / "current").resolve(), self.previous)
+
+    def test_checked_host_revision_is_sent_to_the_staged_installer(self):
+        self.deploy_with("b" * 40, "a" * 40, order=True)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" live " + self.config["machine_id"] + " " + "b" * 40))
+        self.deploy_with(None, "a" * 40)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" none"))
+        self.deploy_with("b" * 40, "a" * 40, allow_downgrade=True)
+        self.assertTrue(self.ssh.call_args.args[1].endswith(" live " + self.config["machine_id"]))
+
+    def test_corrupt_host_revision_metadata_does_not_disable_the_check(self):
+        (store.data_dir() / "release.json").write_text("{")
+        with self.assertRaises(store.FleetError):
+            remote.installed_revision("local")
+        store.atomic(store.data_dir() / "release.json", dict(version=1, revision="not-a-commit"))
+        with self.assertRaisesRegex(store.FleetError, "invalid Fleet revision"):
+            remote.installed_revision("local")
+
+    def test_shallow_negative_answer_falls_back_to_github(self):
+        checkout = self.home / "shallow"
+        (checkout / ".git").mkdir(parents=True)
+        answers = {"merge-base": subprocess.CompletedProcess([], 1, "", ""),
+                   "rev-parse": subprocess.CompletedProcess([], 0, "true\n", ""),
+                   "api": subprocess.CompletedProcess([], 0, "ahead\n", "")}
+        def probe(args, **kwargs):
+            return next(v for k, v in answers.items() if k in map(str, args))
+        with patch.object(remote, "__file__", str(checkout / "tauceti_fleet/remote.py")), \
+                patch.object(remote, "probe", side_effect=probe):
+            self.assertTrue(remote.descends("b" * 40, "a" * 40))
+            answers["rev-parse"] = subprocess.CompletedProcess([], 0, "false\n", "")
+            self.assertFalse(remote.descends("b" * 40, "a" * 40))
+
+    def test_repackaged_release_keeps_its_recorded_revision(self):
+        package = self.home / "releases/extracted/tauceti_fleet"
+        package.mkdir(parents=True)
+        store.atomic(package.parent / "release.json", dict(version=1, revision="d" * 40))
+        with patch.object(remote, "__file__", str(package / "remote.py")):
+            self.assertEqual(remote.manifest()["revision"], "d" * 40)
+
     def test_legacy_ssh_identity_is_verified_before_transferring_an_update(self):
         with patch.object(remote, "call", side_effect=store.FleetError("identity differs")), \
                 patch.object(remote, "ssh") as ssh:
@@ -294,6 +433,73 @@ class LiveUpdate(unittest.TestCase):
             update.handover(self.release)
         self.assertIn("--signal=SIGHUP", calls[0])
         self.assertEqual([v[2] for v in calls[1:]], ["reset-failed", "start"])
+
+    def test_stopped_controller_gets_the_release_and_stays_stopped(self):
+        staged = store.data_dir() / "worker-runtimes" / self.revision
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1)
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        with (patch.object(update, "service", return_value=stopped),
+              patch.object(update, "stage_worker", return_value=staged),
+              patch.object(update, "run", side_effect=command)):
+            result = self.install()
+            self.assertEqual(calls, [])
+            self.assertEqual(result["controller"], "stopped")
+            self.assertNotIn("active_processes_preserved", result)
+            self.assertEqual((store.data_dir() / "current").resolve(), self.release.resolve())
+            self.assertEqual((store.data_dir() / "bin/tauceti").readlink(), staged / "bin/tauceti")
+            self.assertIn("os.path.realpath", self.binary.read_text())
+            (staged / "bin").mkdir(parents=True)
+            (staged / "bin/tauceti").write_text("new worker")
+            again = self.install()
+        self.assertTrue(again["unchanged"])
+        self.assertEqual(again["controller"], "stopped")
+        self.assertEqual(calls, [])
+
+    def test_failed_controller_is_not_restarted(self):
+        failed = dict(MainPID="0", Restart="on-failure", ActiveState="failed")
+        with (patch.object(update, "service", return_value=failed),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "run") as command):
+            self.assertEqual(self.install()["controller"], "stopped")
+        command.assert_not_called()
+
+    def test_controller_stopped_during_the_update_is_not_restarted(self):
+        active = dict(MainPID="42", Restart="on-failure", ActiveState="active")
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        with (patch.object(update, "service", side_effect=[active, stopped]),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "run") as command):
+            self.assertEqual(self.install()["controller"], "stopped")
+        command.assert_not_called()
+
+    def test_controller_started_during_the_update_is_handed_over(self):
+        stopped = dict(MainPID="0", Restart="on-failure", ActiveState="inactive")
+        started = dict(MainPID="42", Restart="on-failure", ActiveState="active")
+        with (patch.object(update, "service", side_effect=[stopped, started]),
+              patch.object(update, "stage_worker", return_value=self.home / "new-worker"),
+              patch.object(update, "handover", return_value=dict(controller_release=str(self.release))) as handover):
+            result = self.install()
+        handover.assert_called_once()
+        self.assertTrue(result["active_processes_preserved"])
+
+    def test_restarting_controller_starts_even_when_reset_failed_is_refused(self):
+        calls = []
+        def command(argv, **kwargs):
+            calls.append(argv)
+            if "reset-failed" in argv:
+                self.assertFalse(kwargs.get("check", True))
+                return subprocess.CompletedProcess(argv, 1)
+            store.atomic(store.state_dir() / "status.json", dict(
+                observed_at=time.time() + 1, controller_release=str(self.release), controller_pid=43))
+            return subprocess.CompletedProcess(argv, 0)
+        restarting = dict(MainPID="0", Restart="on-failure", ActiveState="activating")
+        with patch.object(update, "service", side_effect=[restarting, dict(MainPID="43")]), \
+                patch.object(update, "run", side_effect=command):
+            update.handover(self.release)
+        self.assertEqual([v[2] for v in calls], ["reset-failed", "start"])
 
     def test_rollback_forces_kill_even_with_stale_modern_protocol_and_confirms_legacy(self):
         store.atomic(store.state_dir() / "status.json", dict(live_update_protocol=1, controller_pid=42))
@@ -390,7 +596,8 @@ class LiveUpdate(unittest.TestCase):
         with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, \
                 patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(cli.main(["update", "local", "--json"]), 0)
-        deploy.assert_called_once_with("local", live=True, expected_machine_id=self.config["machine_id"])
+        deploy.assert_called_once_with("local", live=True, expected_machine_id=self.config["machine_id"],
+                                       allow_downgrade=False)
         self.assertFalse((store.config_dir() / "inventory.json").exists())
         self.assert_work_preserved()
 

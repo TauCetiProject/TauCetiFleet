@@ -151,9 +151,11 @@ class LeanRuntime(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             patch.object(host, "units", return_value=Path(directory)),
             patch.object(host, "run"),
+            patch.dict(host.os.environ, PATH="/home/op/.local/bin:/usr/bin"),
         ):
             host.start_workers()
             text = (Path(directory) / "tauceti-fleet-workers.service").read_text()
+            self.assertIn('Environment="PATH=/home/op/.local/bin:/usr/bin"\n', text)
             # Only the supervisor is protected; run_workers keeps workers at 500.
             self.assertIn("OOMScoreAdjust=100", text)
             self.assertEqual(host.WORKER_OOM_SCORE_ADJ, 500)

@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, broker, host, pool_activity, remote, worker_view
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -31,6 +31,10 @@ def parser():
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--timezone", default="Australia/Sydney", help="merge-queue timestamp timezone (default: Australia/Sydney)")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+            cmd.add_argument("--workers", action="store_true", help="add one row per worker and the workers' recent PR events")
+        if name == "update":
+            cmd.add_argument("--allow-downgrade", action="store_true",
+                             help="ship this CLI's release even if it does not descend from the host's release")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -63,7 +67,19 @@ def parser():
     workers.add_argument("--max", dest="maximum", type=int)
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
+    workers.add_argument("--forgejo-workers", type=int, default=None,
+                         help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
+    workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
+                         help="set an environment variable in every worker's definition (repeatable)")
+    workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
+                         help="remove a worker environment variable set with --env (repeatable)")
     workers.add_argument("--json", action="store_true")
+    schedule = sub.add_parser("schedule", help="admit new worker rounds only inside weekly time slots")
+    schedule.add_argument("host")
+    schedule.add_argument("slots", nargs="*", metavar="SLOT", help='for example "Mon 23:00 -> Thu 07:00"; omit to show the saved schedule')
+    schedule.add_argument("--timezone", help="IANA zone the slot times are in (default: the host's local time)")
+    schedule.add_argument("--clear", action="store_true")
+    schedule.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
     focus.add_argument("--percent", type=int)
@@ -72,6 +88,12 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    export = sub.add_parser("status-export", help="keep a world-readable copy of this host's status in a directory")
+    export.add_argument("host")
+    destination = export.add_mutually_exclusive_group()
+    destination.add_argument("--dir", dest="directory", help="existing absolute directory on the host")
+    destination.add_argument("--clear", action="store_true")
+    export.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
@@ -119,7 +141,7 @@ def print_isolation(status):
         print("Isolation diagnostics: " + isolation["error"])
 
 
-def main(argv=None, *, _status_results=None):
+def main(argv=None, *, _status_results=None, _standalone=False):
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["monitoring"]:
         from .monitoring import main as monitoring_main
@@ -176,13 +198,16 @@ def main(argv=None, *, _status_results=None):
                 + " (no paid workers or production routing are activated)"
             )
             return 0
-        entries = remote.inventory()
+        # A standalone view has only its prepared results: no inventory, caches or requests.
+        entries = ({name: dict(target="local", machine_id=value.get("machine_id", name))
+                    for name, value in _status_results.items()} if _standalone else remote.inventory())
         if args.command == "enable" and not (args.ci or args.workers):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
-        if args.command == "workers" and args.maximum is None and args.self_tested is None:
-            raise FleetError("Select --max, --self-tested, or --no-self-tested")
+        if (args.command == "workers" and args.maximum is None and args.self_tested is None
+                and args.forgejo_workers is None and not args.env and not args.unset_env):
+            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.host == "local":
@@ -198,7 +223,8 @@ def main(argv=None, *, _status_results=None):
             from . import status_follow
 
             command = (["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
-                       + (["--all-jobs"] if args.all_jobs else []) + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
+                       + (["--all-jobs"] if args.all_jobs else []) + (["--workers"] if args.workers else [])
+                       + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
                                      json_output=args.json, refresh=pool_activity.refresh)
         results = {}
@@ -224,8 +250,25 @@ def main(argv=None, *, _status_results=None):
                     payload["maximum"] = args.maximum
                 if args.self_tested is not None:
                     payload["self_tested"] = args.self_tested
+                if args.forgejo_workers is not None:
+                    payload["forgejo_workers"] = args.forgejo_workers
+                if args.env or args.unset_env:
+                    changes = {}
+                    for item in args.env or []:
+                        variable, sep, value = item.partition("=")
+                        if not sep:
+                            raise FleetError(f"--env expects NAME=VALUE, got {item!r}")
+                        changes[variable] = value
+                    for variable in args.unset_env or []:
+                        changes[variable] = None
+                    payload["worker_env"] = changes
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+            if args.command == "schedule":
+                slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
+                if (args.clear and slots) or (args.timezone and not slots):
+                    raise FleetError("Give --timezone together with slots, and --clear alone")
+                payload.update(dict(clear=True) if args.clear else dict(slots=slots, timezone=args.timezone) if slots else {})
             if args.command == "focus":
                 if args.percent is not None:
                     payload["percent"] = args.percent
@@ -237,8 +280,14 @@ def main(argv=None, *, _status_results=None):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "status-export":
+                if args.directory is not None:
+                    payload["directory"] = args.directory
+                if args.clear:
+                    payload["clear"] = True
             if args.command == "update":
-                options = dict(live=True, expected_machine_id=entry["machine_id"])
+                options = dict(live=True, expected_machine_id=entry["machine_id"],
+                               allow_downgrade=args.allow_downgrade)
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
@@ -272,10 +321,11 @@ def main(argv=None, *, _status_results=None):
 
             pool_names = {"fleet-" + e["machine_id"][:12]: name[:1].upper() + name[1:] for name, e in entries.items()}
             overview = ci_overview.combine([v.get("ci_overview", {}) for v in results.values()], pool_names)
-            overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
-            from . import queue_history, queue_status
-            overview["queue"] = overview["pool_activity"].get("queue") or queue_status.cached()
-            overview["queue_history"] = queue_history.cached()
+            if not _standalone:
+                overview["pool_activity"] = pool_activity.cached() if _status_results is not None else pool_activity.refresh()
+                from . import queue_history, queue_status
+                overview["queue"] = overview["pool_activity"].get("queue") or queue_status.cached()
+                overview["queue_history"] = queue_history.cached()
             overview["queue_timezone"] = args.timezone
             bors_printed = False
 
@@ -292,8 +342,9 @@ def main(argv=None, *, _status_results=None):
             else:
                 ci_overview.display(overview, section="overview")
                 print()
-                pool_activity.display(overview["pool_activity"], all_jobs=args.all_jobs)
-                print()
+                if "pool_activity" in overview:
+                    pool_activity.display(overview["pool_activity"], all_jobs=args.all_jobs)
+                    print()
         if args.json:
             if fleet is not None:
                 results["_fleet"] = dict(activity=fleet)
@@ -413,6 +464,10 @@ def main(argv=None, *, _status_results=None):
                                 )
                             else:
                                 print("Next increase: eligible now, awaiting a fresh controller check")
+                    if status.get("worker_schedule"):
+                        from . import schedule
+
+                        print(schedule.describe(status["worker_schedule"]))
                     if status.get("roadmap_focus_error"):
                         print("Roadmap focus disabled: " + status["roadmap_focus_error"])
                     focus = status.get("roadmap_focus", {})
@@ -444,6 +499,9 @@ def main(argv=None, *, _status_results=None):
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                    if args.workers:
+                        print()
+                        worker_view.display(status)
                     print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)

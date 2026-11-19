@@ -5,9 +5,30 @@ export function capacity(host) {
   // slot-index bound, never a per-host permission; local --max-jobs is authoritative.
   return {max_jobs:MAX_JOBS,kinds:host.kinds ?? ['staging']};
 }
-export function validKinds(kinds) {
-  return Array.isArray(kinds) && kinds.length>=1 && kinds.length<=2 &&
-    new Set(kinds).size===kinds.length && kinds.every(k=>['pr','staging'].includes(k));
+// Build classes share the TauCetiFleet group. Each special class has its own
+// selected-repository group; the broker, never the host, chooses the group.
+export const GROUPS={pr:3,staging:3,'queue-control':6,'pr-status':7};
+export const SPECIAL_GROUPS={'queue-control':6,'pr-status':7};
+/** Classes an operator may authorize for a host. */
+export function hostKinds(kinds) {
+  return Array.isArray(kinds) && kinds.length>=1 && new Set(kinds).size===kinds.length &&
+    kinds.every(k=>Object.hasOwn(GROUPS,k));
+}
+/** Classes of one runner: build classes together, or exactly one special class. */
+export function runnerKinds(kinds) {
+  return hostKinds(kinds) && (kinds.length===1 || kinds.every(k=>GROUPS[k]===3));
+}
+export function groupFor(kinds) {
+  return GROUPS[kinds[0]];
+}
+/** Groups a host's runners can be in: its classes' and its live or reserved slots'. */
+export function hostGroups(host) {
+  const groups=(host.kinds ?? ['staging']).filter(k=>Object.hasOwn(GROUPS,k)).map(k=>GROUPS[k]);
+  for (const slot of Object.values(slots(host))) {
+    if (slot.pending) groups.push(slot.pending.group ?? 3);
+    if (slot.runner_id) groups.push(groupFor(slot.kinds || ['staging']));
+  }
+  return [...new Set(groups.filter(g=>g!==undefined))].sort((a,b)=>a-b);
 }
 export function slots(host) {
   if (!host.slots) {

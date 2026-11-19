@@ -100,6 +100,26 @@ class Reconciliation(unittest.TestCase):
         _, stop, _ = self.step(1000000, refresh=False)
         stop.assert_not_called()
 
+    def test_external_bootstrap_wait_preserves_registered_offline_runner(self):
+        self.value.pop("run_id")
+        self.value.update(busy=False, ci_bootstrap_waiting=True)
+        store.atomic(self.path, self.value)
+        value, stop, retire = self.step(10000, inventory=[dict(id=12, status="offline", busy=False)])
+        self.assertTrue(value)
+        stop.assert_not_called()
+        retire.assert_not_called()
+
+    def test_external_bootstrap_release_restarts_normal_online_deadline(self):
+        self.value.pop("run_id")
+        self.value.update(busy=False, ci_bootstrap_waiting=False, ci_bootstrap_ready_at=1000)
+        store.atomic(self.path, self.value)
+        value, _, retire = self.step(1100, inventory=[dict(id=12, status="offline", busy=False)])
+        self.assertTrue(value)
+        retire.assert_not_called()
+        value, _, retire = self.step(1181, inventory=[dict(id=12, status="offline", busy=False)])
+        self.assertFalse(value)
+        retire.assert_called_once()
+
     def test_stop_failure_preserves_guest_ownership_for_retry(self):
         self.step(1000)
         with (

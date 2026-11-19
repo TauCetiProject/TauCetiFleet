@@ -85,8 +85,11 @@ def combine(snapshots, prs, owners, origin_times, now):
                 continue
             for kind, counts in kinds.items():
                 row = rounds[w].setdefault(kind, dict(finished=0, failed=0, unknown=0))
-                for key in row:
+                for key in ("finished", "failed", "unknown"):
                     row[key] += counts.get(key, 0)
+                if counts.get("closed"):
+                    # Present only when nonzero, matching worker summaries.
+                    row["closed"] = row.get("closed", 0) + counts["closed"]
     # PR counts use the existing deduplicated repository/number identities.
     windows = {}
     for w in report_windows:
