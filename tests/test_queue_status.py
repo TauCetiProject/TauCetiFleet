@@ -337,7 +337,9 @@ class QueueStatus(unittest.TestCase):
                  status="in_progress", started_at="2026-11-08T22:16:00Z")])
         progress = dict(coverage="untrusted_counters_trusted_reporter", observed_at="2026-11-08T23:35:30Z",
                         phase="build", completed_modules=25433, last_module="TauCeti.Private.Detail",
-                        completed_tasks=103917, total_tasks=113955, tasks_per_minute=850.4)
+                        completed_tasks=103917, total_tasks=113955, tasks_per_minute=850.4,
+                        estimated_total_tasks=120000,
+                        estimate_source=dict(run_id="7", job_class="staging_build", total_tasks=120000))
         other = dict(run_id="44442676966", run_attempt=1, active=True, name="pick-runner / pick",
                      progress=dict(coverage="steps_only", completed_modules=None))
         build = dict(other, name="sandboxed-build", progress=progress)
@@ -357,17 +359,27 @@ class QueueStatus(unittest.TestCase):
             self.assertIn("build_progress", queue.refresh(self.manifest)["value"]["batches"][0])
         output = self.render(result)
         self.assertIn("CI building since 09 Nov 09:16 AEDT\n" + " " * 33
-                      + "build: phase build, 103,917/113,955 Lake jobs (91.2%), 850/min, ETA 09 Nov 10:47 AEDT\n",
+                      + "build: phase build, 103,917 jobs done, ~87% of ~120.0k jobs (from last staging run), 850/min, "
+                      "ETA ~09 Nov 10:54 AEDT\n",
                       output)
         self.assertNotIn("Private", json.dumps(result))
         # An audit phase keeps the finished counter but has no rate or ETA.
         result["value"]["batches"][0]["build_progress"].update(phase="audit-axioms", completed_tasks=113955,
                                                                tasks_per_minute=None)
-        self.assertIn("build: phase axiom audit, 113,955/113,955 Lake jobs (100.0%)\n", self.render(result))
+        self.assertIn("build: phase axiom audit, 113,955 jobs done\n", self.render(result))
+        # Without an estimate, or once the build passes it, only the done count and rate remain:
+        # Lake's own growing total is never used as a denominator.
+        building = result["value"]["batches"][0]["build_progress"]
+        for estimate in (None, 100000):
+            building.update(phase="build", completed_tasks=103917, tasks_per_minute=850.4,
+                            estimated_total_tasks=estimate)
+            self.assertIn("build: phase build, 103,917 jobs done, 850/min\n", self.render(result))
+        building.update(estimated_total_tasks=120000)
         # A rate too small for any representable ETA keeps the counters.
         result["value"]["batches"][0]["build_progress"].update(phase="build", completed_tasks=100,
                                                                tasks_per_minute=1e-300)
-        self.assertIn("build: phase build, 100/113,955 Lake jobs (0.1%), 0/min\n", self.render(result))
+        self.assertIn("build: phase build, 100 jobs done, ~0% of ~120.0k jobs (from last staging run), 0/min\n",
+                      self.render(result))
         # Stale reports say so; a passed attempt no longer shows the build line.
         self.now += 600
         self.assertIn("reported 10m ago", self.render(result))

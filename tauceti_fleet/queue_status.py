@@ -35,6 +35,7 @@ REPORTED_PHASES = {
     "declaration-names": "record declaration names", "stage-cache": "stage cache", "end": "finished",
 }
 REPORTED = "untrusted_counters_trusted_reporter"
+ESTIMATE_SOURCES = {"staging_build": "last staging run", "pr_build": "last PR build"}
 MAX_JOB_PAGES = 5
 
 
@@ -219,7 +220,8 @@ def reported_progress(value):
     timestamp(value.get("observed_at"))
     phase = value.get("phase")
     result = dict(observed_at=value["observed_at"], phase=phase if phase in REPORTED_PHASES else None,
-                  completed_tasks=None, total_tasks=None, tasks_per_minute=None, completed_modules=None)
+                  completed_tasks=None, total_tasks=None, tasks_per_minute=None, completed_modules=None,
+                  estimated_total_tasks=None, estimate_source=None)
     modules = value.get("completed_modules")
     if type(modules) is int and 0 <= modules <= 10_000_000:
         result["completed_modules"] = modules
@@ -229,6 +231,12 @@ def reported_progress(value):
     rate = value.get("tasks_per_minute")
     if type(rate) in (int, float) and 0 <= rate <= 10_000_000:
         result["tasks_per_minute"] = float(rate)
+    # The receiver's estimate of the final count: Lake's own total grows as it discovers jobs.
+    estimate, source = value.get("estimated_total_tasks"), value.get("estimate_source")
+    if type(estimate) is int and 0 < estimate <= 10_000_000:
+        result["estimated_total_tasks"] = estimate
+        kind = source.get("job_class") if isinstance(source, dict) else None
+        result["estimate_source"] = ESTIMATE_SOURCES.get(kind, "last build")
     return result
 
 
@@ -252,24 +260,33 @@ def build_progress(manifest, attempt):
 
 
 def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
-    """"build: phase build, 113,917/113,955 Lake jobs (99.9%), 850/min, ETA 19 Nov 15:40 AEDT"."""
+    """"build: phase build, 44,180 jobs done, ~54% of ~81.8k jobs (from last PR build), 905/min,
+    ETA ~19 Nov 20:10 AEDT". Lake's own total grows as it discovers jobs, so the percentage and ETA
+    use the receiver's estimate (the latest finished build's final count) and are marked as estimates;
+    without one only the done count and rate are shown."""
     now = time.time() if now is None else now
     parts = []
     if progress.get("phase"):
         parts.append("phase " + REPORTED_PHASES[progress["phase"]])
     done, total = progress.get("completed_tasks"), progress.get("total_tasks")
     if done is not None and total:
-        percent = 100 * done / total
-        percent = min(percent, 99.9) if done < total else 100.0
-        parts.append(f"{done:,}/{total:,} Lake jobs ({percent:.1f}%)")
+        parts.append(f"{done:,} jobs done")
+        building = progress.get("phase") == "build"
+        estimate = progress.get("estimated_total_tasks")
+        # An estimate Lake's own count has reached is no longer an estimate of the final count.
+        remaining = estimate - done if building and estimate and estimate > total else 0
+        if remaining > 0:
+            parts.append(f"~{100 * done / estimate:.0f}% of ~{estimate / 1000:.1f}k jobs "
+                         f"(from {progress.get('estimate_source') or 'last build'})")
         rate = progress.get("tasks_per_minute")
-        if rate is not None and progress.get("phase") == "build" and done < total:
+        if rate is not None and building:
             parts.append(f"{rate:,.0f}/min")
-            try:
-                eta = timestamp(progress["observed_at"]) + (total - done) * 60 / rate
-                parts.append("ETA " + datetime.fromtimestamp(eta, ZoneInfo(timezone)).strftime("%d %b %H:%M %Z"))
-            except (ZeroDivisionError, OverflowError, OSError, ValueError):
-                pass  # No usable ETA from this rate; the counters stand alone.
+            if remaining > 0:
+                try:
+                    eta = timestamp(progress["observed_at"]) + remaining * 60 / rate
+                    parts.append("ETA ~" + datetime.fromtimestamp(eta, ZoneInfo(timezone)).strftime("%d %b %H:%M %Z"))
+                except (ZeroDivisionError, OverflowError, OSError, ValueError):
+                    pass  # No usable ETA from this rate; the counters stand alone.
     elif progress.get("completed_modules") and progress.get("phase") == "build":
         # Reporters before Lake's job counter count only built TauCeti modules, with no total.
         parts.append(f"{progress['completed_modules']:,} TauCeti modules built")
