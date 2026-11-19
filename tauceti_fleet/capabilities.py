@@ -213,6 +213,20 @@ print(json.dumps({n:(p/n).read_text().strip() for n in ('cpu.weight','memory.hig
     return values
 
 
+def worker_protocol(worker=None):
+    """The `_fleet-protocol` reply of a worker runtime, the installed one by default; {} when it is missing or speaks another version."""
+    worker = worker or executable("tauceti")
+    if worker:
+        try:
+            result = run([worker, "_fleet-protocol"], check=False)
+            protocol = json.loads(result.stdout) if result.returncode == 0 else {}
+            if isinstance(protocol, dict) and protocol.get("version") == 1:
+                return protocol
+        except (FleetError, ValueError, AttributeError):
+            pass
+    return {}
+
+
 def doctor(config=None, *, probe=True):
     config = config or host_config()
     checks = []
@@ -404,18 +418,8 @@ def doctor(config=None, *, probe=True):
             "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
             roles=("workers",),
         )
-    compatible = False
-    protocol = {}
-    if worker:
-        try:
-            result = run([worker, "_fleet-protocol"], check=False)
-            if result.returncode == 0:
-                protocol = json.loads(result.stdout)
-                compatible = isinstance(protocol, dict) and protocol.get("version") == 1
-            if not isinstance(protocol, dict):
-                protocol = {}
-        except (FleetError, ValueError, AttributeError):
-            pass
+    protocol = worker_protocol()
+    compatible = bool(protocol)
     add(
         "worker-runtime",
         "ok" if compatible else "blocked",
@@ -456,6 +460,20 @@ def doctor(config=None, *, probe=True):
                 "private Forgejo credential file present" if private else "Forgejo credential missing or readable by other users",
                 "Provision a private Forgejo worker credential at the path the workers read, with chmod 600", roles=("workers",),
             )
+    if config.get("roadmap_targets"):
+        from .targets import status as target_list
+
+        listed = target_list(config, [])
+        supported = protocol.get("roadmap_targets") == 1 and protocol.get("targets_inspect") == 1
+        # Either fault stops every worker: the manager loads no definitions with an unknown key, and
+        # a worker exits at startup when its list is missing or unmarked.
+        add(
+            "roadmap-targets", "ok" if supported and "error" not in listed else "blocked",
+            "Installed worker has no target-list support" if not supported
+            else listed.get("error") or f"{listed['items']} items in {len(listed['areas'])} areas at {listed['path']}",
+            "Install a Worker release with roadmap_targets protocol support, or replace the list with targets HOST --file or remove it with targets HOST --clear",
+            roles=("workers",),
+        )
     image = data_dir() / "images/prepared.json"
     add(
         "ci-image",
