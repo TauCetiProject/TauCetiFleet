@@ -998,12 +998,8 @@ the key, and leaves the host's groups alone when it does not.
 Worker ids stay positional (`fleet-<machine>-<n>`). An edit keeps every worker
 in a group that still describes it and rewrites only the definitions that
 change group: going from the profile above to the command above rewrites two of
-the nine. The worker manager holds a changed `agent` or `only` until that
-worker's round ends; this needs a TauCetiWorker release that defers those two
-edits, and an older one restarts the changed workers at once. A changed
-progress setting restarts that group's workers when their round in flight ends
-under a TauCetiWorker release with graceful restarts, and at once under an
-older one. Fleet
+the nine. The worker manager restarts a worker whose `agent`, `only` or
+progress setting changed once its round in flight finishes. Fleet
 admits a worker whose agent or phases were rewritten, including by `--clear`,
 only once its live status shows the new ones, so one that has not started yet
 waits for its first pass after it does. A group that shrinks gives up
