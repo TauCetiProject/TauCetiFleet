@@ -291,16 +291,33 @@ class Overview(unittest.TestCase):
         self.assertIsNone(overview.source_value("backlog", old))
 
     def test_bors_total_and_legacy_backlog_cache(self):
-        batches = list(reversed([dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]))
+        batches = [dict(id=4, size=1, state="running", sealed=True), dict(id=3, size=7, state="waiting", sealed=False),
+                   dict(id=2, size=26, state="waiting", sealed=True), dict(id=1, size=26, state="waiting")]
         value = dict(sources=dict(
             bors=dict(value=dict(batches=batches, held=0), observed_at=time.time()),
             backlog=dict(value=dict(pr_builds=71, all_workflows=100), observed_at=time.time())))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(value)
-        self.assertIn("Bors: 54=26+26+2", out.getvalue())
+        self.assertIn("Bors feed (GitHub PRs only): 60=1+26+26+7 (", out.getvalue())
         self.assertIn("CI backlog: unknown", out.getvalue())
         self.assertNotIn("71 PR-build", out.getvalue())
+
+    def test_queue_table_replaces_the_github_only_bors_total(self):
+        value = dict(sources=dict(bors=dict(value=dict(batches=[dict(id=1, size=2, state="running")], held=0),
+                                            observed_at=time.time())),
+                     queue=dict(value=dict(observed_at="2026-11-08T23:35:30Z", batches=[], claims=[], workers=[],
+                                           waiting=0)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch("tauceti_fleet.queue_status.worker_names", return_value={}):
+            overview.display(value)
+        self.assertNotIn("Bors feed", out.getvalue())
+        self.assertIn("Merge queue (", out.getvalue())
+        value["queue"] = dict(error="Public queue observation is unavailable")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(value)
+        self.assertIn("Bors feed (GitHub PRs only): 2 (", out.getvalue())
 
     def test_history_windows_show_outcome_fractions_attempts_and_sampled_job_runtime(self):
         windows = [dict(window=label, completed_batches=4, successful_batches=2,

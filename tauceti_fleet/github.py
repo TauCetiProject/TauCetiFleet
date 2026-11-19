@@ -1,6 +1,7 @@
 """Small bounded GitHub client. Privileged runner credentials stay on the host."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -68,9 +69,16 @@ def runner_policy(config):
     if config.get("ci_broker_url"):
         from .broker import request as broker_request
 
-        group = broker_request(config, "/v1/policy")["runner_group_id"]
+        policy = broker_request(config, "/v1/policy")
+        group = policy["runner_group_id"]
         if group != config.get("runner_group_id"):
             raise FleetError("CI broker returned a different runner group")
+        if config.get("ci_slot_runner_group_id") is not None:
+            # A special slot (for_slot): its kind must map to the configured group.
+            from .capacity import broker_slot_group
+
+            return broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                                     runner_group_id=config["ci_slot_runner_group_id"]), policy)
         return group
     group = config.get("ci_slot_runner_group_id", config.get("runner_group_id"))
     if not isinstance(group, int) or group <= 0:
@@ -82,47 +90,51 @@ def runner_policy(config):
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
     if kinds := config.get("ci_kinds"):
-        if kinds in (["roadmap"], ["control"], ["queue-control"]):
+        if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
-    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@8902fa12a4faafc7bb512ab0baa9a452249b93aa",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@150b56c3ab743b1f2a120f0639d98586455d7f2a",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
-               "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@a7662ab81f900586db3586ec3a11c38a5f46962d"}
+    allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not selected <= allowed
+        or not trusted_entries(selected - allowed, ("pr-build.yml",))
     ):
-        raise FleetError("Runner group must allow only trusted main project workflows and the approved source-CI harness pin")
+        raise FleetError("Runner group must allow only trusted main project workflows and the shared harness at main")
     return group
+
+
+HARNESS = "TauCetiProject/TauCetiTools"
+
+
+def trusted_entries(entries, workflows):
+    """Every entry names one of `workflows` in the shared harness at TauCetiTools main."""
+    return set(entries) <= {f"{HARNESS}/.github/workflows/{name}@refs/heads/main" for name in workflows}
 
 
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
-    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl"}[kind]
+    expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")
-    repository = "TauCetiProject/TauCeti" if kind == "queue-control" else "TauCetiProject/TauCetiRoadmap"
+    repository = "TauCetiProject/TauCeti" if kind in ("queue-control", "pr-status") else "TauCetiProject/TauCetiRoadmap"
     if kind == "queue-control":
         allowed = {repository + "/.github/workflows/" + name + "@refs/heads/main"
                    for name in ("pr-build.yml", "pick-runner.yml", "publish-lake-cache.yml")}
         required = allowed
-        allowed = allowed | {
-            "TauCetiProject/TauCetiTools/.github/workflows/" + name + "@" + revision
-            for name in ("pr-build.yml", "publish-lake-cache.yml")
-            for revision in ("150b56c3ab743b1f2a120f0639d98586455d7f2a",
-                             "fe61c4f22f1e59c4393fe24ed32d22787f3d5e9f",
-                             "a7662ab81f900586db3586ec3a11c38a5f46962d")
-        }
         selected = set(data.get("selected_workflows", []))
-        if not data.get("restricted_to_workflows") or not required <= selected or not selected <= allowed:
-            raise FleetError("Queue control runners require trusted main workflows and only approved source-CI harness pins")
+        if (not data.get("restricted_to_workflows") or not required <= selected
+                or not trusted_entries(selected - allowed, ("pr-build.yml", "publish-lake-cache.yml"))):
+            raise FleetError("Queue control runners require trusted main workflows and only the shared harness at main")
+    if kind == "pr-status":
+        required = {repository + "/.github/workflows/" + name + "@refs/heads/main"
+                    for name in ("pr-status.yml", "pr-labels.yml")}
+        if not data.get("restricted_to_workflows") or set(data.get("selected_workflows", [])) != required:
+            raise FleetError("PR status runners require exactly the trusted main reconciliation workflows")
     repositories = request(f"orgs/TauCetiProject/actions/runner-groups/{config['ci_slot_runner_group_id']}/repositories",
                            token_file=config.get("ci_token_file") or config.get("github_token_file"))
     if (repositories.get("total_count") != 1
@@ -136,6 +148,13 @@ def jit_config(config, name):
         from .broker import request as broker_request
         from .capacity import kinds
 
+        if config.get("ci_slot_runner_group_id") is not None:
+            # Refuse a special slot whose kind or group differs from the broker's.
+            # /v1/groups needs no group 3 check, so group 3 drift cannot stop it.
+            from .capacity import broker_slot_group
+
+            broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
+                              runner_group_id=config["ci_slot_runner_group_id"]), broker_request(config, "/v1/groups"))
         value = broker_request(config, "/v1/runners", method="POST",
                                data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
         return value["runner_id"], value["encoded_jit_config"]

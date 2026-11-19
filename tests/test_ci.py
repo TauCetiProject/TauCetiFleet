@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import ci, host, report, store
+from tauceti_fleet import ci, host, report, store, vm
 
 
 def step(name, outcome="success", number=1, start="00:00:01", end="00:00:02"):
@@ -148,6 +148,61 @@ class Classification(unittest.TestCase):
         self.assertEqual(decision["reason"], "verified_bors_cancellation")
         self.assertEqual(decision["evidence"]["cancellation_status_id"], 123)
         self.assertLess(len(json.dumps(decision)), 400)
+
+    def test_queue_cancellation_on_a_reserved_staging_slot_keeps_capacity(self):
+        job, run, statuses = evidence()
+        run["name"] = "source request=" + "1" * 32
+        decision = ci.classify(job, host_health="healthy", staging_slot=True)
+        self.assertEqual((decision["cooldown"], decision["reason"]), (False, "staging_slot_cancelled"))
+        # Other slots still need bors evidence for a cancellation.
+        decision = ci.classify(job, run=run, statuses=statuses, host_health="healthy")
+        self.assertEqual((decision["cooldown"], decision["reason"]), (True, "cancellation_run_name_mismatch"))
+
+    def test_reserved_staging_slot_cancellation_still_needs_a_healthy_guest(self):
+        job, _, _ = evidence()
+        for host_health in (None, "unknown", "fault", "oom"):
+            with self.subTest(host_health=host_health):
+                self.assertTrue(ci.classify(job, host_health=host_health, staging_slot=True)["cooldown"])
+        for outcome in ("failure", "cancelled", None):
+            with self.subTest(complete_job=outcome):
+                broken = copy.deepcopy(job)
+                broken["steps"][3]["conclusion"] = outcome
+                self.assertTrue(ci.classify(broken, host_health="healthy", staging_slot=True)["cooldown"])
+        missing = copy.deepcopy(job)
+        missing["steps"].pop(3)
+        self.assertTrue(ci.classify(missing, host_health="healthy", staging_slot=True)["cooldown"])
+        for name in ("Set up job", "Fetch Mathlib"):
+            with self.subTest(name=name):
+                failed = copy.deepcopy(job)
+                failed["steps"].append(step(name + " fault", "failure", 5))
+                self.assertTrue(ci.classify(failed, host_health="healthy", staging_slot=True)["cooldown"])
+
+    def test_reserved_staging_slot_cancellation_keeps_the_step_health_checks(self):
+        job, _, _ = evidence()
+        finalized = copy.deepcopy(job)
+        finalized["steps"].insert(3, step(ci.REPORT, "failure", 5))
+        decision = ci.classify(finalized, host_health="healthy", staging_slot=True)
+        self.assertEqual((decision["cooldown"], decision["reason"]), (False, "staging_slot_cancelled"))
+        duplicate = copy.deepcopy(job)
+        duplicate["steps"].insert(1, step("Set up job", number=5))
+        unfinished = copy.deepcopy(job)
+        unfinished["steps"][2]["status"] = "in_progress"
+        unknown_outcome = copy.deepcopy(job)
+        unknown_outcome["steps"][2]["conclusion"] = "neutral"
+        unknown_failure = copy.deepcopy(job)
+        unknown_failure["steps"][2]["conclusion"] = "failure"
+        for broken, reason in (
+            (duplicate, "cancellation_steps_incomplete"),
+            (unfinished, "cancellation_steps_incomplete"),
+            (unknown_outcome, "cancellation_steps_incomplete"),
+            (unknown_failure, "cancellation_unknown_step_failed"),
+        ):
+            with self.subTest(reason=reason, steps=broken["steps"]):
+                decision = ci.classify(broken, host_health="healthy", staging_slot=True)
+                self.assertEqual((decision["cooldown"], decision["reason"]), (True, reason))
+        self.assertEqual(
+            ci.classify(unknown_failure, host_health="healthy", staging_slot=True)["evidence"], {"step_number": 3}
+        )
 
     def test_faults_override_authenticated_cancellation(self):
         for name in ("Set up job", "Fetch Mathlib", "Install bubblewrap", "Checkout current base"):
@@ -423,6 +478,42 @@ class Collection(unittest.TestCase):
         store.atomic(self.backoff, dict(until=9999999999, job_id=99))
         self.bootstrap_failure("healthy")
         self.assertEqual(store.read(self.backoff)["job_id"], 99)
+
+    def queue_cancellation(self, config, *, slot, job_id=7):
+        job, _, _ = evidence()
+        job["id"] = job_id
+        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="healthy", slot=slot,
+                                         ci_kinds=["staging"])])
+        run = dict(id=42, name="source request=" + "1" * 32, display_title="source request=" + "1" * 32,
+                   event="repository_dispatch")
+
+        def request(path, **_):
+            return dict(jobs=[job]) if "/jobs?" in path else run
+
+        with patch.object(host.github, "request", side_effect=request) as request_mock:
+            host.collect_ci_results(config)
+        self.request_count = request_mock.call_count
+        return report.timestamp(job["completed_at"])
+
+    def test_queue_cancellation_on_the_staging_slot_has_no_cooldown(self):
+        config = dict(self.config, ci_max_jobs=2, ci_kinds=["pr", "staging"], ci_staging_slots=1)
+        self.queue_cancellation(config, slot=0)
+        self.assertFalse(self.backoff.exists())
+        self.assertEqual(self.request_count, 1, "no cancellation metadata reads")
+        self.assertEqual(store.export_events()[0]["classification"]["reason"], "staging_slot_cancelled")
+        self.assertEqual(store.read(self.pending), [])
+
+    def test_queue_cancellation_outside_the_staging_reservation_keeps_its_cooldown(self):
+        for job_id, slot, config in (
+            (8, 1, dict(self.config, ci_max_jobs=2, ci_kinds=["pr", "staging"], ci_staging_slots=1)),
+            (9, 0, dict(self.config, ci_max_jobs=2, ci_kinds=["staging"])),
+        ):
+            with self.subTest(slot=slot, config=config):
+                backoff = vm.slot_file({"ci_slot": slot}, "ci-slot-backoff.json")
+                completed = self.queue_cancellation(config, slot=slot, job_id=job_id)
+                self.assertEqual(store.read(backoff)["until"], completed + 900)
+                self.assertEqual(store.read(backoff)["reason"], "cancellation_run_name_mismatch")
+                backoff.unlink()
 
     def test_missing_evidence_and_host_fault_cool_down(self):
         self.collect(api_fault=True)
