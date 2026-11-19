@@ -145,6 +145,14 @@ Every job runs in a disposable VM; ordinary builds select the roadmap class or
 Namespace, while small automation selects the control class. This setup uses the operator host's existing
 direct runner credential, not the volunteer registration broker.
 
+A broker-enrolled host may also reserve `queue-control` and `pr-status` slots
+when its enrollment allows those classes. The host keeps its slot map; the broker
+registers `queue-control` runners in group 6 and `pr-status` runners in group 7,
+and `/v1/policy` reports that mapping in `groups`. The host refuses to start a
+reserved slot whose class the enrollment lacks or whose `runner_group_id`
+differs from the broker's group. `control` and `roadmap` slots still require
+direct runner credentials.
+
 The control guest has 2 CPUs and 4 GiB; the roadmap guest has 16 CPUs and 32 GiB.
 Both slots stay warm independently of TauCeti's capacity discovery and cannot
 be borrowed by its builds or recovery. The existing slot ceiling, launch pacing,
@@ -610,6 +618,7 @@ tauceti-fleet status
 tauceti-fleet status server1
 tauceti-fleet status --json
 tauceti-fleet status --all-jobs
+tauceti-fleet status --workers
 tauceti-fleet status -f
 tauceti-fleet status server1 --follow
 ```
@@ -643,6 +652,25 @@ pool aggregate every 30 seconds; redraws read its prepared cache. Disconnected h
 snapshot while the stream reconnects with backoff. Hosts need the updated Fleet
 CLI for streaming. Without a terminal, follow prints snapshots as they change;
 `status --follow --json` emits newline-delimited JSON snapshots.
+
+`--workers` adds a table under each host's worker summary, one row per worker:
+state, stage, the PR or target it holds, agent, time in the current round and
+its last log line. The workers' latest PR events follow it: opened, pushed,
+replied, closed, and a finished round. It combines with `-f`. `status --json`
+always carries the same facts: every entry of `status.workers` has `agent`,
+`provider` (the agent of the round in progress), `pr`, `round_started_at` and
+`log_line`, and `status.worker_events` holds the last 15 events. The controller
+prepares them with each report, about every five seconds, from the worker
+status files, the last 64 KiB of each worker's console log and the last 128 KiB
+of `worker-events.jsonl`; it makes no GitHub request. A round's start is the
+time on its opening log line, read in the controller's time zone, and is
+unknown once that line lies before the part of the log that is read or when
+the latest opening line names another stage or target (a worker closing a PR
+after spent repair attempts logs none). Stage,
+target and round time appear while a worker reports `running`, `verifying` or
+`working`; stage and target also during the back-off after a failed round.
+GitHub writes that are neither a reply nor a closure, such as label changes,
+are left out of the events.
 
 The first lines report running jobs by runner pool,
 the PR-build and other-workflow backlogs, and account authoring pressure
@@ -737,6 +765,63 @@ history in background. Fleet only collects the small prepared summaries.
 Neither status nor LOC preparation issues new GitHub API requests. The `budget`
 command remains the explicit interface for grants and replenishment changes.
 
+## Status export
+
+A host can keep a world-readable copy of its status for programs run by other
+Unix accounts on the same machine, which have neither SSH access to the fleet
+account nor a Fleet configuration of their own:
+
+```sh
+tauceti-fleet status-export big-server --dir /srv/fleet-status
+tauceti-fleet status-export big-server           # show the saved setting
+tauceti-fleet status-export big-server --clear   # stop exporting
+```
+
+The host saves this as `status_export` in `host.json`. It is unset by default and
+changes take effect without a restart or any change to admissions. While it is
+set, the controller writes `DIR/<machine_id>.json` at most once every 30 seconds:
+a finished temporary file in the same directory, mode 0644, renamed into place,
+so a reader never sees a partial file. The directory must already exist. Fleet
+never creates it or changes its permissions, so the operator decides who may
+read it; several fleet accounts can share one directory they can all write to,
+since their machine ids differ. A failed write is reported once in the
+controller's log and retried at the next interval; admissions and CI continue.
+Use local storage: the write happens inside the controller loop. `--clear` stops
+the updates and leaves the last file for the operator to remove.
+
+The file is the per-host object of `tauceti-fleet status --json` (the value under
+each host name) with one added key, `exported_at`, the Unix time of the write.
+`machine_id` identifies the host; `exported_at` dates the file and
+`status.observed_at` dates the controller report inside it. The object holds no
+credential contents. It does hold the account's spending, budget balance and PR
+counts (`activity`), its GitHub account name (`ci_overview`), and worker and
+runner identities, process ids, and paths under the fleet account's home
+directory and cgroup (`status`), so export only to a directory whose readers may
+see those.
+
+`tauceti_fleet.status_view.render(objects)` returns the text of `tauceti-fleet
+status` for a `{label: object}` dictionary of such objects:
+
+```python
+import json
+from pathlib import Path
+
+from tauceti_fleet import status_view
+
+objects = {path.stem: json.loads(path.read_text()) for path in Path("/srv/fleet-status").glob("*.json")}
+print(status_view.render(objects), end="")
+```
+
+It uses its argument alone: no Fleet configuration or cached observations, no
+SSH, no network requests and no credentials. It therefore draws every section
+whose data hosts prepare (running jobs, backlog and authoring pressure, the
+per-host report, activity, cost and budget tables, fleet totals across distinct
+machines, Bors batches and history, and host diagnostics) and omits the three
+that the operator client fetches from public sources: the CI pool activity
+table, the merge-queue table and queue history. Labels are the caller's; a
+reader that tracks freshness compares `exported_at` with its own clock. The file
+format and `render` are interfaces other tools may build on.
+
 ## Development
 
 ```sh
@@ -775,6 +860,7 @@ existing global maintenance behavior. An explicit
 worker `--roadmap-only` still wins, and `--roadmap-skip` exclusions still apply.
 Workers require the corresponding TauCetiWorker focus support; older workers
 ignore the additional policy field.
+A worker that authors from a [target list](#target-lists) takes no focus.
 
 At 40 admitted workers, 20% designates eight slots. These slots draw uniformly
 from the eligible focus areas at the start of each round. The other
@@ -810,6 +896,127 @@ the worker's current roadmap inventory; when none remain, it logs the condition
 and uses ordinary selection so focus cannot strand a worker. Future roadmap
 additions require updating the configured list or reapplying an updated preset.
 `status` reports the effective whole and fractional slot allocation.
+
+## Target lists
+
+Have every worker on a host author from an operator target list: a markdown file
+of milestones on the way to one goal, grouped by roadmap, each naming the items
+that have to land first. TauCetiWorker's `docs/target-lists.md` defines the
+format and how a worker chooses from it.
+
+```sh
+tauceti-fleet targets big-server --file goal.md                       # transfer this file
+tauceti-fleet targets big-server --file /srv/lists/goal.md --on-host  # use a file on the host
+tauceti-fleet targets big-server                                      # show the list and its counts
+tauceti-fleet targets big-server --audit                              # compare it with the host's files
+tauceti-fleet targets big-server --audit --apply                      # compatibility option; currently no automatic rewrites
+tauceti-fleet targets big-server --clear                              # workers choose areas themselves again
+```
+
+`--file PATH` reads the file on the machine where the command runs and stores a
+private copy on the host at `~/.config/tauceti-fleet/roadmap-targets.md`; a later
+transfer replaces that copy. With `--on-host`, `PATH` is an absolute path on the
+host and the workers read that file in place, which suits a list kept in a git
+checkout there or shared by several installs. A symlink is saved as the file it
+names when the list is set, since workers resolve the path when they start; after
+repointing the link, set the list again. A transferred list is at most 256 KiB,
+the room it has inside the request to the host; a list on the host may be up to
+16 MiB. Either way the list must carry the `<!-- tauceti-targets:v1 -->` marker.
+Fleet invokes the Worker's versioned, offline `_targets-inspect` interface: the
+same strict parser that workers use rejects duplicate slugs, malformed items,
+missing prerequisites and dependency cycles. Fleet has no separate list parser.
+The worker validates roadmap availability during selection.
+
+The host saves the path in `host.json`, and the controller writes it into every
+worker definition as `roadmap_targets` on its next pass. No drain is needed.
+The worker manager restarts a worker whose definition changes once its round in
+flight finishes, so setting, moving or clearing a list applies from each
+worker's next round; workers read the file at
+the start of each roadmap round, so new contents at the same path, including
+every repeated transfer, change no definition and restart nothing. The installed
+TauCetiWorker must report `roadmap_targets` and `targets_inspect` in its Fleet
+protocol. A running manager must also advertise those capabilities and
+`graceful_restart` through its live socket, which a live update leaves in
+place. Fleet refuses to set a list otherwise, because a worker manager that does
+not know the key loads no worker from definitions that name it; restarting
+`tauceti-fleet-workers.service` moves the manager to the installed runtime.
+Workers in their own scopes keep running and the new manager adopts them; a
+worker whose status shows degraded isolation runs inside the manager's service
+and its round ends with it.
+`doctor` blocks worker activation for the same reason or when the saved list has
+become unreadable.
+
+`status` adds the list under the focus line:
+
+```text
+Target list: 12 items in 3 areas: 4 done, 2 in flight, 3 eligible, 3 blocked
+  Counted from the file's marks and this host's rounds; workers separately resolve open and merged pull request markers at any age
+  Rounds in progress: fleet-0123abcd-3 Probability/strong-law
+```
+
+Done and in flight are the file's `[x]` and `[~]` marks, plus the items that
+rounds in progress on this host hold (each worker reports its item as
+`roadmap_target`). An open item is eligible when everything it needs is done
+and blocked otherwise. The controller reads only the list and the worker status
+files for this. Workers additionally treat an item as in flight while an open
+pull request carries its marker and as done once one has merged, so they may
+see fewer eligible items than this line. `targets HOST` prints the same counts
+per area.
+
+`--audit` validates the list with the canonical parser and reports active
+rounds whose item is missing or marked done. It is offline and does not rewrite
+the list. The old prepared activity inventory cannot prove a complete target
+marker or distinguish partial landings, so it is not evidence for ticking an
+item done. `--apply` remains accepted for compatibility but reports zero
+corrections. Workers resolve complete versus partial merged markers on the
+appropriate forge, including completion older than their broad listing window;
+Fleet's displayed file-only counts deliberately do not claim that live view.
+
+A worker under a target list takes no roadmap focus. With both set, `focus`,
+`targets` and `status` say that the focus share is not applied; it applies again
+after `targets HOST --clear`.
+
+## Weekly schedule
+
+Admit new worker rounds only during chosen parts of the week:
+
+```sh
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00"
+tauceti-fleet schedule big-server "Mon 23:00 -> Thu 07:00" "Sat 09:00 -> Sun 21:00" --timezone Europe/Berlin
+tauceti-fleet schedule big-server          # show the saved slots, the current slot and the next boundary
+tauceti-fleet schedule big-server --clear  # admit at any time again
+```
+
+The host saves the slots in `host.json` as `worker_schedule`; a host without one
+behaves as before. Outside every slot the controller uses a worker ceiling of
+zero in its ordinary admission decision: admitted rounds finish, no new round
+starts, and the manager, the worker definitions, `workers --max` and CI
+admissions are untouched. Inside a slot the schedule changes nothing. A change
+applies on the controller's next pass, a few seconds later, without a restart or
+a timer unit.
+
+Slot times are wall-clock times in the host's local time zone, the zone its
+controller runs in. `--timezone` names an IANA zone to use instead and is saved
+with the slots; setting slots without it returns to host local time. Across a
+daylight-saving change a slot is an hour shorter or longer, and a time the
+change skips counts as the end of the skipped hour. Days are English
+names or their first three letters and times are 24-hour. A slot whose end is
+earlier in the week than its start runs past Sunday midnight, and slots that
+touch or overlap count as one. Several slots are separate arguments or one
+comma-separated argument, given before any option.
+
+`status` shows the zone, the current slot and the next boundary:
+
+```
+Starting new work: paused; outside the weekly schedule
+Weekly schedule (host local time): outside every slot; next slot starts Mon 23:00 CET (in 2d 3h)
+```
+
+JSON status has the same facts under `status.worker_schedule`, with the boundary
+as `boundary_at` in epoch seconds. A saved schedule the controller cannot read
+admits nothing and is reported there; `--clear` or a new set of slots replaces
+it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
+admission time left in the current slot.
 
 ## Public operations telemetry
 

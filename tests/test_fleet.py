@@ -477,11 +477,13 @@ class Isolated(unittest.TestCase):
     def test_release_archive_contains_only_code_and_manifest(self):
         import zipfile
 
-        with zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
+        revision = "a" * 40
+        with patch.object(remote, "source_revision", return_value=revision), \
+                zipfile.ZipFile(io.BytesIO(remote.archive())) as zipped:
             self.assertIn("release.json", zipped.namelist())
             self.assertTrue(all(n.startswith("tauceti_fleet/") or n == "release.json" for n in zipped.namelist()))
             manifest = json.loads(zipped.read("release.json"))
-            self.assertEqual(manifest, {"version": 1})
+            self.assertEqual(manifest, {"version": 1, "revision": revision})
 
     def test_duplicate_hosts_cannot_double_count_reports(self):
         pr = dict(

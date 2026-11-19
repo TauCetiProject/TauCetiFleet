@@ -36,7 +36,7 @@ def read(path, default=None):
         raise FleetError(f"Cannot read {path}: {type(exc).__name__}; preserve it and repair the file") from None
 
 
-def atomic(path, value):
+def atomic(path, value, *, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".fleet-", dir=path.parent)
@@ -46,6 +46,8 @@ def atomic(path, value):
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
