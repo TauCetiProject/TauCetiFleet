@@ -348,6 +348,9 @@ def start_workers():
         + argv
         + "\nEnvironment="
         + unit_argument("PYTHONPATH=" + root)
+        # systemd's default PATH lacks ~/.local/bin, where doctor finds uvx and bubble from the installing shell.
+        + "\nEnvironment="
+        + unit_argument("PATH=" + os.environ.get("PATH", "/usr/bin:/bin"))
         + "\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=30\nOOMPolicy=continue\nOOMScoreAdjust=100\n"
     )
     run(["systemctl", "--user", "daemon-reload"])
