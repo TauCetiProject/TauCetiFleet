@@ -481,9 +481,10 @@ after that file is replaced `clear-halt` refuses for a GitHub halt until
 `systemctl --user restart tauceti-fleet-workers.service` has run on the host. That
 restart leaves scoped workers running (see below); a worker whose status shows
 degraded isolation runs inside the manager's service and its round ends with it.
-A Forgejo source reads the file `TAUCETI_FORGEJO_TOKEN_FILE` names at every
-identity check, so a Forgejo halt needs only `clear-halt` once that file holds
-the new token.
+A Forgejo source reads its token file (`TAUCETI_FORGEJO_TOKEN_FILE`, by default
+the `~/.config/tauceti-forgejo/worker-token` that `--forgejo-workers` requires)
+at every identity check, so a Forgejo halt needs only `clear-halt` once that
+file holds the new token.
 A worker whose account is still wrong halts again. Worker releases without identity halts never
 report the state, and `clear-halt` then finds nothing to clear.
 
