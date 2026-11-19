@@ -68,6 +68,19 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("worker 1 alive / idle", output)
         self.assertNotIn("96%", output, "discovered build totals may grow")
 
+    def test_stuck_heads_line_appears_only_when_the_queue_reports_them(self):
+        self.assertNotIn("Stuck heads", self.render())
+        self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z")]
+        self.assertIn("  Stuck heads: 0 (no final state", self.render())
+        self.document["conditions"] += [dict(kind="stuck_head", since="2026-11-08T18:36:00Z"),
+                                        dict(kind="stuck_head", since="2026-11-08T20:00:00Z"),
+                                        dict(kind="stuck_heads_truncated")]
+        self.assertIn("  Stuck heads: 2+, oldest 5h (no final state", self.render())
+        self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z"),
+                                       dict(kind="stuck_heads_partial")]
+        self.assertIn("  Stuck heads: 0+ (no final state", self.render())
+        self.assertIn("; partial pass).", self.render())
+
     def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
         identity = "repair-3@chungus2"
         alias = "queue-worker-" + hashlib.sha256(identity.encode()).hexdigest()[:12]
