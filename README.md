@@ -160,64 +160,37 @@ profile returns to its default.
 
 ### Forgejo
 
-`forges` and `new_pr_forge` become the worker's own `forges` and `new_pr_forge`
-keys in `workers.toml`, which the worker passes to `tauceti work` as
-`--github`/`--no-github`, `--forgejo` and `--new-pr-forge`. A Forgejo-only
-profile that authors there:
-
-```json
-{
-  "forgejo": {
-    "github_account": "operator",
-    "github_token_file": "/home/operator/.config/secrets/github-token",
-    "forgejo_token_file": "/home/operator/.config/secrets/forgejo-token",
-    "claude_billing": "subscription",
-    "agent": "auto",
-    "forges": ["forgejo"],
-    "new_pr_forge": "forgejo",
-    "env": {"TAUCETI_FORGEJO_FORK": "operator/TauCeti"}
-  }
-}
-```
-
-A profile on both forges that keeps authoring on GitHub:
+`workers HOST --forgejo-workers N` moves the highest-numbered slots to Forgejo
+alone (see below). `forges` and `new_pr_forge` instead select the same forges for
+every slot, including both at once, which the count cannot express; they become
+the worker's `github`, `forgejo` and `new_pr_forge` keys. A host uses one or the
+other: a nonzero count refuses a profile with either key, and such a profile
+refuses a nonzero count. A profile on both forges that keeps authoring on
+GitHub:
 
 ```json
 {
   "both": {
     "github_account": "operator",
-    "forgejo_token_file": "/home/operator/.config/secrets/forgejo-token",
     "forges": ["github", "forgejo"]
   }
 }
 ```
 
-The worker knows the canonical TauCeti repository's Forgejo server and native
-repository ID. For another repository, set `TAUCETI_FORGEJO_ORIGIN`,
-`TAUCETI_FORGEJO_REPO` and `TAUCETI_FORGEJO_REPOSITORY_ID` in `env`;
-`TAUCETI_FORGEJO_FORK` names an explicit fork for new PR branches. `add` refuses
-a combination the worker would refuse: no repository ID for a non-canonical
-repository, no token for a non-canonical server, `TAUCETI_PR` in `env` with
-both forges, and the `bubble` sandbox with `forges = ["forgejo"]` or
-`new_pr_forge = "forgejo"`, because Forgejo rounds run on the host only. With
-both forges a bubble worker counts Forgejo PRs toward its limits but works on
-GitHub PRs only; `doctor` warns.
-
-Workers on Forgejo still use their GitHub login for author claims, the review
-archive and the roadmap, review, data and claims repositories, so the profile's
-GitHub credential stays required. Fleet makes no Forgejo requests itself:
-`doctor` checks that the installed worker reports `"forges": 1` from
-`tauceti _fleet-protocol` (otherwise workers cannot be enabled) and that the
-Forgejo token file is present and private, and `status` prints the selected
-forges. Changing either key takes a drain before repeating `add`.
-
-These keys select the same forges for every slot, while `workers HOST
---forgejo-workers N` routes the highest-numbered slots to the canonical Forgejo repository with the
-credential it checks. Use one or the other: with a nonzero count, `forges`,
-`new_pr_forge` and the `env` settings `TAUCETI_FORGEJO_ORIGIN`,
-`TAUCETI_FORGEJO_REPO`, `TAUCETI_FORGEJO_REPOSITORY_ID` and
-`TAUCETI_FORGEJO_TOKEN_FILE` are refused, and a profile with them refuses a
-nonzero count.
+Workers read the same Forgejo credential as routed slots,
+`~/.config/tauceti-forgejo/worker-token` on the host, unless the worker
+environment (`workers HOST --env`) sets `TAUCETI_FORGEJO_TOKEN_FILE`. The worker
+knows the canonical TauCeti repository's Forgejo server and native repository
+ID; for another repository set `TAUCETI_FORGEJO_ORIGIN`, `TAUCETI_FORGEJO_REPO`,
+`TAUCETI_FORGEJO_REPOSITORY_ID` and `TAUCETI_FORGEJO_TOKEN_FILE` there. `add`
+and `--env` refuse a combination the worker would refuse: a missing origin,
+repository ID or token outside the canonical repository, and `TAUCETI_PR` with
+both forges. Workers on Forgejo still use their GitHub login for author claims,
+the review archive and the roadmap, review, data and claims repositories, so the
+profile's GitHub credential stays required. `doctor` blocks enabling workers
+until the installed worker reports source selection and the credential is
+present and private; `status` prints the selected forges. Changing either key
+takes a drain before repeating `add`.
 
 ## Protected roadmap capacity
 
