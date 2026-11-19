@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from . import activity, broker, host, pool_activity, remote
+from . import activity, broker, host, pool_activity, remote, worker_view
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -31,6 +31,7 @@ def parser():
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--timezone", default="Australia/Sydney", help="merge-queue timestamp timezone (default: Australia/Sydney)")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+            cmd.add_argument("--workers", action="store_true", help="add one row per worker and the workers' recent PR events")
         if name == "update":
             cmd.add_argument("--allow-downgrade", action="store_true",
                              help="ship this CLI's release even if it does not descend from the host's release")
@@ -222,7 +223,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             from . import status_follow
 
             command = (["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
-                       + (["--all-jobs"] if args.all_jobs else []) + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
+                       + (["--all-jobs"] if args.all_jobs else []) + (["--workers"] if args.workers else [])
+                       + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
                                      json_output=args.json, refresh=pool_activity.refresh)
         results = {}
@@ -495,6 +497,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                    if args.workers:
+                        print()
+                        worker_view.display(status)
                     print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
