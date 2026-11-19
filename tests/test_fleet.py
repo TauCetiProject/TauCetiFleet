@@ -501,6 +501,17 @@ class Isolated(unittest.TestCase):
         self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
         self.assertIn(["/runtime/old/bin/tauceti", "work", "--worker-id", "w1", "--clear-halt"], calls)
         del calls[:]
+        # The live process outranks a record left by an earlier manager.
+        store.atomic(store.state_dir() / "worker-manager.json",
+                     dict(binary="/runtime/stale/bin/tauceti", github_token_sha256=host.token_digest("token-z")))
+        with (
+            patch.object(host, "run", side_effect=fake),
+            patch.object(host, "manager_process", return_value=(argv, dict(GH_TOKEN="token-a"))),
+        ):
+            host.rpc(dict(action="clear-halt"))
+        self.assertEqual({c[0] for c in calls[1:]}, {"/runtime/old/bin/tauceti"})
+        (store.state_dir() / "worker-manager.json").unlink()
+        del calls[:]
         with (
             patch.object(host, "run", side_effect=fake),
             patch.object(host, "executable", return_value="/runtime/new/bin/tauceti"),
