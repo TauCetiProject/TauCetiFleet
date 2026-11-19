@@ -96,7 +96,8 @@ class Enrollment(unittest.TestCase):
         remote.remember("chris", status, profile_name="science")
         with patch.object(remote, "deploy", return_value=dict(installed=True)) as deploy, patch.object(remote, "profile", side_effect=AssertionError("Credential must stay on server")), patch.object(remote, "call", side_effect=AssertionError("Must use staged release, not configure or prepare_update")), patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(cli.main(["update", "chris", "--json"]), 0)
-        deploy.assert_called_once_with("chris", live=True, expected_machine_id=status["machine_id"])
+        deploy.assert_called_once_with("chris", live=True, expected_machine_id=status["machine_id"],
+                                       allow_downgrade=False)
         self.assertEqual(remote.resolve("chris")["profile"], "science")
 
     def test_legacy_host_identity_is_verified_by_the_caller_before_mutation_or_reenrollment(self):

@@ -14,7 +14,7 @@ export class GitHub {
   constructor(env) { this.env=env; this.tokens=new Map(); this.cachedPolicy=null; }
   async raw(path, token, method='GET', data) {
     const response=await fetch('https://api.github.com/'+path, {method,
-      headers:{Accept:'application/vnd.github+json', Authorization:'Bearer '+token,
+      headers:{Accept:'application/vnd.github+json', ...(token?{Authorization:'Bearer '+token}:{}),
         'User-Agent':'TauCetiFleet/broker', 'X-GitHub-Api-Version':'2022-11-28', 'Content-Type':'application/json'},
       body:data===undefined?undefined:JSON.stringify(data), signal:AbortSignal.timeout(20000)});
     if (!response.ok) throw new UpstreamError(response.status,response.headers.get('x-github-request-id'));
@@ -64,10 +64,15 @@ export class GitHub {
     if (!fresh && this.cachedPolicy?.expires>Date.now()) return this.cachedPolicy.value;
     const group=await this.request('orgs/TauCetiProject/actions/runner-groups/3',{kind:'runners'});
     const required='TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main';
-    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/fleet-smoke.yml@refs/heads/main']);
+    const allowed=new Set([required,'TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main',
+      'TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main',
+      'TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main',
+      // TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.
+      'TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main']);
     const selected=group.selected_workflows || [];
-    if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows ||
-        !selected.includes(required) || selected.some(w=>!allowed.has(w))) throw new PolicyError();
+    if (group.id!==3 || group.name!=='TauCetiFleet' || !group.restricted_to_workflows || !selected.includes(required))
+      throw new PolicyError();
+    if (selected.some(workflow=>!allowed.has(workflow))) throw new PolicyError();
     const value={runner_group_id:3};
     this.cachedPolicy={expires:Date.now()+60000,value};
     return value;

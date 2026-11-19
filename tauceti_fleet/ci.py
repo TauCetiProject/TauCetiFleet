@@ -41,8 +41,41 @@ INFRA_PREFIXES = (
 )
 
 
-def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", memory_overcommit=False):
-    """Return a bounded, non-secret decision; missing/conflicting facts fail closed."""
+# The only steps a cancellation may leave failed: this finalizer runs under `always()` and
+# deliberately exits 1 for a cancellation, including before build/guard outputs exist.
+CANCELLATION_FINALIZERS = (REPORT,)
+
+
+def cancelled_steps_unhealthy(steps):
+    """The reason a cancelled job's steps cannot establish health, else None.
+
+    Shared by every cancellation exemption: duplicate names or partial/unknown step outcomes,
+    a runner that did not complete, or a failed step other than an expected finalizer."""
+    by_name = {s.get("name"): s for s in steps}
+    if len(by_name) != len(steps) or any(
+        s.get("status") != "completed" or s.get("conclusion") not in ("success", "skipped", "cancelled", "failure")
+        for s in steps
+    ):
+        return "cancellation_steps_incomplete", {}
+    # A clean QEMU exit alone does not prove that the guest runner survived.
+    if by_name.get("Complete job", {}).get("conclusion") != "success":
+        return "cancellation_runner_completion_missing", {}
+    for step in steps:
+        # The finalizer's status writes do not prove host health: runner completion and the
+        # host receipt do. A failed GitHub publication also does not establish a machine
+        # fault. Its start time relative to cancellation does not change that: runner step
+        # timestamps and GitHub status timestamps can disagree. Infrastructure failures and
+        # host faults were handled before any exemption is considered.
+        if step.get("conclusion") == "failure" and step.get("name") not in CANCELLATION_FINALIZERS:
+            return "cancellation_unknown_step_failed", {"step_number": step.get("number")}
+    return None
+
+
+def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", memory_overcommit=False,
+             staging_slot=False):
+    """Return a bounded, non-secret decision; missing/conflicting facts fail closed.
+
+    `staging_slot`: the job ran on a slot reserved for staging (`ci_staging_slots`)."""
 
     def result(cooldown, reason, **evidence):
         return dict(cooldown=cooldown, reason=reason, evidence=evidence)
@@ -116,6 +149,16 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", 
     unknown = result(True, "cancellation_evidence_inconclusive")
     if host_health != "healthy":
         return result(True, "cancellation_host_health_unknown")
+    # The queue cancels a superseded staging run as soon as a newer candidate exists, and
+    # its runs carry no bors evidence. On a reserved staging slot, a clean host exit and a
+    # completed runner already show the guest healthy: a cooldown would only hold the
+    # replacement candidate behind the run it replaced. Other slots keep the strict test. Only
+    # the Bors evidence is waived: the step health checks are the same as for Bors.
+    if staging_slot:
+        unhealthy = cancelled_steps_unhealthy(steps)
+        if unhealthy:
+            return result(True, unhealthy[0], **unhealthy[1])
+        return result(False, "staging_slot_cancelled", host_service="healthy")
     if not run or not isinstance(statuses, list):
         return unknown
     match = re.fullmatch(
@@ -140,16 +183,11 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", 
         or job.get("name") != "sandboxed-build"
     ):
         return result(True, "cancellation_run_identity_mismatch")
-    # Duplicate names or partial/unknown step outcomes cannot establish health.
-    by_name = {s.get("name"): s for s in steps}
-    if len(by_name) != len(steps) or any(
-        s.get("status") != "completed" or s.get("conclusion") not in ("success", "skipped", "cancelled", "failure")
-        for s in steps
-    ):
-        return result(True, "cancellation_steps_incomplete")
-    # A clean QEMU exit alone does not prove that the guest runner survived.
-    if by_name.get("Complete job", {}).get("conclusion") != "success":
-        return result(True, "cancellation_runner_completion_missing")
+    # Duplicate names, partial/unknown step outcomes or a runner that did not complete cannot
+    # establish health (`cancelled_steps_unhealthy`); unknown failed steps are checked last.
+    unhealthy = cancelled_steps_unhealthy(steps)
+    if unhealthy and unhealthy[0] != "cancellation_unknown_step_failed":
+        return result(True, unhealthy[0])
     # Bors can cancel during setup, cache restoration, building or finalizers;
     # runner completion and the host receipt establish health independently
     # of which workflow step happened to receive the cancellation.
@@ -169,18 +207,8 @@ def classify(job, *, run=None, statuses=None, host_health=None, kind="staging", 
             return result(True, "cancellation_status_time_mismatch")
     except (ValueError, TypeError, OverflowError):
         return result(True, "cancellation_timestamps_invalid")
-    for step in steps:
-        if step.get("conclusion") != "failure":
-            continue
-        # This finalizer deliberately exits 1 for cancellation, including
-        # before build/guard outputs exist. Its status writes do not prove
-        # host health: runner completion and the host receipt do. A failed
-        # GitHub publication also does not establish a machine fault.
-        # Actual infrastructure failures and host faults were handled above.
-        # Its start time relative to cancellation does not change that:
-        # runner step timestamps and GitHub status timestamps can disagree.
-        if step.get("name") != REPORT:
-            return result(True, "cancellation_unknown_step_failed", step_number=step.get("number"))
+    if unhealthy:
+        return result(True, unhealthy[0], **unhealthy[1])
     return result(
         False,
         "verified_bors_cancellation",

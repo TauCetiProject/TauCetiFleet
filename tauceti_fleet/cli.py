@@ -31,6 +31,9 @@ def parser():
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
             cmd.add_argument("--timezone", default="Australia/Sydney", help="merge-queue timestamp timezone (default: Australia/Sydney)")
             cmd.add_argument("--all-jobs", action="store_true", help="include CI control jobs in the pool activity table")
+        if name == "update":
+            cmd.add_argument("--allow-downgrade", action="store_true",
+                             help="ship this CLI's release even if it does not descend from the host's release")
         if name == "doctor":
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
@@ -63,6 +66,12 @@ def parser():
     workers.add_argument("--max", dest="maximum", type=int)
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
+    workers.add_argument("--forgejo-workers", type=int, default=None,
+                         help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
+    workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
+                         help="set an environment variable in every worker's definition (repeatable)")
+    workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
+                         help="remove a worker environment variable set with --env (repeatable)")
     workers.add_argument("--json", action="store_true")
     focus = sub.add_parser("focus", help="steer a share of roadmap slots without interrupting work")
     focus.add_argument("host")
@@ -189,8 +198,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             raise FleetError("Select --ci and/or --workers explicitly")
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
-        if args.command == "workers" and args.maximum is None and args.self_tested is None:
-            raise FleetError("Select --max, --self-tested, or --no-self-tested")
+        if (args.command == "workers" and args.maximum is None and args.self_tested is None
+                and args.forgejo_workers is None and not args.env and not args.unset_env):
+            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.host == "local":
@@ -232,6 +242,18 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["maximum"] = args.maximum
                 if args.self_tested is not None:
                     payload["self_tested"] = args.self_tested
+                if args.forgejo_workers is not None:
+                    payload["forgejo_workers"] = args.forgejo_workers
+                if args.env or args.unset_env:
+                    changes = {}
+                    for item in args.env or []:
+                        variable, sep, value = item.partition("=")
+                        if not sep:
+                            raise FleetError(f"--env expects NAME=VALUE, got {item!r}")
+                        changes[variable] = value
+                    for variable in args.unset_env or []:
+                        changes[variable] = None
+                    payload["worker_env"] = changes
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
             if args.command == "focus":
@@ -251,7 +273,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 if args.clear:
                     payload["clear"] = True
             if args.command == "update":
-                options = dict(live=True, expected_machine_id=entry["machine_id"])
+                options = dict(live=True, expected_machine_id=entry["machine_id"],
+                               allow_downgrade=args.allow_downgrade)
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
             cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
