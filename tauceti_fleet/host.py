@@ -9,7 +9,20 @@ import sys
 import time
 from pathlib import Path
 
-from . import activity, capacity, ci, ci_overview, ci_pool, ci_priority, focus, github, hostos, native_runner, vm, worker_view
+from . import (
+    activity,
+    capacity,
+    ci,
+    ci_overview,
+    ci_pool,
+    ci_priority,
+    focus,
+    github,
+    hostos,
+    native_runner,
+    vm,
+    worker_view,
+)
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import budget_environment, budget_path, snapshot

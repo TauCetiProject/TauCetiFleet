@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import cli, github, host, remote, status_follow, store, worker_view
+from tauceti_fleet import cli, github, host, hostos, remote, status_follow, store, worker_view
+
+hostos.MACOS = False
 
 OPENED = 1_800_000_000
 NOW = OPENED + 86400

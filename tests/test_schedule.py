@@ -8,10 +8,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import host, pool_activity, remote, schedule, store
+from tauceti_fleet import host, hostos, pool_activity, remote, schedule, store
 from tauceti_fleet.cli import main
 from tauceti_fleet.status_follow import render_with_cli
 from tauceti_fleet.store import FleetError
+
+hostos.MACOS = False
 
 GIB = 1024**3
 
