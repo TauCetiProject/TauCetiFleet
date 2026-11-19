@@ -88,7 +88,7 @@ class SubscriptionUsage(unittest.TestCase):
         )
         self.assertEqual(subscription_usage.readings(SUBSCRIPTION, NOW), expected)
         self.assertEqual(subscription_usage.readings(dict(SUBSCRIPTION, agent="claude"), NOW), dict(claude=expected["claude"]))
-        elsewhere = dict(SUBSCRIPTION, env=dict(TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
+        elsewhere = dict(SUBSCRIPTION, worker_env=dict(TAUCETI_LEGACY_DATA_ROOT=str(self.root / "kept")))
         host.worker_fields(elsewhere)
         self.cache(self.root / "kept/state/.quota-usage/0011223344556677/quota-claude-0123456789abcdef.json",
                    flat(dict(utilization=50, resets_at=iso(NOW + hour)), None), 5)
@@ -378,12 +378,12 @@ class SubscriptionUsage(unittest.TestCase):
             host.start_workers()
         self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 80.0)
 
-    def test_inherited_data_root_is_searched_again_once_a_profile_override_is_removed(self):
+    def test_inherited_data_root_is_searched_again_once_a_worker_env_override_is_removed(self):
         hour = 3600
         inherited, override = self.root / "inherited", self.root / "override"
         token = self.root / "token"
         token.write_text("synthetic-token")
-        store.update_host(github_token_file=str(token), agent="codex", env=dict(TAUCETI_LEGACY_DATA_ROOT=str(override)))
+        store.update_host(github_token_file=str(token), agent="codex", worker_env=dict(TAUCETI_LEGACY_DATA_ROOT=str(override)))
         with (
             patch.dict(os.environ, {"TAUCETI_LEGACY_DATA_ROOT": str(inherited)}),
             patch.object(host, "executable", return_value="/fake/tauceti"),
@@ -393,7 +393,7 @@ class SubscriptionUsage(unittest.TestCase):
         self.codex(override / "state/fleet-1/cache/quota-codex.json", 60, (30, 5 * hour, hour))
         self.assertEqual(subscription_usage.readings(store.host_config(), NOW)["codex"]["windows"]["session"]["left"], 70.0)
         # The manager keeps running; reconfigured workers fall back to the root it inherited.
-        store.update_host(env={})
+        store.update_host(worker_env={})
         units = self.root / "units"
         units.mkdir()
         with patch.object(host, "units", return_value=units), patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):

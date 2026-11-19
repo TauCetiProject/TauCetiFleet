@@ -30,7 +30,7 @@ def providers(config):
 
 
 def claude_login(config):
-    """The Claude login directory the profile's workers copy; a profile's env may not move it."""
+    """The Claude login directory the profile's workers copy; the worker environment may not move it."""
     return Path.home() / ".claude"
 
 
@@ -39,7 +39,7 @@ def launched_data_root():
 
 
 def record_data_root(environment=None):
-    """Keep the worker data root the manager inherited; worker_roots adds the profile's own override."""
+    """Keep the worker data root the manager inherited; worker_roots adds the host's worker_env override."""
     environment = os.environ if environment is None else environment
     value = environment.get("TAUCETI_LEGACY_DATA_ROOT")
     if value:
@@ -52,7 +52,7 @@ def record_data_root(environment=None):
 def worker_roots(config):
     # Worker state stays inside the runtime that created it, so an earlier runtime can hold the newest reading.
     roots = list((data_dir() / "worker-runtimes").glob("*/lib/python*/site-packages/tauceti_worker"))
-    for root in ((config.get("env") or {}).get("TAUCETI_LEGACY_DATA_ROOT"), recorded_source(launched_data_root())):
+    for root in ((config.get("worker_env") or {}).get("TAUCETI_LEGACY_DATA_ROOT"), recorded_source(launched_data_root())):
         if root and Path(root).is_absolute() and Path(root) not in roots:
             roots.append(Path(root))
     return roots
