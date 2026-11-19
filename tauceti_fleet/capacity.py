@@ -22,9 +22,9 @@ def guest_shape(config, caps=None):
         caps = resources()
     vcpus = min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"])))
     staging_memory = staging_memory_gib(config)
-    if config.get("ci_kinds") == ["staging"] and staging_memory is not None:
-        # A reserved staging guest's RAM is set explicitly, so the guest and the
-        # other CI on the host no longer overcommit the host between them.
+    if config.get("ci_staging_reserved") and staging_memory is not None:
+        # A reserved staging guest's RAM is set explicitly, which reduces how far
+        # it and the other CI on the host can overcommit the host between them.
         return dict(vcpus=vcpus, memory_gib=staging_memory)
     return dict(vcpus=vcpus, memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
 
@@ -168,7 +168,9 @@ def for_slot(config, index):
         return dict(config, ci_slot=index, ci_kinds=[protected["kind"]],
                     ci_slot_runner_group_id=protected["runner_group_id"])
     reserved, _ = reservation(config)
-    return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
+    if index < reserved:
+        return dict(config, ci_slot=index, ci_kinds=["staging"], ci_staging_reserved=True)
+    return dict(config, ci_slot=index, ci_kinds=kinds(config), ci_staging_reserved=False)
 
 
 def broker_slot_group(index, value, policy):

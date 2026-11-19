@@ -157,9 +157,6 @@ class StagingReservations(unittest.TestCase):
         self.assertEqual(store.read(path), intent)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class StagingGuestMemory(unittest.TestCase):
     def setUp(self):
@@ -206,13 +203,48 @@ class StagingGuestMemory(unittest.TestCase):
         self.assertEqual(result["pending_slots"], [0])
         self.assertEqual(store.read(vm.slot_file(self.config, "vm.json")), guest)
         store.atomic(vm.slot_file(self.config, "vm.json"), dict(guest, memory_gib=64))
-        self.assertEqual(host.reserve_staging(1)["pending_slots"], [])
+        with patch.object(host.capacity, "guest_shape", wraps=lambda c, caps=None: real_shape(c, self.caps)):
+            self.assertEqual(host.reserve_staging(1)["pending_slots"], [])
+            # Clearing the setting makes the running 64 GiB guest the one awaiting replacement.
+            self.assertEqual(host.reserve_staging(1, 0)["pending_slots"], [0])
 
     def test_invalid_memory_settings_change_nothing(self):
         before = store.host_config()
-        for value in (-1, True, 1.5, "64", 4097):
+        for value in (-1, True, False, 0.0, 1.5, "", "64", [], {}, 4097):
             with self.assertRaises(store.FleetError):
                 host.reserve_staging(1, value)
+            with self.assertRaises(store.FleetError):
+                host.rpc(dict(action="reserve-staging", maximum=1, memory_gib=value))
         self.assertEqual(store.host_config(), before)
         with self.assertRaises(store.FleetError):
             capacity.controller_config(dict(before, ci_staging_memory_gib="64"))
+
+    def test_unreserved_staging_guests_keep_the_ceiling(self):
+        config = store.update_host(ci_kinds=["staging"], ci_staging_memory_gib=64, ci_staging_slots=0)
+        for index in (0, 1):
+            self.assertEqual(capacity.guest_shape(capacity.for_slot(config, index), self.caps)["memory_gib"], 112)
+        self.assertEqual(capacity.guest_shape(config, self.caps)["memory_gib"], 112)
+
+    def test_the_reserved_guest_launches_with_the_configured_memory(self):
+        config = store.update_host(ci_staging_slots=1, ci_staging_memory_gib=64)
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        calls = []
+        with (patch.object(github, "jit_config", return_value=(100, "jit")),
+              patch.object(vm, "run", side_effect=lambda args, **_: calls.append([str(a) for a in args])),
+              patch.object(vm, "executable", side_effect=lambda name: name),
+              patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"),
+              patch.object(capacity, "guest_shape", wraps=lambda c, caps=None: real_shape(c, self.caps)),
+              patch.object(vm, "start_memory_available", return_value=100 * 1024**3),
+              patch.object(vm.secrets, "token_hex", return_value="b" * 16)):
+            vm.start(dict(config, ci_slot=0))
+        receipt = store.read(vm.slot_file(dict(config, ci_slot=0), "vm.json"))
+        self.assertEqual((receipt["memory_gib"], receipt["vcpus"], receipt["ci_kinds"]), (64, 96, ["staging"]))
+        qemu = next(c for c in calls if any("qemu-system" in a for a in c))
+        self.assertEqual(qemu[qemu.index("-m") + 1], str(64 * 1024))
+
+
+real_shape = capacity.guest_shape
+
+
+if __name__ == "__main__":
+    unittest.main()

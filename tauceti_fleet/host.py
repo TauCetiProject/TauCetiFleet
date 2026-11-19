@@ -511,6 +511,8 @@ def reserve_staging(maximum, memory_gib=None):
     config = host_config()
     changes = dict(ci_staging_slots=maximum)
     if memory_gib is not None:
+        if type(memory_gib) is not int or not 0 <= memory_gib <= 4096:
+            raise FleetError("The staging guest memory must be an integer from 0 to 4096 GiB")
         changes["ci_staging_memory_gib"] = memory_gib or None
     proposed = dict(config, **changes)
 
@@ -527,7 +529,8 @@ def reserve_staging(maximum, memory_gib=None):
     for index in range(maximum):
         guest = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
         if guest and (guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]
-                      or (staging_memory is not None and guest.get("memory_gib") != staging_memory)):
+                      or (guest.get("memory_gib") is not None and not native_runner.is_native(guest)
+                          and guest["memory_gib"] != capacity.guest_shape(capacity.for_slot(value, index))["memory_gib"])):
             pending.append(index)
         elif not guest:
             intent = read(vm.slot_file({"ci_slot": index}, "ci-registration.json"), {})
