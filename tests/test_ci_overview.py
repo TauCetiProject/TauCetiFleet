@@ -190,7 +190,7 @@ class Overview(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             overview.display(value)
         self.assertIn("Bors: unknown", out.getvalue())
-        self.assertIn("CI backlog: PR builds 1200 pending", out.getvalue())
+        self.assertIn("CI backlog: 1230 observed jobs waiting to start; 53 running", out.getvalue())
 
     def test_unknown_machine_keys_merge_and_use_inventory_names(self):
         machine = "c" * 32
@@ -231,19 +231,42 @@ class Overview(unittest.TestCase):
         self.assertEqual(stamp, 1794441600)
         self.assertTrue(fetch.call_args.args[0].startswith("https://ci-data.taucetiproject.org/v1/operations/objects/"))
 
-    def test_pending_and_queued_are_separate_from_verified_and_unconfirmed_records(self):
+    def test_status_reports_actual_jobs_without_turning_workflow_records_into_builds(self):
         data = self.backlog_value(partial=True)
-        data["pr_builds"]["oldest_waiting_at"] = time.time() - 8 * 3600
+        data['waiting_jobs'] = 178
+        data['pr_builds']['oldest_waiting_at'] = time.time() - 8 * 3600
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), patch.object(overview, "fetch", side_effect=AssertionError("foreground network")):
+        with contextlib.redirect_stdout(out), patch.object(overview, 'fetch', side_effect=AssertionError('foreground network')):
             overview.display(dict(sources=dict(backlog=dict(value=data, observed_at=time.time()))))
         text = out.getvalue()
-        self.assertIn("PR builds 1200 pending, 30 queued", text)
-        self.assertIn("other workflows 2 pending, 1 queued", text)
-        self.assertIn("910 verified stuck; 4 without confirmed active jobs", text)
-        self.assertIn("oldest PR wait 8h 0m", text)
-        self.assertIn("partial observations", text)
-        self.assertNotIn("across all workflows", text)
+        self.assertIn('CI backlog: 178 observed jobs waiting to start; 53 running (builds and automation;', text)
+        self.assertIn('Total waiting work: unknown. The queue monitor cannot account for all workflows.', text)
+        for misleading in ('PR builds', 'pending,', 'queued;', 'verified stuck', 'without confirmed active jobs', 'oldest PR wait', '1200', '1230'):
+            self.assertNotIn(misleading, text)
+
+    def test_unrecognised_workflow_state_is_a_monitoring_gap_even_when_source_says_observed(self):
+        for state in ('unconfirmed',):
+            data = self.backlog_value()
+            for row in (data['pr_builds'], data['other_workflows']):
+                row.update(pending=0, queued=0, stuck=0, unconfirmed=0)
+            data['pr_builds'][state] = 1022
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                overview.display(dict(sources=dict(backlog=dict(value=data, observed_at=time.time()))))
+            text = out.getvalue()
+            self.assertIn('Total waiting work: unknown.', text)
+            self.assertNotIn('1022', text)
+
+    def test_normal_pending_workflows_do_not_trigger_a_false_monitoring_alarm(self):
+        data = self.backlog_value()
+        for row in (data['pr_builds'], data['other_workflows']):
+            row.update(pending=1200, stuck=0, unconfirmed=0)
+        data.update(waiting_jobs=0, running_jobs=0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(backlog=dict(value=data, observed_at=time.time()))))
+        self.assertIn('CI backlog: 0 observed jobs waiting to start; 0 running', out.getvalue())
+        self.assertNotIn('Total waiting work: unknown.', out.getvalue())
 
     def test_invalid_or_absent_shared_backlog_does_not_invent_empty_queue(self):
         for alteration in ("absent", "scope", "schema", "negative", "boolean"):
@@ -268,16 +291,33 @@ class Overview(unittest.TestCase):
         self.assertIsNone(overview.source_value("backlog", old))
 
     def test_bors_total_and_legacy_backlog_cache(self):
-        batches = list(reversed([dict(id=i, size=size, state="waiting") for i, size in enumerate((26, 26, 2))]))
+        batches = [dict(id=4, size=1, state="running", sealed=True), dict(id=3, size=7, state="waiting", sealed=False),
+                   dict(id=2, size=26, state="waiting", sealed=True), dict(id=1, size=26, state="waiting")]
         value = dict(sources=dict(
             bors=dict(value=dict(batches=batches, held=0), observed_at=time.time()),
             backlog=dict(value=dict(pr_builds=71, all_workflows=100), observed_at=time.time())))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(value)
-        self.assertIn("Bors: 54=26+26+2", out.getvalue())
+        self.assertIn("Bors feed (GitHub PRs only): 60=1+26+26+7 (", out.getvalue())
         self.assertIn("CI backlog: unknown", out.getvalue())
         self.assertNotIn("71 PR-build", out.getvalue())
+
+    def test_queue_table_replaces_the_github_only_bors_total(self):
+        value = dict(sources=dict(bors=dict(value=dict(batches=[dict(id=1, size=2, state="running")], held=0),
+                                            observed_at=time.time())),
+                     queue=dict(value=dict(observed_at="2026-11-08T23:35:30Z", batches=[], claims=[], workers=[],
+                                           waiting=0)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch("tauceti_fleet.queue_status.worker_names", return_value={}):
+            overview.display(value)
+        self.assertNotIn("Bors feed", out.getvalue())
+        self.assertIn("Merge queue (", out.getvalue())
+        value["queue"] = dict(error="Public queue observation is unavailable")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(value)
+        self.assertIn("Bors feed (GitHub PRs only): 2 (", out.getvalue())
 
     def test_history_windows_show_outcome_fractions_attempts_and_sampled_job_runtime(self):
         windows = [dict(window=label, completed_batches=4, successful_batches=2,

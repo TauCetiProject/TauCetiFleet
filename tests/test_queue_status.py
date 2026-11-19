@@ -64,9 +64,22 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("CI reporting results", output)
         self.assertIn("worker 2: preparation; Lake 36,611/38,051 tasks", output)
         self.assertIn("advanced 09 Nov 10:35 AEDT", output)
-        self.assertIn("Waiting for placement: 7 PRs", output)
+        self.assertIn("1795 PRs in batches (876+349+570); 7 waiting for placement.", output)
         self.assertIn("worker 1 alive / idle", output)
         self.assertNotIn("96%", output, "discovered build totals may grow")
+
+    def test_stuck_heads_line_appears_only_when_the_queue_reports_them(self):
+        self.assertNotIn("Stuck heads", self.render())
+        self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z")]
+        self.assertIn("  Stuck heads: 0 (no final state", self.render())
+        self.document["conditions"] += [dict(kind="stuck_head", since="2026-11-08T18:36:00Z"),
+                                        dict(kind="stuck_head", since="2026-11-08T20:00:00Z"),
+                                        dict(kind="stuck_heads_truncated")]
+        self.assertIn("  Stuck heads: 2+, oldest 5h (no final state", self.render())
+        self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z"),
+                                       dict(kind="stuck_heads_partial")]
+        self.assertIn("  Stuck heads: 0+ (no final state", self.render())
+        self.assertIn("; partial pass).", self.render())
 
     def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
         identity = "repair-3@chungus2"
@@ -111,7 +124,7 @@ class QueueStatus(unittest.TestCase):
         output = self.render(report)
         self.assertIn("worker 2: preparation (earlier membership); Lake 36,611/38,051 tasks", output)
         self.assertIn("CI reporting results", output)
-        self.assertIn("Waiting for placement: 7 PRs", output)
+        self.assertIn("7 waiting for placement.", output)
 
     def test_unclaimed_task_for_earlier_membership_waits_for_refresh(self):
         self.batch["version"] += 5
@@ -158,6 +171,34 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("partial", output)
         self.assertIn("cached", output)
         self.assertIn("refresh failed", output)
+
+    def test_rows_and_total_follow_landing_order_not_batch_number(self):
+        # An emergency head has the newest number; an unsealed batch can predate a sealed one.
+        self.head.update(id="395", latest_attempt=dict(self.head["latest_attempt"], batch_id="395"))
+        early = dict(self.open, id="390", size=11)
+        later = dict(self.batch, id="393", size=22, active_tasks=[])
+        self.document["batches"] = [early, self.batch, later, self.head, self.open]
+        output = self.render()
+        order = [line.split()[0] for line in output.splitlines() if line[:7].strip().isdigit() and line.split()[1].isdigit()]
+        self.assertEqual(order, ["395", "391", "393", "390", "392"])
+        self.assertIn("1828 PRs in batches (876+349+22+11+570); 7 waiting for placement.", output)
+
+    def test_single_batch_total_has_no_sum(self):
+        self.document["batches"] = [self.head]
+        self.assertIn("  876 PRs in batches; 7 waiting for placement.", self.render())
+
+    def test_stale_means_publication_stopped_not_slow_observation(self):
+        # The publisher observes, then uploads about 90s later, every two minutes or so.
+        self.document.update(observed_at="2026-11-08T23:32:30Z", received_at="2026-11-08T23:34:00Z")
+        header = self.render().splitlines()[0]
+        self.assertIn("210s old", header)
+        self.assertNotIn("STALE", header)
+        self.document["received_at"] = "2026-11-08T23:30:59Z"
+        self.assertIn("STALE", self.render().splitlines()[0])
+        del self.document["received_at"]
+        self.assertNotIn("STALE", self.render().splitlines()[0])
+        self.document["observed_at"] = "2026-11-08T23:28:59Z"
+        self.assertIn("STALE", self.render().splitlines()[0])
 
     def test_no_observation_reports_unknown_not_empty_queue(self):
         self.assertIn("unavailable", self.render({}))
@@ -263,6 +304,94 @@ class QueueStatus(unittest.TestCase):
         self.assertNotIn("build/audits passed", self.render())
         attempt["verdicts"] = dict(build=dict(state="success", bound=True))
         self.assertIn("build/audits passed 09 Nov 10:18 AEDT", self.render())
+
+    def test_running_sandboxed_phase_step_is_named(self):
+        attempt = self.head["latest_attempt"]
+        steps = [("Build exact candidate under bwrap, offline", "building"),
+                 ("Audit the candidate under bwrap (duplicates, axioms)", "auditing duplicates and axioms"),
+                 ("Check the module system under bwrap", "checking the module system"),
+                 ("Environment lint under bwrap", "environment lint"),
+                 ("Style lint under bwrap", "style lint"),
+                 ("Record declaration names and stage cache outputs under bwrap", "recording declaration names")]
+        for index, (name, label) in enumerate(steps):
+            with self.subTest(name=name):
+                attempt["phases"] = [
+                    *(dict(name="candidate / sandboxed-build: " + done, status="completed",
+                           started_at="2026-11-08T23:10:00Z", completed_at="2026-11-08T23:18:51Z")
+                      for done, _ in steps[:index]),
+                    dict(name="candidate / sandboxed-build: " + name, status="in_progress",
+                         started_at="2026-11-08T23:20:00Z")]
+                output = self.render()
+                self.assertIn(f"CI {label} since 09 Nov 10:20 AEDT", output)
+                self.assertNotIn("build phase finished", output)
+        attempt["phases"][-1].update(status="completed", completed_at="2026-11-08T23:30:00Z")
+        attempt["phases"].append(dict(name="candidate / sandboxed-build: Report build and bump-guard statuses to the PR head commit",
+                                      status="in_progress", started_at="2026-11-08T23:31:00Z"))
+        self.assertIn("CI reporting results since 09 Nov 10:31 AEDT; build phase finished 09 Nov 10:30 AEDT",
+                      self.render())
+
+    def live_head(self):
+        self.manifest["domains"]["jobs"] = dict(url=self.path)
+        self.head["latest_attempt"].update(run_id="44442676966", run_attempt=1, phases=[
+            dict(name="candidate / sandboxed-build: Build exact candidate under bwrap, offline",
+                 status="in_progress", started_at="2026-11-08T22:16:00Z")])
+        progress = dict(coverage="untrusted_counters_trusted_reporter", observed_at="2026-11-08T23:35:30Z",
+                        phase="build", completed_modules=25433, last_module="TauCeti.Private.Detail",
+                        completed_tasks=103917, total_tasks=113955, tasks_per_minute=850.4)
+        other = dict(run_id="44442676966", run_attempt=1, active=True, name="pick-runner / pick",
+                     progress=dict(coverage="steps_only", completed_modules=None))
+        build = dict(other, name="sandboxed-build", progress=progress)
+        jobs = dict(schema="tauceti.operations.jobs/v1", job_pages=[dict(url=self.path), dict(url=self.path)])
+        detail = dict(batch=dict(id="392"), task_pages=[])
+        return progress, [self.document, detail, jobs, dict(records=[dict(other, run_id="1"), other, build])]
+
+    def test_head_build_shows_lake_jobs_rate_and_eta_from_the_public_job_report(self):
+        progress, documents = self.live_head()
+        with patch.object(ci_overview, "fetch", side_effect=documents) as fetch, \
+                patch.object(github, "request", side_effect=AssertionError("GitHub scan")):
+            result = queue.refresh(self.manifest)
+        self.assertEqual(fetch.call_count, 4, "the first page held the run, so later pages are not read")
+        # A build job already finished while its run continues can sit behind terminal-only pages.
+        terminal = dict(records=[dict(run_id="1", run_attempt=1, active=False)])
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], terminal, documents[3]]):
+            self.assertIn("build_progress", queue.refresh(self.manifest)["value"]["batches"][0])
+        output = self.render(result)
+        self.assertIn("CI building since 09 Nov 09:16 AEDT\n" + " " * 33
+                      + "build: phase build, 103,917/113,955 Lake jobs (91.2%), 850/min, ETA 09 Nov 10:47 AEDT\n",
+                      output)
+        self.assertNotIn("Private", json.dumps(result))
+        # An audit phase keeps the finished counter but has no rate or ETA.
+        result["value"]["batches"][0]["build_progress"].update(phase="audit-axioms", completed_tasks=113955,
+                                                               tasks_per_minute=None)
+        self.assertIn("build: phase axiom audit, 113,955/113,955 Lake jobs (100.0%)\n", self.render(result))
+        # A rate too small for any representable ETA keeps the counters.
+        result["value"]["batches"][0]["build_progress"].update(phase="build", completed_tasks=100,
+                                                               tasks_per_minute=1e-300)
+        self.assertIn("build: phase build, 100/113,955 Lake jobs (0.1%), 0/min\n", self.render(result))
+        # Stale reports say so; a passed attempt no longer shows the build line.
+        self.now += 600
+        self.assertIn("reported 10m ago", self.render(result))
+        result["value"]["batches"][0]["latest_attempt"]["outcome"] = "pass"
+        self.assertNotIn("build: ", self.render(result))
+
+    def test_head_build_without_counters_or_reporter_shows_only_the_step(self):
+        progress, documents = self.live_head()
+        for patch_value in (dict(completed_tasks=None, total_tasks=None, tasks_per_minute=None),
+                            dict(coverage="steps_only"), dict(completed_tasks=9, total_tasks=4)):
+            with self.subTest(patch=patch_value):
+                progress_copy = dict(progress, **patch_value)
+                page = dict(records=[dict(documents[3]["records"][2], progress=progress_copy)])
+                with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], page, dict(records=[])]):
+                    output = self.render(queue.refresh(self.manifest))
+                self.assertIn("CI building since 09 Nov 09:16 AEDT", output)
+                if "coverage" in patch_value:
+                    self.assertNotIn("build: ", output)
+                else:
+                    self.assertIn("build: phase build, 25,433 TauCeti modules built\n", output)
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:2], OSError]):
+            output = self.render(queue.refresh(self.manifest))
+        self.assertIn("CI building since 09 Nov 09:16 AEDT", output)
+        self.assertNotIn("build: ", output)
 
     def test_bad_timezone_fails_before_any_host_calls(self):
         with patch.object(remote, "inventory", side_effect=AssertionError("network")), contextlib.redirect_stderr(io.StringIO()):

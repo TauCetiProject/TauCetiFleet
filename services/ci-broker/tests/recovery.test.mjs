@@ -17,7 +17,7 @@ function fixture({matches=[],inventoryError=null,policyError=null}={}) {
     transaction:async callback=>callback(storage),
   };
   const github={policy:async({fresh})=>{assert.equal(fresh,true);if(policyError)throw policyError;},
-    runners:async()=>{if(inventoryError)throw inventoryError;return structuredClone(matches);},
+    runners:async()=>{if(inventoryError)throw inventoryError;return structuredClone(matches).map(r=>({runner_group_id:3,...r}));},
     request:async(path,{method}={})=>{
       const id=Number(path.split('/').at(-1));
       if(method==='DELETE') { deleted.push(id); return null; }
@@ -60,12 +60,12 @@ test('only exact offline matches are removed and the original diagnosis is retai
   const failure={kind:'github_http',status:502,request_id:'request-123'};
   f.host.slots[0].pending.failure=failure;
   await f.storage.put('host:'+f.host.machine_id,f.host);
-  f.github.runners=async()=>[{id:10,name:f.name,status:'offline',busy:false},
+  f.github.runners=async()=>[{id:10,name:f.name,runner_group_id:3,status:'offline',busy:false},
     {id:11,name:'unrelated',status:'offline',busy:false}];
   f.github.request=async(path,{method})=>{
     assert.ok(path.endsWith('/10'));
     if(method==='DELETE')f.deleted.push(10);
-    else return {id:10,name:f.name,status:'offline',busy:false};
+    else return {id:10,name:f.name,runner_group_id:3,status:'offline',busy:false};
   };
   await f.recovery.run();
   assert.deepEqual(f.deleted,[10]);
@@ -74,15 +74,15 @@ test('only exact offline matches are removed and the original diagnosis is retai
 test('online, busy, missing status and newly active runners remain reserved and retried',async()=>{
   for(const runner of [{status:'online',busy:false},{status:'offline',busy:true},{busy:false}]) {
     const f=fixture();
-    f.github.runners=async()=>[{id:10,name:f.name,...runner}];
+    f.github.runners=async()=>[{id:10,name:f.name,runner_group_id:3,...runner}];
     await f.recovery.run();
     assert.equal((await stored(f)).pending.recovery_error.kind,'runner_active');
     assert.deepEqual(f.deleted,[]);
     assert.ok(await f.storage.getAlarm()>Date.now());
   }
   const f=fixture();
-  f.github.runners=async()=>[{id:10,name:f.name,status:'offline',busy:false}];
-  f.github.request=async()=>({id:10,name:f.name,status:'online',busy:true});
+  f.github.runners=async()=>[{id:10,name:f.name,runner_group_id:3,status:'offline',busy:false}];
+  f.github.request=async()=>({id:10,name:f.name,runner_group_id:3,status:'online',busy:true});
   await f.recovery.run();
   assert.ok((await stored(f)).pending);
   assert.deepEqual(f.deleted,[]);
@@ -113,7 +113,7 @@ test('one blocked slot does not prevent recovery of another slot or host',async(
   f.host.slots[1]={pending:{name:'other',at:Date.now()-RECOVERY_DELAY-1000}};
   await f.storage.put('host:'+f.host.machine_id,f.host);
   await f.storage.put('host:second',{machine_id:'second',slots:{0:{pending:{name:'third',at:1}}}});
-  f.github.runners=async()=>[{id:10,name:f.name,status:'online',busy:true}];
+  f.github.runners=async()=>[{id:10,name:f.name,runner_group_id:3,status:'online',busy:true}];
   await f.recovery.run();
   const host=await f.storage.get('host:'+f.host.machine_id);
   assert.ok(host.slots[0].pending);
