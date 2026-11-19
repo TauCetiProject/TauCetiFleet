@@ -121,7 +121,6 @@ def configure(payload):
         "claude_billing",
         "sandbox",
         "pace",
-        "env",
         "incidents",
         "hold_declined",
         "runner_group_id",
@@ -343,7 +342,7 @@ def worker_fields(config):
     """
     agent = config.get("agent") or "claude"
     billing = config.get("claude_billing") or "api"
-    pace, env = config.get("pace"), config.get("env") or {}
+    pace = config.get("pace")
     api = billing == "api"
     if agent not in ("claude", "codex", "auto"):
         raise FleetError("agent must be claude, codex, or auto")
@@ -357,20 +356,6 @@ def worker_fields(config):
         raise FleetError("sandbox must be host or bubble")
     if pace and not (isinstance(pace, str) and pace_curve(pace)):
         raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
-    if isinstance(env, dict) and CREDENTIAL_SOURCE_ENV & set(env):
-        raise FleetError(
-            "env must not set " + ", ".join(sorted(CREDENTIAL_SOURCE_ENV & set(env)))
-            + ": workers sign in from the host account's own claude and codex logins"
-        )
-    # json.dumps below is not a TOML encoder for DEL or astral characters, and the worker rejects NUL.
-    valid = isinstance(env, dict) and all(
-        isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and k not in WORKER_OWNED_ENV
-        and not k.startswith("TAUCETI_FLEET_") and k not in FLEET_OWNED_ENV
-        and isinstance(v, str) and v.isascii() and v.isprintable()
-        for k, v in env.items()
-    )
-    if not valid or sum(len(k) + len(v) + 2 for k, v in env.items()) > 16 * 1024:
-        raise FleetError("env must map variable names that neither the worker nor Fleet sets to printable ASCII strings, 16 KB at most")
     fields = dict(
         agent=agent,
         max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
@@ -385,15 +370,12 @@ def worker_fields(config):
     for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "sandbox", "pace"):
         if config.get(key):
             fields[key] = config[key]
-    if config.get("worker_env") or env:
-        fields["env"] = dict(sorted(config.get("worker_env", {}).items()), **env)
-    incident_env = attention.worker_env(config)
-    if set(incident_env) & set(env):
-        raise FleetError("env must not set " + " or ".join(sorted(incident_env)) + " beside the profile's incidents key")
-    if fleet_env := {**claude_credentials.worker_env(config), **incident_env}:
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
+    if fleet_env := {**claude_credentials.worker_env(config), **attention.worker_env(config)}:
         fields["env"] = dict(fields.get("env", {}), **fleet_env)
         if sum(len(k) + len(v) + 2 for k, v in fields["env"].items()) > 16 * 1024:
-            raise FleetError("env and the paths Fleet adds to it exceed 16 KB; shorten env")
+            raise FleetError("worker_env and the Claude credential paths Fleet adds to it exceed 16 KB; shorten worker_env")
     if config.get(claude_credentials.USAGE):
         # Nothing else on the host uses the stored usage login, so the workers may renew it.
         fields["auto_refresh"] = True
@@ -402,7 +384,7 @@ def worker_fields(config):
 
 def toml_value(value):
     if isinstance(value, dict):
-        return "{" + ", ".join(k + " = " + json.dumps(v) for k, v in sorted(value.items())) + "}"
+        return "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in value.items()) + " }"
     return str(value).lower() if isinstance(value, bool) else json.dumps(value)
 
 
@@ -437,12 +419,9 @@ def _worker_config(config):
         slot = dict(fields)
         if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
-        env = slot.pop("env", None)
         for key, value in slot.items():
             if value is not None:
                 lines.append(key + " = " + toml_value(value))
-        if env:
-            lines.append("env = " + toml_value(env))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
@@ -793,6 +772,8 @@ def merged_worker_env(current, changes):
             raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
         if value is None:
             env.pop(name, None)
+        elif name in WORKER_OWNED_ENV | FLEET_OWNED_ENV | CREDENTIAL_SOURCE_ENV or name.startswith("TAUCETI_FLEET_"):
+            raise FleetError(f"{name} is set by the worker or Fleet, or names a login source, and cannot be a worker environment variable")
         elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
             raise FleetError(f"Worker environment value for {name} must be a single-line string")
         else:
@@ -836,6 +817,7 @@ def set_worker_policy(payload):
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
+        worker_fields(dict(host_config(), **changes))
         config = update_host(**changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")

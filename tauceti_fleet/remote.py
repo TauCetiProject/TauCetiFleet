@@ -258,7 +258,7 @@ def profile(name):
     allowed = {"github_account", "max_open_prs", "runner_group_id", "github_state_url", "incidents", "hold_declined"}
     result = {k: v for k, v in value.items() if k in allowed}
     # Always sent, so removing one of these keys from a profile returns the host to its default.
-    for key in ("author_model", "author_effort", "agent", "claude_billing", "sandbox", "pace", "env"):
+    for key in ("author_model", "author_effort", "agent", "claude_billing", "sandbox", "pace"):
         result[key] = value.get(key)
     for key in claude_credentials.KINDS:
         result[key] = bool(value.get(key)) or None

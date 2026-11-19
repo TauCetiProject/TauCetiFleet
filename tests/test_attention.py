@@ -1173,14 +1173,10 @@ class Attention(unittest.TestCase):
     def test_incident_and_credential_variables_share_one_env_table(self):
         with patch.object(host, "install_service"):
             host.configure(dict(profile="test", ci_allowed=False, incidents=True, claude_billing="subscription",
-                                env={"A": "1"}, credentials=dict(claude_token_file="sk-ant-oat01-token")))
-            host.worker_config(store.host_config())
+                                credentials=dict(claude_token_file="sk-ant-oat01-token")))
+            host.set_worker_policy(dict(worker_env={"A": "1"}))
             worker = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"][0]
             self.assertEqual(sorted(worker["env"]), ["A", "CLAUDE_CONFIG_DIR", "TAUCETI_HOLD_DECLINED", "TAUCETI_INCIDENTS_DIR"])
-            with self.assertRaisesRegex(store.FleetError, "env must not set TAUCETI_HOLD_DECLINED or TAUCETI_INCIDENTS_DIR"):
-                host.configure(dict(env={"TAUCETI_INCIDENTS_DIR": "/elsewhere"}))
-            host.configure(dict(incidents=False, env={"TAUCETI_INCIDENTS_DIR": "/elsewhere"}))
-
 
 if __name__ == "__main__":
     unittest.main()

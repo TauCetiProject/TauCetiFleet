@@ -154,7 +154,10 @@ class Isolated(unittest.TestCase):
 
     def test_worker_env_rejects_unsafe_names_and_values(self):
         original = store.update_host(max_workers=2, workers_enabled=True)
-        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097}):
+        reserved = sorted(host.WORKER_OWNED_ENV | host.FLEET_OWNED_ENV | host.CREDENTIAL_SOURCE_ENV) + [
+            "TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR", "CODEX_HOME", "TAUCETI_FLEET_ADMISSION_FILE"]
+        for env in ({}, [], {"lower": "1"}, {"A B": "1"}, {"X": 1}, {"X": "line\nbreak"}, {"X": "x" * 4097},
+                    *({name: "/elsewhere"} for name in reserved)):
             with self.assertRaises(store.FleetError):
                 host.set_worker_policy(dict(worker_env=env))
             self.assertEqual(store.host_config(), original)
@@ -277,8 +280,7 @@ class Isolated(unittest.TestCase):
     def test_subscription_profile_transfers_no_api_key_and_writes_no_budget(self):
         import tomllib
 
-        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70",
-                     env={"TAUCETI_OVERLAP_BATCH_COMMITS": "80", "A": 'quoted "value"'})
+        shape = dict(claude_billing="subscription", agent="auto", sandbox="bubble", pace="0:10,50:70")
         store.atomic(store.config_dir() / "profiles.json", {"subscription": dict(shape, **self.secrets())})
         payload = remote.profile("subscription")
         self.assertEqual(payload["credentials"], {"github_token_file": "token-secret"})
@@ -325,28 +327,16 @@ class Isolated(unittest.TestCase):
             dict(claude_billing="subscription", agent="auto", author_model="model"),
             dict(claude_billing="subscription", agent="auto", author_effort="high"),
             dict(sandbox="vm"),
-            dict(env=["A=1"]),
-            dict(env={"A": 1}),
-            dict(env={"A-B": "1"}),
-            dict(env={"A": "line\nbreak"}),
-            dict(env={"TAUCETI_DATA_HOME": "/elsewhere"}),
-            dict(env={"TAUCETI_FLEET_ADMISSION_FILE": "/elsewhere"}),
-            *(dict(env={name: "/elsewhere"}) for name in host.FLEET_OWNED_ENV),
-            *(dict(env={name: "/elsewhere"}) for name in ("TAUCETI_BUDGET_DIR", "TAUCETI_ACTIVITY_DIR",
-                                                          "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME")),
-            *(dict(claude_billing="subscription", agent="codex", env={name: "/other-login"})
-              for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME")),
-            dict(env={"A": "x" * 16384}),
         ]
         with patch.object(host, "install_service"):
             for shape in rejected:
                 with self.assertRaises(store.FleetError, msg=shape):
                     host.configure(shape)
-            self.assertFalse({"agent", "claude_billing", "sandbox", "pace", "env"} & set(store.host_config()))
+            self.assertFalse({"agent", "claude_billing", "sandbox", "pace"} & set(store.host_config()))
             host.configure(dict(claude_billing="subscription", agent="codex", author_model="model"))
             store.update_host(workers_enabled=True)
             host.configure(dict(claude_billing="subscription", agent="codex"))
-            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(env={"A": "1"})):
+            for shape in (dict(agent="claude"), dict(claude_billing=None, agent=None), dict(sandbox="bubble")):
                 with self.assertRaisesRegex(store.FleetError, "Drain", msg=shape):
                     host.configure(shape)
             store.update_host(workers_enabled=False)

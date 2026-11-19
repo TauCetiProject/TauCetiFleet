@@ -139,8 +139,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
     "claude_billing": "subscription",
     "agent": "auto",
     "sandbox": "bubble",
-    "pace": "0:10,50:70,90:90",
-    "env": {"TAUCETI_OVERLAP_BATCH_COMMITS": "80"}
+    "pace": "0:10,50:70,90:90"
   }
 }
 ```
@@ -149,9 +148,8 @@ Claude or Codex subscriptions; each applies to every worker slot:
 | --- | --- | --- |
 | `claude_billing` | `api`, or `subscription`: no API key is read or transferred, and workers follow the provider's quota windows instead of [grants](#grants) | `api` |
 | `agent` | `claude`, `codex`, or `auto` (the worker chooses per round); `codex` and `auto` require `subscription`, and `auto` excludes `author_model` and `author_effort` | `claude` |
-| `sandbox` | `host` or `bubble`. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
+| `sandbox` | `host` or `bubble`. The worker runs only review rounds in Bubble and refuses work rounds there, so a `bubble` profile authors nothing. Bubble containers run under the Incus daemon, outside the worker slice, so its memory ceiling and CPU weight do not apply to them and host headroom at admission is their only bound; `doctor` warns | `host` |
 | `pace` | Subscription pacing curve as `time%:budget%` points | the worker's curve |
-| `env` | Extra environment for each worker, as printable ASCII strings; names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service, `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`, `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` are refused. Not a secret store: values are written to `workers.toml` | none |
 
 With these keys alone a subscription profile carries no model credential. Sign
 in to `claude` or `codex` as the host account before enabling workers; each
@@ -1268,7 +1266,11 @@ Set an environment variable for every worker with `tauceti-fleet workers HOST --
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
 regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
-between rounds.
+between rounds. Names the worker or Fleet sets (`TAUCETI_FLEET_*`, the worker slice, state and
+runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state service,
+`GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`,
+`TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `HOME` are refused; a worker keeps the login it was first seeded from.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful
