@@ -1000,7 +1000,9 @@ change group: going from the profile above to the command above rewrites two of
 the nine. The worker manager holds a changed `agent` or `only` until that
 worker's round ends; this needs a TauCetiWorker release that defers those two
 edits, and an older one restarts the changed workers at once. A changed
-progress setting restarts that group's workers at once under either. Fleet
+progress setting restarts that group's workers when their round in flight ends
+under a TauCetiWorker release with graceful restarts, and at once under an
+older one. Fleet
 admits a worker whose agent or phases were rewritten, including by `--clear`,
 only once its live status shows the new ones, so one that has not started yet
 waits for its first pass after it does. A group that shrinks gives up
