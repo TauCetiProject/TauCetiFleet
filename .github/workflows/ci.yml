@@ -45,5 +45,7 @@ jobs:
         run: python -m pip install ./worker-contract
       - name: Exercise canonical target inspection and generated definitions
         run: |
-          export TAUCETI_TEST_WORKER="$(command -v tauceti)"
+          worker_binary=$(command -v tauceti)
+          test -x "$worker_binary"
+          export TAUCETI_TEST_WORKER="$worker_binary"
           python -m unittest discover -s tests -p test_targets.py -v
