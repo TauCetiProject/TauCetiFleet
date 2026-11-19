@@ -442,7 +442,7 @@ class SlotGroups(unittest.TestCase):
         host.worker_config(saved)
 
     def test_an_unchanged_pass_renews_admission_without_rereading_definitions(self):
-        host.configure(dict(env={"A": "x" * 4096}))
+        store.update_host(worker_env={"A": "x" * 4096})
         store.update_host(workers_enabled=True, max_workers=8)
         host.rpc(dict(action="slots", groups=[slot_groups.parse("4096:claude:review")]))
         parse, plan, timing = tomllib.loads, host.worker_plan, []
@@ -462,7 +462,7 @@ class SlotGroups(unittest.TestCase):
         self.assertLess(timing[1] - timing[0], 5)
 
     def test_an_edit_to_a_parked_slot_renews_without_reparsing_or_revalidating_each_slot(self):
-        host.configure(dict(env={f"E{n}": "x" * 26 for n in range(64)}))
+        store.update_host(worker_env={f"E{n}": "x" * 26 for n in range(64)})
         store.update_host(workers_enabled=True, max_workers=8)
         host.rpc(dict(action="slots", groups=[slot_groups.parse("256:claude:review")]))
         parse, fields = tomllib.loads, host.worker_fields
@@ -487,7 +487,7 @@ class SlotGroups(unittest.TestCase):
         self.assertLessEqual(built, 2)
 
     def test_a_separate_writer_and_the_controller_share_the_written_layout_without_parsing_it(self):
-        host.configure(dict(env={f"E{n}": "x" * 26 for n in range(64)}))
+        store.update_host(worker_env={f"E{n}": "x" * 26 for n in range(64)})
         store.update_host(workers_enabled=True, max_workers=8)
         host.rpc(dict(action="slots", groups=[slot_groups.parse("256:claude:review")]))
         writer = """
