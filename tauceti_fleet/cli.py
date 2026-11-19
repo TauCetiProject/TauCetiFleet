@@ -6,8 +6,9 @@ import math
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
-from . import activity, broker, host, pool_activity, remote, slot_groups, worker_view
+from . import activity, broker, host, pool_activity, remote, slot_groups, targets, worker_view
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -95,6 +96,15 @@ def parser():
                         help="one group; repeat for each, replacing the saved list")
     change.add_argument("--clear", action="store_true", help="return every slot to the profile's agent and the full rotation")
     groups.add_argument("--json", action="store_true")
+    listed = sub.add_parser("targets", help="have workers author from an operator target list, or audit the list")
+    listed.add_argument("host")
+    change = listed.add_mutually_exclusive_group()
+    change.add_argument("--file", help="the list: a file on this machine to transfer, or with --on-host a path on the host")
+    change.add_argument("--clear", action="store_true", help="return workers to their own choice of roadmap area")
+    change.add_argument("--audit", action="store_true", help="validate the list and report conflicts with active target holders; makes no file corrections")
+    listed.add_argument("--on-host", action="store_true", help="read --file in place on the host instead of transferring it")
+    listed.add_argument("--apply", action="store_true", help="compatibility option for --audit; offline audits currently make no automatic corrections")
+    listed.add_argument("--json", action="store_true")
     export = sub.add_parser("status-export", help="keep a world-readable copy of this host's status in a directory")
     export.add_argument("host")
     destination = export.add_mutually_exclusive_group()
@@ -292,6 +302,14 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["clear"] = True
                 elif args.group:
                     payload["groups"] = [slot_groups.parse(group) for group in args.group]
+            if args.command == "targets":
+                if args.on_host and args.file is None or args.apply and not args.audit:
+                    raise FleetError("--on-host qualifies --file, and --apply qualifies --audit")
+                if args.on_host:
+                    payload["path"] = args.file
+                elif args.file is not None:
+                    payload["text"] = targets.load(Path(args.file).expanduser(), targets.LIMIT)
+                payload.update({k: True for k in ("clear", "audit", "apply") if getattr(args, k)})
             if args.command == "status-export":
                 if args.directory is not None:
                     payload["directory"] = args.directory
@@ -368,6 +386,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
+                elif args.command == "targets" and "error" not in value:
+                    targets.display(value)
                 elif args.command == "status" and "status" in value:
                     status = value["status"]
                     if value.get("offline"):
@@ -494,6 +514,11 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                             + " at the current admission limit); "
                             + ", ".join(focus["areas"])
                         )
+                    listed = status.get("roadmap_targets")
+                    if listed:
+                        if focus.get("percent"):
+                            print("  Not applied: workers under a target list take no roadmap focus")
+                        print("\n".join(targets.summary_lines(listed)))
                     if status.get("workers"):
                         print()
                     groups = {}
