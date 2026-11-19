@@ -330,6 +330,69 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("CI reporting results since 09 Nov 10:31 AEDT; build phase finished 09 Nov 10:30 AEDT",
                       self.render())
 
+    def live_head(self):
+        self.manifest["domains"]["jobs"] = dict(url=self.path)
+        self.head["latest_attempt"].update(run_id="44442676966", run_attempt=1, phases=[
+            dict(name="candidate / sandboxed-build: Build exact candidate under bwrap, offline",
+                 status="in_progress", started_at="2026-11-08T22:16:00Z")])
+        progress = dict(coverage="untrusted_counters_trusted_reporter", observed_at="2026-11-08T23:35:30Z",
+                        phase="build", completed_modules=25433, last_module="TauCeti.Private.Detail",
+                        completed_tasks=103917, total_tasks=113955, tasks_per_minute=850.4)
+        other = dict(run_id="44442676966", run_attempt=1, active=True, name="pick-runner / pick",
+                     progress=dict(coverage="steps_only", completed_modules=None))
+        build = dict(other, name="sandboxed-build", progress=progress)
+        jobs = dict(schema="tauceti.operations.jobs/v1", job_pages=[dict(url=self.path), dict(url=self.path)])
+        detail = dict(batch=dict(id="392"), task_pages=[])
+        return progress, [self.document, detail, jobs, dict(records=[dict(other, run_id="1"), other, build])]
+
+    def test_head_build_shows_lake_jobs_rate_and_eta_from_the_public_job_report(self):
+        progress, documents = self.live_head()
+        with patch.object(ci_overview, "fetch", side_effect=documents) as fetch, \
+                patch.object(github, "request", side_effect=AssertionError("GitHub scan")):
+            result = queue.refresh(self.manifest)
+        self.assertEqual(fetch.call_count, 4, "the first page held the run, so later pages are not read")
+        # A build job already finished while its run continues can sit behind terminal-only pages.
+        terminal = dict(records=[dict(run_id="1", run_attempt=1, active=False)])
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], terminal, documents[3]]):
+            self.assertIn("build_progress", queue.refresh(self.manifest)["value"]["batches"][0])
+        output = self.render(result)
+        self.assertIn("CI building since 09 Nov 09:16 AEDT\n" + " " * 33
+                      + "build: phase build, 103,917/113,955 Lake jobs (91.2%), 850/min, ETA 09 Nov 10:47 AEDT\n",
+                      output)
+        self.assertNotIn("Private", json.dumps(result))
+        # An audit phase keeps the finished counter but has no rate or ETA.
+        result["value"]["batches"][0]["build_progress"].update(phase="audit-axioms", completed_tasks=113955,
+                                                               tasks_per_minute=None)
+        self.assertIn("build: phase axiom audit, 113,955/113,955 Lake jobs (100.0%)\n", self.render(result))
+        # A rate too small for any representable ETA keeps the counters.
+        result["value"]["batches"][0]["build_progress"].update(phase="build", completed_tasks=100,
+                                                               tasks_per_minute=1e-300)
+        self.assertIn("build: phase build, 100/113,955 Lake jobs (0.1%), 0/min\n", self.render(result))
+        # Stale reports say so; a passed attempt no longer shows the build line.
+        self.now += 600
+        self.assertIn("reported 10m ago", self.render(result))
+        result["value"]["batches"][0]["latest_attempt"]["outcome"] = "pass"
+        self.assertNotIn("build: ", self.render(result))
+
+    def test_head_build_without_counters_or_reporter_shows_only_the_step(self):
+        progress, documents = self.live_head()
+        for patch_value in (dict(completed_tasks=None, total_tasks=None, tasks_per_minute=None),
+                            dict(coverage="steps_only"), dict(completed_tasks=9, total_tasks=4)):
+            with self.subTest(patch=patch_value):
+                progress_copy = dict(progress, **patch_value)
+                page = dict(records=[dict(documents[3]["records"][2], progress=progress_copy)])
+                with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], page, dict(records=[])]):
+                    output = self.render(queue.refresh(self.manifest))
+                self.assertIn("CI building since 09 Nov 09:16 AEDT", output)
+                if "coverage" in patch_value:
+                    self.assertNotIn("build: ", output)
+                else:
+                    self.assertIn("build: phase build, 25,433 TauCeti modules built\n", output)
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:2], OSError]):
+            output = self.render(queue.refresh(self.manifest))
+        self.assertIn("CI building since 09 Nov 09:16 AEDT", output)
+        self.assertNotIn("build: ", output)
+
     def test_bad_timezone_fails_before_any_host_calls(self):
         with patch.object(remote, "inventory", side_effect=AssertionError("network")), contextlib.redirect_stderr(io.StringIO()):
             self.assertNotEqual(cli.main(["status", "--timezone", "Invalid/Zone"]), 0)
