@@ -12,7 +12,7 @@ def guest_shape(config, caps=None):
     """Expose shared host capacity, not a fixed fraction reserved per guest."""
     if config.get("ci_kinds") == ["queue-control"]:
         return dict(vcpus=4, memory_gib=8)
-    if config.get("ci_kinds") == ["control"]:
+    if config.get("ci_kinds") in (["control"], ["pr-status"]):
         return dict(vcpus=2, memory_gib=4)
     if config.get("ci_kinds") == ["roadmap"]:
         return dict(vcpus=16, memory_gib=32)
@@ -83,7 +83,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"]]:
+    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"], ["pr-status"]]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -109,13 +109,35 @@ def protected_slots(config):
         if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
                 or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
                 or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
-                or value["kind"] not in ("control", "roadmap", "queue-control")
+                or value["kind"] not in ("control", "roadmap", "queue-control", "pr-status")
                 or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
-                or value["runner_group_id"] == config.get("runner_group_id")
-                or config.get("ci_broker_url")):
-            raise FleetError("Protected slots require a separate runner group, a valid slot, and direct runner credentials")
+                or value["runner_group_id"] == config.get("runner_group_id")):
+            raise FleetError("Protected slots require a separate runner group and a valid slot")
         result[int(key)] = value
     return result
+
+
+def controller_config(config):
+    """Configuration checks whose failure stops the controller loop.
+
+    The daemon runs these on every iteration; a live update runs the staged
+    release's copy before handover so an incompatible release is never started.
+    """
+    missing = [key for key in ("machine_id", "ci_enabled", "workers_enabled", "ci_allowed", "max_workers")
+               if key not in config]
+    if missing:
+        raise FleetError("Host configuration lacks " + ", ".join(missing))
+    jobs(config)
+    kinds(config)
+    if config.get("ci_memory_budget_gib") is not None:
+        memory_budget_gib(config)
+    if config["ci_enabled"]:
+        protected_slots(config)
+        if config.get("ci_broker_url"):
+            from . import broker
+
+            broker.validate_url(config["ci_broker_url"])
+            broker.credential(config)
 
 
 def reservation(config):
@@ -135,7 +157,23 @@ def for_slot(config, index):
     return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
 
 
+def broker_slot_group(index, value, policy):
+    """The broker chooses each special slot's group; it must match the local map."""
+    kind, group = value["kind"], value["runner_group_id"]
+    if kind not in policy.get("kinds", ["staging"]):
+        raise FleetError(f"CI slot {index} is reserved for {kind}, which this machine's broker enrollment does not allow; "
+                         "ask the operator to add it to this machine's CI classes, or remove the slot from ci_protected_slots")
+    actual = (policy.get("groups") or {}).get(kind)
+    if actual != group:
+        raise FleetError(f"CI slot {index} expects {kind} runners in runner group {group}, but the CI broker registers them "
+                         f"in {actual if actual is not None else 'no group'}; correct ci_protected_slots before starting it")
+    return group
+
+
 def authorize(config, policy):
     jobs(config)  # Validate the locally chosen count, independently of broker policy.
     if not set(kinds(config)) <= set(policy.get("kinds", ["staging"])):
         raise FleetError("Requested CI job classes exceed the enrollment policy; ask the operator to update this machine's CI classes")
+    if config.get("ci_broker_url"):
+        for index, value in sorted(protected_slots(config).items()):
+            broker_slot_group(index, value, policy)

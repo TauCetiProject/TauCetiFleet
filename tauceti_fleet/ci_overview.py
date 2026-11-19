@@ -86,7 +86,8 @@ def bors(config):
         if (type(batch.get("id")) is not int or not isinstance(batch.get("state"), str)
                 or not re.fullmatch(r"[a-z_]{1,32}", batch["state"]) or not isinstance(batch.get("members"), list)):
             raise FleetError("Invalid Bors batch")
-        batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"])))
+        batches.append(dict(id=batch["id"], state=batch["state"], size=len(batch["members"]),
+                            sealed=batch.get("sealed") is True))
     held = value.get("held")
     return dict(batches=batches, held=len(held) if isinstance(held, list) else None), time.time()
 
@@ -368,7 +369,8 @@ def source_value(name, source):
         if name == "bors":
             if not isinstance(data.get("batches"), list) or not (data.get("held") is None or integer(data["held"])):
                 return None
-            if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"]) for b in data["batches"]):
+            if any(not isinstance(b, dict) or not integer(b.get("id")) or not integer(b.get("size")) or not isinstance(b.get("state"), str) or not re.fullmatch(r"[a-z_]{1,32}", b["state"])
+                   or type(b.get("sealed", False)) is not bool for b in data["batches"]):
                 return None
         elif name == "bors_history":
             windows = data.get("windows")
@@ -461,17 +463,23 @@ def display(value, *, section="all"):
         return data, note
 
     if section != "overview":
-        data, note = source("bors")
-        if data is None:
-            print("Bors: unknown (background observation unavailable)")
-        else:
-            batches = sorted(data["batches"], key=lambda batch: batch["id"])
-            parts = [str(b["size"]) for b in batches]
-            held = data["held"] if data.get("held") is not None else "unknown"
-            total = sum(b["size"] for b in batches)
-            print("Bors: " + (f"{total}=" + "+".join(parts) if parts else "0") + f"; held {held} ({note})")
-        from . import queue_status
-        queue_status.display(value.get("queue", {}), timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
+        queue = value.get("queue")
+        # The merge-queue table counts every member. Its Bors-compatible feed lists only GitHub
+        # pulls, so it is a fallback for when the queue snapshot is unavailable, not a second total.
+        if not (isinstance(queue, dict) and queue.get("value")):
+            data, note = source("bors")
+            if data is None:
+                print("Bors: unknown (background observation unavailable)")
+            else:
+                # The feed marks a head only while its CI runs; otherwise sealed before unsealed.
+                batches = sorted(data["batches"], key=lambda b: (b["state"] != "running", not b.get("sealed"), b["id"]))
+                parts = [str(b["size"]) for b in batches]
+                total = sum(b["size"] for b in batches)
+                print("Bors feed (GitHub PRs only): " + (f"{total}=" + "+".join(parts) if len(parts) > 1 else str(total))
+                      + f" ({note})")
+        if "queue" in value:
+            from . import queue_status
+            queue_status.display(value["queue"], timezone=value.get("queue_timezone", queue_status.DEFAULT_TIMEZONE))
         data, note = source("bors_history")
         if "queue_history" in value:
             from . import queue_history
@@ -527,21 +535,12 @@ def display(value, *, section="all"):
     if data is None:
         print("CI backlog: unknown (background observation unavailable)")
     else:
-        if data["partial"]:
-            note += "; partial observations"
         pr, other = data["pr_builds"], data["other_workflows"]
-        oldest = pr.get("oldest_waiting_at")
-        age = ""
-        if oldest is not None:
-            minutes = max(0, int((time.time() - oldest) / 60))
-            hours, minutes = divmod(minutes, 60)
-            age = f"; oldest PR wait {hours}h {minutes}m" if hours else f"; oldest PR wait {minutes}m"
-        print(f"CI backlog: PR builds {pr['pending']} pending, {pr['queued']} queued; "
-              f"other workflows {other['pending']} pending, {other['queued']} queued{age} ({note})")
-        stuck = pr["stuck"] + other["stuck"]
-        unconfirmed = pr["unconfirmed"] + other["unconfirmed"]
-        print(f"CI workflow records: {stuck} verified stuck; {unconfirmed} without confirmed active jobs "
-              "(separate from waiting work)")
+        print(f"CI backlog: {data['waiting_jobs']} observed jobs waiting to start; "
+              f"{data['running_jobs']} running (builds and automation; {note})")
+        if data["partial"] or any(row[state] for row in (pr, other)
+                                  for state in ("unconfirmed",)):
+            print("  Total waiting work: unknown. The queue monitor cannot account for all workflows.")
     accounts = value.get("pressure_accounts", {})
     pressures = list(accounts.values()) if isinstance(accounts, dict) else []
     pressures = pressures or [sources.get("pressure", {})]

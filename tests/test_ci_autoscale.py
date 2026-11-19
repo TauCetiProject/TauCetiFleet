@@ -69,6 +69,24 @@ class CapacityPolicy(unittest.TestCase):
         decision = c.decide(snapshot(limit=4, idle=True), 1000)
         self.assertEqual((decision['kind'], decision['target']), ('limit', 3))
 
+    def test_idle_spare_above_ceiling_does_not_reduce_limit_below_busy_guests(self):
+        c = auto.Controller()
+        s = snapshot(limit=4, idle=True)
+        s['maximum'] = 3
+        s['ci']['running_now'] = 1
+        for _ in range(5):
+            decision = c.decide(s,s['at'])
+            self.assertEqual(decision['kind'],'hold')
+            s=advance(s)
+
+    def test_idle_trim_preserves_grandfathered_busy_guests_above_limit(self):
+        c = auto.Controller()
+        s = snapshot(limit=6, idle=True)
+        s['maximum'] = 3
+        s['ci']['running_now'] = 1
+        decision=c.decide(s,s['at'])
+        self.assertEqual(decision['kind'],'hold')
+
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
         s['vms'][0].update(busy=False)

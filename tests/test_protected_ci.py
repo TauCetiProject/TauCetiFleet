@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tauceti_fleet import capacity, ci_autoscale, ci_pool, ci_priority, github, native_runner, store, vm
+from tauceti_fleet import broker, capacity, ci_autoscale, ci_pool, ci_priority, github, native_runner, store, vm
+from tests.test_nightly_runner_policy import harness_api
 
 
 class ProtectedCI(unittest.TestCase):
@@ -79,7 +80,8 @@ class ProtectedCI(unittest.TestCase):
         with self.assertRaises(store.FleetError):
             capacity.staging_slots(dict(self.config, ci_max_jobs=1))
         with self.assertRaises(store.FleetError):
-            capacity.protected_slots(dict(self.config, ci_broker_url="https://broker"))
+            capacity.protected_slots(dict(self.config, ci_broker_url="https://broker",
+                                          ci_protected_slots={"0": dict(kind="control", runner_group_id=3)}))
 
     def test_group_policy_enforces_repository_isolation_without_workflow_pin_edits(self):
         repositories = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCetiRoadmap")])
@@ -96,6 +98,51 @@ class ProtectedCI(unittest.TestCase):
                 with patch.object(github, "request", return_value=invalid):
                     with self.assertRaises(store.FleetError):
                         github.protected_policy(config, group)
+
+class PRStatusCI(unittest.TestCase):
+    def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
+        config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,
+                      ci_idle_pool=True, ci_kinds=["pr", "staging"], runner_group_id=3,
+                      ci_protected_slots={"3": dict(kind="pr-status", runner_group_id=7)})
+        status = capacity.for_slot(config, 3)
+        status["unit"] = "status-guest"
+        self.assertEqual(capacity.kinds(status), ["pr-status"])
+        self.assertEqual(capacity.guest_shape(status), dict(vcpus=2, memory_gib=4))
+        labels = github.runner_labels(dict(status, machine_id="a"*32), "fleet-"+"b"*16)
+        self.assertIn("tauceti-fleet-pr-status", labels)
+        for label in ("tauceti-fleet-pr", "tauceti-fleet-staging", "tauceti-fleet-queue-control"):
+            self.assertNotIn(label, labels)
+        busy = [dict(slot=i, runner_id=i+100, busy=True) for i in range(3)]
+        self.assertEqual(ci_pool.plan(config, busy, [], None), set(range(4)))
+        self.assertEqual(ci_pool.recovery_slots(config, busy, [], dict(queued=[]),
+                         [dict(instance="a"*16, ci_kinds=["pr"])]), {})
+        self.assertFalse(native_runner.selected(status))
+        with patch.object(vm, "start_memory_available", return_value=6*1024**3):
+            self.assertTrue(vm.start_memory_ok(status))
+        with patch.object(ci_priority, "run"), patch.object(github, "ci_read") as metadata:
+            ci_priority.classify(config, status, 100)
+        metadata.assert_not_called()
+        self.assertEqual(status["cpu_weight"], 10000)
+
+    def test_status_group_never_accepts_candidate_or_other_control_workflows(self):
+        config = dict(ci_kinds=["pr-status"], ci_slot_runner_group_id=7)
+        workflows = ["TauCetiProject/TauCeti/.github/workflows/"+name+"@refs/heads/main"
+                     for name in ("pr-status.yml", "pr-labels.yml")]
+        group = dict(name="TauCetiPRStatus", visibility="selected", restricted_to_workflows=True,
+                     selected_workflows=workflows)
+        repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
+        with patch.object(github, "request", return_value=repos):
+            self.assertEqual(github.protected_policy(config, group), 7)
+            for invalid in (dict(group, restricted_to_workflows=False),
+                            dict(group, selected_workflows=workflows[:1]),
+                            dict(group, selected_workflows=workflows+["TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"]),
+                            dict(group, selected_workflows=[w.replace("refs/heads/main", "refs/heads/untrusted") for w in workflows])):
+                with self.assertRaises(store.FleetError):
+                    github.protected_policy(config, invalid)
+        with patch.object(github, "request", return_value=dict(total_count=1, repositories=[dict(full_name="other/repo")])):
+            with self.assertRaises(store.FleetError):
+                github.protected_policy(config, group)
+
 
 class QueueControlCI(unittest.TestCase):
     def setUp(self):
@@ -128,13 +175,94 @@ class QueueControlCI(unittest.TestCase):
         group = dict(name="TauCetiQueueControl", visibility="selected", restricted_to_workflows=True,
                      selected_workflows=list(workflows))
         repos = dict(total_count=1, repositories=[dict(full_name="TauCetiProject/TauCeti")])
-        with patch.object(github, "request", return_value=repos):
+        with patch.object(github, "request", side_effect=harness_api(repos)):
             self.assertEqual(github.protected_policy(control, group), 6)
+            main = ["TauCetiProject/TauCetiTools/.github/workflows/" + name + "@refs/heads/main"
+                    for name in ("pr-build.yml", "publish-lake-cache.yml")]
+            self.assertEqual(github.protected_policy(control, dict(group, selected_workflows=list(workflows) + main)), 6)
+            source = ["TauCetiProject/TauCetiTools/.github/workflows/" + name +
+                      "@150b56c3ab743b1f2a120f0639d98586455d7f2a"
+                      for name in ("pr-build.yml", "publish-lake-cache.yml")]
             for bad in (dict(group, restricted_to_workflows=False),
                         dict(group, selected_workflows=list(workflows)+["untrusted"]),
+                        dict(group, selected_workflows=list(workflows)+[source[0].rsplit("@", 1)[0]+"@refs/heads/other"]),
+                        dict(group, selected_workflows=list(workflows)+[main[0].replace("TauCetiProject/", "someone/")]),
+                        dict(group, selected_workflows=list(workflows)+[
+                            "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@refs/heads/main"]),
+                        dict(group, selected_workflows=list(workflows)+main+source),
+                        dict(group, selected_workflows=list(workflows)+[
+                            "TauCetiProject/TauCetiTools/.github/workflows/pick-runner.yml@abf810bf5064bf549ba76fac568da9d1dbb32362"]),
                         dict(group, selected_workflows=[])):
                 with self.assertRaises(store.FleetError):
                     github.protected_policy(control, bad)
         with patch.object(github, "request", return_value=dict(total_count=1, repositories=[dict(full_name="other/repo")])):
             with self.assertRaises(store.FleetError):
                 github.protected_policy(control, group)
+
+
+class BrokerSpecialSlots(unittest.TestCase):
+    """A broker-enrolled host keeps its slot map; the broker chooses each kind's group."""
+
+    def setUp(self):
+        self.config = dict(ci_enabled=True, ci_max_jobs=15, ci_staging_slots=1, ci_idle_pool=True,
+                           ci_kinds=["pr", "staging"], runner_group_id=3, machine_id="7" * 32,
+                           ci_broker_url=broker.DEFAULT_URL,
+                           ci_protected_slots={"7": dict(kind="queue-control", runner_group_id=6),
+                                               "11": dict(kind="pr-status", runner_group_id=7)})
+        self.policy = dict(runner_group_id=3, max_jobs=4096, groups={"queue-control": 6, "pr-status": 7},
+                           kinds=["pr", "staging", "queue-control", "pr-status"])
+        self.groups = dict(groups=self.policy["groups"], kinds=self.policy["kinds"])
+
+    def test_enrolled_host_may_reserve_special_slots(self):
+        self.assertEqual(capacity.protected_slots(self.config),
+                         {7: dict(kind="queue-control", runner_group_id=6), 11: dict(kind="pr-status", runner_group_id=7)})
+        self.assertEqual(capacity.staging_slots(self.config), 1)
+        capacity.authorize(self.config, self.policy)
+
+    def test_special_slots_request_their_own_kind_and_never_choose_a_group(self):
+        for index, kind in ((7, "queue-control"), (11, "pr-status"), (2, None)):
+            slot = capacity.for_slot(self.config, index)
+            with patch.object(github, "request", side_effect=AssertionError("No GitHub credential on this host")), \
+                    patch.object(broker, "request") as call:
+                call.side_effect = lambda config, path, **kw: (
+                    self.groups if path == "/v1/groups" else dict(runner_id=9, encoded_jit_config="jit"))
+                self.assertEqual(github.jit_config(slot, "fleet-" + "7" * 12 + "-" + "a" * 16), (9, "jit"))
+            post = call.call_args
+            self.assertEqual(post.args[1], "/v1/runners")
+            self.assertEqual(post.kwargs["data"]["slot"], index)
+            self.assertEqual(post.kwargs["data"]["kinds"], [kind] if kind else ["pr", "staging"])
+            self.assertNotIn("runner_group_id", post.kwargs["data"])
+            # Only special slots compare their group with the broker before registering.
+            self.assertEqual([c.args[1] for c in call.call_args_list][:-1], ["/v1/groups"] if kind else [])
+
+    def test_a_disallowed_kind_or_different_group_refuses_the_slot(self):
+        for policy in (dict(self.policy, kinds=["pr", "staging", "pr-status"]),
+                       dict(self.policy, groups={"queue-control": 8, "pr-status": 7}),
+                       {k: v for k, v in self.policy.items() if k != "groups"}):
+            with self.assertRaisesRegex(store.FleetError, "slot 7"):
+                capacity.authorize(self.config, policy)
+            slot = capacity.for_slot(self.config, 7)
+            with patch.object(broker, "request", return_value=policy) as call:
+                with self.assertRaisesRegex(store.FleetError, "slot 7"):
+                    github.jit_config(slot, "fleet-" + "7" * 12 + "-" + "b" * 16)
+            self.assertEqual([c.args[1] for c in call.call_args_list], ["/v1/groups"])
+        # The build slots and the pr-status slot still start under a queue-control mismatch.
+        mismatch = dict(self.policy, groups={"queue-control": 8, "pr-status": 7})
+        with patch.object(broker, "request", return_value=mismatch):
+            self.assertEqual(github.runner_policy(capacity.for_slot(self.config, 11)), 7)
+            self.assertEqual(github.runner_policy(capacity.for_slot(self.config, 2)), 3)
+
+    def test_group_3_drift_does_not_stop_special_slots(self):
+        def answer(config, path, **kw):
+            if path == "/v1/policy":
+                raise store.FleetError("CI broker returned HTTP 503")
+            return self.groups if path == "/v1/groups" else dict(runner_id=9, encoded_jit_config="jit")
+
+        for index in (7, 11):
+            with patch.object(broker, "request", side_effect=answer):
+                self.assertEqual(github.jit_config(capacity.for_slot(self.config, index), "fleet-" + "7" * 12 + "-" + "c" * 16),
+                                 (9, "jit"))
+
+    def test_direct_credential_hosts_keep_their_own_group_checks(self):
+        config = {k: v for k, v in self.config.items() if k != "ci_broker_url"}
+        capacity.authorize(config, dict(runner_group_id=3, kinds=["pr", "staging"]))
