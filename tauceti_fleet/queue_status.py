@@ -126,8 +126,21 @@ def parse(manifest, queue):
     return dict(observed_at=queue["observed_at"], status_observed_at=queue.get("status_observed_at"),
                 partial=queue.get("coverage") != "observed" or bool(queue.get("truncated")),
                 batches=active, waiting=count(queue.get("counts", {}).get("waiting")),
-                workers=workers, claims=claims,
+                workers=workers, claims=claims, stuck_heads=stuck_heads(queue.get("conditions")),
                 last_landing=max(landed, key=lambda b: timestamp(b["landed_at"])) if landed else None)
+
+
+def stuck_heads(conditions):
+    """The CI recovery pass's stuck heads, as the queue publishes them: one `stuck_head` condition per
+    listed head (since its last push) after `stuck_heads_observed`. None when the queue reported none."""
+    if not isinstance(conditions, list):
+        return None
+    kinds = [c.get("kind") for c in conditions if isinstance(c, dict)]
+    if "stuck_heads_observed" not in kinds:
+        return None
+    pushes = [timestamp(c["since"]) for c in conditions if isinstance(c, dict) and c.get("kind") == "stuck_head"]
+    return dict(count=len(pushes), truncated="stuck_heads_truncated" in kinds,
+                oldest=min(pushes) if pushes else None)
 
 
 def task(original, batch_id):
@@ -352,6 +365,12 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
             if successor and successor["active_tasks"]:
                 print("  Next head: batch " + successor["id"] + " after its active preparation releases.")
         print(f"  Waiting for placement: {value['waiting']} PRs.")
+        stuck = value.get("stuck_heads")
+        if stuck:
+            line = f"  Stuck heads: {stuck['count']}{'+' if stuck['truncated'] else ''}"
+            if stuck["oldest"] is not None:
+                line += f", oldest {max(0, int(now - stuck['oldest'])) // 3600}h"
+            print(line + " (no CI and no final state 3h after the last push).")
         visible = [w for w in workers if w.get("state") not in ("stopped","unknown") and w.get("coverage") != "unavailable"]
         if visible:
             print("  Workers: " + "; ".join(f"{names[w['id']]} {w['state']}" for w in visible))
