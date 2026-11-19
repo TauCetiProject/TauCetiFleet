@@ -452,6 +452,12 @@ def run_workers():
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
+@hostos.linux
+def manager_active():
+    return not run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False, timeout=2).returncode
+
+
+@hostos.linux
 def manager_process():
     """The running manager's argv, or None when its service process cannot be identified."""
     result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)

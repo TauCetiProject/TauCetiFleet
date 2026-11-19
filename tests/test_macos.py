@@ -4,13 +4,14 @@ import io
 import os
 import plistlib
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, host, hostos, macos, pool_activity, remote, store, update
+from tauceti_fleet import capabilities, host, hostos, macos, pool_activity, remote, store, targets, update
 from tauceti_fleet.cli import main
 
 GIB = 1024**3
@@ -175,6 +176,20 @@ class MacOS(unittest.TestCase):
         self.assertEqual(self.launchctl("kickstart"), [[f"{self.domain}/org.tauceti.fleet.workers"]])
         with self.assertRaisesRegex(store.FleetError, "no worker slice"):
             host.stop_workers()
+
+    def test_target_lists_find_the_runtime_the_launchd_manager_runs(self):
+        self.assertIsNone(targets.running_manager())
+        self.loaded[macos.WORKERS] = 4242
+        argv = ["/runtime/old/bin/python", "/runtime/old/bin/tauceti", "workers", "--config", "w.toml", "manager"]
+        with patch.object(macos, "process_argv", return_value=argv) as process:
+            self.assertEqual(targets.running_manager(), "/runtime/old/bin/tauceti")
+        process.assert_called_once_with(4242)
+        with patch.object(macos, "process_argv", return_value=None):
+            self.assertEqual(targets.running_manager(), "")
+
+    @unittest.skipUnless(sys.platform == "darwin", "reads a process's arguments from the macOS kernel")
+    def test_process_argv_reads_a_live_process(self):
+        self.assertEqual(macos.process_argv(os.getpid()), sys.orig_argv)
 
     def test_workers_and_funding_share_one_budget_ledger(self):
         for name in ("TAUCETI_BUDGET_DIR", "XDG_STATE_HOME"):

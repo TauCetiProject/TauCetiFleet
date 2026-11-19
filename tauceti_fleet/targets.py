@@ -37,7 +37,7 @@ def running_manager():
     """The live manager's executable, not a potentially stale installed-runtime record."""
     from . import host
 
-    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False, timeout=2).returncode:
+    if not host.manager_active():
         return None
     process = host.manager_process()
     if process is None:

@@ -14,6 +14,7 @@ import platform
 import plistlib
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -130,6 +131,41 @@ def service():
     result = run(["launchctl", "print", f"{domain()}/{CONTROLLER}"], check=False)
     pid = re.search(r"^\s*pid = (\d+)$", result.stdout, re.MULTILINE) if result.returncode == 0 else None
     return dict(MainPID=pid.group(1) if pid else "0", Restart="on-failure")
+
+
+def manager_pid():
+    result = run(["launchctl", "print", f"{domain()}/{WORKERS}"], check=False)
+    pid = re.search(r"^\s*pid = (\d+)$", result.stdout, re.MULTILINE) if result.returncode == 0 else None
+    return int(pid.group(1)) if pid else None
+
+
+def manager_active():
+    return manager_pid() is not None
+
+
+def process_argv(pid):
+    """A process's argv from KERN_PROCARGS2, or None when the kernel does not show it."""
+    libc = mach_host()[0]
+    argmax = ctypes.c_int()
+    size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    if libc.sysctl((ctypes.c_int * 2)(1, 8), 2, ctypes.byref(argmax), ctypes.byref(size), None, 0):
+        return None
+    buffer = ctypes.create_string_buffer(argmax.value)
+    size = ctypes.c_size_t(argmax.value)
+    if libc.sysctl((ctypes.c_int * 3)(1, 49, pid), 3, buffer, ctypes.byref(size), None, 0):
+        return None
+    raw = buffer.raw[:size.value]
+    # argc, then the executable path and its NUL padding, then argc NUL-terminated arguments.
+    argc = int.from_bytes(raw[:4], sys.byteorder)
+    arguments = raw[4:].split(b"\0", 1)[-1].lstrip(b"\0").split(b"\0")[:argc]
+    return [os.fsdecode(a) for a in arguments]
+
+
+def manager_process():
+    # launchd reports the agent's ProgramArguments; the manager has since exec'd the worker runtime.
+    pid = manager_pid()
+    argv = process_argv(pid) if pid else None
+    return (argv, {}) if argv else None
 
 
 def reset_failed():

@@ -10,8 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, host, store, targets
+from tauceti_fleet import capabilities, host, hostos, store, targets
 from tauceti_fleet.store import FleetError
+
+hostos.MACOS = False
 
 INSPECT_FILE = targets.inspect_file
 
@@ -188,11 +190,11 @@ class TargetLists(unittest.TestCase):
 
     def test_manager_identity_uses_actual_process_not_stale_metadata(self):
         store.atomic(store.state_dir() / "worker-manager.json", dict(binary="/stale/bin/tauceti"))
-        with patch.object(targets, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(
+        with patch.object(host, "manager_active", return_value=True), patch.object(
             host, "manager_process", return_value=(["/live/bin/tauceti", "workers", "manager"], {})
         ):
             self.assertEqual(self.find_manager(), "/live/bin/tauceti")
-        with patch.object(targets, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(host, "manager_process", return_value=None):
+        with patch.object(host, "manager_active", return_value=True), patch.object(host, "manager_process", return_value=None):
             self.assertEqual(self.find_manager(), "")
 
     def test_audit_never_ticks_a_possible_partial_merge_or_overwrites_concurrent_edits(self):
