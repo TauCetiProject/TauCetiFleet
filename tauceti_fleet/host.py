@@ -435,7 +435,7 @@ def run_workers():
 
 def manager_process():
     """The running manager's argv, or None when its service process cannot be identified."""
-    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False)
+    result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
     pid = result.stdout.strip() if result.returncode == 0 else ""
     if not pid.isdigit() or pid == "0":
         return None
