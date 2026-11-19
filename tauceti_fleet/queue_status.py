@@ -13,6 +13,24 @@ from .store import FleetError, atomic, config_dir, read
 ORIGIN = "https://ci-data.taucetiproject.org"
 DEFAULT_TIMEZONE = "Australia/Sydney"
 MAX_BATCHES = 16
+# TauCetiTools pr-build runs each sandboxed phase as its own step; older runs had one step,
+# "Build exact candidate under bwrap with workflow-pinned audits, offline", for them all.
+SANDBOX_STEPS = (
+    ("build exact candidate under bwrap with", "building and auditing"),
+    ("build exact candidate under bwrap", "building"),
+    ("audit the candidate under bwrap", "auditing duplicates and axioms"),
+    ("check the module system under bwrap", "checking the module system"),
+    ("environment lint under bwrap", "environment lint"),
+    ("style lint under bwrap", "style lint"),
+    ("record declaration names and stage cache outputs under bwrap", "recording declaration names"),
+    ("build exact candidate", "building and auditing"),
+)
+
+
+def sandbox_step(name):
+    """The status label of a sandboxed build step, or None for any other step."""
+    low = name.lower()
+    return next((label for key, label in SANDBOX_STEPS if key in low), None)
 
 
 def timestamp(value):
@@ -279,15 +297,17 @@ def activity(batch, claims, names, now, timezone):
         if running:
             phase = text(running[-1].get("name", "CI"), 500)
             low = phase.lower()
-            label = ("publishing cache" if "publish" in low or "staged" in low else
+            sandbox = sandbox_step(phase)
+            label = (sandbox if sandbox else
+                     "publishing cache" if "publish" in low or "staged" in low else
                      "reporting results" if any(k in low for k in ("report", "terminal", "finaliz")) else
-                     "building and auditing" if "build exact candidate" in low else phase[:100])
+                     phase[:100])
             result = "CI " + label
             if running[-1].get("started_at"):
                 result += " since " + clock(running[-1]["started_at"], timezone)
-            builds = [p for p in phases if "build exact candidate" in p.get("name", "").lower()
-                      and p.get("completed_at")]
-            if builds:
+            builds = [p for p in phases if sandbox_step(p.get("name", "")) and p.get("completed_at")]
+            # While a sandboxed step runs its label says which; afterwards, when the last one finished.
+            if builds and not sandbox:
                 verdict = (attempt.get("verdicts") or {}).get("build") or {}
                 passed = verdict.get("bound") is True and verdict.get("state") == "success"
                 result += "; " + ("build/audits passed " if passed else "build phase finished ") + clock(builds[-1]["completed_at"], timezone)

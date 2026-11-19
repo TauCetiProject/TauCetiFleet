@@ -277,6 +277,31 @@ class QueueStatus(unittest.TestCase):
         attempt["verdicts"] = dict(build=dict(state="success", bound=True))
         self.assertIn("build/audits passed 09 Nov 10:18 AEDT", self.render())
 
+    def test_running_sandboxed_phase_step_is_named(self):
+        attempt = self.head["latest_attempt"]
+        steps = [("Build exact candidate under bwrap, offline", "building"),
+                 ("Audit the candidate under bwrap (duplicates, axioms)", "auditing duplicates and axioms"),
+                 ("Check the module system under bwrap", "checking the module system"),
+                 ("Environment lint under bwrap", "environment lint"),
+                 ("Style lint under bwrap", "style lint"),
+                 ("Record declaration names and stage cache outputs under bwrap", "recording declaration names")]
+        for index, (name, label) in enumerate(steps):
+            with self.subTest(name=name):
+                attempt["phases"] = [
+                    *(dict(name="candidate / sandboxed-build: " + done, status="completed",
+                           started_at="2026-11-08T23:10:00Z", completed_at="2026-11-08T23:18:51Z")
+                      for done, _ in steps[:index]),
+                    dict(name="candidate / sandboxed-build: " + name, status="in_progress",
+                         started_at="2026-11-08T23:20:00Z")]
+                output = self.render()
+                self.assertIn(f"CI {label} since 09 Nov 10:20 AEDT", output)
+                self.assertNotIn("build phase finished", output)
+        attempt["phases"][-1].update(status="completed", completed_at="2026-11-08T23:30:00Z")
+        attempt["phases"].append(dict(name="candidate / sandboxed-build: Report build and bump-guard statuses to the PR head commit",
+                                      status="in_progress", started_at="2026-11-08T23:31:00Z"))
+        self.assertIn("CI reporting results since 09 Nov 10:31 AEDT; build phase finished 09 Nov 10:30 AEDT",
+                      self.render())
+
     def test_bad_timezone_fails_before_any_host_calls(self):
         with patch.object(remote, "inventory", side_effect=AssertionError("network")), contextlib.redirect_stderr(io.StringIO()):
             self.assertNotEqual(cli.main(["status", "--timezone", "Invalid/Zone"]), 0)
