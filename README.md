@@ -295,6 +295,17 @@ The shared job ceiling and worker admissions stay enabled. Existing guests finis
 with their original classes, and the command reports slots awaiting replacement.
 Use `--slots 0` to remove the reservation as guests are replaced.
 
+Each reserved staging slot also keeps one persistent, sparse disk, `warm.qcow2` in
+the slot's state directory (`ci_disk_gib` virtual size), attached to every guest of
+that slot as a second virtio disk with serial `tauceti-warm`. The disposable guests
+are otherwise unchanged. The trusted staging workflow decides what the disk holds:
+it keeps one batch's build tree for that batch's next attempt and reformats the disk
+for any other batch. No other slot sees the disk, and a slot deletes it when it next
+starts a guest without the staging reservation. Before each attach, `qemu-img check`
+runs: a corrupt disk is replaced by an empty one, and a disk that cannot be opened or
+created is left out, so the guest starts without it and the workflow takes its normal
+cold path.
+
 Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
 host they and the other CI guests together overcommit its RAM. `--memory-gib N`
 gives future reserved staging guests exactly N GiB of virtual RAM instead
