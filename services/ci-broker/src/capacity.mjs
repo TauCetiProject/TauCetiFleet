@@ -21,6 +21,11 @@ export function runnerKinds(kinds) {
 export function groupFor(kinds) {
   return GROUPS[kinds[0]];
 }
+/** Groups a host's runners can be in: its classes' and its registered slots'. */
+export function hostGroups(host) {
+  const kinds=[...(host.kinds ?? ['staging']),...Object.values(slots(host)).flatMap(s=>s.kinds || ['staging'])];
+  return [...new Set(kinds.filter(k=>Object.hasOwn(GROUPS,k)).map(k=>GROUPS[k]))].sort((a,b)=>a-b);
+}
 export function slots(host) {
   if (!host.slots) {
     host.slots={};

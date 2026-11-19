@@ -195,9 +195,10 @@ harness entries below. Group 7 must select exactly TauCeti's `pr-status.yml` and
 `pr-labels.yml` at main. A widened group stops registration in that group only.
 Pending reservations record their group, and recovery rechecks it and removes
 only same-named runners in that group; reservations from before this change are
-group 3. Runner inventory lists groups 3, 6 and 7, so special runners can be
-observed, retired, suspended and recovered like any other, while runners in other
-groups are never touched. `/v1/policy` keeps `runner_group_id: 3` and adds
+group 3. Runner inventory lists the groups of a host's classes and registered
+slots (group 3 alone for build-only hosts), so special runners can be observed,
+retired, suspended and recovered like any other, a special group's outage does not
+affect build-only hosts, and runners in other groups are never touched. `/v1/policy` keeps `runner_group_id: 3` and adds
 `groups: {"queue-control": 6, "pr-status": 7}`, which hosts compare with their
 local `ci_protected_slots`. `/v1/groups` returns that mapping and the host's
 classes without the group 3 check, so group 3 drift does not stop special slots. The `control` and `roadmap` classes (TauCetiRoadmap)

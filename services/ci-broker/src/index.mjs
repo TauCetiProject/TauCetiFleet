@@ -2,7 +2,7 @@ import {suspendHost} from './suspension.mjs';
 import {telemetry} from './monitoring.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import {GitHub, UpstreamError} from './github.mjs';
-import {MAX_JOBS,SPECIAL_GROUPS,capacity,hostKinds,runnerKinds,groupFor,slots,labels} from './capacity.mjs';
+import {MAX_JOBS,SPECIAL_GROUPS,capacity,hostKinds,runnerKinds,groupFor,hostGroups,slots,labels} from './capacity.mjs';
 import {RegistrationRecovery,diagnosis,STUCK_AFTER} from './recovery.mjs';
 
 const HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -268,7 +268,7 @@ export class FleetRegistry extends DurableObject {
         return json({groups:SPECIAL_GROUPS,kinds:capacity(host).kinds});
       if (url.pathname==='/v1/runners' && req.method==='GET') {
         const owned=Object.values(slots(host)).filter(s=>s.runner_id);
-        const found=owned.length?await this.github.runners():[];
+        const found=owned.length?await this.github.runners(hostGroups(host)):[];
         const runners=[];
         for (const slot of owned) {
           const runner=found.find(r=>r.id===slot.runner_id);

@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub,PolicyError} from '../src/github.mjs';
-import {hostKinds,runnerKinds,groupFor,labels} from '../src/capacity.mjs';
+import {hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
 import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
 
 const workflow=(repo,name)=>'TauCetiProject/'+repo+'/.github/workflows/'+name+'@refs/heads/main';
@@ -70,10 +70,21 @@ test('inventory lists the broker groups and tags each runner with its group',asy
     const group=Number(path.match(/runner-groups\/(\d+)\/runners/)[1]);
     return {total_count:1,runners:[{id:group*10,name:'runner-'+group}]};
   };
-  assert.deepEqual(await github.runners(),[3,6,7].map(g=>({id:g*10,name:'runner-'+g,runner_group_id:g})));
+  assert.deepEqual(await github.runners([3,6,7]),[3,6,7].map(g=>({id:g*10,name:'runner-'+g,runner_group_id:g})));
   assert.deepEqual(paths,[3,6,7].map(g=>`orgs/TauCetiProject/actions/runner-groups/${g}/runners?per_page=100&page=1`));
+  // Build-only callers read group 3 alone, as before.
+  paths.length=0;
+  assert.deepEqual(await github.runners(),[{id:30,name:'runner-3',runner_group_id:3}]);
+  assert.equal(paths.length,1);
+  await assert.rejects(github.runners([4]),/Incomplete runner inventory/);
   github.request=async()=>({total_count:1,runners:[{id:1,name:'same'}]});
-  await assert.rejects(github.runners(),/Incomplete runner inventory/);
+  await assert.rejects(github.runners([3,6]),/Incomplete runner inventory/);
+});
+test('hosts inventory only the groups of their classes and registered slots',()=>{
+  assert.deepEqual(hostGroups({kinds:['pr','staging'],slots:{}}),[3]);
+  assert.deepEqual(hostGroups({slots:{}}),[3]);
+  assert.deepEqual(hostGroups({kinds:['pr','staging','queue-control','pr-status'],slots:{}}),[3,6,7]);
+  assert.deepEqual(hostGroups({kinds:['pr'],slots:{4:{runner_id:1,kinds:['pr-status']}}}),[3,7]);
 });
 test('recovery rechecks the group recorded with the reservation, or group 3 for older ones',async()=>{
   for (const [pending,expected] of [[{group:6},6],[{group:7},7],[{},3]]) {

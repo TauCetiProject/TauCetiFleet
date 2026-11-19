@@ -56,11 +56,13 @@ export class GitHub {
   async request(path, {kind='read',method='GET',data}={}) {
     return this.raw(path, await this.token(kind),method,data);
   }
-  // Runners of every group the broker registers in (3, 6 and 7), each tagged
-  // with its group. Runners in other groups are never observed or removed.
-  async runners() {
+  // Runners of the given broker groups (by default 3 only), each tagged with
+  // its group. Runners in other groups are never observed or removed, and a
+  // special group's outage cannot affect hosts that do not use it.
+  async runners(groups=[3]) {
     const found=[];
-    for (const group of Object.keys(CHECKS).map(Number)) {
+    for (const group of groups) {
+      if (!Object.hasOwn(CHECKS,group)) throw new InventoryError();
       for (const runner of await this.groupRunners(group)) {
         if (found.some(r=>r.id===runner.id)) throw new InventoryError();
         found.push({...runner,runner_group_id:group});

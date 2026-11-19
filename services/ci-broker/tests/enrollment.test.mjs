@@ -22,7 +22,7 @@ const trustedGroups=()=>({
       workflow('TauCetiTools','publish-lake-cache.yml')]},
   7:{id:7,name:'TauCetiPRStatus',visibility:'selected',restricted_to_workflows:true,
     selected_workflows:[workflow('TauCeti','pr-labels.yml'),workflow('TauCeti','pr-status.yml')]}});
-let groups=trustedGroups(),groupRepositories={6:['TauCetiProject/TauCeti'],7:['TauCetiProject/TauCeti']};
+let failGroupListing=null,groups=trustedGroups(),groupRepositories={6:['TauCetiProject/TauCeti'],7:['TauCetiProject/TauCeti']};
 const hash=value=>createHash('sha256').update(value).digest('hex');
 before(async()=>{
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
@@ -69,6 +69,7 @@ before(async()=>{
       const listing=url.pathname.match(/^\/orgs\/TauCetiProject\/actions\/runner-groups\/(\d+)\/runners$/);
       if (listing) {
         assert.ok(['3','6','7'].includes(listing[1]));
+        if (listing[1]===failGroupListing) return respond({error:'missing'},404);
         const all=[...runners.values()].filter(r=>(r.runner_group_id ?? 3)===Number(listing[1])),page=Number(url.searchParams.get('page') || 1);
         return respond({total_count:all.length,runners:all.slice((page-1)*100,page*100)});
       }
@@ -553,4 +554,19 @@ test('group 3 drift blocks build registrations but not the special-group mapping
     assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'2'.repeat(16),slot:7,kinds:['queue-control']})).status,200);
     assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'3'.repeat(16),slot:11,kinds:['pr-status']})).status,200);
   } finally { trustedPolicy=true; }
+});
+test('a special group outage leaves build-only hosts inventory working',async()=>{
+  const build='9f'.repeat(16),special='af'.repeat(16),tb='v'.repeat(64),ts='w'.repeat(64);
+  await enroll(build,tb,'outage-build',{kinds:['pr','staging']});
+  await enroll(special,ts,'outage-special',{kinds:specialKinds});
+  for (const [id,token,kinds] of [[build,tb,['pr']],[special,ts,['queue-control']]])
+    assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:'fleet-'+id.slice(0,12)+'-'+'1'.repeat(16),slot:7,kinds})).status,200);
+  failGroupListing='6';
+  try {
+    const start=upstream.length;
+    assert.equal((await hostRequest(build,tb,'/v1/runners')).status,200);
+    assert.ok(upstream.slice(start).every(x=>!/runner-groups\/[67]\/runners/.test(x.path)));
+    assert.equal((await hostRequest(special,ts,'/v1/runners')).status,503);
+  } finally { failGroupListing=null; }
+  assert.equal((await hostRequest(special,ts,'/v1/runners')).status,200);
 });

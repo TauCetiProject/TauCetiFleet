@@ -48,7 +48,7 @@ export class RegistrationRecovery {
     await this.github.policy({group,fresh:true});
     // A complete inventory is required even when there are no matching runners.
     // Only the reserved group can hold the registration this intent made.
-    const matches=(await this.github.runners()).filter(r=>r.name===slot.pending.name && r.runner_group_id===group);
+    const matches=(await this.github.runners([group])).filter(r=>r.name===slot.pending.name && r.runner_group_id===group);
     if (matches.some(r=>r.busy || r.status!=='offline')) throw new RecoveryBlocked('runner_active');
     for (const runner of matches) {
       try {
