@@ -141,7 +141,11 @@ def parse(manifest, queue):
     for w in queue.get("workers", [])[:32]:
         workers.append(dict(id=text(w["id"], 80), state=text(w.get("state", "unknown"), 80),
                             observed_at=w.get("observed_at")))
+    received = queue.get("received_at")
+    if received is not None:
+        timestamp(received)
     return dict(observed_at=queue["observed_at"], status_observed_at=queue.get("status_observed_at"),
+                received_at=received,
                 partial=queue.get("coverage") != "observed" or bool(queue.get("truncated")),
                 batches=active, waiting=count(queue.get("counts", {}).get("waiting")),
                 workers=workers, claims=claims, stuck_heads=stuck_heads(queue.get("conditions")),
@@ -347,6 +351,25 @@ def worker_names(workers, inventory=None):
     return names
 
 
+PUBLICATION_STALE_SECONDS = 300
+OBSERVATION_STALE_SECONDS = 420
+ROLES = ("head", "next head", "sealed, waiting", "unsealed")
+
+
+def processing_order(batches):
+    """(id, batch, role) in the order the queue will land them: head, next head, sealed, unsealed."""
+    sealed_waiting = sorted((b for b in batches if b["state"] != "head" and b.get("sealed")),
+                            key=lambda b: int(b["id"]))
+    next_head = sealed_waiting[0]["id"] if sealed_waiting else None
+    rows = []
+    for batch in batches:
+        role = ("head" if batch["state"] == "head" else
+                "next head" if batch["id"] == next_head else
+                "sealed, waiting" if batch.get("sealed") else "unsealed")
+        rows.append((batch["id"], batch, role))
+    return sorted(rows, key=lambda row: (ROLES.index(row[2]), int(row[0])))
+
+
 def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
     now = time.time() if now is None else now
     value = report.get("value") if isinstance(report, dict) else None
@@ -358,23 +381,19 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
         notes = [clock(value["observed_at"], timezone), f"{max(0, int(now - observed))}s old"]
         if value.get("partial"):
             notes.append("partial")
-        if now - observed > 180 or observed > now + 5:
+        # The publisher takes about two minutes per cycle, so observations arrive about 90s old.
+        # Staleness is a publication that stopped arriving, not the observation's own age.
+        received = timestamp(value["received_at"]) if value.get("received_at") else None
+        if (now - received > PUBLICATION_STALE_SECONDS if received is not None
+                else now - observed > OBSERVATION_STALE_SECONDS) or observed > now + 5:
             notes.append("STALE")
         if report.get("error"):
             notes.extend(("cached", report["error"]))
         print("Merge queue (" + "; ".join(notes) + "):")
         workers = value.get("workers") or []
         names = worker_names(workers)
-        rows = []
-        sealed_waiting = sorted((b for b in value["batches"] if b["state"] != "head" and b.get("sealed")),
-                                key=lambda b: int(b["id"]))
-        next_head = sealed_waiting[0]["id"] if sealed_waiting else None
-        for batch in value["batches"]:
-            role = ("head" if batch["state"] == "head" else
-                    "next head" if batch["id"] == next_head else
-                    "sealed, waiting" if batch.get("sealed") else "unsealed")
-            rows.append((batch["id"], str(batch["size"]), role,
-                         activity(batch, value["claims"], names, now, timezone)))
+        rows = [(number, batch["size"], role, activity(batch, value["claims"], names, now, timezone))
+                for number, batch, role in processing_order(value["batches"])]
         print("  Batch   PRs  State             Activity")
         for number, size, role, doing in rows:
             print(f"  {number:>5} {size:>5}  {role:<17} {doing}")
@@ -384,7 +403,9 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
             successor = next((b for b in value["batches"] if b.get("sealed")), None)
             if successor and successor["active_tasks"]:
                 print("  Next head: batch " + successor["id"] + " after its active preparation releases.")
-        print(f"  Waiting for placement: {value['waiting']} PRs.")
+        sizes = [size for _, size, _, _ in rows]
+        placed = f"{sum(sizes)} PRs in batches" + (f" ({'+'.join(map(str, sizes))})" if len(sizes) > 1 else "")
+        print(f"  {placed}; {value['waiting']} waiting for placement.")
         stuck = value.get("stuck_heads")
         if stuck:
             line = f"  Stuck heads: {stuck['count']}{'+' if stuck['truncated'] or stuck.get('partial') else ''}"
