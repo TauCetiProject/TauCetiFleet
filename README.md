@@ -931,8 +931,9 @@ list is accepted with a note and `--audit` repeats the check later.
 
 The host saves the path in `host.json`, and the controller writes it into every
 worker definition as `roadmap_targets` on its next pass. No drain is needed.
-The worker manager restarts a worker whose definition changes, so setting,
-moving or clearing a list ends the rounds in progress; workers read the file at
+The worker manager restarts a worker whose definition changes once its round in
+flight finishes, so setting, moving or clearing a list applies from each
+worker's next round; workers read the file at
 the start of each roadmap round, so new contents at the same path, including
 every repeated transfer, change no definition and restart nothing. The installed
 TauCetiWorker must report `roadmap_targets` in its Fleet protocol, and so must
