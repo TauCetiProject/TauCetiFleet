@@ -229,7 +229,7 @@ def reported_progress(value):
 
 
 def build_progress(manifest, attempt):
-    """The head attempt's live build report from the public jobs pages; active jobs come first."""
+    """The head attempt's live build report from the first public jobs pages that hold it."""
     from . import pool_activity
 
     root = ci_overview.fetch(pool_activity.jobs_url(manifest), timeout=3)
@@ -242,7 +242,7 @@ def build_progress(manifest, attempt):
                 progress = reported_progress(job.get("progress"))
                 if progress:
                     found.append(progress)
-        if found or not any(isinstance(job, dict) and job.get("active") for job in records):
+        if found:
             break
     return max(found, key=lambda p: timestamp(p["observed_at"])) if found else None
 
@@ -261,9 +261,11 @@ def progress_text(progress, timezone=DEFAULT_TIMEZONE, now=None):
         rate = progress.get("tasks_per_minute")
         if rate is not None and progress.get("phase") == "build" and done < total:
             parts.append(f"{rate:,.0f}/min")
-            if rate > 0:
+            try:
                 eta = timestamp(progress["observed_at"]) + (total - done) * 60 / rate
                 parts.append("ETA " + datetime.fromtimestamp(eta, ZoneInfo(timezone)).strftime("%d %b %H:%M %Z"))
+            except (ZeroDivisionError, OverflowError, OSError, ValueError):
+                pass  # No usable ETA from this rate; the counters stand alone.
     elif progress.get("completed_modules") and progress.get("phase") == "build":
         # Reporters before Lake's job counter count only built TauCeti modules, with no total.
         parts.append(f"{progress['completed_modules']:,} TauCeti modules built")

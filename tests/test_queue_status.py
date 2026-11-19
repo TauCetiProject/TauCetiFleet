@@ -323,6 +323,10 @@ class QueueStatus(unittest.TestCase):
                 patch.object(github, "request", side_effect=AssertionError("GitHub scan")):
             result = queue.refresh(self.manifest)
         self.assertEqual(fetch.call_count, 4, "the first page held the run, so later pages are not read")
+        # A build job already finished while its run continues can sit behind terminal-only pages.
+        terminal = dict(records=[dict(run_id="1", run_attempt=1, active=False)])
+        with patch.object(ci_overview, "fetch", side_effect=[*documents[:3], terminal, documents[3]]):
+            self.assertIn("build_progress", queue.refresh(self.manifest)["value"]["batches"][0])
         output = self.render(result)
         self.assertIn("CI building since 09 Nov 09:16 AEDT\n" + " " * 33
                       + "build: phase build, 103,917/113,955 Lake jobs (91.2%), 850/min, ETA 09 Nov 10:47 AEDT\n",
@@ -332,6 +336,10 @@ class QueueStatus(unittest.TestCase):
         result["value"]["batches"][0]["build_progress"].update(phase="audit-axioms", completed_tasks=113955,
                                                                tasks_per_minute=None)
         self.assertIn("build: phase axiom audit, 113,955/113,955 Lake jobs (100.0%)\n", self.render(result))
+        # A rate too small for any representable ETA keeps the counters.
+        result["value"]["batches"][0]["build_progress"].update(phase="build", completed_tasks=100,
+                                                               tasks_per_minute=1e-300)
+        self.assertIn("build: phase build, 100/113,955 Lake jobs (0.1%), 0/min\n", self.render(result))
         # Stale reports say so; a passed attempt no longer shows the build line.
         self.now += 600
         self.assertIn("reported 10m ago", self.render(result))
