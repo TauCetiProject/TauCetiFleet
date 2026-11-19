@@ -140,7 +140,7 @@ def stuck_heads(conditions):
         return None
     pushes = [timestamp(c["since"]) for c in conditions if isinstance(c, dict) and c.get("kind") == "stuck_head"]
     return dict(count=len(pushes), truncated="stuck_heads_truncated" in kinds,
-                oldest=min(pushes) if pushes else None)
+                partial="stuck_heads_partial" in kinds, oldest=min(pushes) if pushes else None)
 
 
 def task(original, batch_id):
@@ -367,10 +367,11 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
         print(f"  Waiting for placement: {value['waiting']} PRs.")
         stuck = value.get("stuck_heads")
         if stuck:
-            line = f"  Stuck heads: {stuck['count']}{'+' if stuck['truncated'] else ''}"
+            line = f"  Stuck heads: {stuck['count']}{'+' if stuck['truncated'] or stuck.get('partial') else ''}"
             if stuck["oldest"] is not None:
                 line += f", oldest {max(0, int(now - stuck['oldest'])) // 3600}h"
-            print(line + " (no CI and no final state 3h after the last push).")
+            line += " (no final state and, 3h after the last push, no CI or only interrupted builds"
+            print(line + ("; partial pass)." if stuck.get("partial") else ")."))
         visible = [w for w in workers if w.get("state") not in ("stopped","unknown") and w.get("coverage") != "unavailable"]
         if visible:
             print("  Workers: " + "; ".join(f"{names[w['id']]} {w['state']}" for w in visible))

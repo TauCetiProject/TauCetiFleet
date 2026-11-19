@@ -71,11 +71,15 @@ class QueueStatus(unittest.TestCase):
     def test_stuck_heads_line_appears_only_when_the_queue_reports_them(self):
         self.assertNotIn("Stuck heads", self.render())
         self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z")]
-        self.assertIn("  Stuck heads: 0 (no CI", self.render())
+        self.assertIn("  Stuck heads: 0 (no final state", self.render())
         self.document["conditions"] += [dict(kind="stuck_head", since="2026-11-08T18:36:00Z"),
                                         dict(kind="stuck_head", since="2026-11-08T20:00:00Z"),
                                         dict(kind="stuck_heads_truncated")]
-        self.assertIn("  Stuck heads: 2+, oldest 5h (no CI", self.render())
+        self.assertIn("  Stuck heads: 2+, oldest 5h (no final state", self.render())
+        self.document["conditions"] = [dict(kind="stuck_heads_observed", since="2026-11-08T23:30:00Z"),
+                                       dict(kind="stuck_heads_partial")]
+        self.assertIn("  Stuck heads: 0+ (no final state", self.render())
+        self.assertIn("; partial pass).", self.render())
 
     def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
         identity = "repair-3@chungus2"
