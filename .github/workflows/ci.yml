@@ -29,3 +29,21 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q tauceti_fleet
+  worker-target-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCetiWorker
+          ref: main
+          path: worker-contract
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the merged Worker contract
+        run: python -m pip install ./worker-contract
+      - name: Exercise canonical target inspection and generated definitions
+        run: |
+          export TAUCETI_TEST_WORKER="$(command -v tauceti)"
+          python -m unittest discover -s tests -p test_targets.py -v

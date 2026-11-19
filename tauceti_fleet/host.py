@@ -1,6 +1,5 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
-import hashlib
 import json
 import os
 import re
