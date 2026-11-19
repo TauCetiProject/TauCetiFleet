@@ -129,17 +129,17 @@ def configure(payload):
     credentials = payload.get("credentials", {})
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
-    for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
-            raise FleetError("Unknown credential kind")
-        if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
-            raise FleetError("Invalid credential value")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
     worker_fields(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
+    for key, secret in credentials.items():
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+            raise FleetError("Unknown credential kind")
+        if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
+            raise FleetError("Invalid credential value")
     for key, secret in credentials.items():
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
