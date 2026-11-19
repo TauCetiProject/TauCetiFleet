@@ -19,6 +19,7 @@ from . import (
     focus,
     github,
     native_runner,
+    slot_groups,
     targets,
     vm,
     worker_view,
@@ -115,6 +116,11 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
+        "slots",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -138,8 +144,12 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    if updates.get("slots") is not None:
+        updates["slots"] = slot_groups.validate(updates["slots"])
+    loadable_workers(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
+        # Slot groups change live: the worker manager holds an agent or phase edit until the round ends.
+        if any(current.get(k) != v for k, v in updates.items() if k != "slots"):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
@@ -161,7 +171,7 @@ def configure(payload):
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         updates[key] = str(path)
-    value = update_host(validate=capacity.staging_slots, **updates)
+    value = update_host(validate=lambda merged: (capacity.staging_slots(merged), loadable_workers(merged)), **updates)
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
     # Inactive installation never adopts or starts the existing worker fleet.
@@ -289,71 +299,289 @@ def write_slices(config, caps):
     return worker
 
 
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
+}
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace = config.get("pace")
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets", "sandbox", "pace"):
+        if config.get(key):
+            fields[key] = config[key]
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
+    return fields
+
+
 def toml_value(value):
     # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
     # takes them literally but requires DEL escaped.
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-def worker_config(config):
-    # Serialize controller and operator rewrites, and never restore an old label policy.
-    with locked(config_dir() / "worker-policy.lock"):
-        current = host_config()
-        config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "worker_env", "roadmap_targets"):
-            if field in current:
-                config[field] = current[field]
-        return _worker_config(config)
-
-
-def _worker_config(config):
-    if config.get("roadmap_targets"):
-        targets.require_support()
-    # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
-    )
-    if config.get("self_tested"):
-        fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
-        if config.get(key):
-            fields[key] = config[key]
-    if config.get("worker_env"):
-        fields["env"] = dict(sorted(config["worker_env"].items()))
-    lines = ["version = 1"]
-    ids = []
+def worker_plan(config):
+    """(id, definition keys, slot group or None) per worker, and the ids in admission order."""
     # Keep existing definitions when reducing admissions: removing a definition
     # makes the manager terminate its worker, including an admitted paid session.
+    preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
+    old = written_workers() if preserve else []
+    if config.get("slots"):
+        plan = slot_groups.layout(config, old, worker_fields)
+        admission = slot_groups.order([group for _, group in plan])
+    else:
+        plan = [(worker_fields(config), None)] * max(1, config["max_workers"], len(old))
+        admission = range(len(plan))
+    ids = ["fleet-" + config["machine_id"][:8] + f"-{n + 1}" for n in range(len(plan))]
+    return [(wid, *entry) for wid, entry in zip(ids, plan, strict=True)], [ids[n] for n in admission]
+
+
+def manifest_signature():
+    """Identifies the workers.toml on disk; every write replaces the file."""
+    path = config_dir() / "workers.toml"
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (str(path),)
+    return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
+# The id, agent and phases of each written definition, and the last plan
+# written, each kept with the manifest signature (and saved configuration) it
+# was built from.
+_manifest = dict(signature=None, workers=[], roles={})
+_written = dict(key=None, ids=[])
+# What a later layout reads back from a written definition: its place, agent and each slot-group key.
+SUMMARY_KEYS = ("id", "agent", *(name for name, *_ in slot_groups.KEYS.values()))
+
+
+def written_workers():
+    """id, agent and only of each definition in workers.toml.
+
+    Other processes share them through a summary keyed by the manifest's
+    signature, which any change to the file (a hand edit included) invalidates;
+    without a matching summary the file is parsed and the summary rewritten.
+    """
     import tomllib
 
-    prior = config_dir() / "workers.toml"
+    signature = manifest_signature()
+    if _manifest["signature"] == signature:
+        return _manifest["workers"]
+    try:
+        summary = read(state_dir() / "worker-summary.json", {})
+    except FleetError:
+        summary = {}
+    workers = summary.get("workers")
+    if summary.get("signature") == list(signature) and isinstance(workers, list) and all(
+        isinstance(w, dict) and isinstance(w.get("id"), str) and set(w) <= set(SUMMARY_KEYS) for w in workers
+    ):
+        remember_manifest(signature, workers, share=False)
+    else:
+        path = config_dir() / "workers.toml"
+        parsed = tomllib.loads(path.read_text(encoding="utf-8")).get("workers", []) if signature[1:] else []
+        remember_manifest(signature, parsed, share=manifest_signature() == signature)
+    return _manifest["workers"]
+
+
+def remember_manifest(signature, workers, share=True):
+    workers = [{key: w[key] for key in SUMMARY_KEYS if key in w} for w in workers]
+    roles = {w["id"]: (w.get("agent", "auto"), w.get("only", [])) for w in workers}
+    _manifest.update(signature=signature, workers=workers, roles=roles)
+    if share:
+        atomic(state_dir() / "worker-summary.json", dict(signature=list(signature), workers=workers))
+
+
+def written_roles():
+    """(agent, phases) of each worker definition the manager reads now."""
+    written_workers()
+    return _manifest["roles"]
+
+
+def worker_config(config):
+    # Serialize controller and operator rewrites, and never restore an old label policy.
+    # enable() writes definitions beside the controller. Under the definitions lock
+    # (always taken second) the saved configuration replaces the caller's snapshot,
+    # and holds, admission revocation and the controller's publication serialize.
+    with locked(config_dir() / "worker-policy.lock"), locked(state_dir() / "worker-definitions.lock"):
+        return write_worker_config(dict(config, **host_config()))
+
+
+def write_worker_config(config):
+    # Existing worker definitions and the operator's manager are never rewritten.
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text(encoding="utf-8")).get("workers", [])) if preserve and prior.exists() else 0
-    count = max(1, config["max_workers"], old_count)
-    for n in range(count):
-        wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
-        ids.append(wid)
+    settings = json.dumps(config, sort_keys=True, default=str), preserve
+    if _written["key"] == (*settings, manifest_signature()):
+        return list(_written["ids"])
+    if config.get("roadmap_targets"):
+        targets.require_support()
+    definitions, ids = worker_plan(config)
+    before = written_roles()
+    changed = {wid for wid, fields, _ in definitions
+               if wid in before and before[wid] != (fields["agent"], fields.get("only", []))}
+    if changed:
+        pending = set(read(state_dir() / "unapplied-workers.json", {}).get("workers", []))
+        atomic(state_dir() / "unapplied-workers.json", dict(workers=sorted(pending | changed)))
+        admission = read(state_dir() / "admission.json")
+        if admission and changed & set(admission.get("workers", [])):
+            focused = admission.get("roadmap_focus") or {}
+            if focused.get("fractional_worker") in changed:
+                focused["fractional_worker"] = None
+            if "workers" in focused:
+                focused["workers"] = [w for w in focused["workers"] if w not in changed]
+            atomic(state_dir() / "admission.json",
+                   dict(admission, workers=[w for w in admission["workers"] if w not in changed]))
+    # The last forgejo_workers admissions under the ceiling are routed to Forgejo.
+    routed = set(ids[config["max_workers"] - config.get("forgejo_workers", 0) : config["max_workers"]])
+    lines = ["version = 1"]
+    for wid, fields, _ in definitions:
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
-        worker_fields = dict(fields)
-        if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
-            worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
-        for key, value in worker_fields.items():
+        slot = dict(fields)
+        if wid in routed:
+            slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
+        for key, value in slot.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
             elif value is not None:
                 lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    if not (path.exists() and path.read_text(encoding="utf-8") == "\n".join(lines) + "\n"):
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    signature = manifest_signature()
+    # The definitions just rendered are what parsing the file would return.
+    remember_manifest(signature, [dict(id=wid, **{k: v for k, v in fields.items() if v is not None})
+                                  for wid, fields, _ in definitions])
+    _written.update(key=(*settings, signature), ids=list(ids))
     return ids
+
+
+def maintenance_workers():
+    """Written ids whose phases leave out roadmap rounds, where roadmap focus has nothing to steer."""
+    return {wid for wid, (_, only) in written_roles().items() if only and "roadmap" not in only}
+
+
+def unapplied_workers():
+    """Ids not yet confirmed to run the agent and phases written for them.
+
+    The manager reads definitions once per pass and may launch, or keep
+    polling admission with, the previous ones; an id whose agent or phases
+    were rewritten stays out until its live status shows the new ones.
+    """
+    with locked(state_dir() / "worker-definitions.lock"):
+        return acknowledge_workers()
+
+
+def acknowledge_workers():
+    path = state_dir() / "unapplied-workers.json"
+    pending = set(read(path, {}).get("workers", []))
+    held = set()
+    for wid, wanted in written_roles().items():
+        status = read(state_dir() / "workers" / f"{wid}.json", {})
+        # applied_spec omits agent "auto" and an empty phase list; workers older
+        # than it publish both fields beside it, and the oldest neither.
+        applied = status.get("applied_spec")
+        known = isinstance(applied, dict) or "agent" in status or "only" in status
+        applied = applied if isinstance(applied, dict) else status
+        running = (applied.get("agent", "auto"), applied.get("only", []))
+        if status.get("alive") and (running == wanted or not known):
+            pending.discard(wid)
+        elif wid in pending or status.get("alive"):
+            held.add(wid)
+    pending &= held
+    if pending != set(read(path, {}).get("workers", [])):
+        atomic(path, dict(workers=sorted(pending)))
+    return held
+
+
+def loadable_workers(config):
+    """Raise unless every definition this configuration writes passes the worker's checks.
+
+    Writers check it again on the merged configuration inside update_host's lock,
+    so a concurrent profile or group change cannot save an incompatible pair.
+    """
+    worker_fields(config)
+    if config.get("slots"):
+        slot_groups.layout(config, [], worker_fields)
+
+
+def configure_slots(payload):
+    """Show or replace the slot groups. Definitions follow on the controller's next pass."""
+    config = host_config()
+    if payload.get("clear"):
+        config = update_host(slots=None)
+    elif payload.get("groups") is not None:
+        groups = slot_groups.validate(payload["groups"])
+        loadable_workers(dict(config, slots=groups))
+        config = update_host(slots=groups, validate=loadable_workers)
+    groups = config.get("slots")
+    result = dict(slots=groups, max_workers=config["max_workers"])
+    if groups:
+        definitions, _ = worker_plan(config)
+        admitted = read(state_dir() / "admission.json", {}).get("workers", [])
+        result["slots"] = []
+        for index, group in enumerate(groups):
+            workers = [wid for wid, _, placed in definitions if placed == index]
+            result["slots"].append(dict(group, workers=workers, admitted=len(set(workers) & set(admitted))))
+        total = sum(group["count"] for group in groups)
+        if config["max_workers"] < total:
+            result["detail"] = (f"The worker ceiling admits {config['max_workers']} of these {total} slots, "
+                                "each group in proportion; raise it with workers --max")
+    return result
 
 
 WORKER_OOM_SCORE_ADJ = 500
@@ -628,6 +856,8 @@ def merged_worker_env(current, changes):
             raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
         if value is None:
             env.pop(name, None)
+        elif name in WORKER_OWNED_ENV | FLEET_OWNED_ENV | CREDENTIAL_SOURCE_ENV or name.startswith("TAUCETI_FLEET_"):
+            raise FleetError(f"{name} is set by the worker or Fleet, or names a login source, and cannot be a worker environment variable")
         elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
             raise FleetError(f"Worker environment value for {name} must be a single-line string")
         else:
@@ -1046,7 +1276,7 @@ def daemon():
         pool_error = None
         error = None
         ids = []
-        applied_targets = None
+        manifest = None
         last_results = 0
         memory_paused = False
         export = StatusExport()
@@ -1098,9 +1328,12 @@ def daemon():
                             slot_errors[str(index)] = value["ci_priority_error"]
                 busy = any(v.get("busy") for v in values)
                 if config["workers_enabled"]:
-                    listed = config.get("roadmap_targets")
-                    if not ids or len(ids) < config["max_workers"] or listed != applied_targets:
-                        ids, applied_targets = worker_config(config), listed
+                    # Every pass brings workers.toml back to the saved configuration,
+                    # whichever writer changed either since the last one.
+                    ids = worker_config(config)
+                    written = manifest_signature()
+                    if manifest != written:
+                        manifest = written
                         start_workers()
                 reserve = worker_headroom(caps, ci_busy=busy)
                 maximum = config["max_workers"]
@@ -1139,17 +1372,21 @@ def daemon():
                     maximum=maximum,
                     pause_reason=pause_reason,
                 )
-                roadmap_focus = focus.policy(config, ids[:target])
-                atomic(
-                    state_dir() / "admission.json",
-                    dict(
-                        version=1,
-                        expires_at=time.time() + 15,
-                        workers=ids[:target],
-                        reason=reason,
-                        roadmap_focus=roadmap_focus,
-                    ),
-                )
+                with locked(state_dir() / "worker-definitions.lock"):
+                    held = acknowledge_workers()
+                    maintenance = maintenance_workers()
+                    admitted = [wid for wid in ids[:target] if wid not in held]
+                    roadmap_focus = focus.policy(config, [w for w in admitted if w not in maintenance])
+                    atomic(
+                        state_dir() / "admission.json",
+                        dict(
+                            version=1,
+                            expires_at=time.time() + 15,
+                            workers=admitted,
+                            reason=reason,
+                            roadmap_focus=roadmap_focus,
+                        ),
+                    )
                 atomic(
                     state_dir() / "status.json",
                     dict(
@@ -1163,7 +1400,7 @@ def daemon():
                         workers_enabled=config["workers_enabled"],
                         ci_busy=busy,
                         ci_cooldown=circuit if cooling else None,
-                        active_worker_limit=target,
+                        active_worker_limit=len(admitted),
                         roadmap_focus=roadmap_focus,
                         roadmap_focus_error=roadmap_focus.get("error"),
                         roadmap_targets=targets.status(config, worker_statuses()),
@@ -1360,6 +1597,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "slots":
+        return configure_slots(payload)
     if action == "targets":
         return targets.configure(payload, worker_statuses())
     if action == "workers":

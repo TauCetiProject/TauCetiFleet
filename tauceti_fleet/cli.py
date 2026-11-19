@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import activity, broker, host, pool_activity, remote, targets, worker_view
+from . import activity, broker, host, pool_activity, remote, slot_groups, targets, worker_view
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -91,6 +91,13 @@ def parser():
     selection.add_argument("--areas", help="comma-separated roadmap directory names")
     selection.add_argument("--clear", action="store_true")
     focus.add_argument("--json", action="store_true")
+    groups = sub.add_parser("slots", help="give groups of worker slots their own agent and work phases")
+    groups.add_argument("host")
+    change = groups.add_mutually_exclusive_group()
+    change.add_argument("--group", action="append", metavar="COUNT:AGENT[:ROLE,ROLE...]",
+                        help="one group; repeat for each, replacing the saved list")
+    change.add_argument("--clear", action="store_true", help="return every slot to the profile's agent and the full rotation")
+    groups.add_argument("--json", action="store_true")
     listed = sub.add_parser("targets", help="have workers author from an operator target list, or audit the list")
     listed.add_argument("host")
     change = listed.add_mutually_exclusive_group()
@@ -294,6 +301,11 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     if args.percent is not None:
                         raise FleetError("--clear cannot be combined with --percent")
                     payload["clear"] = True
+            if args.command == "slots":
+                if args.clear:
+                    payload["clear"] = True
+                elif args.group:
+                    payload["groups"] = [slot_groups.parse(group) for group in args.group]
             if args.command == "targets":
                 if args.on_host and args.file is None or args.apply and not args.audit:
                     raise FleetError("--on-host qualifies --file, and --apply qualifies --audit")
