@@ -96,7 +96,7 @@ def parser():
     change.add_argument("--clear", action="store_true", help="return workers to their own choice of roadmap area")
     change.add_argument("--audit", action="store_true", help="compare the list with the host's files")
     listed.add_argument("--on-host", action="store_true", help="read --file in place on the host instead of transferring it")
-    listed.add_argument("--apply", action="store_true", help="with --audit, write the corrections into the list")
+    listed.add_argument("--apply", action="store_true", help="compatibility option for --audit; offline audits currently make no automatic corrections")
     listed.add_argument("--json", action="store_true")
     export = sub.add_parser("status-export", help="keep a world-readable copy of this host's status in a directory")
     export.add_argument("host")
