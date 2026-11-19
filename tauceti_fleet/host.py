@@ -333,7 +333,7 @@ def _worker_config(config):
 
     prior = config_dir() / "workers.toml"
     preserve = config["workers_enabled"] or any(w.get("alive") for w in worker_statuses())
-    old_count = len(tomllib.loads(prior.read_text()).get("workers", [])) if preserve and prior.exists() else 0
+    old_count = len(tomllib.loads(prior.read_text(encoding="utf-8")).get("workers", [])) if preserve and prior.exists() else 0
     count = max(1, config["max_workers"], old_count)
     for n in range(count):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
@@ -350,7 +350,7 @@ def _worker_config(config):
                 lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
     temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     return ids
@@ -569,16 +569,8 @@ def require_worker_support(feature, description):
     path = state_dir() / "worker-runtime/manager.sock"
     if not path.exists():
         return  # A future manager will use the installed, supporting runtime.
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(5)
-            client.connect(str(path))
-            client.sendall(b'{"action":"ping"}\n')
-            reply = client.makefile("rb").readline(65537)
-        if json.loads(reply).get(feature) == 1:
-            return
-    except (OSError, ValueError):
-        pass
+    if manager_ping().get(feature) == 1:
+        return
     raise FleetError(f"The running worker manager does not support {description}; hand over the manager to the installed runtime without stopping worker scopes")
 
 
@@ -653,6 +645,8 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
+    if host_config().get("roadmap_targets"):
+        targets.require_support()  # Refuse before persisting any incompatible live policy.
     result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:

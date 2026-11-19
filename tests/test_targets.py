@@ -130,6 +130,42 @@ class TargetLists(unittest.TestCase):
             with self.assertRaisesRegex(FleetError, "running worker manager"):
                 targets.require_support()
 
+    def test_symlink_config_uses_workers_resolved_configuration_identity(self):
+        actual = self.root / "actual-config"
+        actual.mkdir()
+        alias = self.root / "alias-config"
+        alias.symlink_to(actual, target_is_directory=True)
+        reply = dict(ok=True, roadmap_targets=1, targets_inspect=1, graceful_restart=1,
+                     config=str(actual / "workers.toml"))
+        with patch.dict(os.environ, TAUCETI_FLEET_CONFIG=str(alias)), patch.object(targets, "running_manager", return_value="/live/bin/tauceti"), patch.object(host, "manager_ping", return_value=reply):
+            targets.require_support()
+
+    def test_inspection_is_cached_but_file_replacement_and_runtime_change_invalidate_it(self):
+        path = self.root / "cached.md"
+        path.write_text(EXAMPLE)
+        result = subprocess.CompletedProcess([], 0, json.dumps(CANONICAL), "")
+        with patch.object(targets, "running_manager", return_value="/live/bin/tauceti") as manager, patch.object(targets, "run", return_value=result) as run:
+            INSPECT_FILE(path)
+            INSPECT_FILE(path)
+            self.assertEqual(run.call_count, 1)
+            replacement = path.with_suffix(".new")
+            replacement.write_text(EXAMPLE)
+            replacement.replace(path)
+            INSPECT_FILE(path)
+            self.assertEqual(run.call_count, 2)
+            manager.return_value = "/other/bin/tauceti"
+            INSPECT_FILE(path)
+            self.assertEqual(run.call_count, 3)
+
+    def test_worker_policy_incompatible_manager_refuses_before_persisting(self):
+        targets.configure(dict(text=EXAMPLE), [])
+        before = store.host_config()
+        with patch.object(targets, "require_support", side_effect=FleetError("old manager")):
+            with self.assertRaisesRegex(FleetError, "old manager"):
+                host.set_worker_policy(dict(worker_env={"OTHER": "value"}, maximum=2))
+        self.assertEqual(store.host_config(), before)
+        self.assertFalse((store.state_dir() / "worker-admission-lease.json").exists())
+
     def test_clear_does_not_require_installed_parser_but_requires_graceful_live_manager(self):
         targets.configure(dict(text=EXAMPLE), [])
         with patch.object(capabilities, "worker_protocol", return_value={}):
@@ -196,6 +232,7 @@ class TargetLists(unittest.TestCase):
         with patch.object(targets, "running_manager", return_value="/live/bin/tauceti"), patch.object(targets, "run", return_value=result) as run:
             self.assertEqual(original(path), CANONICAL)
         self.assertEqual(run.call_args.args[0], ["/live/bin/tauceti", "_targets-inspect", "--file", str(path)])
+        targets._INSPECTIONS.clear()
         with patch.object(targets, "running_manager", return_value="/live/bin/tauceti"), patch.object(targets, "run", return_value=subprocess.CompletedProcess([], 0, '{}', '')):
             with self.assertRaisesRegex(FleetError, "invalid.*inspection"):
                 original(path)

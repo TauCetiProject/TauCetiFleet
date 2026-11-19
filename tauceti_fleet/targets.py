@@ -23,6 +23,7 @@ VERIFYING = ("verifying", "working", "verification-pending", "verification-incom
 LIMIT = 256 * 1024
 # A list named on the host never travels; this only bounds what the controller reads into memory.
 HOST_LIMIT = 16 * 1024 * 1024
+_INSPECTIONS = {}
 REPOSITORY = "TauCetiProject/TauCeti"
 FILE_ONLY = "Counted from the file's marks and this host's rounds; workers separately resolve open and merged pull request markers at any age"
 RESTART_MANAGER = (
@@ -59,7 +60,9 @@ def require_support(*, clearing=False):
     if manager:
         live = host.manager_ping()
         required = ("graceful_restart",) if clearing else ("roadmap_targets", "targets_inspect", "graceful_restart")
-        if not all(live.get(key) == 1 for key in required) or live.get("config") != str(config_dir() / "workers.toml"):
+        configured = live.get("config")
+        same_config = isinstance(configured, str) and Path(configured).resolve() == (config_dir() / "workers.toml").resolve()
+        if not all(live.get(key) == 1 for key in required) or not same_config:
             raise FleetError("The running worker manager lacks target-list inspection or graceful replacement; " + RESTART_MANAGER)
     return manager or executable("tauceti")
 
@@ -72,6 +75,15 @@ def inspect_file(path):
     binary = binary or executable("tauceti")
     if not binary:
         raise FleetError("No worker runtime is installed")
+    binary = str(Path(binary).resolve())
+    path = Path(path).resolve()
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise FleetError(f"Cannot read target list {path}: {type(exc).__name__}") from None
+    key = (str(path), info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size, str(binary))
+    if key in _INSPECTIONS:
+        return _INSPECTIONS[key]
     load(path)  # Bound the local read before handing it to the shared parser.
     result = run([binary, "_targets-inspect", "--file", str(path)], check=False, timeout=5)
     if result.returncode:
@@ -82,6 +94,9 @@ def inspect_file(path):
         value = json.loads(result.stdout)
         if value.get("schema") != "tauceti-target-list/v1" or not isinstance(value.get("items"), list):
             raise ValueError("unsupported inspection schema")
+        if len(_INSPECTIONS) >= 16:
+            _INSPECTIONS.clear()
+        _INSPECTIONS[key] = value
         return value
     except (ValueError, TypeError, AttributeError) as exc:
         raise FleetError("Worker returned an invalid target-list inspection result") from exc

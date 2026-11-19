@@ -94,7 +94,7 @@ def parser():
     change = listed.add_mutually_exclusive_group()
     change.add_argument("--file", help="the list: a file on this machine to transfer, or with --on-host a path on the host")
     change.add_argument("--clear", action="store_true", help="return workers to their own choice of roadmap area")
-    change.add_argument("--audit", action="store_true", help="compare the list with the host's files")
+    change.add_argument("--audit", action="store_true", help="validate the list and report conflicts with active target holders; makes no file corrections")
     listed.add_argument("--on-host", action="store_true", help="read --file in place on the host instead of transferring it")
     listed.add_argument("--apply", action="store_true", help="compatibility option for --audit; offline audits currently make no automatic corrections")
     listed.add_argument("--json", action="store_true")
