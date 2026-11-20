@@ -38,6 +38,7 @@ from .store import (
     read,
     state_dir,
     update_host,
+    change_host,
 )
 
 # Resolve once: switching the current symlink must not make an old controller
@@ -563,16 +564,13 @@ def set_infra_slots(count):
     if not config.get("ci_broker_url"):
         raise FleetError("Infra slots register through the CI broker; enroll this host first")
     policy = github.capacity_policy(config)
-    proposed = capacity.with_infra_slots(config, count, (policy.get("groups") or {}).get("infra"))
+    group = (policy.get("groups") or {}).get("infra")
+    proposed = capacity.with_infra_slots(config, count, group)
     capacity.authorize(proposed, policy)
     if config["ci_enabled"]:
         native_runner.prepare_for_ci(proposed)
-
-    def validate(value):
-        capacity.staging_slots(value)
-
-    value = update_host(validate=validate, ci_max_jobs=proposed["ci_max_jobs"],
-                        ci_protected_slots=proposed["ci_protected_slots"])
+    # Recompute from the locked current file: the autoscaler may write meanwhile.
+    value = change_host(lambda current: capacity.with_infra_slots(current, count, group))
     event("ci_infra_slots", count=count, ci_max_jobs=value["ci_max_jobs"])
     return dict(infra_slots=capacity.infra_slots(value), pr_slots=capacity.pr_jobs(value),
                 ci_max_jobs=capacity.jobs(value), ci_enabled=value["ci_enabled"])

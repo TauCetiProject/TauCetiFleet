@@ -367,6 +367,11 @@ class HostActions(unittest.TestCase):
         for maximum in (2,4):
             with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=maximum))
         self.assertEqual(store.host_config()['ci_max_jobs'],5)
+        with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=True))
+        # A removed infra slot's guest finishing its job is not a PR recovery candidate.
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=6,instance='6'*16,unit='u6',ci_kinds=['infra'])]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            self.assertEqual(auto.host_action(dict(mode='snapshot'))['vms'],[])
 
     def test_reserved_and_replaced_instances_cannot_be_retired(self):
         with patch.object(vm,'retire') as retire:

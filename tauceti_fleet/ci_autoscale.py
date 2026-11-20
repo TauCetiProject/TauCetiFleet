@@ -86,21 +86,27 @@ class AppTokens:
 def host_action(payload):
     """Authenticated SSH RPCs; no GitHub calls on the observation path."""
     from . import github, host, vm
-    from .store import host_config, update_host
+    from .store import change_host, host_config
 
     config = host_config()
     mode = payload.get("mode", "snapshot")
     if mode == "limit":
-        # The autoscaler sizes PR slots. Infra slots sit above them, so their
-        # numbers move with the PR count; hosts with infra keep that count fixed.
-        infra = capacity.infra_slots(config)
-        if infra and payload["maximum"] != capacity.pr_jobs(config):
-            raise FleetError("Hosts with infra slots keep a fixed PR slot count; change it with enable and infra-slots")
-        proposed = dict(config, ci_max_jobs=payload["maximum"] + len(infra))
-        capacity.jobs(proposed)
-        capacity.staging_slots(proposed)
-        update_host(ci_max_jobs=proposed["ci_max_jobs"], validate=capacity.staging_slots)
-        return dict(maximum=proposed["ci_max_jobs"])
+        maximum = payload["maximum"]
+        if type(maximum) is not int:
+            raise FleetError("The CI limit must be an integer")
+
+        def limit(value):
+            # The autoscaler sizes PR slots. Infra slots sit above them, so their
+            # numbers move with the PR count; hosts with infra keep that count fixed.
+            infra = capacity.infra_slots(value)
+            if infra and maximum != capacity.pr_jobs(value):
+                raise FleetError("Hosts with infra slots keep a fixed PR slot count; change it with enable and infra-slots")
+            value = dict(value, ci_max_jobs=maximum + len(infra))
+            capacity.jobs(value)
+            capacity.staging_slots(value)
+            return value
+
+        return dict(maximum=change_host(limit)["ci_max_jobs"])
     if mode == "note":
         value = payload["value"]
         if not isinstance(value, dict) or len(json.dumps(value)) > 4096:
@@ -168,7 +174,8 @@ def host_action(payload):
     infra = set(capacity.infra_slots(config))
     vms = []
     for original in status.get("ci_vms", []):
-        if original.get("slot", 0) in infra:
+        # Also a removed infra slot's guest that is still finishing its job.
+        if original.get("slot", 0) in infra or original.get("ci_kinds") == ["infra"]:
             continue
         value = dict(original)
         try:
