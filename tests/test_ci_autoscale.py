@@ -91,10 +91,17 @@ class CapacityPolicy(unittest.TestCase):
         c = auto.Controller(minimum=1, maximum=6)
         # An idle guest under RAM pressure would normally shrink the host.
         s = dict(snapshot(idle=True, available=10), fixed_pr_slots=True)
-        self.assertEqual(c.decide(s, 1000), dict(kind="hold", reason="infra slots fix this host's PR slot count"))
         self.assertEqual(auto.Controller(minimum=1, maximum=6).decide(dict(s, fixed_pr_slots=False), 1000)["kind"], "limit")
-        with patch.object(auto.Controller, "_decide", return_value=dict(kind="recover", target=2, candidates=[], reason="r")):
-            self.assertEqual(c.decide(s, 1000)["target"], 3)
+        self.assertEqual(c.decide(s, 1000)["kind"], "hold")
+        # An idle guest does not block stall recovery, which keeps the PR count.
+        decisions = []
+        for i in range(5):
+            decisions.append(c.decide(s, 1000 + 30 * i))
+            s = advance(s)
+        recover = [d for d in decisions if d["kind"] == "recover"]
+        self.assertTrue(recover)
+        self.assertTrue(all(d["target"] == 3 for d in recover))
+        self.assertFalse([d for d in decisions if d["kind"] == "limit"])
 
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()

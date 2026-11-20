@@ -211,16 +211,13 @@ class Controller:
         self.growth_delay, self.stall_delay = growth_delay, stall_delay
 
     def decide(self, snapshot, now):
-        decision = self._decide(snapshot, now)
-        if snapshot.get("fixed_pr_slots") and decision.get("target") not in (None, snapshot["maximum"]):
-            # Infra slots fix this host's PR count: recover in place, never resize.
-            if decision["kind"] == "recover":
-                return dict(decision, target=snapshot["maximum"])
-            self.value.pop("growth_since", None)
-            return dict(kind="hold", reason="infra slots fix this host's PR slot count")
-        return decision
+        if not snapshot.get("fixed_pr_slots"):
+            return self._decide(snapshot, now, self.minimum, self.maximum)
+        # Infra slots fix this host's PR count: decide as if pinned to it, so
+        # stall recovery still runs in place and no resize is ever proposed.
+        return self._decide(snapshot, now, snapshot["maximum"], snapshot["maximum"])
 
-    def _decide(self, snapshot, now):
+    def _decide(self, snapshot, now, minimum, maximum):
         from . import lean_pressure
 
         if not snapshot.get("enabled"):
@@ -255,15 +252,15 @@ class Controller:
             self.value.setdefault("stall_since", now)
         else:
             self.value.pop("stall_since", None)
-        floor = max(self.minimum, snapshot["reserved"] + 1)
-        if limit < floor <= self.maximum and available >= headroom + 21 * GIB:
+        floor = max(minimum, snapshot["reserved"] + 1)
+        if limit < floor <= maximum and available >= headroom + 21 * GIB:
             return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
         if low and general_idle and limit > floor:
             self.value.pop("growth_since", None)
             target = max(floor, len(busy) + len(idle) - len(general_idle))
             if target < limit:
                 return dict(kind="limit", target=target, reason="return idle guest RAM to active builds")
-        if stalled and now - self.value["stall_since"] >= 30 and limit >= self.minimum:
+        if stalled and now - self.value["stall_since"] >= 30 and limit >= minimum:
             candidates = [v for v in busy_general if v.get("run_id") and cpu.get(v["instance"], 1) < .2]
             if candidates and now - self.value.get("last_recovery", {}).get("at", 0) >= 120:
                 self.value.pop("growth_since", None)
@@ -281,7 +278,7 @@ class Controller:
         pending = sum(max(0, budget - (footprint(v) if footprint(v) is not None else budget)) for v in growing)
         room = available - pending >= headroom + budget + GIB
         saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
-        growth = (room and saturated and limit < self.maximum
+        growth = (room and saturated and limit < maximum
                   and all(footprint(v) is not None for v in growing))
         if growth and pressure.get("cpu_percent", 100) < 85:
             self.value.setdefault("growth_since", now)
