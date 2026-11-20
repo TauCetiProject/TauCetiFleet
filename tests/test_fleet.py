@@ -110,6 +110,8 @@ class Isolated(unittest.TestCase):
                 self.assertEqual(call.call_args.args[1], dict(action="workers", self_tested=enabled))
             self.assertEqual(main(["workers", "test", "--max", "4", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", maximum=4))
+            self.assertEqual(main(["workers", "test", "--swap-gib", "12", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", swap_gib=12))
 
     def test_gradual_forgejo_routing_preserves_admissions_and_other_slots(self):
         import tomllib
@@ -324,6 +326,27 @@ class Isolated(unittest.TestCase):
         self.assertIn(f"MemorySwapMax={gib}\n", workers)
         self.assertIn(f"MemoryMax={int(worker)}\n", workers)
         self.assertIn(f"MemoryHigh={int(worker * 0.95)}\n", workers)
+
+    def test_workers_swap_is_a_host_setting_applied_live(self):
+        gib = 1024**3
+        caps = dict(memory_total=128 * gib, memory_available=128 * gib)
+        with (
+            patch.object(host, "units", return_value=self.root),
+            patch.object(host, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")) as run,
+        ):
+            host.write_slices(dict(ci_allowed=True, ci_memory_gib=64, workers_swap_gib=12), caps)
+            path = self.root / "tauceti-fleet-workers.slice"
+            self.assertIn(f"MemorySwapMax={12 * gib}\n", path.read_text())
+            before = path.read_text()
+            host.apply_workers_swap(dict(workers_swap_gib=3))
+            after = path.read_text()
+            run.assert_called_with(["systemctl", "--user", "daemon-reload"])
+        # Only the swap line changes, and it stays inside [Slice].
+        self.assertEqual(after.replace(f"MemorySwapMax={3 * gib}", f"MemorySwapMax={12 * gib}"), before)
+        self.assertEqual(after.count("MemorySwapMax="), 1)
+        for value in (-1, 1025, "12", True):
+            with self.assertRaises(store.FleetError):
+                host.workers_swap_bytes(dict(workers_swap_gib=value))
 
     def test_low_memory_or_disable_blocks_new_work_and_recovers_immediately(self):
         scaler = host.Scaler()
