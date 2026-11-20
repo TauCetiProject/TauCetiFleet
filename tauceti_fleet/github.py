@@ -118,6 +118,8 @@ def trusted_entries(entries, workflows):
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
+    if kind == "infra":
+        raise FleetError("Infra runners register only through the CI broker")
     expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")

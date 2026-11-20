@@ -48,6 +48,13 @@ slots. An image, namespace or mapping failure is explicit; it does not silently
 select a different backend. The compiler gate and shared slot/startup controls
 are unchanged. There are no canary slot selectors or native enable/disable flags.
 
+Protected `infra` slots (`ci_protected_slots` entries with kind `infra`, in the
+TauCetiInfra group) also use native-disk. They run our infrastructure
+repositories' CI, never take PR or staging work, and run at CPU weight 25
+against PR builds' 100, so TauCeti PR builds keep CPU precedence. Add them above
+a host's PR slots, raising `ci_max_jobs` by the number of infra slots, so PR
+capacity is unchanged.
+
 `native-runner HOST --prepare` remains available for an explicit image refresh;
 it is not required to enable PR CI through the standard setup.
 

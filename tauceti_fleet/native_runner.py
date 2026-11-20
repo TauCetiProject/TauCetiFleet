@@ -56,7 +56,7 @@ def selected(config):
     # Native setup has a weaker boundary and only registers for PR work.
     return (type(index) is int and type(reserved) is int
             and 0 <= reserved <= index < capacity.jobs(config)
-            and "pr" in kinds and (kinds == ["pr"] or reserved > 0))
+            and (kinds == ["infra"] or "pr" in kinds and (kinds == ["pr"] or reserved > 0)))
 
 
 def prepare_for_ci(config):
@@ -125,7 +125,7 @@ def choose(config, available):
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
     # A lost registration reply must retain the original job classes.
-    if intent and intent.get("ci_kinds") != ["pr"]:
+    if intent and intent.get("ci_kinds") not in (["pr"], ["infra"]):
         atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
                backend="vm", reason="preserve existing runner classes"))
         return False

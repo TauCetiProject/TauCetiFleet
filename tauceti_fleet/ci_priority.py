@@ -40,7 +40,9 @@ def frame(observation, *, staging=False, unrestricted_memory=False):
 
 
 def apply(value):
-    weight = 10000 if staging(value) else 100
+    from .capacity import INFRA_CPU_WEIGHT
+
+    weight = 10000 if staging(value) else INFRA_CPU_WEIGHT if value.get("ci_kinds") == ["infra"] else 100
     if value.get("cpu_weight") != weight:
         run(["systemctl", "--user", "set-property", "--runtime", value["unit"], f"CPUWeight={weight}"])
         value["cpu_weight"] = weight
@@ -88,7 +90,7 @@ def classify(config, value, now):
 
     if value.get("ci_kinds") == ["staging"]:
         value["ci_job_kind"] = "staging"
-    elif value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"], ["pr-status"]):
+    elif value.get("ci_kinds") in (["roadmap"], ["control"], ["queue-control"], ["pr-status"], ["infra"]):
         value["ci_job_kind"] = value["ci_kinds"][0]
     elif value.get("ci_kinds") == ["pr"]:
         value["ci_job_kind"] = "pr"
