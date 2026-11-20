@@ -171,6 +171,29 @@ class Capacity(unittest.TestCase):
         self.assertEqual(start.call_args.args[0]["ci_slot"], 1)
         self.assertEqual(start.call_args.args[0]["ci_memory_gib"], 32)
 
+    def test_dropping_pr_from_a_reserved_host_is_live_and_retires_pr_runners_as_they_finish(self):
+        config = capacity.settings(store.host_config(), ci="both", maximum=4, vcpus=16, memory_gib=32)
+        store.update_host(**dict(config, ci_enabled=True, ci_staging_slots=1,
+                                 ci_protected_slots={"3": {"kind": "queue-control", "runner_group_id": 6}}))
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        for slot, busy in ((1, False), (2, True)):
+            store.atomic(vm.slot_file({"ci_slot": slot}, "vm.json"),
+                         dict(slot=slot, unit=f"vm-{slot}", directory=str(self.root / str(slot)), runner_id=100 + slot,
+                              started_at=0, phase="ready", busy=busy, **({"run_id": 7} if busy else {})))
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))), patch.object(github, "capacity_policy", return_value=dict(kinds=["pr", "staging", "queue-control"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service"):
+            host.enable(ci="staging")
+        start.assert_not_called()
+        saved = store.host_config()
+        self.assertEqual(saved["ci_kinds"], ["staging"])
+        self.assertEqual([capacity.unused(saved, i) for i in range(4)], [False, True, True, False])
+        inventory = [dict(id=101, status="online", busy=False), dict(id=102, status="online", busy=True)]
+        with patch.object(host, "ci_service_state", return_value=(True, "healthy")), patch.object(vm, "retire") as retire, patch.object(vm, "start", return_value={}) as start:
+            self.assertFalse(host.CISlot(1).step(saved, inventory=inventory, refresh=True, cooling=False))
+            self.assertTrue(host.CISlot(2).step(saved, inventory=inventory, refresh=True, cooling=False)["busy"])
+            host.CISlot(3).step(saved, inventory=inventory, refresh=True, cooling=False)
+        self.assertEqual([c.args[1]["slot"] for c in retire.call_args_list], [1])
+        self.assertEqual([c.args[0]["ci_kinds"] for c in start.call_args_list], [["queue-control"]])
+
     def test_live_enable_keeps_the_existing_controller_running(self):
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run") as run:
             host.install_service(restart=False)
