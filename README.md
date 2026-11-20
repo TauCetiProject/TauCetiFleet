@@ -332,10 +332,9 @@ host they and the other CI guests together overcommit its RAM. `--memory-gib N`
 gives future reserved staging guests exactly N GiB of virtual RAM instead
 (`--memory-gib 0` restores the shared ceiling), for example
 `tauceti-fleet reserve-staging HOST --slots 1 --memory-gib 64`. Running guests
-keep their size and are reported as awaiting replacement. Staging compiler starts
-skip memory admission, so choose N above the staging build's measured peak RAM,
-with room for its growth: a build that needs more than N GiB is OOM-killed inside
-the guest rather than slowed.
+keep their size and are reported as awaiting replacement. Unused guest RAM is
+shared anyway, so a smaller N only caps the staging build; leave it at the
+shared ceiling unless a specific constraint calls for less.
 
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
@@ -456,8 +455,7 @@ percentages. A separate user service samples the host ten times per second, insi
 the same ancestor memory limits as CI, and broadcasts a small JSON frame over
 dedicated virtio serial ports. Guests send only a bounded numeric request ID for
 the next compiler start. The host grants starts fairly across waiting guests,
-limiting ordinary CI bursts using current free RAM and a quarter-second startup allowance.
-Staging requests receive all their pending permits without that memory budget.
+limiting bursts using current free RAM and a quarter-second startup allowance.
 This is transient admission accounting, not a physical resource reservation.
 It accepts no guest commands and makes no network or GitHub API requests.
 A root guest service caches the frame under `/usr/local`,
@@ -465,13 +463,15 @@ readable through the existing offline sandbox's read-only `/usr` mount. Missing,
 invalid, or ten-second-old observations make new compilers wait; existing
 compilers continue. Guest file caches are released at most once per 30 seconds
 when the host needs RAM, allowing free-page reporting to return it to the host.
-Ordinary CI also requires enough guest-local absolute RAM for one measured
+Every guest also requires enough guest-local absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
 
-Staging compiler starts bypass CPU-utilization sleeps and all memory admission
-checks, both host pressure and the guest-local worst-file margin. Ordinary CI
-retains its existing CPU, host RAM and guest RAM checks. Physical VM memory and
-hard cgroup RAM caps still apply. The reserved staging guest can boot with
+Staging compiler starts bypass CPU-utilization sleeps and need one measured
+worst-file RAM margin before starting instead of two for ordinary CI. On a
+112 GiB shared ceiling this allows roughly 91% use (about 10 GiB free before
+admission), compared with 83% (about 19 GiB) for ordinary CI, so a staging build
+slows at the ceiling instead of having its VM OOM-killed there. Already-running
+compilers can still grow together past it. The reserved staging guest can boot with
 14 GiB of free RAM instead of 20 GiB, retaining room for guest preparation.
 Staging guests receive CPUWeight=10000 versus
 100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
@@ -533,9 +533,16 @@ sizes. No CPU pinning or memory preallocation is added. The physical parent and
 CI slice limits remain the shared emergency bounds. Existing guests retain
 their sizes and admission setup until they complete and are replaced.
 
-Workers and CI can use whatever RAM is currently free. Their parent
-`tauceti-fleet.slice` limits combined resident memory to host RAM minus the OS
-reserve and 1 GiB swap allowance. Worker hard limits no longer reserve CI's full
+Workers and CI can use whatever RAM is currently free. The parent
+`tauceti.slice` limits combined resident memory to host RAM minus the OS
+reserve and 1 GiB swap allowance. It holds `tauceti-fleet.slice` and, where
+TauCetiWorker's queue repair workers run, their `tauceti-repair.slice`, so the
+repairs share the ceiling with the VMs and yield to them: VM memory is never
+swapped, the repair builds' compiler wrapper measures the same ceiling, and every
+five seconds the controller sets the repair slice's `memory.high` to its pinned
+memory plus the free memory under the ceiling, less 21 GiB (the new-guest start
+requirement plus 1 GiB). The repair units run at `OOMScoreAdjust=1000`, so an OOM
+kill under the ceiling takes a repair process rather than a VM. Worker hard limits no longer reserve CI's full
 configured RAM in advance. CI defaults to the same shared ceiling; an explicit
 `ci_memory_budget_gib` still applies to its child slice. CPU priorities are
 unchanged. Concurrent compilers can still grow after passing
