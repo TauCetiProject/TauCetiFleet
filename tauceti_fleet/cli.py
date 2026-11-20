@@ -77,6 +77,10 @@ def parser():
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
                          help="remove a worker environment variable set with --env (repeatable)")
     workers.add_argument("--json", action="store_true")
+    clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
+    clear.add_argument("host")
+    clear.add_argument("worker", nargs="?", help="worker id (default: every halted worker on the host)")
+    clear.add_argument("--json", action="store_true")
     schedule = sub.add_parser("schedule", help="admit new worker rounds only inside weekly time slots")
     schedule.add_argument("host")
     schedule.add_argument("slots", nargs="*", metavar="SLOT", help='for example "Mon 23:00 -> Thu 07:00"; omit to show the saved schedule')
@@ -296,6 +300,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 payload.update(maximum=args.maximum)
                 if args.memory_gib is not None:
                     payload.update(memory_gib=args.memory_gib)
+            if args.command == "clear-halt":
+                payload.update(worker=args.worker)
             if args.command == "schedule":
                 slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
                 if (args.clear and slots) or (args.timezone and not slots):
@@ -532,19 +538,31 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         print("\n".join(targets.summary_lines(listed)))
                     if status.get("workers"):
                         print()
-                    groups = {}
+                    groups, remedies = {}, {}
                     for worker in status.get("workers", []):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
+                        detail = worker.get("detail") or ""
+                        if state == "halted":
+                            reason = worker.get("halt_reason")
+                            forge, verdict = host.halt_forge(reason)
+                            state = f"halted ({host.FORGE_NAMES.get(forge, forge)} {verdict})" if reason else "halted (reason not recorded)"
+                            detail = worker.get("failure_reason") or detail
+                            remedy = host.HALT_REMEDY.get(verdict, {}).get(forge) if reason else None
+                            remedies[state] = (f"{remedy}, then clear the halt" if remedy
+                                               else "The worker stays stopped; clear the halt once the account is in order")
                         error = worker.get("isolation_error")
-                        key = (state, worker.get("detail") or "", error, worker["id"] if error else None)
+                        key = (state, detail, error, worker["id"] if error else None)
                         groups.setdefault(key, []).append(worker["id"])
                     for (state, detail, error, _), workers in groups.items():
                         label = workers[0] if len(workers) == 1 else f"{len(workers)} workers"
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                        if state in remedies:
+                            print(f"    {remedies[state]}: tauceti-fleet clear-halt {name} "
+                                  + (workers[0] if len(workers) == 1 else "[WORKER]"))
                     if args.workers:
                         print()
                         worker_view.display(status)
