@@ -221,7 +221,9 @@ def host_column(value):
         **{f"Rounds finished {w}": sum(r["finished"] for r in rounds[w].values()) if w in rounds else None
            for w in ("1h", "24h")},
         "PRs authored 24h": prs.get("authored"),
+        "  on Forgejo": prs.get("authored_forgejo"),
         "Authored PRs landed 24h": prs.get("landed"),
+        "  from Forgejo": prs.get("landed_forgejo"),
         "Reviews 24h": prs.get("reviews"),
         "API spend 24h": amount(spending.get("24h", {}).get("spent_usd")),
         "API spend/hour (1h)": amount(spending.get("1h", {}).get("usd_per_hour")),
