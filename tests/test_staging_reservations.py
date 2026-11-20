@@ -282,12 +282,13 @@ class WarmStagingDisk(unittest.TestCase):
               patch.object(vm.secrets, "token_hex", return_value=instance)):
             vm.start(dict(self.config, ci_slot=index))
         launch = next(c.args[0] for c in calls.call_args_list if c.args[0][0] == "systemd-run")
-        return [a for a in launch if "id=warm" in a or "serial=" + vm.WARM_SERIAL in a]
+        return [a for a in launch if "id=warm" in a or "serial=" + vm.WARM_SERIAL in a or "bootindex" in a]
 
     def test_reserved_staging_slot_keeps_one_disk_across_guests(self):
         first = self.start(0, "a" * 16)
         path = vm.slot_file(capacity.for_slot(self.config, 0), vm.WARM_DISK)
-        self.assertEqual(first, [f"file={path},format=qcow2,if=none,id=warm,"
+        self.assertEqual(first, ["virtio-blk-pci,drive=system,bootindex=0",
+                                 f"file={path},format=qcow2,if=none,id=warm,"
                                  "werror=report,rerror=report,discard=unmap",
                                  "virtio-blk-pci,drive=warm,serial=tauceti-warm"])
         self.assertEqual(path.read_text(), "disk")
