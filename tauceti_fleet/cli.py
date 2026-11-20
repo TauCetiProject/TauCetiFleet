@@ -228,11 +228,10 @@ def host_column(value):
 def print_hosts(results):
     """Worker totals, then the selected hosts' numbers side by side."""
     columns = {name: host_column(value) for name, value in results.items()}
-    distinct = {value.get("machine_id", name): columns[name] for name, value in results.items()}
-    alive, working = (sum(c[key] or 0 for c in distinct.values()) for key in ("Workers alive", "  working"))
-    live = sum(c["Report"] == "live" for c in distinct.values())
+    alive, working = (sum(c[key] or 0 for c in columns.values()) for key in ("Workers alive", "  working"))
+    live = sum(c["Report"] == "live" for c in columns.values())
     print(f"Workers: {alive} alive, {working} working, {alive - working} idle or waiting; "
-          f"{live} of {len(distinct)} hosts live")
+          f"{live} of {len(columns)} hosts live")
     labels = list(next(iter(columns.values())))
     width = max(map(len, labels))
     cells = {name: ["—" if c[label] is None else str(c[label]) for label in labels]
@@ -324,12 +323,18 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
-        hosts = args.host if args.command == "status" else [args.host] if args.host else []
+        selected = {}
+        for name in args.host if args.command == "status" else [args.host] if args.host else []:
+            entry = local_entry() if name == "local" else remote.resolve(name)
+            # Host aliases never multiply output.
+            if entry["machine_id"] not in (e["machine_id"] for e in selected.values()):
+                selected[name] = entry
+        hosts = list(selected)
         if args.command == "status":
             # Several named hosts get the side-by-side view; one host or none keep their own.
             args.host = hosts[0] if len(hosts) == 1 else None
         combined = len(hosts) > 1
-        selected = {name: local_entry() if name == "local" else remote.resolve(name) for name in hosts} or entries
+        selected = selected or entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
         if args.command == "status" and args.follow:

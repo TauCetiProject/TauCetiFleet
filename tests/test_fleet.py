@@ -450,7 +450,7 @@ class Isolated(unittest.TestCase):
             patch.object(remote, "call", side_effect=prepared),
             patch("sys.stdout", output),
         ):
-            self.assertEqual(main(["status", "a", "bb"]), 1)  # bb is b's alias.
+            self.assertEqual(main(["status", "a", "bb", "b"]), 1)  # bb is b's alias; b adds no column.
         text = output.getvalue()
         self.assertIn("Workers: 2 alive, 1 working, 1 idle or waiting; 1 of 2 hosts live", text)
         self.assertRegex(text, r"\n +a +bb\nReport +live +unreachable\nWorkers alive +2 +—\n")
