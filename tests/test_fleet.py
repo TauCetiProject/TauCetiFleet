@@ -431,7 +431,7 @@ class Isolated(unittest.TestCase):
         self.assertIn("_fleet", json.loads(output.getvalue()))
 
     def test_named_hosts_are_fetched_in_parallel_and_shown_side_by_side(self):
-        entries = {name: dict(machine_id=name + "-id", target=name) for name in ("a", "b", "c")}
+        entries = {name: dict(machine_id=name + "-id", target=name, aliases=[name * 2]) for name in ("a", "b", "c")}
         both_waiting = threading.Barrier(2, timeout=5)
         workers = dict(a=["running", "idle"], b=["verifying"])
 
@@ -450,11 +450,11 @@ class Isolated(unittest.TestCase):
             patch.object(remote, "call", side_effect=prepared),
             patch("sys.stdout", output),
         ):
-            self.assertEqual(main(["status", "a", "b"]), 1)
+            self.assertEqual(main(["status", "a", "bb"]), 1)  # bb is b's alias.
         text = output.getvalue()
         self.assertIn("Workers: 2 alive, 1 working, 1 idle or waiting; 1 of 2 hosts live", text)
-        self.assertRegex(text, r"\n +a +b\nReport +live +unreachable\nWorkers alive +2 +—\n")
-        self.assertIn("b: offline", text)
+        self.assertRegex(text, r"\n +a +bb\nReport +live +unreachable\nWorkers alive +2 +—\n")
+        self.assertIn("bb: offline", text)
         self.assertIn("Fleet totals:", text)
         self.assertNotIn("Worker rounds:", text)  # No full per-host sections.
 

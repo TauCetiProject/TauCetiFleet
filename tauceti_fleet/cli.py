@@ -340,16 +340,13 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                        + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
                                      json_output=args.json, refresh=pool_activity.refresh)
-        fetched = {}
-        if args.command == "status" and _status_results is None:
-            with ThreadPoolExecutor(len(selected)) as pool:
-                fetched = dict(zip(selected, pool.map(fetch_status, selected.values())))
         results = {}
-        for name, entry in selected.items():
-            if args.command == "status":
-                results[name] = (fetched[name] if _status_results is None
-                                 else _status_results.get(name, dict(error="Waiting for prepared status")))
-                continue
+        if args.command == "status" and _status_results is not None:
+            results = {name: _status_results.get(name, dict(error="Waiting for prepared status")) for name in selected}
+        elif args.command == "status":
+            with ThreadPoolExecutor(len(selected)) as pool:
+                results = dict(zip(selected, pool.map(fetch_status, selected.values())))
+        for name, entry in ({} if args.command == "status" else selected).items():
             action = args.command
             payload = dict(action=action)
             if args.command == "doctor":
@@ -431,7 +428,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         if args.command == "status" and not args.host:
             distinct = {}
             for name, value in results.items():
-                distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
+                distinct.setdefault(value.get("machine_id", selected[name]["machine_id"]), value)
             if len(distinct) > 1 or combined:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
         if args.command == "status":
