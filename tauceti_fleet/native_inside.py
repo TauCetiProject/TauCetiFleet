@@ -200,9 +200,11 @@ def boot():
     envfile = Path('/opt/actions-runner/.env')
     lean = ('LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
             'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
+    # The infra image adds its own runner settings (its tool cache location).
+    extra = Path('/opt/tauceti-runner.env')
     envfile.write_text('ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh\n'
                        'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh\n'
-                       + (lean if gated else ''))
+                       + (lean if gated else '') + (extra.read_text() if extra.is_file() else ''))
     os.chown(envfile, 1000, 1000)
     pressure_fd = int(os.environ['TAUCETI_NATIVE_PRESSURE_FD'])
     receiver = subprocess.Popen([sys.executable, __file__, 'pressure-loop'], pass_fds=(pressure_fd,))

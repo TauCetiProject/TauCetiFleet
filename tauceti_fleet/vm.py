@@ -526,7 +526,7 @@ def _start(config):
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
         if native:
-            runtime_fields = native_runner.stage(directory, jit, lean=config.get("ci_kinds") != ["infra"])
+            runtime_fields = native_runner.stage(directory, jit, infra=config.get("ci_kinds") == ["infra"])
         else:
             run(
                 [

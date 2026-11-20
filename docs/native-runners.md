@@ -58,6 +58,14 @@ authorizes the `infra` class for the host, set them live with:
 tauceti-fleet infra-slots HOST --slots 8
 ```
 
+Infra slots use their own native image, exported from the same verified VM base
+with what other repositories' ordinary GitHub workflows expect of GitHub's runner
+image: current Git (the git-core PPA), Node.js, and a runner-owned
+`/opt/hostedtoolcache` set as the tool cache, so `actions/setup-python` interpreters
+find their libraries. PR and staging slots keep the minimal image. Setup and live
+`update` prepare the infra image when the host has infra slots; an infra slot
+whose image is missing fails explicitly rather than falling back.
+
 This places the slots directly above the PR slots and raises `ci_max_jobs` by
 their count, so PR slots and running guests are untouched. `--slots 0` removes
 them; removed slots finish their current job. The CI autoscaler sizes only the
