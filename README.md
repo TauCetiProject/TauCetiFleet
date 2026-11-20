@@ -658,6 +658,7 @@ active sessions may settle into a deficit.
 ```sh
 tauceti-fleet status
 tauceti-fleet status server1
+tauceti-fleet status server1 server2
 tauceti-fleet status --json
 tauceti-fleet status --all-jobs
 tauceti-fleet status --workers
@@ -670,6 +671,13 @@ it includes fleet totals when multiple distinct machines are enrolled. Host
 aliases never multiply costs or output. Offline hosts retain their last small
 status snapshot with an explicit age and unavailable-host error; new machines
 without a snapshot contribute no invented financial totals.
+
+Naming several hosts shows them together: the CI lines once, a worker total, one
+column per host (report freshness, workers alive/working/idle, admission limit,
+CPU idle, worker memory, rounds, PRs, spend and budget), then the fleet totals and
+merge queue. Hosts are queried in parallel; an unreachable host shows its cached
+snapshot or `unreachable` and does not delay the others. It combines with `-f`,
+`--json` and `--workers`. One named host keeps the full single-host view.
 
 The CI pool activity table uses the same public aggregate as `/ci`: running and
 waiting builds, latest completion and outcome, oldest running/waiting job ages,

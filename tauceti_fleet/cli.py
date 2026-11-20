@@ -5,10 +5,12 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import activity, broker, host, pool_activity, remote, targets, worker_view
+from .activity_summary import amount
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -26,7 +28,8 @@ def parser():
     enroll.add_argument("--replace-machine", action="store_true", help="explicitly enroll a replacement machine at a remembered SSH alias")
     for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
-        cmd.add_argument("host", nargs="?")
+        cmd.add_argument("host", nargs="*" if name == "status" else "?",
+                         help="hosts to show side by side" if name == "status" else None)
         cmd.add_argument("--json", action="store_true")
         if name == "status":
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
@@ -162,6 +165,87 @@ def print_isolation(status):
         print("Isolation diagnostics: " + isolation["error"])
 
 
+def local_entry():
+    local = read(config_dir() / "host.json")
+    if not local or not local.get("machine_id"):
+        raise FleetError("This account has no Fleet host configuration; use add or enroll first")
+    return dict(target="local", machine_id=local["machine_id"])
+
+
+def fetch_status(entry):
+    """One host's status, or its last cached snapshot marked offline."""
+    cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
+    try:
+        value = remote.call(entry["target"], dict(action="status"), timeout=3,
+                            expected_machine_id=entry["machine_id"])
+    except FleetError as exc:
+        if not cache.exists():
+            return dict(error=str(exc))
+        saved = read(cache)
+        return dict(saved["value"], error=str(exc), offline=True, collected_at=saved["collected_at"])
+    atomic(cache, dict(collected_at=time.time(), value=value))
+    return value
+
+
+def host_column(value):
+    """The per-host numbers of the side-by-side status view; None where a host reports nothing."""
+    status = value.get("status") or {}
+    alive = [w for w in status.get("workers") or [] if w.get("alive")]
+    working = sum(w.get("state") not in host.IDLE_STATES for w in alive)
+    summary = (value.get("activity") or {}).get("summary") or {}
+    rounds, prs = summary.get("rounds", {}), summary.get("pr_windows", {}).get("24h", {})
+    costs = summary.get("costs", {})
+    spending = costs.get("spending_including_live") or costs.get("spending") or {}
+    funding = costs.get("funding") or {}
+    memory = status.get("worker_memory") or {}
+    if "status" not in value:
+        report = "unreachable"
+    elif value.get("offline"):
+        report = f"cached {max(0, int(time.time() - value['collected_at']))}s"
+    else:
+        report = "live"
+    return {
+        "Report": report,
+        "Workers alive": len(alive) if status else None,
+        "  working": working if status else None,
+        "  idle or waiting": len(alive) - working if status else None,
+        "New-round limit": f"{status.get('active_worker_limit', 0)}/{value.get('max_workers', 0)}" if status else None,
+        "CPU idle": f"{status['cpu_idle_fraction']:.0%}" if "cpu_idle_fraction" in status else None,
+        "Worker working memory": f"{memory['working_set'] / 1024**3:.1f} GiB" if memory else None,
+        **{f"Rounds finished {w}": sum(r["finished"] for r in rounds[w].values()) if w in rounds else None
+           for w in ("1h", "24h")},
+        "PRs authored 24h": prs.get("authored"),
+        "Authored PRs landed 24h": prs.get("landed"),
+        "Reviews 24h": prs.get("reviews"),
+        "API spend 24h": amount(spending.get("24h", {}).get("spent_usd")),
+        "API spend/hour (1h)": amount(spending.get("1h", {}).get("usd_per_hour")),
+        "Budget available": amount(funding.get("available")),
+        "Budget replenishment": amount(funding.get("grant_rate")) + "/hour" if funding else None,
+        "Open authored PRs": summary.get("open_prs"),
+    }
+
+
+def print_hosts(results):
+    """Worker totals, then the selected hosts' numbers side by side."""
+    columns = {name: host_column(value) for name, value in results.items()}
+    distinct = {value.get("machine_id", name): columns[name] for name, value in results.items()}
+    alive, working = (sum(c[key] or 0 for c in distinct.values()) for key in ("Workers alive", "  working"))
+    live = sum(c["Report"] == "live" for c in distinct.values())
+    print(f"Workers: {alive} alive, {working} working, {alive - working} idle or waiting; "
+          f"{live} of {len(distinct)} hosts live")
+    labels = list(next(iter(columns.values())))
+    width = max(map(len, labels))
+    cells = {name: ["—" if c[label] is None else str(c[label]) for label in labels]
+             for name, c in columns.items()}
+    widths = {name: max(len(name), *map(len, values)) for name, values in cells.items()}
+    print(" " * width + "".join(f"  {name:>{widths[name]}}" for name in cells))
+    for row, label in enumerate(labels):
+        print(f"{label:<{width}}" + "".join(f"  {values[row]:>{widths[name]}}" for name, values in cells.items()))
+    for name, value in results.items():
+        if value.get("error"):
+            print(f"{name}: {value['error']}")
+
+
 def main(argv=None, *, _status_results=None, _standalone=False):
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["monitoring"]:
@@ -240,27 +324,31 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
         if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
-        if args.host == "local":
-            local = read(config_dir() / "host.json")
-            if not local or not local.get("machine_id"):
-                raise FleetError("This account has no Fleet host configuration; use add or enroll first")
-            selected = {"local": dict(target="local", machine_id=local["machine_id"])}
-        else:
-            selected = {args.host: remote.resolve(args.host)} if args.host else entries
+        hosts = args.host if args.command == "status" else [args.host] if args.host else []
+        if args.command == "status":
+            # Several named hosts get the side-by-side view; one host or none keep their own.
+            args.host = hosts[0] if len(hosts) == 1 else None
+        combined = len(hosts) > 1
+        selected = {name: local_entry() if name == "local" else remote.resolve(name) for name in hosts} or entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
         if args.command == "status" and args.follow:
             from . import status_follow
 
-            command = (["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
+            command = (["status"] + hosts + (["--json"] if args.json else [])
                        + (["--all-jobs"] if args.all_jobs else []) + (["--workers"] if args.workers else [])
                        + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
                                      json_output=args.json, refresh=pool_activity.refresh)
+        fetched = {}
+        if args.command == "status" and _status_results is None:
+            with ThreadPoolExecutor(len(selected)) as pool:
+                fetched = dict(zip(selected, pool.map(fetch_status, selected.values())))
         results = {}
         for name, entry in selected.items():
-            if _status_results is not None:
-                results[name] = _status_results.get(name, dict(error="Waiting for prepared status"))
+            if args.command == "status":
+                results[name] = (fetched[name] if _status_results is None
+                                 else _status_results.get(name, dict(error="Waiting for prepared status")))
                 continue
             action = args.command
             payload = dict(action=action)
@@ -330,31 +418,21 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                                allow_downgrade=args.allow_downgrade)
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
-            cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:
-                value = remote.call(
+                results[name] = remote.call(
                     entry["target"],
                     payload,
-                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging") or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
+                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging") or (action == "native-runner" and args.prepare) else 90,
                     expected_machine_id=entry["machine_id"],
                 )
-                results[name] = value
-                if args.command == "status":
-                    atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:
-                if args.command == "status" and cache.exists():
-                    saved = read(cache)
-                    results[name] = dict(
-                        saved["value"], error=str(exc), offline=True, collected_at=saved["collected_at"]
-                    )
-                else:
-                    results[name] = dict(error=str(exc))
+                results[name] = dict(error=str(exc))
         fleet = None
         if args.command == "status" and not args.host:
             distinct = {}
             for name, value in results.items():
                 distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
-            if len(distinct) > 1:
+            if len(distinct) > 1 or combined:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
         if args.command == "status":
             from . import ci_overview
@@ -390,7 +468,12 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 results["_fleet"] = dict(activity=fleet)
             print(json.dumps(results, indent=2))
         else:
-            for index, (name, value) in enumerate(results.items()):
+            if combined:
+                print_hosts(results)
+                for name, value in results.items() if args.workers else ():
+                    print(f"\n{name} workers:")
+                    worker_view.display(value.get("status") or {})
+            for index, (name, value) in enumerate(() if combined else results.items()):
                 if index:
                     print()
                 print(name + ":")
