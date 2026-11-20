@@ -270,6 +270,61 @@ class RecoveryTransactions(unittest.TestCase):
                 request.assert_called_once()
                 self.assertEqual(request.call_args.args[0][:3],['gh','auth','token'])
 
+    def test_app_tokens_carry_writes_and_reads_stay_on_the_ai_account(self):
+        tokens=Mock(); tokens.token.return_value='ghs_apptoken'
+        op=auto.Operator('host','machine',root=Path(self.temp.name)/'app',app_tokens=tokens)
+        with patch.object(auto.subprocess,'run',return_value=Mock(returncode=0,stdout='{}',stderr='')) as request:
+            op.api('actions/runs/1/rerun',method='POST')
+            self.assertEqual(request.call_args.kwargs['env']['GH_TOKEN'],'ghs_apptoken')
+            self.assertEqual(request.call_args.kwargs['env']['GH_HOST'],'github.com')
+            self.assertNotIn('GITHUB_TOKEN',request.call_args.kwargs['env'])
+        tokens.token.side_effect=store.FleetError('no key')
+        with patch.object(auto.subprocess,'run') as request:
+            with self.assertRaises(store.FleetError):op.api('actions/runs/1/force-cancel',method='POST')
+            request.assert_not_called()  # no fallback to an ambient or personal credential
+        with patch.object(auto.subprocess,'run',side_effect=[Mock(returncode=0,stdout='ghr_read\n'),Mock(returncode=0,stdout='{}',stderr='')]) as request:
+            op.api('actions/runs/1')
+            self.assertEqual(request.call_args_list[0].args[0][-1],'tauceti-ai-for-science')
+
+    def test_app_token_is_minted_for_the_repository_and_cached(self):
+        directory=Path(self.temp.name)/'creds'; directory.mkdir()
+        pem=directory/'github-private-key.pem'; pem.write_text('unused'); pem.chmod(0o600)
+        (directory/'github-app.json').write_text(json.dumps(dict(id=7,installation_id=99)))
+        requests=[]
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*a):return False
+            def read(self,n):return json.dumps(dict(token='ghs_x',expires_at='2030-01-01T00:00:00Z')).encode()
+        def opener(request,timeout):
+            requests.append(request);return Response()
+        tokens=auto.AppTokens(directory,opener=opener,clock=lambda:1800000000)
+        with patch.object(auto.AppTokens,'_jwt',return_value='app.jwt') as jwt:
+            self.assertEqual(tokens.token(),'ghs_x'); self.assertEqual(tokens.token(),'ghs_x')
+            jwt.assert_called_once_with(7)
+        self.assertEqual(len(requests),1)
+        self.assertTrue(requests[0].full_url.endswith('/app/installations/99/access_tokens'))
+        self.assertEqual(requests[0].get_header('Authorization'),'Bearer app.jwt')
+        self.assertEqual(json.loads(requests[0].data),dict(repositories=['TauCeti'],permissions=dict(actions='write')))
+        pem.chmod(0o644)
+        with self.assertRaises(store.FleetError):auto.AppTokens(directory,opener=opener).token()
+
+    def test_app_jwt_is_a_valid_rs256_signature(self):
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        except ImportError:
+            self.skipTest('cryptography is not installed')
+        import base64
+        directory=Path(self.temp.name)/'jwt'; directory.mkdir()
+        key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        pem=directory/'github-private-key.pem'
+        pem.write_bytes(key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+        pem.chmod(0o600)
+        head,body,sig=auto.AppTokens(directory,clock=lambda:1000)._jwt(7).split('.')
+        pad=lambda s:base64.urlsafe_b64decode(s+'='*(-len(s)%4))
+        self.assertEqual(json.loads(pad(body)),dict(iat=940,exp=1540,iss='7'))
+        key.public_key().verify(pad(sig),(head+'.'+body).encode(),padding.PKCS1v15(),hashes.SHA256())
+
     def test_staging_and_stale_runner_ownership_are_never_cancelled(self):
         for staging in (True,False):
             with self.subTest(staging=staging):
