@@ -122,8 +122,17 @@ def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard
         "none",
         "-serial",
         "file:" + str(directory / "console.log"),
-        "-drive",
-        f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
+        # With a second disk, SeaBIOS may try to boot the blank one and halt, so the
+        # system disk gets bootindex=0 (the only bootable device that has one).
+        *([
+            "-drive",
+            f"file={disk},format=qcow2,if=none,id=system,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
+            "-device",
+            "virtio-blk-pci,drive=system,bootindex=0",
+        ] if warm else [
+            "-drive",
+            f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
+        ]),
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
         # QEMU 10 rejects `serial` as a -drive option, so the serial goes on the device.
