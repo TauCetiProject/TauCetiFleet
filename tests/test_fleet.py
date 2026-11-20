@@ -251,6 +251,19 @@ class Isolated(unittest.TestCase):
         with self.assertRaisesRegex(store.FleetError, "JSON object"):
             host.configure(dict(credentials=[]))
 
+    def test_worker_definition_settings_apply_live_between_rounds(self):
+        store.update_host(workers_enabled=True, max_workers=2)
+        with patch.object(host, "install_service"), patch.object(host, "worker_config") as definitions:
+            host.configure(dict(github_state_url="https://state.example", max_open_prs=1024,
+                                credentials={"github_state_token_file": "state-secret"}))
+        value = store.host_config()
+        self.assertEqual(value["github_state_url"], "https://state.example")
+        self.assertEqual(value["max_open_prs"], 1024)
+        self.assertTrue(value["workers_enabled"])
+        self.assertEqual(definitions.call_args.args[0]["github_state_url"], "https://state.example")
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(github_state_url="https://other.example", max_workers=3))
+
     def test_unsupported_user_services_still_allow_actionable_doctor_reporting(self):
         with patch.object(host, "install_service", side_effect=store.FleetError("user manager unavailable")):
             result = host.configure(dict(ci_allowed=False))

@@ -132,7 +132,9 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 }
 ```
 
-Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
+Then deploy with `--profile personal`. Repeating `add` on an active host applies a profile's
+worker definition settings (`max_open_prs`, `author_model`, `author_effort`, `github_state_url`)
+and credentials live, between rounds; other profile or resource changes need a drained host. Model credentials, GitHub identity, model,
 and effort are independent settings. Version 1 profiles use Claude API billing.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
