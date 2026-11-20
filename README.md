@@ -542,7 +542,9 @@ swapped, the repair builds' compiler wrapper measures the same ceiling, and ever
 five seconds the controller sets the repair slice's `memory.high` to its pinned
 memory plus the free memory under the ceiling, less 21 GiB (the new-guest start
 requirement plus 1 GiB). The repair units run at `OOMScoreAdjust=1000`, so an OOM
-kill under the ceiling takes a repair process rather than a VM. Worker hard limits no longer reserve CI's full
+kill under the ceiling takes a repair process rather than a VM (with the
+host's swap counted in OOM scores, as on tauchonki2). `enable` and a live
+`update` both write the ceiling. Worker hard limits no longer reserve CI's full
 configured RAM in advance. CI defaults to the same shared ceiling; an explicit
 `ci_memory_budget_gib` still applies to its child slice. CPU priorities are
 unchanged. Concurrent compilers can still grow after passing

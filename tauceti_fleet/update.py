@@ -250,6 +250,13 @@ def install(release, *, expected_machine_id, expected_revision=False):
         if result is None:
             return dict(installed=True, release=release.name, controller="stopped", worker_revision=revision,
                         worker_runtime_scope="future manager starts", image="preserved")
+        # Only enable writes slice units, so a handed-over host gets the shared
+        # ceiling here. Unmeasured host RAM would compute a 16 MiB ceiling.
+        from . import host
+
+        caps = host.resources()
+        if caps["memory_total"] and host.install_ceiling(caps):
+            run(["systemctl", "--user", "daemon-reload"])
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
                     worker_revision=revision,
                     active_processes_preserved=True,

@@ -24,7 +24,7 @@ from . import (
     vm,
     worker_view,
 )
-from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
+from .capabilities import GIB, clean_file_bytes, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -272,10 +272,8 @@ def refresh_repair_memory():
     if not relative or not cg.is_dir():
         return None
     _, available = lean_pressure.memory(relative)
-    stats = dict(line.split() for line in (cg / "memory.stat").read_text().splitlines())
-    reclaimable = max(0, int(stats["file"]) - int(stats.get("shmem", 0)) - int(stats.get("file_dirty", 0))
-                      - int(stats.get("file_writeback", 0)))
-    pinned = max(0, int((cg / "memory.current").read_text()) - reclaimable)
+    stats = {k: int(v) for k, v in (line.split() for line in (cg / "memory.stat").read_text().splitlines())}
+    pinned = max(0, int((cg / "memory.current").read_text()) - clean_file_bytes(stats))
     high = max(GIB, pinned + available - REPAIR_HEADROOM)
     current = (cg / "memory.high").read_text().strip()
     # Same write as the workers slice: skip small rises, never block on reclaim.
@@ -286,6 +284,26 @@ def refresh_repair_memory():
         finally:
             os.close(fd)
     return dict(high=int((cg / "memory.high").read_text()), pinned=pinned, available=available)
+
+
+def install_ceiling(caps):
+    """Write the shared hard ceiling; True when a unit file changed.
+
+    The existing hyphenated child slice names already belong to this parent.
+    Both may use free RAM; their combined usage still leaves OS/swap headroom.
+    The hard ceiling sits one level up, on tauceti.slice, so it also covers work
+    that yields to the VMs from beside this slice (TauCetiWorker's repair slice).
+    VM memory is never swapped, so reclaim at the ceiling takes that work's memory,
+    and its compiler admission, which reads every capped ancestor, measures it too.
+    """
+    changed = False
+    for name, text in (("tauceti.slice", f"[Slice]\nMemoryMax={int(capacity.shared_memory_bytes(caps))}\n"),
+                       ("tauceti-fleet.slice", "[Slice]\nTasksMax=32768\n")):
+        path = units() / name
+        if not path.exists() or path.read_text() != text:
+            path.write_text(text)
+            changed = True
+    return changed
 
 
 def write_slices(config, caps):
@@ -316,14 +334,7 @@ def write_slices(config, caps):
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
     worker = max(16 * 1024**2, worker)
-    # The existing hyphenated child slice names already belong to this parent.
-    # Both may use free RAM; their combined usage still leaves OS/swap headroom.
-    # The hard ceiling sits one level up, on tauceti.slice, so it also covers work
-    # that yields to the VMs from beside this slice (TauCetiWorker's repair slice).
-    # VM memory is never swapped, so reclaim at the ceiling takes that work's memory,
-    # and its compiler admission, which reads every capped ancestor, measures it too.
-    (units() / "tauceti.slice").write_text(f"[Slice]\nMemoryMax={int(shared)}\n")
-    (units() / "tauceti-fleet.slice").write_text("[Slice]\nTasksMax=32768\n")
+    install_ceiling(caps)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"

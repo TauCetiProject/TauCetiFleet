@@ -92,6 +92,8 @@ class StagingPriority(unittest.TestCase):
         self.assertEqual(cached['memory_available'],12*GIB)
         self.assertGreater(cached['cpu_percent'],90)
         self.assertFalse(cached['staging_priority']['cpu_sleeps'])
+        self.assertTrue(cached['staging_priority']['memory_sleeps'])
+        self.assertAlmostEqual(cached['staging_priority']['headroom_gib'],ci_priority.headroom(112*GIB,staging=True)/GIB)
 
     def test_no_guest_receives_permits_at_zero_shared_memory(self):
         pr,stage=self.publisher_frames(available=0,busy_cpu=True,stage_waiters=96)

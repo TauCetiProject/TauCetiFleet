@@ -237,7 +237,8 @@ class Publisher:
                 state_dir() / "lean-host-pressure.json",
                 dict(value, guests=len(self.clients), waiting_guests=sum(bool(n) for n, _ in self.pending.values()),
                      staging_priority=dict(guests=sum(path in staging_paths for path in self.clients),
-                                           cpu_sleeps=False, memory_sleeps=False, headroom_gib=0,
+                                           cpu_sleeps=False, memory_sleeps=True,
+                                           headroom_gib=ci_priority.headroom(total, staging=True) / 1024**3,
                                            normal_headroom_gib=ci_priority.headroom(total) / 1024**3)),
             )
             self.reported_at = time.time()

@@ -152,6 +152,17 @@ class Overcommit(unittest.TestCase):
         _, high = self.refresh_repair(cg, host.REPAIR_HEADROOM + 40 * GIB + 100 * 1024**2)
         self.assertEqual(high, 60 * GIB)
 
+    def test_live_update_moves_the_ceiling_onto_the_parent_slice(self):
+        units = self.root / "units"
+        units.mkdir()
+        (units / "tauceti-fleet.slice").write_text(f"[Slice]\nMemoryHigh={100 * GIB}\nMemoryMax={100 * GIB}\nTasksMax=32768\n")
+        caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
+        with patch.object(host, "units", return_value=units):
+            self.assertTrue(host.install_ceiling(caps))
+            self.assertFalse(host.install_ceiling(caps))
+        self.assertEqual((units / "tauceti.slice").read_text(), f"[Slice]\nMemoryMax={capacity.shared_memory_bytes(caps)}\n")
+        self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
+
     def test_hosts_without_a_repair_slice_are_untouched(self):
         with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
             self.assertIsNone(host.refresh_repair_memory())
