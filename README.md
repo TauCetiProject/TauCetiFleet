@@ -666,6 +666,13 @@ both scopes, all completion outcomes, and exact job identities and URLs under
 public source retains the last cached summary with an error; missing observations
 under partial coverage are unknown. Host-specific status still shows every pool.
 
+Known GitHub zombies never enter the text: jobs queued for over 24 hours, and
+workflows queued with no jobs that long, are left out of Run/Wait, the oldest
+wait and the backlog line, and the text does not mention them. JSON keeps their
+`stale_waiting` counts. They hold no runner and block nothing. We never file
+GitHub support requests about them; TauCetiWorker
+`docs/queue/github-zombie-runs.md` records the policy and the known runs.
+
 The operator client fetches one public manifest and its jobs summary per status
 invocation, independently of host count. It does not fetch job-detail pages or
 scan GitHub. This table needs only the updated operator CLI; hosts need no change.
@@ -707,7 +714,7 @@ workflows, including small control jobs. Backlog reporting separates pending
 and queued workflows. A second line shows verified stuck records and records
 without confirmed active jobs; these are not added to waiting work. Verification
 requires a complete empty/terminal job inventory and a settled workflow, never
-age alone. An old pending job remains waiting. Counts come from retained shared
+age alone. An old pending workflow remains waiting. Counts come from retained shared
 observations before detail-page limits; incomplete observations remain explicit. Authoring pressure uses the workers' complete cached survey:
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
