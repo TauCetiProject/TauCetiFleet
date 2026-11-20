@@ -461,7 +461,15 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
             and capacity.kinds(proposed) == capacity.kinds(config)
             and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
         )
-        if changed and not growing and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
+        # Dropping PR from a host with a staging reservation is live too: the
+        # reserved and protected guests keep their shape and labels, and the
+        # other slots retire their runners as their jobs finish.
+        narrowing = (
+            capacity.kinds(config) == ["pr", "staging"] and capacity.kinds(proposed) == ["staging"]
+            and capacity.staging_slots(config) > 0 and capacity.jobs(proposed) == capacity.jobs(config)
+            and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
+        )
+        if changed and not (growing or narrowing) and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
             raise FleetError("Drain this host and wait for every CI slot to retire before changing its CI classes or capacity")
         config = proposed
     result = doctor(config)
@@ -903,7 +911,9 @@ class CISlot:
 
     def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False):
         config = dict(capacity.for_slot(config, self.index),
-                      ci_enabled=config["ci_enabled"] and (self.index < capacity.jobs(config) if admitted is None else admitted))
+                      # An unused slot still recreates a retired identity a queued job targets.
+                      ci_enabled=config["ci_enabled"] and (recovery is not None or not capacity.unused(config, self.index))
+                      and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
