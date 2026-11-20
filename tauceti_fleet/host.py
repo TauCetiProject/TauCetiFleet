@@ -38,6 +38,7 @@ from .store import (
     read,
     state_dir,
     update_host,
+    change_host,
 )
 
 # Resolve once: switching the current symlink must not make an old controller
@@ -552,6 +553,27 @@ def reserve_staging(maximum, memory_gib=None):
     return dict(ci_staging_slots=maximum, ci_staging_memory_gib=staging_memory, ci_max_jobs=capacity.jobs(value),
                 ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 pending_slots=pending)
+
+
+def set_infra_slots(count):
+    """Run `count` infra slots above the PR slots; PR slots and guests are untouched.
+
+    Added slots start on the controller's next loop; removed ones finish their job.
+    """
+    config = host_config()
+    if not config.get("ci_broker_url"):
+        raise FleetError("Infra slots register through the CI broker; enroll this host first")
+    policy = github.capacity_policy(config)
+    group = (policy.get("groups") or {}).get("infra")
+    proposed = capacity.with_infra_slots(config, count, group)
+    capacity.authorize(proposed, policy)
+    if config["ci_enabled"]:
+        native_runner.prepare_for_ci(proposed)
+    # Recompute from the locked current file: the autoscaler may write meanwhile.
+    value = change_host(lambda current: capacity.with_infra_slots(current, count, group))
+    event("ci_infra_slots", count=count, ci_max_jobs=value["ci_max_jobs"])
+    return dict(infra_slots=capacity.infra_slots(value), pr_slots=capacity.pr_jobs(value),
+                ci_max_jobs=capacity.jobs(value), ci_enabled=value["ci_enabled"])
 
 
 def drain():
@@ -1390,6 +1412,8 @@ def rpc(payload):
         return schedule.configure(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"], payload.get("memory_gib"))
+    if action == "infra-slots":
+        return set_infra_slots(payload["count"])
     if action == "drain":
         return drain()
     if action == "budget":

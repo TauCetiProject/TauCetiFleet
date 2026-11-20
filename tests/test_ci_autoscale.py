@@ -87,10 +87,21 @@ class CapacityPolicy(unittest.TestCase):
         decision=c.decide(s,s['at'])
         self.assertEqual(decision['kind'],'hold')
 
-    def test_infra_slots_hold_autoscaling(self):
-        controller = auto.Controller(minimum=1, maximum=6)
-        self.assertEqual(controller.decide(dict(snapshot(), infra_slots=True), 1000),
-                         dict(kind="hold", reason="infra slots sit above the general slots; size this host's CI by hand"))
+    def test_fixed_pr_slot_hosts_hold_resizes_and_recover_in_place(self):
+        c = auto.Controller(minimum=1, maximum=6)
+        # An idle guest under RAM pressure would normally shrink the host.
+        s = dict(snapshot(idle=True, available=10), fixed_pr_slots=True)
+        self.assertEqual(auto.Controller(minimum=1, maximum=6).decide(dict(s, fixed_pr_slots=False), 1000)["kind"], "limit")
+        self.assertEqual(c.decide(s, 1000)["kind"], "hold")
+        # An idle guest does not block stall recovery, which keeps the PR count.
+        decisions = []
+        for i in range(5):
+            decisions.append(c.decide(s, 1000 + 30 * i))
+            s = advance(s)
+        recover = [d for d in decisions if d["kind"] == "recover"]
+        self.assertTrue(recover)
+        self.assertTrue(all(d["target"] == 3 for d in recover))
+        self.assertFalse([d for d in decisions if d["kind"] == "limit"])
 
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
@@ -357,6 +368,26 @@ class HostActions(unittest.TestCase):
         self.assertEqual(config['ci_max_jobs'],2)
         self.assertTrue(config['ci_enabled']);self.assertTrue(config['workers_enabled']);self.assertEqual(config['max_workers'],40)
         with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=0))
+
+    def test_infra_slots_sit_outside_the_autoscaled_pr_slots(self):
+        store.update_host(ci_max_jobs=5,ci_kinds=['pr'],ci_staging_slots=0,ci_broker_url='https://fleet.example',
+                          ci_protected_slots={'3':dict(kind='infra',runner_group_id=8),'4':dict(kind='infra',runner_group_id=8)})
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=i,instance=str(i)*16,unit='u%d'%i) for i in range(5)]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            value=auto.host_action(dict(mode='snapshot'))
+        self.assertEqual((value['maximum'],value['reserved']),(3,0))
+        self.assertEqual(sorted(v['slot'] for v in value['vms']),[0,1,2])
+        # The autoscaler's PR count maps to the slots below infra; changing it would move them.
+        self.assertEqual(auto.host_action(dict(mode='limit',maximum=3)),dict(maximum=5))
+        self.assertEqual(store.host_config()['ci_max_jobs'],5)
+        for maximum in (2,4):
+            with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=maximum))
+        self.assertEqual(store.host_config()['ci_max_jobs'],5)
+        with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=True))
+        # A removed infra slot's guest finishing its job is not a PR recovery candidate.
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=6,instance='6'*16,unit='u6',ci_kinds=['infra'])]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            self.assertEqual(auto.host_action(dict(mode='snapshot'))['vms'],[])
 
     def test_reserved_and_replaced_instances_cannot_be_retired(self):
         with patch.object(vm,'retire') as retire:

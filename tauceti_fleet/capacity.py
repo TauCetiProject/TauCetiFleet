@@ -135,6 +135,35 @@ def protected_slots(config):
     return result
 
 
+def infra_slots(config):
+    """Protected infra slot numbers. They sit above the PR slots, so ci_max_jobs
+    minus their count is the host's PR slot count."""
+    return sorted(i for i, v in protected_slots(config).items() if v["kind"] == "infra")
+
+
+def pr_jobs(config):
+    """Slots other than infra ones: what the CI autoscaler sizes."""
+    return jobs(config) - len(infra_slots(config))
+
+
+def with_infra_slots(config, count, group):
+    """Place `count` infra slots directly above the host's PR slots."""
+    if type(count) is not int or not 0 <= count <= 64:
+        raise FleetError("The infra slot count must be an integer from 0 to 64")
+    if count and (type(group) is not int or group <= 0):
+        raise FleetError("The CI broker reports no runner group for infra")
+    base = pr_jobs(config)
+    if infra_slots(config) != list(range(base, jobs(config))):
+        raise FleetError("Existing infra slots must sit directly above the PR slots")
+    others = {k: v for k, v in config.get("ci_protected_slots", {}).items() if v["kind"] != "infra"}
+    if any(int(k) >= base for k in others):
+        raise FleetError("Other protected slots must sit below the infra slots")
+    slots = dict(others, **{str(i): dict(kind="infra", runner_group_id=group) for i in range(base, base + count)})
+    result = dict(config, ci_max_jobs=base + count, ci_protected_slots=slots)
+    staging_slots(result)
+    return result
+
+
 def controller_config(config):
     """Configuration checks whose failure stops the controller loop.
 
