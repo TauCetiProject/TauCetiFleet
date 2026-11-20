@@ -68,7 +68,9 @@ persistent user service on the SSH control host, with `LoadCredential=github-app
 `LoadCredential=github-private-key.pem:...` naming a GitHub App with `actions: write` on TauCeti
 (the queue App). Its recovery writes (force-cancel, rerun) then use a TauCeti-only installation
 token; reads use tauceti-ai-for-science. `--github-account LOGIN` instead makes the writes with that
-`gh` account, which spends a personal REST quota. It reads the host's existing
+`gh` account, which spends a personal REST quota. The App path needs the `cryptography` package
+(the `app` extra, `pip install 'tauceti-fleet[app]'`, or a system Python that has it); without it
+the writes fail with that message rather than falling back. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
 and compiler headroom. Build guest launches still obey the host's ten-second settling interval and
