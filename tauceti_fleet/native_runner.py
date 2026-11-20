@@ -211,14 +211,19 @@ def remove_root(root):
         raise FleetError("Native filesystem cleanup is incomplete; retain instance ownership")
 
 
-def stage(directory, jit):
-    """Stage a small durable launch intent; allocate OS/workspace inside its unit."""
+def stage(directory, jit, *, lean=True):
+    """Stage a small durable launch intent; allocate OS/workspace inside its unit.
+
+    `lean=False` (infra slots) omits the Lean pressure gate's job environment:
+    those jobs are not TauCeti builds, and some of their tests read `LEAN`.
+    """
     directory = Path(directory)
     value = image()
     (directory / "control").mkdir(mode=0o700)
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
-    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB))
+    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB,
+                                           lean_runtime=lean))
     return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
                 disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
@@ -236,7 +241,9 @@ def materialize(directory):
         target = root / "usr/local/bin" / name
         target.write_text(Path(module.__file__).read_text())
         target.chmod(0o755)
-    (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
+    if read(directory / "native.json").get("lean_runtime", True):
+        # Its presence also tells the job unit to export the Lean gate's environment.
+        (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
 
 
 def prerequisites():

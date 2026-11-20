@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -302,6 +303,22 @@ class NativeRunner(unittest.TestCase):
         self.assertEqual(value["runtime"], native.RUNTIME)
         self.assertFalse((self.root / "rootfs").exists())
         self.assertEqual((self.root / "control/jit").stat().st_mode & 0o777, 0o600)
+
+    def test_infra_slots_omit_the_lean_gate_environment(self):
+        image = store.data_dir() / "images/native" / ("a" * 64) / "rootfs"
+        (image / "usr/local/bin").mkdir(parents=True)
+        (image / "opt").mkdir()
+        for lean, present in ((True, True), (False, False)):
+            with self.subTest(lean=lean):
+                directory = self.root / ("lean" if lean else "infra")
+                directory.mkdir()
+                with patch.object(native, "image", return_value=dict(sha256="a" * 64)):
+                    native.stage(directory, "jit", lean=lean)
+                def copy(command, **_):
+                    shutil.copytree(command[-2], command[-1], symlinks=True)
+                with patch.object(native, "run", side_effect=copy):
+                    native.materialize(directory)
+                self.assertEqual((directory / "rootfs/opt/tauceti-lean-env").exists(), present)
 
     def test_shared_records_cannot_read_host_symlinks_or_block_on_fifo(self):
         target = self.root / "control/native-progress.json"
