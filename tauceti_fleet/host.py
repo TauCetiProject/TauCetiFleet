@@ -1326,7 +1326,7 @@ def budget(payload):
                     raise ValueError("amount")
             except (InvalidOperation, ValueError):
                 raise FleetError("Grants and rates must be finite and nonnegative; balances finite") from None
-            args += ["--" + name.replace("_", "-"), str(amount)]
+            args.append("--" + name.replace("_", "-") + "=" + str(amount))  # "=" keeps negatives one argument
     return json.loads(run(args, timeout=30).stdout)
 
 

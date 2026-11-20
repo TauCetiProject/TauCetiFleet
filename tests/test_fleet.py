@@ -218,7 +218,7 @@ class Isolated(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, stdout="{}")
         with patch.object(host, "executable", return_value="/bin/tauceti"), patch.object(host, "run", return_value=completed) as run:
             host.budget(dict(set_grant="0"))
-        self.assertEqual(run.call_args.args[0], ["/bin/tauceti", "budget", "--json", "--set-grant", "0"])
+        self.assertEqual(run.call_args.args[0], ["/bin/tauceti", "budget", "--json", "--set-grant=0"])
 
     def test_forgejo_count_cli_preserves_explicit_zero(self):
         with (patch.object(remote, "inventory", return_value={}),
