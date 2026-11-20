@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import ci_autoscale as auto, host, store, vm
+from tauceti_fleet import ci_autoscale as auto, host, hostos, store, vm
+
+hostos.MACOS = False
 
 GIB = 1024**3
 

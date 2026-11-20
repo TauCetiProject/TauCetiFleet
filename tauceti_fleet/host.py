@@ -18,6 +18,7 @@ from . import (
     ci_priority,
     focus,
     github,
+    hostos,
     native_runner,
     targets,
     vm,
@@ -25,7 +26,7 @@ from . import (
 )
 from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
-from .report import snapshot
+from .report import budget_environment, budget_path, snapshot
 from .store import (
     FleetError,
     atomic,
@@ -59,6 +60,7 @@ def units():
     return path
 
 
+@hostos.linux
 def install_service(*, restart=True):
     args = " ".join(unit_argument(a) for a in [Path.home() / ".local/bin/tauceti-fleet", "host-daemon"])
     environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
@@ -82,6 +84,7 @@ def install_service(*, restart=True):
         run(["systemctl", "--user", "restart", target.name])
 
 
+@hostos.linux
 def install_pressure_service():
     """Provision the publisher on both first install and live controller handover."""
     environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
@@ -99,6 +102,11 @@ def install_pressure_service():
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "enable", "--now", "tauceti-fleet-pressure.service"])
     run(["systemctl", "--user", "try-restart", "tauceti-fleet-pressure.service"])
+
+
+def require_ci(remedy=""):
+    if "ci" not in hostos.roles():
+        raise FleetError("This host's operating system takes no CI runners" + remedy)
 
 
 def configure(payload):
@@ -146,6 +154,8 @@ def configure(payload):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+    if dict(current, **updates)["ci_allowed"]:
+        require_ci("; repeat add with --no-ci")
     for key, secret in credentials.items():
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -246,6 +256,7 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
     memory["high"] = int((cg / "memory.high").read_text())
 
 
+@hostos.linux
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     shared = capacity.shared_memory_bytes(caps)
@@ -359,6 +370,7 @@ def _worker_config(config):
 WORKER_OOM_SCORE_ADJ = 500
 
 
+@hostos.linux
 def start_workers():
     root = RUNNING_RELEASE
     argv = " ".join(unit_argument(a) for a in [*command(), "run-workers"])
@@ -376,6 +388,13 @@ def start_workers():
     )
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "start", target.name])
+
+
+@hostos.linux
+def stop_workers():
+    # A manager-service stop no longer contains all workers. Slice stop
+    # includes scopes, manager survivors, and direct-launch fallback work.
+    run(["systemctl", "--user", "stop", "tauceti-fleet-workers.slice"], timeout=45)
 
 
 def manager_ping():
@@ -425,7 +444,7 @@ def run_workers():
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
     # Keep the pre-existing per-user budget location even though fleet workers
     # have separate checkout/state/runtime directories.
-    os.environ.setdefault("TAUCETI_BUDGET_DIR", str(Path.home() / ".local/state/tauceti/budget"))
+    os.environ.setdefault("TAUCETI_BUDGET_DIR", str(budget_path()))
     binary = executable("tauceti")
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
@@ -433,6 +452,12 @@ def run_workers():
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
+@hostos.linux
+def manager_active():
+    return not run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False, timeout=2).returncode
+
+
+@hostos.linux
 def manager_process():
     """The running manager's argv, or None when its service process cannot be identified."""
     result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
@@ -558,6 +583,7 @@ def drain():
     return dict(state="draining", detail="Active work finishes; no new worker rounds or CI guests are admitted")
 
 
+@hostos.linux
 def cpu_sample():
     numbers = [int(v) for v in Path("/proc/stat").read_text().splitlines()[0].split()[1:9]]
     return sum(numbers), numbers[3] + numbers[4]
@@ -859,6 +885,7 @@ def collect_ci_results(config):
     atomic(path, remaining)
 
 
+@hostos.linux
 class Scaler:
     def __init__(self):
         self.target = 0
@@ -875,7 +902,7 @@ class Scaler:
         )
         return self.target, reason
 
-    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None):
+    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, workers=(), pause_reason=None):
         if not enabled or available < reserve:
             self.target = 0
             reason = pause_reason or (
@@ -1147,6 +1174,7 @@ def daemon():
                     reserve=reserve,
                     idle=idle,
                     maximum=maximum,
+                    workers=ids,
                     pause_reason=pause_reason,
                 )
                 roadmap_focus = focus.policy(config, ids[:target])
@@ -1236,7 +1264,7 @@ def daemon():
 
 def status_report(config):
     pressure = read(state_dir() / "lean-host-pressure.json", {})
-    pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10)
+    pressure = dict(pressure, healthy=0 <= time.time() - pressure.get("at", 0) <= 10) if "ci" in hostos.roles() else None
     return dict(
         machine_id=config["machine_id"],
         profile=config["profile"],
@@ -1319,7 +1347,7 @@ def budget(payload):
             except (InvalidOperation, ValueError):
                 raise FleetError("Budget amounts must be finite and nonnegative") from None
             args += ["--" + name.replace("_", "-"), str(amount)]
-    return json.loads(run(args, timeout=30).stdout)
+    return json.loads(run(args, timeout=30, env=budget_environment()).stdout)
 
 
 def rpc(payload):
@@ -1329,6 +1357,8 @@ def rpc(payload):
     if expected is not None and expected != host_config()["machine_id"]:
         raise FleetError("Host identity differs from inventory; verify the SSH target before re-enrolling")
     action = payload.get("action")
+    if action in ("ci-autoscale", "native-runner", "enroll", "reserve-staging") or (action == "doctor" and payload.get("smoke")):
+        require_ci()
     if action == "ci-autoscale":
         from .ci_autoscale import host_action
 
@@ -1352,9 +1382,7 @@ def rpc(payload):
             w.get("alive") and w.get("state") not in waiting for w in worker_statuses()
         ):
             raise FleetError("Active work is still draining; wait before updating")
-        # A manager-service stop no longer contains all workers. Slice stop
-        # includes scopes, manager survivors, and direct-launch fallback work.
-        run(["systemctl", "--user", "stop", "tauceti-fleet-workers.slice"], timeout=45)
+        stop_workers()
         return dict(quiescent=True)
     if action == "doctor":
         result = doctor()

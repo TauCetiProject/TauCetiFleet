@@ -11,7 +11,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tauceti_fleet import ci_overview as overview
-from tauceti_fleet import cli, github, host, remote, store
+from tauceti_fleet import cli, github, host, hostos, remote, store
+
+hostos.MACOS = False
 
 
 class Overview(unittest.TestCase):

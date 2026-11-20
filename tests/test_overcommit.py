@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, capacity, ci, cli, github, host, store, vm
+from tauceti_fleet import capabilities, capacity, ci, cli, github, host, hostos, store, vm
+
+hostos.MACOS = False
 
 GIB = 1024**3
 

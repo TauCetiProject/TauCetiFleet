@@ -2,7 +2,10 @@
 
 import unittest
 
+from tauceti_fleet import hostos
 from tauceti_fleet.capabilities import GIB, memory_accounting, memory_pressure
+
+hostos.MACOS = False
 
 
 class MemoryTests(unittest.TestCase):

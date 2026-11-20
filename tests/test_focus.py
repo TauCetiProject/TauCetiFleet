@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import capabilities, focus, host, remote
+from tauceti_fleet import capabilities, focus, host, hostos, remote
 from tauceti_fleet.cli import main
 from tauceti_fleet.store import FleetError
+
+hostos.MACOS = False
 
 
 class FocusTests(unittest.TestCase):

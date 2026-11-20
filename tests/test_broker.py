@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import broker, cli, github, host, remote, store, vm
+from tauceti_fleet import broker, cli, github, host, hostos, remote, store, vm
+
+hostos.MACOS = False
 
 
 class Enrollment(unittest.TestCase):

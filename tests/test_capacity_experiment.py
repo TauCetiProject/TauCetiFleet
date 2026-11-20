@@ -7,7 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from experiments import worker_capacity_20261018 as ramp
-from tauceti_fleet import host, store
+from tauceti_fleet import host, hostos, store
+
+hostos.MACOS = False
 
 
 class CapacityExperimentTests(unittest.TestCase):

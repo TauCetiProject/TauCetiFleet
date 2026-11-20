@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tauceti_fleet import github, host, native_inside, store, vm
+from tauceti_fleet import github, host, hostos, native_inside, store, vm
 from tauceti_fleet import native_runner as native
+
+hostos.MACOS = False
 
 GIB = 1024**3
 

@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host, capacity, lean_pressure
+from tauceti_fleet import host, hostos, capacity, lean_pressure
 from tauceti_fleet.capabilities import GIB, memory_pressure
+
+hostos.MACOS = False
 
 
 class ElasticMemory(unittest.TestCase):

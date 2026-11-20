@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_fleet import broker, capacity, github, host, native_runner, store, vm
+from tauceti_fleet import broker, capacity, github, host, hostos, native_runner, store, vm
+
+hostos.MACOS = False
 
 
 class StagingReservations(unittest.TestCase):
