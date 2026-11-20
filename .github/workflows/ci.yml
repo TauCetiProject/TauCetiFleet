@@ -11,9 +11,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
+# Linux jobs run on the fleet's TauCetiInfra runners (native-disk slots on our own
+# machines) when the repository variable FLEET_INFRA_CI is 'true', and on GitHub-hosted
+# ubuntu-24.04 otherwise: unset or change that variable to fall back. Fork pull requests
+# always run hosted. test stays hosted for now.
 jobs:
   ci-broker:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
     defaults:
       run:
         working-directory: services/ci-broker
@@ -27,6 +31,8 @@ jobs:
       - run: npm ci
       - run: npm test
   test:
+    # Stays GitHub-hosted for now: on a fleet runner, test_lean_runtime's Lean-gate fixture sees
+    # the runner's own gate files under /usr/local/share/tauceti and fails.
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -39,7 +45,7 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q tauceti_fleet
   worker-target-contract:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
