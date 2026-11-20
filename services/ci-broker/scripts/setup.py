@@ -158,8 +158,8 @@ def main():
         limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
     if args.kinds:
         kinds = args.kinds.split(",")
-        if len(set(kinds)) != len(kinds) or not set(kinds) <= {"pr", "staging", "queue-control", "pr-status"}:
-            raise SystemExit("--kinds takes distinct classes from pr, staging, queue-control and pr-status")
+        if len(set(kinds)) != len(kinds) or not set(kinds) <= {"pr", "staging", "queue-control", "pr-status", "infra"}:
+            raise SystemExit("--kinds takes distinct classes from pr, staging, queue-control, pr-status and infra")
         limits["kinds"] = kinds
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
