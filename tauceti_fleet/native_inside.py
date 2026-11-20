@@ -187,8 +187,12 @@ def boot():
     os.chown(LINK / 'events.jsonl', 1000, 1000)
     (LINK / 'telemetry').mkdir(exist_ok=True)
     os.chown(LINK / 'telemetry', 1000, 1000)
+    # The host stages the Lean startup file only for slots that run the Lean gate
+    # (not infra); without it, jobs see neither the gate's environment nor its marker.
+    gated = Path('/opt/tauceti-lean-env').exists()
     Path('/usr/local/share/tauceti').mkdir(parents=True, exist_ok=True)
-    Path('/usr/local/share/tauceti/host-pressure.required').touch()
+    if gated:
+        Path('/usr/local/share/tauceti/host-pressure.required').touch()
     for name, kind in (('start','ci_started'), ('complete','ci_completed')):
         target = Path('/opt/hook-'+name+'.sh')
         target.write_text('#!/bin/bash\nexec /usr/bin/python3 /usr/local/bin/tauceti_native_inside.py '+kind+'\n')
@@ -196,10 +200,9 @@ def boot():
     envfile = Path('/opt/actions-runner/.env')
     lean = ('LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
             'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
-    # The host stages the Lean startup file only for slots that run the Lean gate.
     envfile.write_text('ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh\n'
                        'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh\n'
-                       + (lean if Path('/opt/tauceti-lean-env').exists() else ''))
+                       + (lean if gated else ''))
     os.chown(envfile, 1000, 1000)
     pressure_fd = int(os.environ['TAUCETI_NATIVE_PRESSURE_FD'])
     receiver = subprocess.Popen([sys.executable, __file__, 'pressure-loop'], pass_fds=(pressure_fd,))
