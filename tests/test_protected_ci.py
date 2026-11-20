@@ -99,6 +99,54 @@ class ProtectedCI(unittest.TestCase):
                     with self.assertRaises(store.FleetError):
                         github.protected_policy(config, group)
 
+class InfraCI(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        env = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": temporary.name})
+        env.start()
+        self.addCleanup(env.stop)
+        # A PR host with two infra slots added above its PR slots.
+        self.config = dict(ci_enabled=True, ci_max_jobs=5, ci_staging_slots=0, ci_idle_pool=True,
+                           ci_kinds=["pr"], runner_group_id=3,
+                           ci_protected_slots={"3": dict(kind="infra", runner_group_id=8),
+                                               "4": dict(kind="infra", runner_group_id=8)})
+
+    def test_infra_slots_are_native_protected_and_below_pr_priority(self):
+        infra = capacity.for_slot(self.config, 3)
+        self.assertEqual(capacity.kinds(infra), ["infra"])
+        self.assertEqual(infra["ci_slot_runner_group_id"], 8)
+        # Infra runs on the native-disk backend like PR slots, never in a VM.
+        self.assertTrue(native_runner.selected(infra))
+        self.assertTrue(native_runner.selected(capacity.for_slot(self.config, 0)))
+        # A full PR backlog cannot take infra slots, and infra never takes PR slots.
+        busy = [dict(slot=i, runner_id=i + 100, busy=True) for i in range(3)]
+        self.assertEqual(ci_pool.plan(self.config, busy, [], dict(queued=[])), set(range(5)))
+        self.assertEqual(ci_pool.recovery_slots(self.config, busy[:2], [], dict(queued=[["tauceti-fleet-pr"]]),
+                         [dict(instance="a" * 16, ci_kinds=["infra"], labels=["tauceti-fleet-pr"])]), {})
+        infra["unit"] = "infra-guest"
+        with patch.object(ci_priority, "run") as run, patch.object(github, "ci_read") as metadata:
+            ci_priority.classify(self.config, infra, 100)
+        metadata.assert_not_called()
+        self.assertEqual(infra["ci_job_kind"], "infra")
+        self.assertFalse(ci_priority.staging(infra))
+        self.assertEqual(infra["cpu_weight"], capacity.INFRA_CPU_WEIGHT)
+        self.assertLess(capacity.INFRA_CPU_WEIGHT, 100)
+        run.assert_called_once_with(["systemctl", "--user", "set-property", "--runtime", "infra-guest",
+                                     "CPUWeight=" + str(capacity.INFRA_CPU_WEIGHT)])
+
+    def test_infra_requires_the_broker_and_its_results_stay_with_github(self):
+        with self.assertRaises(store.FleetError):
+            github.protected_policy(dict(ci_kinds=["infra"], ci_slot_runner_group_id=8), {})
+        from tauceti_fleet import host
+        store.atomic(store.state_dir() / "pending-ci.json",
+                     [dict(run_id=1, runner_id=2, instance="c" * 16, ci_kinds=["infra"], started_at=__import__("time").time())])
+        with patch.object(github, "ci_read") as metadata:
+            host.collect_ci_results(dict(self.config, machine_id="a" * 32))
+        metadata.assert_not_called()
+        self.assertEqual(store.read(store.state_dir() / "pending-ci.json", None), [])
+
+
 class PRStatusCI(unittest.TestCase):
     def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
         config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,

@@ -35,7 +35,7 @@ not set another ceiling in the broker. Existing stored enrollment counts are
 ignored, including for older controllers: `/v1/policy` reports the protocol's
 4096-slot bound in its legacy `max_jobs` field. Invitations and host inventory no
 longer expose a per-host count. Old API callers' `max_jobs` values are ignored.
-Changing authorized job classes still requires retiring registered slots first.
+Adding job classes applies live; removing one still requires retiring registered slots first.
 
 Rolling back to a broker that enforces enrollment counts requires restoring a
 `max_jobs` field on every host record before switching code. Otherwise that broker
@@ -107,8 +107,8 @@ explicitly. Reverting broker code alone does not restore the old record format.
 python3 scripts/setup.py hosts
 python3 scripts/setup.py revoke --machine-id HEX_ID
 python3 scripts/setup.py reconcile --machine-id HEX_ID --slot 0
-# Change authorized classes after retiring the host's registered slots:
-python3 scripts/setup.py capacity --machine-id HEX_ID --ci both
+# Add classes live; removing a class requires retiring the host's registered slots first:
+python3 scripts/setup.py capacity --machine-id HEX_ID --kinds pr,infra
 ```
 
 Revocation immediately rejects future host requests and discards the stored JIT
@@ -203,6 +203,17 @@ affect build-only hosts, and runners in other groups are never touched. `/v1/pol
 local `ci_protected_slots`. `/v1/groups` returns that mapping and the host's
 classes without the group 3 check, so group 3 drift does not stop special slots. The `control` and `roadmap` classes (TauCetiRoadmap)
 are outside the App installation and stay unsupported.
+
+The `infra` class runs CI for our own infrastructure repositories (TauCetiCI,
+TauCetiFleet, TauCetiTools and TauCetiWorker) in group 8 (`TauCetiInfra`). Those
+repositories take pull requests only from us and our agents, so the group has no
+workflow restriction; instead the broker requires selected-repository visibility
+with exactly those four repositories, checked like the other special groups.
+Their workflows target the group only for same-repository pull requests and
+pushes, and the repositories require approval before fork pull request workflows
+run. Hosts run infra in protected slots (`ci_protected_slots` kind `infra`) on the
+native-disk backend, below PR builds' CPU weight. The App installation does not
+cover these repositories, so Fleet records no per-job result for infra slots.
 
 ## Shared-harness entries
 

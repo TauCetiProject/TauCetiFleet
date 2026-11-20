@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -136,6 +137,11 @@ class NativeRunner(unittest.TestCase):
                            dict(ci_kinds=["pr", "staging"], ci_staging_slots=2, ci_max_jobs=2)):
                 self.assertIsNone(native.prepare_for_ci(config))
         prepare.assert_not_called()
+        # Protected infra slots run native-disk on any host, so they need the image.
+        infra = dict(ci_kinds=["staging"], ci_max_jobs=3, ci_protected_slots={"2": dict(kind="infra", runner_group_id=8)})
+        with patch.object(native, "prepare", return_value="image") as prepare:
+            self.assertEqual(native.prepare_for_ci(infra), "image")
+        prepare.assert_called_once_with(infra)
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])
@@ -234,6 +240,7 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(native.idle_expired(value, own))
             self.assertFalse(native.idle_expired(dict(value, busy=True), own))
             self.assertFalse(native.idle_expired(dict(value, run_id=42), own))
+            self.assertFalse(native.idle_expired(dict(value, ci_kinds=["infra"]), own))
             self.assertFalse(native.idle_expired(value, dict(own, busy=True)))
             self.assertFalse(native.idle_expired(dict(value, online_observed_at=200), own))
 
@@ -296,6 +303,22 @@ class NativeRunner(unittest.TestCase):
         self.assertEqual(value["runtime"], native.RUNTIME)
         self.assertFalse((self.root / "rootfs").exists())
         self.assertEqual((self.root / "control/jit").stat().st_mode & 0o777, 0o600)
+
+    def test_infra_slots_omit_the_lean_gate_environment(self):
+        image = store.data_dir() / "images/native" / ("a" * 64) / "rootfs"
+        (image / "usr/local/bin").mkdir(parents=True)
+        (image / "opt").mkdir()
+        for lean, present in ((True, True), (False, False)):
+            with self.subTest(lean=lean):
+                directory = self.root / ("lean" if lean else "infra")
+                directory.mkdir()
+                with patch.object(native, "image", return_value=dict(sha256="a" * 64)):
+                    native.stage(directory, "jit", lean=lean)
+                def copy(command, **_):
+                    shutil.copytree(command[-2], command[-1], symlinks=True)
+                with patch.object(native, "run", side_effect=copy):
+                    native.materialize(directory)
+                self.assertEqual((directory / "rootfs/opt/tauceti-lean-env").exists(), present)
 
     def test_shared_records_cannot_read_host_symlinks_or_block_on_fifo(self):
         target = self.root / "control/native-progress.json"

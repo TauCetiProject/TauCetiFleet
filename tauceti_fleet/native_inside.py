@@ -194,10 +194,12 @@ def boot():
         target.write_text('#!/bin/bash\nexec /usr/bin/python3 /usr/local/bin/tauceti_native_inside.py '+kind+'\n')
         target.chmod(0o755)
     envfile = Path('/opt/actions-runner/.env')
+    lean = ('LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
+            'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
+    # The host stages the Lean startup file only for slots that run the Lean gate.
     envfile.write_text('ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh\n'
                        'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh\n'
-                       'LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
-                       'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
+                       + (lean if Path('/opt/tauceti-lean-env').exists() else ''))
     os.chown(envfile, 1000, 1000)
     pressure_fd = int(os.environ['TAUCETI_NATIVE_PRESSURE_FD'])
     receiver = subprocess.Popen([sys.executable, __file__, 'pressure-loop'], pass_fds=(pressure_fd,))

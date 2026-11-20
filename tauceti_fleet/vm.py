@@ -335,7 +335,7 @@ def start(config):
             native = native_runner.choose(config, available)
             config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available,
                           _ci_start_measured_available=measured_available, _ci_start_boot_reservation=boot_reservation)
-            if native:
+            if native and config.get("ci_kinds") != ["infra"]:
                 config["ci_kinds"] = ["pr"]
             if not start_memory_ok(config):
                 # Defer without consuming the startup interval; the slot retries in 5s.
@@ -482,7 +482,7 @@ def _cancel_registration(config):
 
 def _start(config):
     from . import native_runner
-    from .capacity import disk_root, disk_startup_gib, guest_shape
+    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_shape
 
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
@@ -526,7 +526,7 @@ def _start(config):
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
         if native:
-            runtime_fields = native_runner.stage(directory, jit)
+            runtime_fields = native_runner.stage(directory, jit, lean=config.get("ci_kinds") != ["infra"])
         else:
             run(
                 [
@@ -594,7 +594,8 @@ def _start(config):
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
-                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"]) else "100"),
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"])
+                                else str(INFRA_CPU_WEIGHT) if config.get("ci_kinds") == ["infra"] else "100"),
                 "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",

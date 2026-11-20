@@ -5,6 +5,11 @@ import math
 from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
+# Classes of protected slots, each in its own runner group. `infra` runs our own
+# infrastructure repositories' CI on native-disk slots below PR builds' CPU weight.
+PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra")
+# CPU weight of infra jobs; PR builds have 100 and staging 10000.
+INFRA_CPU_WEIGHT = 25
 MAX_JOBS = 4096
 
 
@@ -96,7 +101,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"], ["pr-status"]]:
+    if value not in [*KINDS.values(), *([kind] for kind in PROTECTED_KINDS)]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -122,7 +127,7 @@ def protected_slots(config):
         if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
                 or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
                 or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
-                or value["kind"] not in ("control", "roadmap", "queue-control", "pr-status")
+                or value["kind"] not in PROTECTED_KINDS
                 or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
                 or value["runner_group_id"] == config.get("runner_group_id")):
             raise FleetError("Protected slots require a separate runner group and a valid slot")

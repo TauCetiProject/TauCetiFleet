@@ -783,6 +783,9 @@ def collect_ci_results(config):
         if time.time() - value.get("started_at", time.time()) > 7 * 86400:
             event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
             continue
+        if value.get("ci_kinds") == ["infra"]:
+            # The broker reads TauCeti only; an infra job's result stays with GitHub.
+            continue
         try:
             repository = value.get("repository", "TauCetiProject/TauCeti")
             if repository not in ("TauCetiProject/TauCeti", "TauCetiProject/TauCetiRoadmap"):

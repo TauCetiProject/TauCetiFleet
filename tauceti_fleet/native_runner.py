@@ -56,12 +56,13 @@ def selected(config):
     # Native setup has a weaker boundary and only registers for PR work.
     return (type(index) is int and type(reserved) is int
             and 0 <= reserved <= index < capacity.jobs(config)
-            and "pr" in kinds and (kinds == ["pr"] or reserved > 0))
+            and (kinds == ["infra"] or "pr" in kinds and (kinds == ["pr"] or reserved > 0)))
 
 
 def prepare_for_ci(config):
     """Provision the default PR backend before enabling or handing over CI."""
-    if selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
+    infra = any(value["kind"] == "infra" for value in capacity.protected_slots(config).values())
+    if infra or selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
         return prepare(config)
     return None
 
@@ -71,7 +72,8 @@ def is_native(value):
 
 
 def idle_expired(value, own):
-    return (is_native(value) and not value.get("busy") and not value.get("run_id")
+    # Protected infra slots are always wanted; retiring an idle one only restarts it.
+    return (is_native(value) and value.get("ci_kinds") != ["infra"] and not value.get("busy") and not value.get("run_id")
             and own.get("status") == "online" and not own.get("busy")
             and time.time() - value.get("online_observed_at", time.time()) >= 300)
 
@@ -125,7 +127,7 @@ def choose(config, available):
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
     # A lost registration reply must retain the original job classes.
-    if intent and intent.get("ci_kinds") != ["pr"]:
+    if intent and intent.get("ci_kinds") not in (["pr"], ["infra"]):
         atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
                backend="vm", reason="preserve existing runner classes"))
         return False
@@ -209,14 +211,19 @@ def remove_root(root):
         raise FleetError("Native filesystem cleanup is incomplete; retain instance ownership")
 
 
-def stage(directory, jit):
-    """Stage a small durable launch intent; allocate OS/workspace inside its unit."""
+def stage(directory, jit, *, lean=True):
+    """Stage a small durable launch intent; allocate OS/workspace inside its unit.
+
+    `lean=False` (infra slots) omits the Lean pressure gate's job environment:
+    those jobs are not TauCeti builds, and some of their tests read `LEAN`.
+    """
     directory = Path(directory)
     value = image()
     (directory / "control").mkdir(mode=0o700)
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
-    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB))
+    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB,
+                                           lean_runtime=lean))
     return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
                 disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
@@ -234,7 +241,9 @@ def materialize(directory):
         target = root / "usr/local/bin" / name
         target.write_text(Path(module.__file__).read_text())
         target.chmod(0o755)
-    (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
+    if read(directory / "native.json").get("lean_runtime", True):
+        # Its presence also tells the job unit to export the Lean gate's environment.
+        (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
 
 
 def prerequisites():

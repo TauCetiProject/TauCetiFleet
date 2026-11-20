@@ -87,6 +87,11 @@ class CapacityPolicy(unittest.TestCase):
         decision=c.decide(s,s['at'])
         self.assertEqual(decision['kind'],'hold')
 
+    def test_infra_slots_hold_autoscaling(self):
+        controller = auto.Controller(minimum=1, maximum=6)
+        self.assertEqual(controller.decide(dict(snapshot(), infra_slots=True), 1000),
+                         dict(kind="hold", reason="infra slots sit above the general slots; size this host's CI by hand"))
+
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
         s['vms'][0].update(busy=False)

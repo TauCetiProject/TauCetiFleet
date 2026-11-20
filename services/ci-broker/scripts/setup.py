@@ -148,7 +148,7 @@ def main():
     parser.add_argument("--expires-in-days", type=int, default=7, help="invitation lifetime, 1–30 days (default: 7)")
     parser.add_argument("--token-file", type=Path, help="extend an existing unredeemed invitation instead of creating a new code")
     parser.add_argument("--ci", choices=("pr", "staging", "both"), help="allowed CI job classes")
-    parser.add_argument("--kinds", help="comma-separated CI classes, replacing --ci; also accepts queue-control and pr-status")
+    parser.add_argument("--kinds", help="comma-separated CI classes, replacing --ci; also accepts queue-control, pr-status and infra")
     parser.add_argument("--slot", type=int, default=0, help="slot to reconcile (default: 0)")
     args = parser.parse_args()
     limits = {}
@@ -158,8 +158,8 @@ def main():
         limits["kinds"] = ["pr", "staging"] if args.ci == "both" else [args.ci]
     if args.kinds:
         kinds = args.kinds.split(",")
-        if len(set(kinds)) != len(kinds) or not set(kinds) <= {"pr", "staging", "queue-control", "pr-status"}:
-            raise SystemExit("--kinds takes distinct classes from pr, staging, queue-control and pr-status")
+        if len(set(kinds)) != len(kinds) or not set(kinds) <= {"pr", "staging", "queue-control", "pr-status", "infra"}:
+            raise SystemExit("--kinds takes distinct classes from pr, staging, queue-control, pr-status and infra")
         limits["kinds"] = kinds
     DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == "prepare":
