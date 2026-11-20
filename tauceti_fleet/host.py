@@ -554,6 +554,30 @@ def reserve_staging(maximum, memory_gib=None):
                 pending_slots=pending)
 
 
+def set_infra_slots(count):
+    """Run `count` infra slots above the PR slots; PR slots and guests are untouched.
+
+    Added slots start on the controller's next loop; removed ones finish their job.
+    """
+    config = host_config()
+    if not config.get("ci_broker_url"):
+        raise FleetError("Infra slots register through the CI broker; enroll this host first")
+    policy = github.capacity_policy(config)
+    proposed = capacity.with_infra_slots(config, count, (policy.get("groups") or {}).get("infra"))
+    capacity.authorize(proposed, policy)
+    if config["ci_enabled"]:
+        native_runner.prepare_for_ci(proposed)
+
+    def validate(value):
+        capacity.staging_slots(value)
+
+    value = update_host(validate=validate, ci_max_jobs=proposed["ci_max_jobs"],
+                        ci_protected_slots=proposed["ci_protected_slots"])
+    event("ci_infra_slots", count=count, ci_max_jobs=value["ci_max_jobs"])
+    return dict(infra_slots=capacity.infra_slots(value), pr_slots=capacity.pr_jobs(value),
+                ci_max_jobs=capacity.jobs(value), ci_enabled=value["ci_enabled"])
+
+
 def drain():
     update_host(ci_enabled=False, workers_enabled=False, draining=True)
     atomic(
@@ -1390,6 +1414,8 @@ def rpc(payload):
         return schedule.configure(payload)
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"], payload.get("memory_gib"))
+    if action == "infra-slots":
+        return set_infra_slots(payload["count"])
     if action == "drain":
         return drain()
     if action == "budget":

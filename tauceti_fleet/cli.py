@@ -64,6 +64,10 @@ def parser():
     native.add_argument("host")
     native.add_argument("--prepare", action="store_true")
     native.add_argument("--json", action="store_true")
+    infra = sub.add_parser("infra-slots", help="run infrastructure-repository CI in slots above the PR slots")
+    infra.add_argument("host")
+    infra.add_argument("--slots", dest="count", type=int, required=True)
+    infra.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
@@ -385,6 +389,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     for variable in args.unset_env or []:
                         changes[variable] = None
                     payload["worker_env"] = changes
+            if args.command == "infra-slots":
+                payload.update(count=args.count)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
                 if args.memory_gib is not None:
@@ -427,7 +433,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 results[name] = remote.call(
                     entry["target"],
                     payload,
-                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging") or (action == "native-runner" and args.prepare) else 90,
+                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging", "infra-slots") or (action == "native-runner" and args.prepare) else 90,
                     expected_machine_id=entry["machine_id"],
                 )
             except FleetError as exc:

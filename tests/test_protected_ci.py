@@ -147,6 +147,47 @@ class InfraCI(unittest.TestCase):
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json", None), [])
 
 
+class InfraSlotsCommand(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = temporary.name
+        env = patch.dict(os.environ, {"TAUCETI_FLEET_" + k: os.path.join(root, k) for k in ("STATE", "CONFIG", "DATA")})
+        env.start()
+        self.addCleanup(env.stop)
+        store.update_host(machine_id="a" * 32, ci_enabled=True, workers_enabled=False, ci_allowed=True, max_workers=0,
+                          ci_kinds=["pr"], ci_max_jobs=15, ci_broker_url="https://fleet.example")
+        self.policy = dict(runner_group_id=3, groups={"queue-control": 6, "pr-status": 7, "infra": 8}, kinds=["pr", "infra"])
+
+    def run_command(self, count, policy=None):
+        from tauceti_fleet import host
+        with patch.object(github, "capacity_policy", return_value=policy or self.policy), \
+                patch.object(native_runner, "prepare_for_ci") as prepare:
+            result = host.rpc(dict(action="infra-slots", count=count))
+        return result, prepare
+
+    def test_infra_slots_go_above_the_pr_slots_and_can_change_live(self):
+        result, prepare = self.run_command(8)
+        self.assertEqual(result, dict(infra_slots=list(range(15, 23)), pr_slots=15, ci_max_jobs=23, ci_enabled=True))
+        config = store.host_config()
+        self.assertEqual(config["ci_protected_slots"]["22"], dict(kind="infra", runner_group_id=8))
+        prepare.assert_called_once()
+        self.assertEqual(self.run_command(2)[0]["infra_slots"], [15, 16])
+        self.assertEqual(self.run_command(0)[0], dict(infra_slots=[], pr_slots=15, ci_max_jobs=15, ci_enabled=True))
+        self.assertEqual(store.host_config()["ci_protected_slots"], {})
+
+    def test_infra_slots_require_the_broker_class_and_keep_other_protected_slots_below(self):
+        with self.assertRaises(store.FleetError):
+            self.run_command(4, dict(self.policy, kinds=["pr"]))
+        with self.assertRaises(store.FleetError):
+            self.run_command(4, dict(self.policy, groups={"queue-control": 6}))
+        self.assertEqual(store.host_config()["ci_max_jobs"], 15)
+        store.update_host(ci_protected_slots={"14": dict(kind="pr-status", runner_group_id=7)})
+        self.policy["kinds"].append("pr-status")
+        self.assertEqual(self.run_command(2)[0]["infra_slots"], [15, 16])
+        self.assertEqual(store.host_config()["ci_protected_slots"]["14"]["kind"], "pr-status")
+
+
 class PRStatusCI(unittest.TestCase):
     def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
         config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,
