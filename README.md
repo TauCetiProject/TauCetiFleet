@@ -301,6 +301,12 @@ The shared job ceiling and worker admissions stay enabled. Existing guests finis
 with their original classes, and the command reports slots awaiting replacement.
 Use `--slots 0` to remove the reservation as guests are replaced.
 
+To stop a mixed host with a staging reservation taking PR jobs, run
+`tauceti-fleet enable HOST --ci staging` live. A staging-only host with a reservation
+runs staging in its reserved slots only: they and any `ci_protected_slots` keep their
+guests, while each other slot retires its idle runner and lets a busy one finish its
+job, then stays empty. Nothing is cancelled.
+
 Each reserved staging slot also keeps one persistent, sparse disk, `warm.qcow2` in
 the slot's state directory (`ci_disk_gib` virtual size), attached to every guest of
 that slot as a second virtio disk with serial `tauceti-warm`. The disposable guests
@@ -325,9 +331,9 @@ the guest rather than slowed.
 
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
-slots independently. Enabling does not restart the controller. Changes to guest
-shape or job classes, and reductions in the slot count, still require retiring
-the current guests first. Each host chooses its runner count with local
+slots independently. Enabling does not restart the controller. Other changes to guest
+shape or job classes (apart from dropping PR from a reserved host, above), and
+reductions in the slot count, still require retiring the current guests first. Each host chooses its runner count with local
 `--max-jobs`; there is no separate broker or dispatcher ceiling for a machine.
 Enrollment authorizes job classes, and a host can select a subset of them.
 The slot format supports up to 4096 jobs per host. Each guest has its own

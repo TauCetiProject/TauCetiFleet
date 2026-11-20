@@ -162,6 +162,12 @@ def reservation(config):
         return 0, str(exc)
 
 
+def unused(config, index):
+    """A staging-only host with a reservation runs staging in its reserved slots only."""
+    reserved, _ = reservation(config)
+    return kinds(config) == ["staging"] and 0 < reserved <= index and index not in protected_slots(config)
+
+
 def for_slot(config, index):
     protected = protected_slots(config).get(index)
     if protected:
