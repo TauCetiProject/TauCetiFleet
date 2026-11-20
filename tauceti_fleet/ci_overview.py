@@ -232,6 +232,9 @@ def pressure_rows(path, identity, account, policies):
     ]
 
 
+REPORT_LIFETIME = 6 * 3600  # longer than a slow round, so a busy worker keeps its last report
+
+
 def reported_pressure_rows(config, account, policies):
     """Rows from the authoring backpressure live workers report for their own rounds.
 
@@ -239,6 +242,7 @@ def reported_pressure_rows(config, account, policies):
     when the fleet works on Forgejo and no GitHub survey response is cached."""
     prefix = "fleet-" + config["machine_id"][:8] + "-"
     rows = {}
+    now = time.time()
     for path in (state_dir() / "workers").glob("*.json"):
         try:
             value = read(path, {})
@@ -255,7 +259,10 @@ def reported_pressure_rows(config, account, policies):
         count, limit, stamp = report.get("count"), report.get("limit"), report.get("observed_at")
         scope, skip = report.get("scope"), report.get("skip", "")
         if (type(count) is not int or count < 0 or type(limit) is not int or limit <= 0
-                or type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp <= 0
+                or type(stamp) not in (int, float) or not math.isfinite(stamp)
+                # Never from the future (status rejects that), and not left over from long ago:
+                # a worker that stopped reporting yields to cached surveys.
+                or not now - REPORT_LIFETIME <= stamp <= now + 5
                 or not isinstance(scope, str) or not isinstance(skip, str)):
             continue
         skipped = tuple(sorted(set(filter(None, skip.split(",")))))

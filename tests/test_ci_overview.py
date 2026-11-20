@@ -183,6 +183,8 @@ class Overview(unittest.TestCase):
         self.worker(1, limit=1024, authoring=dict(report, observed_at=now - 90, count=95))
         self.worker(2, limit=1024, authoring=report)
         self.worker(3, limit=1024, authoring=dict(report, count="many"))  # malformed: ignored
+        self.worker(4, limit=1024, authoring=dict(report, observed_at=now + 3600, count=1))  # future: ignored
+        self.worker(5, limit=1024, authoring=dict(report, observed_at=now - 7 * 3600, count=2))  # long ago
         data, stamp = overview.pressure(self.config)  # no gateway cache on this host at all
         self.assertEqual([(r["scope"], r["count"], r["limit"], r["blocked"]) for r in data["scopes"]],
                          [("auto", 97, 1024, False)])
