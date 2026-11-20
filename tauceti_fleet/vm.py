@@ -126,9 +126,12 @@ def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard
         f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
+        # QEMU 10 rejects `serial` as a -drive option, so the serial goes on the device.
         *([
             "-drive",
-            f"file={warm},format=qcow2,if=virtio,serial={WARM_SERIAL},werror=report,rerror=report,discard=unmap",
+            f"file={warm},format=qcow2,if=none,id=warm,werror=report,rerror=report,discard=unmap",
+            "-device",
+            f"virtio-blk-pci,drive=warm,serial={WARM_SERIAL}",
         ] if warm else []),
         "-netdev",
         "user,id=net0",
