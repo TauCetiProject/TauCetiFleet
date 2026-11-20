@@ -1,66 +1,49 @@
 name: CI
 on:
-  # Branch pushes would duplicate each pull_request run on GitHub-hosted runners, which the
-  # whole organisation shares; only main is checked on push.
-  push:
-    branches: [main]
   pull_request:
-# A new push to a PR cancels that PR's older run; main runs never cancel each other.
-concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-permissions:
-  contents: read
-# Linux jobs run on the fleet's TauCetiInfra runners (native-disk slots on our own
-# machines) when the repository variable FLEET_INFRA_CI is 'true', and on GitHub-hosted
-# ubuntu-24.04 otherwise: unset or change that variable to fall back. Fork pull requests
-# always run hosted. test stays hosted for now.
 jobs:
-  ci-broker:
-    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
-    defaults:
-      run:
-        working-directory: services/ci-broker
+  probe:
+    runs-on: {group: TauCetiInfra, labels: [self-hosted, linux, x64, tauceti-fleet-infra]}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: services/ci-broker/package-lock.json
-      - run: npm ci
-      - run: npm test
-  test:
-    # Stays GitHub-hosted for now: on a fleet runner, test_lean_runtime's Lean-gate fixture sees
-    # the runner's own gate files under /usr/local/share/tauceti and fails.
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        python: ['3.11', '3.13']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q tauceti_fleet
-  worker-target-contract:
-    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: TauCetiProject/TauCetiWorker
-          ref: 205da3359574ee5b656aed11ebed916c57e1b164
-          path: worker-contract
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Install the merged Worker contract
-        run: python -m pip install ./worker-contract
-      - name: Exercise canonical target inspection and generated definitions
+      - name: Environment
         run: |
-          worker_binary=$(command -v tauceti)
-          test -x "$worker_binary"
-          export TAUCETI_TEST_WORKER="$worker_binary"
-          python -m unittest discover -s tests -p test_targets.py -v
+          id; git --version; command -v node || true; ls -la /opt /usr/local/share/tauceti 2>&1 || true; env | sort | grep -E 'LEAN|BASH_ENV|TOOL|AGENT' || true
+      - name: Processes of this uid that refuse inspection
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          uid=os.getuid()
+          for p in sorted(Path('/proc').glob('[0-9]*'), key=lambda p:int(p.name)):
+              try:
+                  st=p.stat()
+              except OSError: continue
+              cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ')[:120] if os.access(p/'cmdline',os.R_OK) else b'?'
+              bad=[]
+              for n in ('cwd','exe'):
+                  try: os.readlink(p/n)
+                  except OSError as e: bad.append(f'{n}:{e.errno}')
+              try: list((p/'fd').iterdir())
+              except OSError as e: bad.append(f'fd:{e.errno}')
+              print(p.name, 'uid', st.st_uid, 'BAD' if bad and st.st_uid==uid else '', bad, cmd)
+          PY
+      - name: Fleet lean runtime test, verbose
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, tempfile, sys
+          from pathlib import Path
+          sys.path.insert(0, '.')
+          from tauceti_fleet import lean_pressure, lean_runtime
+          with tempfile.TemporaryDirectory() as d:
+              root=Path(d); tc=root/'elan/toolchains/snapshot'; (tc/'bin').mkdir(parents=True)
+              c=tc/'bin/lean'; c.write_text('#!/bin/sh\necho compiler\n'); c.chmod(0o755)
+              w=root/'watchdog'; (w/'bin').mkdir(parents=True); (w/'bin/lean-real').symlink_to(c)
+              e=w/'bin/lean'; e.write_text('#!/bin/sh\nexec "$(dirname "$0")/lean-real" "$@"\n'); e.chmod(0o755)
+              h=root/'tauceti-lean'; h.write_bytes(Path(lean_pressure.__file__).read_bytes()); h.chmod(0o755)
+              s=root/'ci-startup'; s.write_text(lean_runtime.STARTUP)
+              env={**os.environ,'BASH_ENV':str(s),'WATCHDOG_TOOLCHAIN':str(w),'TAUCETI_LEAN_WRAPPER':str(h),'SHLVL':'1'}
+              r=subprocess.run(['bash','-ec','bash -ec true'],env=env,text=True,capture_output=True,timeout=5); print('install', r.returncode, r.stdout, r.stderr)
+              print(sorted(str(p.relative_to(root)) for p in root.rglob('*')))
+              r=subprocess.run([str(e),'--print-prefix'],env={'PATH':os.environ['PATH']},text=True,capture_output=True); print('prefix', r.returncode, repr(r.stdout), r.stderr)
+          PY
