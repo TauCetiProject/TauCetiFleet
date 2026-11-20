@@ -441,3 +441,34 @@ class HostActions(unittest.TestCase):
             result=auto.host_action({})
         self.assertEqual(result['maximum'],3)
         self.assertEqual(result['vms'],[])
+
+
+class Install(unittest.TestCase):
+    def test_install_writes_unit_from_the_installed_launcher_with_app_credentials(self):
+        from tauceti_fleet import process
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            with patch.object(host, "units", return_value=path), patch.object(process, "run") as run:
+                result = auto.install("chungus5", "a" * 32, minimum=15, maximum=15, github_app_dir=path / "app")
+            unit = (path / auto.UNIT).read_text()
+            self.assertIn('"ci-autoscale" "--host" "chungus5" "--machine-id" "' + "a" * 32 + '"', unit)
+            self.assertIn('"--minimum" "15" "--maximum" "15" "--github-app-dir" "%d"', unit)
+            self.assertIn(str(Path.home() / ".local/bin/tauceti-fleet"), unit)
+            self.assertIn("LoadCredential=" + json.dumps(f"github-private-key.pem:{path / 'app'}/github-private-key.pem"), unit)
+            self.assertNotIn("PYTHONPATH", unit)
+            self.assertEqual(result["maximum"], 15)
+            self.assertEqual(run.call_args.args[0], ["systemctl", "--user", "restart", auto.UNIT])
+
+    def test_install_refuses_a_drop_in(self):
+        from tauceti_fleet import process
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / (auto.UNIT + ".d")).mkdir()
+            (path / (auto.UNIT + ".d") / "90-hand.conf").write_text("[Service]\n")
+            with patch.object(host, "units", return_value=path), patch.object(process, "run") as run:
+                with self.assertRaises(store.FleetError):
+                    auto.install("chungus5", "a" * 32, minimum=1, maximum=4, github_app_dir=path)
+            run.assert_not_called()
+            self.assertFalse((path / auto.UNIT).exists())

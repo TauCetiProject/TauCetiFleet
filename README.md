@@ -62,15 +62,21 @@ operation. Existing administrator resource allocations remain authoritative.
 Worker readiness also checks `gh`, `git`, `uvx`, `jq`, `lake` (elan), and `claude`
 in the account's PATH. Missing tools block worker activation with a remedy.
 
-An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
---machine-id MACHINE_ID --minimum 1 --maximum 4 --github-app-dir %d` as a
-persistent user service on the SSH control host, with `LoadCredential=github-app.json:...` and
-`LoadCredential=github-private-key.pem:...` naming a GitHub App with `actions: write` on TauCeti
-(the queue App). Its recovery writes (force-cancel, rerun) then use a TauCeti-only installation
-token; reads use tauceti-ai-for-science. `--github-account LOGIN` instead makes the writes with that
-`gh` account, which spends a personal REST quota. The App path needs the `cryptography` package
-(the `app` extra, `pip install 'tauceti-fleet[app]'`, or a system Python that has it); without it
-the writes fail with that message rather than falling back. It reads the host's existing
+On the SSH control host, install the CI autoscaler as a persistent user service with:
+
+```sh
+tauceti-fleet install-ci-autoscale chungus5 --machine-id MACHINE_ID --minimum 1 --maximum 15
+```
+
+The unit runs `tauceti-fleet ci-autoscale` from the installed Fleet release, so a restart after
+`update local` picks up new code; rerun the installer to change its bounds. It loads
+`github-app.json` and `github-private-key.pem` from `--github-app-dir` (default
+`~/.config/tauceti-queue`, the queue App, which has `actions: write` on TauCeti) with
+`LoadCredential=`. Its recovery writes (force-cancel, rerun) then use a TauCeti-only installation
+token; reads use tauceti-ai-for-science. The installer refuses to run while a drop-in exists for
+`tauceti-ci-autoscale.service`. The App path needs the `cryptography` package (the `app` extra,
+`pip install 'tauceti-fleet[app]'`, or a system Python that has it); without it the writes fail with
+that message rather than falling back. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
 and compiler headroom. Build guest launches still obey the host's ten-second settling interval and

@@ -108,6 +108,15 @@ def parser():
     export.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
+    sub.add_parser("ci-autoscale", help="run the CI autoscaler for one host (the installed unit's command)")
+    install_autoscale = sub.add_parser("install-ci-autoscale",
+                                       help="install this account's CI autoscaler unit for one SSH host")
+    install_autoscale.add_argument("host", help="SSH alias of the CI host")
+    install_autoscale.add_argument("--machine-id", required=True)
+    install_autoscale.add_argument("--minimum", type=int, required=True)
+    install_autoscale.add_argument("--maximum", type=int, required=True)
+    install_autoscale.add_argument("--github-app-dir", default=str(Path.home() / ".config/tauceti-queue"),
+                                   help="directory holding github-app.json and github-private-key.pem (default: the queue App's)")
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
@@ -158,6 +167,15 @@ def main(argv=None, *, _status_results=None, _standalone=False):
     if raw[:1] == ["monitoring"]:
         from .monitoring import main as monitoring_main
         return monitoring_main(raw[1:])
+    if raw[:1] == ["ci-autoscale"]:
+        from .ci_autoscale import main as autoscale_main
+        return autoscale_main(raw[1:])
+    if raw[:1] == ["install-ci-autoscale"]:
+        from .ci_autoscale import install
+        args = parser().parse_args(raw)
+        print(json.dumps(install(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
+                                 github_app_dir=args.github_app_dir)))
+        return 0
     if raw[:1] == ["install-monitoring"]:
         from .monitoring import install_local
         args = parser().parse_args(raw)

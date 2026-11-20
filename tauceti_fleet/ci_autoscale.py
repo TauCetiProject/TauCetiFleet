@@ -423,7 +423,38 @@ class Operator:
         return decision
 
 
-def main():
+UNIT = "tauceti-ci-autoscale.service"
+
+
+def install(target, machine_id, *, minimum, maximum, github_app_dir):
+    """Write and (re)start this account's autoscaler unit; it runs the installed Fleet release."""
+    from .host import unit_argument, units
+    from .process import run
+
+    remote.validate_target(target)
+    if not 1 <= minimum <= maximum <= capacity.MAX_JOBS:
+        raise FleetError("invalid adaptive CI bounds")
+    directory = Path(github_app_dir).expanduser().resolve()
+    dropins = sorted((units() / (UNIT + ".d")).glob("*.conf"))
+    if dropins:
+        raise FleetError(f"systemd drop-in {dropins[0]} overrides {UNIT}; move it away, then rerun")
+    args = [Path.home() / ".local/bin/tauceti-fleet", "ci-autoscale", "--host", target, "--machine-id", machine_id,
+            "--minimum", minimum, "--maximum", maximum]
+    body = (f"[Unit]\nDescription=Adapt {target} CI capacity and recover stalled PR builds\n"
+            "StartLimitIntervalSec=0\n\n[Service]\nType=simple\n"
+            "ExecStart=" + " ".join(unit_argument(a) for a in args) + ' "--github-app-dir" "%d"\n')
+    for name in ("github-app.json", "github-private-key.pem"):
+        body += "LoadCredential=" + unit_argument(f"{name}:{directory / name}") + "\n"
+    body += "Environment=" + unit_argument("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")) + "\n"
+    body += "Restart=always\nRestartSec=15\nUMask=0077\nMemoryMax=256M\n\n[Install]\nWantedBy=default.target\n"
+    (units() / UNIT).write_text(body)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", UNIT])
+    run(["systemctl", "--user", "restart", UNIT])
+    return dict(installed=UNIT, host=target, machine_id=machine_id, minimum=minimum, maximum=maximum)
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True)
     parser.add_argument("--machine-id", required=True)
@@ -434,7 +465,7 @@ def main():
     writer.add_argument("--github-app-dir", type=Path,
                         help="GitHub App credential directory for recovery writes (e.g. %%d with LoadCredential=)")
     parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     remote.validate_target(args.host)
     if not 1 <= args.minimum <= args.maximum <= capacity.MAX_JOBS:
         parser.error("invalid adaptive CI bounds")
