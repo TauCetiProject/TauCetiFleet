@@ -441,7 +441,7 @@ class Isolated(unittest.TestCase):
                 raise store.FleetError("offline")
             states = workers[target]
             return dict(machine_id=target + "-id", max_workers=len(states), activity=dict(available=False),
-                        status=dict(active_worker_limit=len(states), cpu_idle_fraction=0.5,
+                        status=dict(active_worker_limit=len(states), cpu_idle_fraction=0.5, error="controller failed",
                                     workers=[dict(id=str(i), state=s, alive=True) for i, s in enumerate(states)]))
 
         output = io.StringIO()
@@ -455,6 +455,7 @@ class Isolated(unittest.TestCase):
         self.assertIn("Workers: 2 alive, 1 working, 1 idle or waiting; 1 of 2 hosts live", text)
         self.assertRegex(text, r"\n +a +bb\nReport +live +unreachable\nWorkers alive +2 +—\n")
         self.assertIn("bb: offline", text)
+        self.assertIn("a: controller failed", text)
         self.assertIn("Fleet totals:", text)
         self.assertNotIn("Worker rounds:", text)  # No full per-host sections.
 

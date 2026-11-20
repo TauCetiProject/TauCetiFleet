@@ -241,8 +241,9 @@ def print_hosts(results):
     for row, label in enumerate(labels):
         print(f"{label:<{width}}" + "".join(f"  {values[row]:>{widths[name]}}" for name, values in cells.items()))
     for name, value in results.items():
-        if value.get("error"):
-            print(f"{name}: {value['error']}")
+        for error in (value.get("error"), (value.get("status") or {}).get("error")):
+            if error:
+                print(f"{name}: {error}")
 
 
 def main(argv=None, *, _status_results=None, _standalone=False):
@@ -434,7 +435,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             distinct = {}
             for name, value in results.items():
                 distinct.setdefault(value.get("machine_id", selected[name]["machine_id"]), value)
-            if len(distinct) > 1 or combined:
+            if len(distinct) > 1:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
         if args.command == "status":
             from . import ci_overview
