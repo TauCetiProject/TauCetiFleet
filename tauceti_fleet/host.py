@@ -138,8 +138,10 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    # Worker definition settings apply between rounds, like `workers`; the rest need a drain.
+    live = {"max_open_prs", "author_model", "author_effort", "github_state_url"}
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
+        if any(current.get(k) != v for k, v in updates.items() if k not in live):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
@@ -164,6 +166,8 @@ def configure(payload):
     value = update_host(validate=capacity.staging_slots, **updates)
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
+    if value["workers_enabled"]:
+        worker_config(value)
     # Inactive installation never adopts or starts the existing worker fleet.
     service_error = None
     try:
