@@ -141,7 +141,33 @@ class NativeRunner(unittest.TestCase):
         infra = dict(ci_kinds=["staging"], ci_max_jobs=3, ci_protected_slots={"2": dict(kind="infra", runner_group_id=8)})
         with patch.object(native, "prepare", return_value="image") as prepare:
             self.assertEqual(native.prepare_for_ci(infra), "image")
-        prepare.assert_called_once_with(infra)
+        prepare.assert_called_once_with(infra, infra=True)
+        # A PR host with infra slots prepares both images.
+        both = dict(infra, ci_kinds=["pr"])
+        with patch.object(native, "prepare", side_effect=lambda config, infra=False: "infra" if infra else "pr") as prepare:
+            self.assertEqual(native.prepare_for_ci(both), "pr")
+        self.assertEqual([c.kwargs for c in prepare.call_args_list], [dict(infra=True), {}])
+
+    def test_infra_image_adds_packages_and_refuses_to_export_without_them(self):
+        commands = {}
+        def seed(directory, values, name):
+            commands[infra] = values
+            raise store.FleetError("stop after seeding")
+        base = dict(sha256="a" * 64, runner_version="v1")
+        store.state_dir().mkdir(parents=True, exist_ok=True)
+        (store.data_dir() / "images").mkdir(parents=True, exist_ok=True)
+        for infra in (False, True):
+            with (patch.object(native, "prerequisites"), patch.object(vm, "prepare_tools"),
+                  patch.object(native, "read", return_value=base), patch.object(vm, "digest", return_value="a" * 64),
+                  patch.object(native, "ready", return_value=False), patch.object(native, "run"),
+                  patch.object(vm, "cloud_seed", side_effect=seed), self.assertRaises(store.FleetError)):
+                native.prepare(dict(ci_kinds=["pr"]), infra=infra)
+        joined = {k: " ; ".join(v) for k, v in commands.items()}
+        for line in native.INFRA_PACKAGES:
+            self.assertIn(line, joined[True])
+            self.assertTrue(line == "apt-get update" or line not in joined[False])
+        self.assertIn("command -v node && git --version", joined[True])
+        self.assertNotIn("command -v node", joined[False])
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])
@@ -308,17 +334,18 @@ class NativeRunner(unittest.TestCase):
         image = store.data_dir() / "images/native" / ("a" * 64) / "rootfs"
         (image / "usr/local/bin").mkdir(parents=True)
         (image / "opt").mkdir()
-        for lean, present in ((True, True), (False, False)):
-            with self.subTest(lean=lean):
-                directory = self.root / ("lean" if lean else "infra")
+        for infra in (False, True):
+            with self.subTest(infra=infra):
+                directory = self.root / ("infra" if infra else "lean")
                 directory.mkdir()
-                with patch.object(native, "image", return_value=dict(sha256="a" * 64)):
-                    native.stage(directory, "jit", lean=lean)
+                with patch.object(native, "image", return_value=dict(sha256="a" * 64)) as image:
+                    native.stage(directory, "jit", infra=infra)
+                image.assert_called_once_with(infra)
                 def copy(command, **_):
                     shutil.copytree(command[-2], command[-1], symlinks=True)
                 with patch.object(native, "run", side_effect=copy):
                     native.materialize(directory)
-                self.assertEqual((directory / "rootfs/opt/tauceti-lean-env").exists(), present)
+                self.assertEqual((directory / "rootfs/opt/tauceti-lean-env").exists(), not infra)
 
     def test_shared_records_cannot_read_host_symlinks_or_block_on_fifo(self):
         target = self.root / "control/native-progress.json"
