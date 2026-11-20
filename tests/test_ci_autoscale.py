@@ -455,7 +455,7 @@ class Install(unittest.TestCase):
             self.assertIn('"ci-autoscale" "--host" "chungus5" "--machine-id" "' + "a" * 32 + '"', unit)
             self.assertIn('"--minimum" "15" "--maximum" "15" "--github-app-dir" "%d"', unit)
             self.assertIn(str(Path.home() / ".local/bin/tauceti-fleet"), unit)
-            self.assertIn("LoadCredential=" + json.dumps(f"github-private-key.pem:{path / 'app'}/github-private-key.pem"), unit)
+            self.assertIn(f"\nLoadCredential=github-private-key.pem:{path / 'app'}/github-private-key.pem\n", unit)
             self.assertNotIn("PYTHONPATH", unit)
             self.assertEqual(result["maximum"], 15)
             self.assertEqual(run.call_args.args[0], ["systemctl", "--user", "restart", auto.UNIT])

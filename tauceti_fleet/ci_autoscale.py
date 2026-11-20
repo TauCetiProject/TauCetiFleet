@@ -444,7 +444,8 @@ def install(target, machine_id, *, minimum, maximum, github_app_dir):
             "StartLimitIntervalSec=0\n\n[Service]\nType=simple\n"
             "ExecStart=" + " ".join(unit_argument(a) for a in args) + ' "--github-app-dir" "%d"\n')
     for name in ("github-app.json", "github-private-key.pem"):
-        body += "LoadCredential=" + unit_argument(f"{name}:{directory / name}") + "\n"
+        # systemd keeps quotes in LoadCredential= values, so only escape specifiers.
+        body += "LoadCredential=" + f"{name}:{directory / name}".replace("%", "%%") + "\n"
     body += "Environment=" + unit_argument("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")) + "\n"
     body += "Restart=always\nRestartSec=15\nUMask=0077\nMemoryMax=256M\n\n[Install]\nWantedBy=default.target\n"
     (units() / UNIT).write_text(body)
