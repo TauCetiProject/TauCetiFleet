@@ -101,6 +101,16 @@ class LiveUpdate(unittest.TestCase):
         self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
         run.assert_called_once_with(["systemctl", "--user", "daemon-reload"])
 
+    def test_update_of_a_stopped_controller_also_moves_the_ceiling(self):
+        caps = dict(cpus=96, memory_total=125 * 1024**3, memory_available=90 * 1024**3)
+        with patch.object(update, "service", return_value=dict(MainPID="0", Restart="on-failure")), \
+                patch.object(update, "stage_worker", return_value=store.data_dir() / "worker-runtimes" / self.revision), \
+                patch.object(update, "handover", return_value=None), \
+                patch.object(host, "resources", return_value=caps), patch.object(update, "run") as run:
+            self.assertEqual(self.install()["controller"], "stopped")
+        self.assertTrue((self.home / ".config/systemd/user/tauceti.slice").exists())
+        run.assert_called_once_with(["systemctl", "--user", "daemon-reload"])
+
     def test_update_uses_main_instead_of_bundled_or_independently_selected_revision(self):
         store.atomic(self.release / "release.json", dict(worker_revision="c" * 40))
         staged = store.data_dir() / "worker-runtimes" / self.revision

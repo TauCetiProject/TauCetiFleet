@@ -247,16 +247,17 @@ def install(release, *, expected_machine_id, expected_revision=False):
             if not signalled:
                 raise FleetError("Live update failed before handover; previous release restored, controller left running") from exc
             raise FleetError("Live update failed; previous release restored and controller recovered") from exc
-        if result is None:
-            return dict(installed=True, release=release.name, controller="stopped", worker_revision=revision,
-                        worker_runtime_scope="future manager starts", image="preserved")
-        # Only enable writes slice units, so a handed-over host gets the shared
-        # ceiling here. Unmeasured host RAM would compute a 16 MiB ceiling.
+        # Only enable writes slice units, so an updated host gets the shared ceiling
+        # here, whether or not its controller runs. Unmeasured host RAM would
+        # compute a 16 MiB ceiling, so leave the units alone then.
         from . import host
 
         caps = host.resources()
         if caps["memory_total"] and host.install_ceiling(caps):
             run(["systemctl", "--user", "daemon-reload"])
+        if result is None:
+            return dict(installed=True, release=release.name, controller="stopped", worker_revision=revision,
+                        worker_runtime_scope="future manager starts", image="preserved")
         return dict(installed=True, release=release.name, controller_release=result["controller_release"],
                     worker_revision=revision,
                     active_processes_preserved=True,
