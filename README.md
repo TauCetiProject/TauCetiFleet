@@ -640,12 +640,13 @@ remains the boundary for candidate code inside a guest.
 
 ```sh
 tauceti-fleet budget server1 --grant 100
+tauceti-fleet budget server1 --set-grant 0
 tauceti-fleet budget server1 --grant-rate 10
 tauceti-fleet budget server2 --grant-rate 10
 tauceti-fleet budget
 ```
 
-These wrap the existing local grant ledger. New hosts start with zero credit
+These wrap the existing local grant ledger; `--set-grant` sets the balance (for example to 0, so only the rate funds new rounds) through a logged adjustment. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
 Queries can aggregate hosts. Workers on a host share its budget. Estimated

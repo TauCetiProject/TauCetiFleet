@@ -1317,15 +1317,16 @@ def budget(payload):
     args = [binary, "budget", "--json"]
     from decimal import Decimal, InvalidOperation
 
-    for name in ("grant", "grant_rate"):
+    for name in ("grant", "set_grant", "grant_rate"):
         if payload.get(name) is not None:
             try:
                 amount = Decimal(str(payload[name]))
-                if not amount.is_finite() or amount < 0:
+                # A balance may be set below zero; additions and rates may not.
+                if not amount.is_finite() or (amount < 0 and name != "set_grant"):
                     raise ValueError("amount")
             except (InvalidOperation, ValueError):
-                raise FleetError("Budget amounts must be finite and nonnegative") from None
-            args += ["--" + name.replace("_", "-"), str(amount)]
+                raise FleetError("Grants and rates must be finite and nonnegative; balances finite") from None
+            args.append("--" + name.replace("_", "-") + "=" + str(amount))  # "=" keeps negatives one argument
     return json.loads(run(args, timeout=30).stdout)
 
 

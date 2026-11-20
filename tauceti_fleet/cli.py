@@ -42,7 +42,9 @@ def parser():
             )
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
-    budget.add_argument("--grant")
+    funding = budget.add_mutually_exclusive_group()
+    funding.add_argument("--grant", help="add this many USD to the host's balance")
+    funding.add_argument("--set-grant", help="set the host's balance to this many USD (a logged adjustment)")
     budget.add_argument("--grant-rate")
     budget.add_argument("--json", action="store_true")
     enable = sub.add_parser("enable", help="explicitly activate a prepared role")
@@ -238,7 +240,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         if (args.command == "workers" and args.maximum is None and args.self_tested is None
                 and args.forgejo_workers is None and not args.env and not args.unset_env):
             raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
-        if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
+        if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.host == "local":
             local = read(config_dir() / "host.json")
@@ -267,7 +269,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             if args.command == "doctor":
                 payload["smoke"] = args.smoke
             if args.command == "budget":
-                payload.update(grant=args.grant, grant_rate=args.grant_rate)
+                payload.update(grant=args.grant, set_grant=args.set_grant, grant_rate=args.grant_rate)
             if args.command == "enable":
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
