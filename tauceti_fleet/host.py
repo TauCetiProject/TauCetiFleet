@@ -911,7 +911,8 @@ class CISlot:
 
     def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False):
         config = dict(capacity.for_slot(config, self.index),
-                      ci_enabled=config["ci_enabled"] and not capacity.unused(config, self.index)
+                      # An unused slot still recreates a retired identity a queued job targets.
+                      ci_enabled=config["ci_enabled"] and (recovery is not None or not capacity.unused(config, self.index))
                       and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
