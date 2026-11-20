@@ -208,6 +208,18 @@ class Isolated(unittest.TestCase):
             with self.assertRaises(store.FleetError):
                 host.require_forgejo_credential()
 
+    def test_budget_set_grant_reaches_the_worker_ledger(self):
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["budget", "test", "--set-grant", "0", "--json"]), 0)
+        self.assertEqual(call.call_args.args[1], dict(action="budget", grant=None, set_grant="0", grant_rate=None))
+        completed = subprocess.CompletedProcess([], 0, stdout="{}")
+        with patch.object(host, "executable", return_value="/bin/tauceti"), patch.object(host, "run", return_value=completed) as run:
+            host.budget(dict(set_grant="0"))
+        self.assertEqual(run.call_args.args[0], ["/bin/tauceti", "budget", "--json", "--set-grant", "0"])
+
     def test_forgejo_count_cli_preserves_explicit_zero(self):
         with (patch.object(remote, "inventory", return_value={}),
               patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),

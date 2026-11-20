@@ -1317,7 +1317,7 @@ def budget(payload):
     args = [binary, "budget", "--json"]
     from decimal import Decimal, InvalidOperation
 
-    for name in ("grant", "grant_rate"):
+    for name in ("grant", "set_grant", "grant_rate"):
         if payload.get(name) is not None:
             try:
                 amount = Decimal(str(payload[name]))
