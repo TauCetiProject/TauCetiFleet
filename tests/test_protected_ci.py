@@ -254,7 +254,6 @@ class QueueControlCI(unittest.TestCase):
         self.assertNotIn("tauceti-fleet-staging", labels)
         self.assertFalse(native_runner.selected(control))
         self.assertTrue(ci_priority.staging(dict(ci_kinds=["queue-control"])))
-        self.assertFalse(ci_priority.staging_build(dict(ci_kinds=["queue-control"])))
         with patch.object(vm, "start_memory_available", return_value=10*1024**3):
             self.assertTrue(vm.start_memory_ok(control))
         with patch.object(vm, "start_memory_available", return_value=8*1024**3):

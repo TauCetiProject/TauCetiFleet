@@ -18,12 +18,13 @@ from . import (
     ci_priority,
     focus,
     github,
+    lean_pressure,
     native_runner,
     targets,
     vm,
     worker_view,
 )
-from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
+from .capabilities import GIB, clean_file_bytes, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -251,6 +252,60 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
     memory["high"] = int((cg / "memory.high").read_text())
 
 
+REPAIR_SLICE = "tauceti-repair.slice"
+# Free memory kept under the shared ceiling ahead of repair: the new-guest start
+# check's requirement, which also exceeds the normal two-file compiler headroom.
+REPAIR_HEADROOM = max(vm.START_MEMORY_BYTES, 2 * lean_pressure.WORST_FILE_RSS_BYTES) + GIB
+
+
+def refresh_repair_memory():
+    """Give TauCetiWorker's repair slice what the VMs leave under the shared ceiling.
+
+    memory.high follows repair's unreclaimable use plus the free memory under the
+    ceiling, less REPAIR_HEADROOM: far above repair's use while the VMs are quiet,
+    and below it while a staging build grows, so the kernel reclaims, swaps and
+    slows repair before the VMs reach the ceiling. None where there is no repair slice.
+    """
+    result = run(["systemctl", "--user", "show", REPAIR_SLICE, "-p", "ControlGroup", "--value"], check=False)
+    relative = (result.stdout or "").strip() if result.returncode == 0 else ""
+    cg = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    if not relative or not cg.is_dir():
+        return None
+    _, available = lean_pressure.memory(relative)
+    stats = {k: int(v) for k, v in (line.split() for line in (cg / "memory.stat").read_text().splitlines())}
+    pinned = max(0, int((cg / "memory.current").read_text()) - clean_file_bytes(stats))
+    high = max(GIB, pinned + available - REPAIR_HEADROOM)
+    current = (cg / "memory.high").read_text().strip()
+    # Same write as the workers slice: skip small rises, never block on reclaim.
+    if current == "max" or high < int(current) or high - int(current) >= 256 * 1024**2:
+        fd = os.open(cg / "memory.high", os.O_WRONLY | os.O_TRUNC | os.O_NONBLOCK)
+        try:
+            os.write(fd, str(high).encode())
+        finally:
+            os.close(fd)
+    return dict(high=int((cg / "memory.high").read_text()), pinned=pinned, available=available)
+
+
+def install_ceiling(caps):
+    """Write the shared hard ceiling; True when a unit file changed.
+
+    The existing hyphenated child slice names already belong to this parent.
+    Both may use free RAM; their combined usage still leaves OS/swap headroom.
+    The hard ceiling sits one level up, on tauceti.slice, so it also covers work
+    that yields to the VMs from beside this slice (TauCetiWorker's repair slice).
+    VM memory is never swapped, so reclaim at the ceiling takes that work's memory,
+    and its compiler admission, which reads every capped ancestor, measures it too.
+    """
+    changed = False
+    for name, text in (("tauceti.slice", f"[Slice]\nMemoryMax={int(capacity.shared_memory_bytes(caps))}\n"),
+                       ("tauceti-fleet.slice", "[Slice]\nTasksMax=32768\n")):
+        path = units() / name
+        if not path.exists() or path.read_text() != text:
+            path.write_text(text)
+            changed = True
+    return changed
+
+
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     shared = capacity.shared_memory_bytes(caps)
@@ -279,11 +334,7 @@ def write_slices(config, caps):
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
     worker = max(16 * 1024**2, worker)
-    # The existing hyphenated child slice names already belong to this parent.
-    # Both may use free RAM; their combined usage still leaves OS/swap headroom.
-    (units() / "tauceti-fleet.slice").write_text(
-        f"[Slice]\nMemoryHigh={int(shared)}\nMemoryMax={int(shared)}\nTasksMax=32768\n"
-    )
+    install_ceiling(caps)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
@@ -1197,6 +1248,10 @@ def daemon():
                         # Retain the last applied limit and admissions on a transient
                         # tuning error; status keeps the operation and failure visible.
                         memory["allocation_error"] = f"worker memory.high refresh failed: {exc}"
+                try:
+                    repair_memory = refresh_repair_memory()
+                except (OSError, ValueError, KeyError) as exc:
+                    repair_memory = dict(error=f"repair memory.high refresh failed: {exc}")
                 pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
@@ -1244,6 +1299,7 @@ def daemon():
                         worker_admission=scaler.decision,
                         worker_schedule=window,
                         worker_memory=memory,
+                        repair_memory=repair_memory,
                         memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,

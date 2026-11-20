@@ -114,6 +114,59 @@ class Overcommit(unittest.TestCase):
                 vm.start(self.config)
             jit.assert_not_called()
 
+    def repair_slice(self, *, current, file, high="max"):
+        cg = self.root / "cgroup/user.slice/tauceti.slice/tauceti-repair.slice"
+        cg.mkdir(parents=True)
+        (cg / "memory.current").write_text(f"{current}\n")
+        (cg / "memory.stat").write_text(f"anon {current - file}\nfile {file}\nshmem 0\nfile_dirty 0\nfile_writeback 0\n")
+        (cg / "memory.high").write_text(f"{high}\n")
+        return cg
+
+    def refresh_repair(self, cg, available):
+        shown = subprocess.CompletedProcess([], 0, stdout="/user.slice/tauceti.slice/tauceti-repair.slice\n")
+        cgroup_root = self.root / "cgroup"
+        real = Path
+        with (
+            patch.object(host, "run", return_value=shown),
+            patch.object(host.lean_pressure, "memory", return_value=(112 * GIB, available)) as memory,
+            patch.object(host, "Path", side_effect=lambda p, *a: cgroup_root if p == "/sys/fs/cgroup" else real(p, *a)),
+        ):
+            value = host.refresh_repair_memory()
+        memory.assert_called_once_with("/user.slice/tauceti.slice/tauceti-repair.slice")
+        return value, int((cg / "memory.high").read_text())
+
+    def test_repair_takes_what_the_vms_leave_under_the_shared_ceiling(self):
+        # Quiet VMs: repair's limit sits far above its use, so it caps nothing.
+        cg = self.repair_slice(current=30 * GIB, file=10 * GIB)
+        value, high = self.refresh_repair(cg, 60 * GIB)
+        self.assertEqual(high, 20 * GIB + 60 * GIB - host.REPAIR_HEADROOM)
+        self.assertEqual(value["pinned"], 20 * GIB)
+        # A growing staging build leaves less: the limit falls below repair's own use.
+        _, high = self.refresh_repair(cg, 5 * GIB)
+        self.assertEqual(high, 20 * GIB + 5 * GIB - host.REPAIR_HEADROOM)
+        self.assertLess(high, 20 * GIB)
+        # It never goes below 1 GiB, and small rises are not rewritten.
+        _, high = self.refresh_repair(cg, 0)
+        self.assertEqual(high, GIB)
+        (cg / "memory.high").write_text(f"{60 * GIB}\n")
+        _, high = self.refresh_repair(cg, host.REPAIR_HEADROOM + 40 * GIB + 100 * 1024**2)
+        self.assertEqual(high, 60 * GIB)
+
+    def test_live_update_moves_the_ceiling_onto_the_parent_slice(self):
+        units = self.root / "units"
+        units.mkdir()
+        (units / "tauceti-fleet.slice").write_text(f"[Slice]\nMemoryHigh={100 * GIB}\nMemoryMax={100 * GIB}\nTasksMax=32768\n")
+        caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
+        with patch.object(host, "units", return_value=units):
+            self.assertTrue(host.install_ceiling(caps))
+            self.assertFalse(host.install_ceiling(caps))
+        self.assertEqual((units / "tauceti.slice").read_text(), f"[Slice]\nMemoryMax={capacity.shared_memory_bytes(caps)}\n")
+        self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
+
+    def test_hosts_without_a_repair_slice_are_untouched(self):
+        with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
+            self.assertIsNone(host.refresh_repair_memory())
+
     def test_worker_ram_shares_host_capacity_without_subtracting_ci_budget(self):
         config = dict(self.config, ci_allowed=True, ci_memory_budget_gib=80)
         _, maximum = host.worker_memory_limits(config, dict(memory_total=125 * GIB, memory_available=30 * GIB))
