@@ -1,5 +1,6 @@
 """Local user-service controller. All admission and resource decisions are local."""
 
+import hashlib
 import json
 import os
 import re
@@ -11,11 +12,13 @@ from pathlib import Path
 
 from . import (
     activity,
+    attention,
     capacity,
     ci,
     ci_overview,
     ci_pool,
     ci_priority,
+    claude_credentials,
     focus,
     github,
     native_runner,
@@ -115,6 +118,12 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
+        "incidents",
+        "hold_declined",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -137,16 +146,27 @@ def configure(payload):
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
+    updates.update(claude_credentials.selected(dict(payload, credentials=credentials)))
     capacity.staging_slots(dict(current, **updates))
+    attention.validate(updates)
+    worker_fields(dict(current, **updates))
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items()):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file", *claude_credentials.KINDS):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+        claude_credentials.validate(key, secret)
+    times = payload.get("credential_times")
+    # The usage login first: the stored token takes its subscription fields from it.
+    for key in reversed(claude_credentials.KINDS):
+        if key in credentials:
+            claude_credentials.install(key, credentials[key], times.get(key) if isinstance(times, dict) else None)
     for key, secret in credentials.items():
+        if key in claude_credentials.KINDS:
+            continue
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Private atomic secret installation. Never return credential values.
@@ -289,6 +309,80 @@ def write_slices(config, caps):
     return worker
 
 
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
+}
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace = config.get("pace")
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets", "sandbox", "pace"):
+        if config.get(key):
+            fields[key] = config[key]
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
+    if fleet_env := {**claude_credentials.worker_env(config), **attention.worker_env(config)}:
+        fields["env"] = dict(fields.get("env", {}), **fleet_env)
+        if sum(len(k) + len(v) + 2 for k, v in fields["env"].items()) > 16 * 1024:
+            raise FleetError("worker_env and the Claude credential paths Fleet adds to it exceed 16 KB; shorten worker_env")
+    if config.get(claude_credentials.USAGE):
+        # Nothing else on the host uses the stored usage login, so the workers may renew it.
+        fields["auto_refresh"] = True
+    return fields
+
+
 def toml_value(value):
     # JSON escapes characters outside the basic plane as surrogate pairs, which TOML rejects; TOML
     # takes them literally but requires DEL escaped.
@@ -310,21 +404,7 @@ def _worker_config(config):
     if config.get("roadmap_targets"):
         targets.require_support()
     # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
-    )
-    if config.get("self_tested"):
-        fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
-        if config.get(key):
-            fields[key] = config[key]
-    if config.get("worker_env"):
-        fields["env"] = dict(sorted(config["worker_env"].items()))
+    fields = worker_fields(config)
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -339,10 +419,10 @@ def _worker_config(config):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
-        worker_fields = dict(fields)
+        slot = dict(fields)
         if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
-            worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
-        for key, value in worker_fields.items():
+            slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
+        for key, value in slot.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
@@ -419,7 +499,8 @@ def run_workers():
     for field in ("github_state_url", "github_state_token_file"):
         if config.get(field):
             os.environ["TAUCETI_" + field.upper()] = config[field]
-    os.environ["GH_TOKEN"] = Path(config["github_token_file"]).read_text().strip()
+    token = Path(config["github_token_file"]).read_text().strip()
+    os.environ["GH_TOKEN"] = token
     gh_config = state_dir() / "gh"
     gh_config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ["GH_CONFIG_DIR"] = str(gh_config)
@@ -430,11 +511,16 @@ def run_workers():
     if not binary:
         raise FleetError("Pinned worker runtime is unavailable; run prepare")
     binary = str(Path(binary).resolve())
+    atomic(state_dir() / "worker-manager.json", dict(binary=binary, github_token_sha256=token_digest(token)))
     os.execv(binary, [binary, "workers", "--config", str(config_dir() / "workers.toml"), "manager"])
 
 
+def token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def manager_process():
-    """The running manager's argv, or None when its service process cannot be identified."""
+    """The running manager's argv and environment, or None when its service process cannot be identified."""
     result = run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "tauceti-fleet-workers.service"], check=False, timeout=2)
     pid = result.stdout.strip() if result.returncode == 0 else ""
     if not pid.isdigit() or pid == "0":
@@ -443,7 +529,92 @@ def manager_process():
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
     except OSError:
         return None
-    return [os.fsdecode(a) for a in argv if a], {}
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        environ = []
+    return [os.fsdecode(a) for a in argv if a], dict(os.fsdecode(e).split("=", 1) for e in environ if b"=" in e)
+
+
+def running_manager():
+    """The runtime and token digest of the running manager, read from its process before its start record."""
+    recorded = read(state_dir() / "worker-manager.json", {})
+    argv, environ = manager_process() or ([], {})
+    binary = next((argv[i - 1] for i in range(1, len(argv)) if argv[i] == "workers" and Path(argv[i - 1]).name == "tauceti"), None)
+    return dict(binary=binary or recorded.get("binary"),
+                github_token_sha256=token_digest(environ["GH_TOKEN"]) if environ.get("GH_TOKEN") else recorded.get("github_token_sha256"))
+
+
+RESTART_MANAGER = (
+    "on the host run `systemctl --user restart tauceti-fleet-workers.service`, then clear the halt again. "
+    "Workers in their own scopes keep running and the new manager adopts them; a worker whose status shows "
+    "degraded isolation runs inside the manager's service and its round ends with it"
+)
+
+
+# What to put right before clearing a halt, by the worker's reason and the forge it names.
+HALT_REMEDY = {
+    "identity-mismatch": dict(
+        github="Give the host a GitHub credential of the account github_account names, or correct github_account",
+        forgejo="Write a token of the Forgejo user TAUCETI_FORGEJO_USER_ID names to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host, or correct the user ID"),
+    "invalid-credentials": dict(
+        github="Replace the host's GitHub token (github_token_file, or the stored gh credential)",
+        forgejo="Issue a new Forgejo token for the worker's user and write it to the file "
+                "TAUCETI_FORGEJO_TOKEN_FILE names on the host"),
+    "account-halt": dict(
+        github="Have GitHub lift the suspension or lock on the worker's account",
+        forgejo="Have the Forgejo instance's administrator reinstate the worker's user, "
+                "or give its token the read:user scope"),
+}
+FORGE_NAMES = dict(github="GitHub", forgejo="Forgejo")
+
+
+def halt_forge(reason):
+    """The forge and verdict of a halt reason such as `forgejo:invalid-credentials`."""
+    # A worker release before Forgejo identity checks names GitHub's reasons without the forge.
+    forge, _, verdict = str(reason or "").rpartition(":")
+    return forge or "github", verdict
+
+
+def clear_halt(worker=None):
+    reasons = {w["id"]: w.get("halt_reason") for w in worker_statuses() if w.get("state") == "halted"}
+    halted = list(reasons)
+    if worker is not None and worker not in halted:
+        raise FleetError(f"Worker {worker} is not halted")
+    cleared = [worker] if worker else halted
+    if not cleared:
+        return dict(cleared=[], detail="No worker on this host is halted")
+    # `workers restart` starts a manager of its own, outside the worker slice, when it finds none.
+    if run(["systemctl", "--user", "is-active", "--quiet", "tauceti-fleet-workers.service"], check=False).returncode:
+        raise FleetError("The worker manager is not running; enable workers before clearing a halt")
+    # A worker keeps its halt record beside the runtime it runs from, and a live update leaves the
+    # running manager on the runtime it started with, so clear with that one.
+    manager = running_manager()
+    binary = manager.get("binary")
+    if not binary:
+        raise FleetError("Cannot tell which worker runtime the running manager uses; " + RESTART_MANAGER)
+    # Restarted workers inherit GH_TOKEN from the manager, which read the token file once. A Forgejo
+    # source reads TAUCETI_FORGEJO_TOKEN_FILE at every identity check, so the worker's restart suffices.
+    github = [wid for wid in cleared if halt_forge(reasons[wid])[0] == "github"]
+    token_file = host_config().get("github_token_file") if github else None
+    try:
+        current = token_file and token_digest(Path(token_file).read_text().strip())
+    except OSError as exc:
+        raise FleetError(f"Cannot read {token_file}: {type(exc).__name__}; repair it before clearing a halt") from None
+    if current and manager.get("github_token_sha256") != current:
+        raise FleetError(f"{token_file} differs from the token the worker manager started with, which "
+                         f"{', '.join(github)} would restart with; " + RESTART_MANAGER)
+    env = dict(os.environ, **manager_environment())
+    workers_config = config_dir() / "workers.toml"
+    managed = run([binary, "workers", "clear-halt", "--help"], env=env, check=False).returncode == 0
+    for wid in cleared:
+        if managed:
+            run([binary, "workers", "--config", workers_config, "clear-halt", wid], env=env)
+        else:
+            run([binary, "work", "--worker-id", wid, "--clear-halt"], env=env)
+        run([binary, "workers", "--config", workers_config, "restart", wid], env=env, timeout=60)
+    return dict(cleared=cleared, detail="Halt records removed and workers restarted; a worker whose account is still wrong halts again")
 
 
 def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -636,6 +807,8 @@ def merged_worker_env(current, changes):
             raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
         if value is None:
             env.pop(name, None)
+        elif name in WORKER_OWNED_ENV | FLEET_OWNED_ENV | CREDENTIAL_SOURCE_ENV or name.startswith("TAUCETI_FLEET_"):
+            raise FleetError(f"{name} is set by the worker or Fleet, or names a login source, and cannot be a worker environment variable")
         elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
             raise FleetError(f"Worker environment value for {name} must be a single-line string")
         else:
@@ -684,6 +857,7 @@ def set_worker_policy(payload):
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
+        worker_fields(dict(host_config(), **changes))
         config = update_host(**changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
@@ -702,6 +876,9 @@ def worker_statuses():
             # Workers without focus reporting omit the key; status must not count them as unfocused.
             if "roadmap_focus" in value:
                 status["roadmap_focus"] = value["roadmap_focus"]
+            if value.get("state") == "halted":
+                status.update(halt_reason=value.get("halt_reason"), failure_reason=value.get("failure_reason"),
+                              halt_forge=halt_forge(value["halt_reason"])[0] if value.get("halt_reason") else None)
             if value.get("roadmap_target"):
                 status.update(roadmap_target=value["roadmap_target"], next_action_at=value.get("next_action_at"))
             values.append(status)
@@ -1058,6 +1235,7 @@ def daemon():
         ids = []
         applied_targets = None
         last_results = 0
+        last_attention = 0
         memory_paused = False
         export = StatusExport()
         previous_tasks = None
@@ -1069,6 +1247,9 @@ def daemon():
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
                     last_results = time.time()
+                if time.time() - last_attention >= 60:
+                    attention.prepare(config)
+                    last_attention = time.time()
                 current = cpu_sample()
                 idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
                 previous = current
@@ -1258,6 +1439,8 @@ def status_report(config):
         status=read(state_dir() / "status.json", {}),
         activity=activity.cached(config["machine_id"]),
         ci_overview=ci_overview.cached(config),
+        claude_credentials=claude_credentials.report(config, wait=False),
+        **({"attention": needs} if (needs := attention.prepared()) or attention.enabled(config) else {}),
     )
 
 
@@ -1370,6 +1553,8 @@ def rpc(payload):
                       memory_budget_gib=payload.get("memory_budget_gib"))
     if action == "focus":
         return focus.configure(payload)
+    if action == "attention":
+        return attention.host_action(payload)
     if action == "targets":
         return targets.configure(payload, worker_statuses())
     if action == "workers":
@@ -1382,6 +1567,8 @@ def rpc(payload):
         return reserve_staging(payload["maximum"], payload.get("memory_gib"))
     if action == "drain":
         return drain()
+    if action == "clear-halt":
+        return clear_halt(payload.get("worker"))
     if action == "budget":
         return budget(payload)
     if action == "snapshot":
