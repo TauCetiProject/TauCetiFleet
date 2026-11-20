@@ -136,6 +136,11 @@ class NativeRunner(unittest.TestCase):
                            dict(ci_kinds=["pr", "staging"], ci_staging_slots=2, ci_max_jobs=2)):
                 self.assertIsNone(native.prepare_for_ci(config))
         prepare.assert_not_called()
+        # Protected infra slots run native-disk on any host, so they need the image.
+        infra = dict(ci_kinds=["staging"], ci_max_jobs=3, ci_protected_slots={"2": dict(kind="infra", runner_group_id=8)})
+        with patch.object(native, "prepare", return_value="image") as prepare:
+            self.assertEqual(native.prepare_for_ci(infra), "image")
+        prepare.assert_called_once_with(infra)
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])
@@ -234,6 +239,7 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(native.idle_expired(value, own))
             self.assertFalse(native.idle_expired(dict(value, busy=True), own))
             self.assertFalse(native.idle_expired(dict(value, run_id=42), own))
+            self.assertFalse(native.idle_expired(dict(value, ci_kinds=["infra"]), own))
             self.assertFalse(native.idle_expired(value, dict(own, busy=True)))
             self.assertFalse(native.idle_expired(dict(value, online_observed_at=200), own))
 

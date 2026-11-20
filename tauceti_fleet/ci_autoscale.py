@@ -176,7 +176,10 @@ def host_action(payload):
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
                 enabled=config["ci_enabled"], maximum=capacity.jobs(config),
-                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config))]), cpus=status.get("resources", {}).get("cpus", 1),
+                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config))]),
+                # The controller treats every slot below `reserved` as reserved. Infra
+                # slots sit above the general ones, so they would hide every general slot.
+                infra_slots=any(v["kind"] == "infra" for v in capacity.protected_slots(config).values()), cpus=status.get("resources", {}).get("cpus", 1),
                 pressure=pressure, timing_at=timing.get("at", 0), ci=timing.get("ci", {}),
                 last_admission=timing.get("last_admission_seen", {}).get("ci"),
                 observation_since=timing.get("admission_seen_since", timing.get("at", 0)), vms=vms)
@@ -199,6 +202,9 @@ class Controller:
         if not snapshot.get("enabled"):
             self.value.pop("growth_since", None)
             return dict(kind="hold", reason="CI disabled")
+        if snapshot.get("infra_slots"):
+            self.value.pop("growth_since", None)
+            return dict(kind="hold", reason="infra slots sit above the general slots; size this host's CI by hand")
         if not fresh(snapshot, now):
             self.value.pop("growth_since", None)
             self.value.pop("stall_since", None)

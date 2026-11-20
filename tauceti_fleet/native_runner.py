@@ -61,7 +61,8 @@ def selected(config):
 
 def prepare_for_ci(config):
     """Provision the default PR backend before enabling or handing over CI."""
-    if selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
+    infra = any(value["kind"] == "infra" for value in capacity.protected_slots(config).values())
+    if infra or selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
         return prepare(config)
     return None
 
@@ -71,7 +72,8 @@ def is_native(value):
 
 
 def idle_expired(value, own):
-    return (is_native(value) and not value.get("busy") and not value.get("run_id")
+    # Protected infra slots are always wanted; retiring an idle one only restarts it.
+    return (is_native(value) and value.get("ci_kinds") != ["infra"] and not value.get("busy") and not value.get("run_id")
             and own.get("status") == "online" and not own.get("busy")
             and time.time() - value.get("online_observed_at", time.time()) >= 300)
 

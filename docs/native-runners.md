@@ -53,7 +53,8 @@ TauCetiInfra group) also use native-disk. They run our infrastructure
 repositories' CI, never take PR or staging work, and run at CPU weight 25
 against PR builds' 100, so TauCeti PR builds keep CPU precedence. Add them above
 a host's PR slots, raising `ci_max_jobs` by the number of infra slots, so PR
-capacity is unchanged.
+capacity is unchanged. The CI autoscaler, which moves `ci_max_jobs`, holds on a host with infra
+slots; size such a host by hand.
 
 `native-runner HOST --prepare` remains available for an explicit image refresh;
 it is not required to enable PR CI through the standard setup.
