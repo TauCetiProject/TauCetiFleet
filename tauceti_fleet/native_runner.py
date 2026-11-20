@@ -91,10 +91,14 @@ def is_native(value):
 
 
 def idle_expired(value, own):
-    # Protected infra slots are always wanted; retiring an idle one only restarts it.
-    return (is_native(value) and value.get("ci_kinds") != ["infra"] and not value.get("busy") and not value.get("run_id")
-            and own.get("status") == "online" and not own.get("busy")
-            and time.time() - value.get("online_observed_at", time.time()) >= 300)
+    idle = (is_native(value) and not value.get("busy") and not value.get("run_id")
+            and own.get("status") == "online" and not own.get("busy"))
+    if value.get("ci_kinds") == ["infra"]:
+        # Protected infra slots are always wanted, so retiring an idle one only
+        # restarts it: do that only to move it onto a newer infra image.
+        current = image(True).get("sha256")
+        return idle and bool(current) and value.get("native_image_sha256") != current
+    return idle and time.time() - value.get("online_observed_at", time.time()) >= 300
 
 
 def instances():

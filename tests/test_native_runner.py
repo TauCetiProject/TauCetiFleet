@@ -266,7 +266,15 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(native.idle_expired(value, own))
             self.assertFalse(native.idle_expired(dict(value, busy=True), own))
             self.assertFalse(native.idle_expired(dict(value, run_id=42), own))
-            self.assertFalse(native.idle_expired(dict(value, ci_kinds=["infra"]), own))
+            infra = dict(value, ci_kinds=["infra"], native_image_sha256="b" * 64)
+            with patch.object(native, "image", return_value=dict(sha256="b" * 64)):
+                self.assertFalse(native.idle_expired(infra, own))
+            # An idle infra runner on an older infra image retires at once to restart on the new one.
+            with patch.object(native, "image", return_value=dict(sha256="c" * 64)):
+                self.assertTrue(native.idle_expired(dict(infra, online_observed_at=400), own))
+                self.assertFalse(native.idle_expired(dict(infra, busy=True), own))
+            with patch.object(native, "image", return_value={}):
+                self.assertFalse(native.idle_expired(infra, own))
             self.assertFalse(native.idle_expired(value, dict(own, busy=True)))
             self.assertFalse(native.idle_expired(dict(value, online_observed_at=200), own))
 
