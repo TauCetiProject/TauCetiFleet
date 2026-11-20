@@ -182,6 +182,9 @@ class InfraSlotsCommand(unittest.TestCase):
         with self.assertRaises(store.FleetError):
             self.run_command(4, dict(self.policy, groups={"queue-control": 6}))
         self.assertEqual(store.host_config()["ci_max_jobs"], 15)
+        self.run_command(2)
+        # Removing infra slots needs no infra group, so it works after the broker drops it.
+        self.assertEqual(self.run_command(0, dict(self.policy, groups={}))[0]["infra_slots"], [])
         store.update_host(ci_protected_slots={"14": dict(kind="pr-status", runner_group_id=7)})
         self.policy["kinds"].append("pr-status")
         self.assertEqual(self.run_command(2)[0]["infra_slots"], [15, 16])

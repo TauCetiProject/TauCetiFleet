@@ -191,7 +191,7 @@ def host_action(payload):
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
                 # Infra slots are outside the autoscaler's view: it sizes the PR slots below them.
-                enabled=config["ci_enabled"], maximum=capacity.pr_jobs(config),
+                enabled=config["ci_enabled"], maximum=capacity.pr_jobs(config), fixed_pr_slots=bool(infra),
                 reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config) if i not in infra)]),
                 cpus=status.get("resources", {}).get("cpus", 1),
                 pressure=pressure, timing_at=timing.get("at", 0), ci=timing.get("ci", {}),
@@ -211,6 +211,16 @@ class Controller:
         self.growth_delay, self.stall_delay = growth_delay, stall_delay
 
     def decide(self, snapshot, now):
+        decision = self._decide(snapshot, now)
+        if snapshot.get("fixed_pr_slots") and decision.get("target") not in (None, snapshot["maximum"]):
+            # Infra slots fix this host's PR count: recover in place, never resize.
+            if decision["kind"] == "recover":
+                return dict(decision, target=snapshot["maximum"])
+            self.value.pop("growth_since", None)
+            return dict(kind="hold", reason="infra slots fix this host's PR slot count")
+        return decision
+
+    def _decide(self, snapshot, now):
         from . import lean_pressure
 
         if not snapshot.get("enabled"):

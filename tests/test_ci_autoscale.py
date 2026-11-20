@@ -87,6 +87,15 @@ class CapacityPolicy(unittest.TestCase):
         decision=c.decide(s,s['at'])
         self.assertEqual(decision['kind'],'hold')
 
+    def test_fixed_pr_slot_hosts_hold_resizes_and_recover_in_place(self):
+        c = auto.Controller(minimum=1, maximum=6)
+        # An idle guest under RAM pressure would normally shrink the host.
+        s = dict(snapshot(idle=True, available=10), fixed_pr_slots=True)
+        self.assertEqual(c.decide(s, 1000), dict(kind="hold", reason="infra slots fix this host's PR slot count"))
+        self.assertEqual(auto.Controller(minimum=1, maximum=6).decide(dict(s, fixed_pr_slots=False), 1000)["kind"], "limit")
+        with patch.object(auto.Controller, "_decide", return_value=dict(kind="recover", target=2, candidates=[], reason="r")):
+            self.assertEqual(c.decide(s, 1000)["target"], 3)
+
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
         s['vms'][0].update(busy=False)

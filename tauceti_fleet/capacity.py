@@ -150,7 +150,7 @@ def with_infra_slots(config, count, group):
     """Place `count` infra slots directly above the host's PR slots."""
     if type(count) is not int or not 0 <= count <= 64:
         raise FleetError("The infra slot count must be an integer from 0 to 64")
-    if type(group) is not int or group <= 0:
+    if count and (type(group) is not int or group <= 0):
         raise FleetError("The CI broker reports no runner group for infra")
     base = pr_jobs(config)
     if infra_slots(config) != list(range(base, jobs(config))):
