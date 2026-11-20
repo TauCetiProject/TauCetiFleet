@@ -63,6 +63,8 @@ def parser():
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
+    reserve.add_argument("--memory-gib", type=int,
+                         help="GiB of virtual RAM for future reserved staging guests (0: the shared CI ceiling)")
     reserve.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change worker capacity or self-tested prompting without interrupting active work")
     workers.add_argument("host")
@@ -116,6 +118,15 @@ def parser():
     needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
+    sub.add_parser("ci-autoscale", help="run the CI autoscaler for one host (the installed unit's command)")
+    install_autoscale = sub.add_parser("install-ci-autoscale",
+                                       help="install this account's CI autoscaler unit for one SSH host")
+    install_autoscale.add_argument("host", help="SSH alias of the CI host")
+    install_autoscale.add_argument("--machine-id", required=True)
+    install_autoscale.add_argument("--minimum", type=int, required=True)
+    install_autoscale.add_argument("--maximum", type=int, required=True)
+    install_autoscale.add_argument("--github-app-dir", default=str(Path.home() / ".config/tauceti-queue"),
+                                   help="directory holding github-app.json and github-private-key.pem (default: the queue App's)")
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
@@ -166,6 +177,15 @@ def main(argv=None, *, _status_results=None, _standalone=False):
     if raw[:1] == ["monitoring"]:
         from .monitoring import main as monitoring_main
         return monitoring_main(raw[1:])
+    if raw[:1] == ["ci-autoscale"]:
+        from .ci_autoscale import main as autoscale_main
+        return autoscale_main(raw[1:])
+    if raw[:1] == ["install-ci-autoscale"]:
+        from .ci_autoscale import install
+        args = parser().parse_args(raw)
+        print(json.dumps(install(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
+                                 github_app_dir=args.github_app_dir)))
+        return 0
     if raw[:1] == ["install-monitoring"]:
         from .monitoring import install_local
         args = parser().parse_args(raw)
@@ -290,6 +310,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["worker_env"] = changes
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+                if args.memory_gib is not None:
+                    payload.update(memory_gib=args.memory_gib)
             if args.command == "clear-halt":
                 payload.update(worker=args.worker)
             if args.command == "schedule":
@@ -445,7 +467,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
                     if value.get("ci_staging_slots"):
-                        print(f"Reserved for staging: {value['ci_staging_slots']} slots")
+                        print(f"Reserved for staging: {value['ci_staging_slots']} slots"
+                              + (f", {value['ci_staging_memory_gib']} GiB RAM each" if value.get("ci_staging_memory_gib") else ""))
                     if value.get("ci_staging_reservation_error"):
                         print("Staging reservation invalid: " + value["ci_staging_reservation_error"])
                     memory = status.get("worker_memory")

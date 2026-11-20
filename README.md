@@ -64,9 +64,21 @@ profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PAT
 plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
 tools block worker activation with a remedy.
 
-An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
---machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
-persistent user service on the SSH control host. It reads the host's existing
+On the SSH control host, install the CI autoscaler as a persistent user service with:
+
+```sh
+tauceti-fleet install-ci-autoscale chungus5 --machine-id MACHINE_ID --minimum 1 --maximum 15
+```
+
+The unit runs `tauceti-fleet ci-autoscale` from the installed Fleet release, so a restart after
+`update local` picks up new code; rerun the installer to change its bounds. It loads
+`github-app.json` and `github-private-key.pem` from `--github-app-dir` (default
+`~/.config/tauceti-queue`, the queue App, which has `actions: write` on TauCeti) with
+`LoadCredential=`. Its recovery writes (force-cancel, rerun) then use a TauCeti-only installation
+token; reads use tauceti-ai-for-science. The installer refuses to run while a drop-in exists for
+`tauceti-ci-autoscale.service`. The App path needs the `cryptography` package (the `app` extra,
+`pip install 'tauceti-fleet[app]'`, or a system Python that has it); without it the writes fail with
+that message rather than falling back. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
 and compiler headroom. Build guest launches still obey the host's ten-second settling interval and
@@ -367,11 +379,39 @@ The shared job ceiling and worker admissions stay enabled. Existing guests finis
 with their original classes, and the command reports slots awaiting replacement.
 Use `--slots 0` to remove the reservation as guests are replaced.
 
+To stop a mixed host with a staging reservation taking PR jobs, run
+`tauceti-fleet enable HOST --ci staging` live. A staging-only host with a reservation
+runs staging in its reserved slots only: they and any `ci_protected_slots` keep their
+guests, while each other slot retires its idle runner and lets a busy one finish its
+job, then stays empty. Nothing is cancelled.
+
+Each reserved staging slot also keeps one persistent, sparse disk, `warm.qcow2` in
+the slot's state directory (`ci_disk_gib` virtual size), attached to every guest of
+that slot as a second virtio disk with serial `tauceti-warm`. The disposable guests
+are otherwise unchanged. The trusted staging workflow decides what the disk holds:
+it keeps one batch's build tree for that batch's next attempt and reformats the disk
+for any other batch. No other slot sees the disk, and a slot deletes it when it next
+starts a guest without the staging reservation (before its free-space check). Before
+each attach, `qemu-img check` reads the disk's metadata: a corrupt disk is replaced by
+an empty one, and a disk that cannot be opened (for example one a QEMU still holds) or
+created is left alone, so the guest starts without it and the workflow takes its
+normal cold path.
+
+Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
+host they and the other CI guests together overcommit its RAM. `--memory-gib N`
+gives future reserved staging guests exactly N GiB of virtual RAM instead
+(`--memory-gib 0` restores the shared ceiling), for example
+`tauceti-fleet reserve-staging HOST --slots 1 --memory-gib 64`. Running guests
+keep their size and are reported as awaiting replacement. Staging compiler starts
+skip memory admission, so choose N above the staging build's measured peak RAM,
+with room for its growth: a build that needs more than N GiB is OOM-killed inside
+the guest rather than slowed.
+
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
-slots independently. Enabling does not restart the controller. Changes to guest
-shape or job classes, and reductions in the slot count, still require retiring
-the current guests first. Each host chooses its runner count with local
+slots independently. Enabling does not restart the controller. Other changes to guest
+shape or job classes (apart from dropping PR from a reserved host, above), and
+reductions in the slot count, still require retiring the current guests first. Each host chooses its runner count with local
 `--max-jobs`; there is no separate broker or dispatcher ceiling for a machine.
 Enrollment authorizes job classes, and a host can select a subset of them.
 The slot format supports up to 4096 jobs per host. Each guest has its own
@@ -745,6 +785,13 @@ both scopes, all completion outcomes, and exact job identities and URLs under
 public source retains the last cached summary with an error; missing observations
 under partial coverage are unknown. Host-specific status still shows every pool.
 
+Known GitHub zombies never enter the text: jobs queued for over 24 hours, and
+workflows queued with no jobs that long, are left out of Run/Wait, the oldest
+wait and the backlog line, and the text does not mention them. JSON keeps their
+`stale_waiting` counts. They hold no runner and block nothing. We never file
+GitHub support requests about them; TauCetiWorker
+`docs/queue/github-zombie-runs.md` records the policy and the known runs.
+
 The operator client fetches one public manifest and its jobs summary per status
 invocation, independently of host count. It does not fetch job-detail pages or
 scan GitHub. This table needs only the updated operator CLI; hosts need no change.
@@ -786,7 +833,7 @@ workflows, including small control jobs. Backlog reporting separates pending
 and queued workflows. A second line shows verified stuck records and records
 without confirmed active jobs; these are not added to waiting work. Verification
 requires a complete empty/terminal job inventory and a settled workflow, never
-age alone. An old pending job remains waiting. Counts come from retained shared
+age alone. An old pending workflow remains waiting. Counts come from retained shared
 observations before detail-page limits; incomplete observations remain explicit. Authoring pressure uses the workers' complete cached survey:
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
