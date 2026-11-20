@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -440,6 +441,50 @@ class Isolated(unittest.TestCase):
         summaries = combine.call_args.args[0]
         self.assertEqual([v["summary"]["source_id"] for v in summaries], ["one", "two"])
         self.assertIn("_fleet", json.loads(output.getvalue()))
+
+    def test_named_hosts_are_fetched_in_parallel_and_shown_side_by_side(self):
+        entries = {name: dict(machine_id=name + "-id", target=name, aliases=[name * 2]) for name in ("a", "b", "c")}
+        both_waiting = threading.Barrier(2, timeout=5)
+        workers = dict(a=["running", "idle"], b=["verifying"])
+
+        def prepared(target, payload, **kwargs):
+            both_waiting.wait()  # Each host's reply waits for the other's request.
+            if target == "b":
+                raise store.FleetError("offline")
+            states = workers[target]
+            return dict(machine_id=target + "-id", max_workers=len(states), activity=dict(available=False),
+                        status=dict(active_worker_limit=len(states), cpu_idle_fraction=0.5, error="controller failed",
+                                    workers=[dict(id=str(i), state=s, alive=True) for i, s in enumerate(states)]))
+
+        output = io.StringIO()
+        with (
+            patch.object(remote, "inventory", return_value=entries),
+            patch.object(remote, "call", side_effect=prepared),
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "a", "bb", "b"]), 1)  # bb is b's alias; b adds no column.
+        text = output.getvalue()
+        self.assertIn("Workers: 2 alive, 1 working, 1 idle or waiting; 1 of 2 hosts live", text)
+        self.assertRegex(text, r"\n +a +bb\nReport +live +unreachable\nWorkers alive +2 +—\n")
+        self.assertIn("bb: offline", text)
+        self.assertIn("a: controller failed", text)
+        self.assertIn("Fleet totals:", text)
+        self.assertNotIn("Worker rounds:", text)  # No full per-host sections.
+
+    def test_one_named_host_keeps_its_full_section(self):
+        entry = dict(machine_id="a-id", target="a")
+        value = dict(machine_id="a-id", activity=dict(available=False), status=dict(workers=[]))
+        output = io.StringIO()
+        with (
+            patch.object(remote, "inventory", return_value=dict(a=entry, b=dict(entry, machine_id="b-id"))),
+            patch.object(remote, "call", return_value=value) as call,
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "a"]), 0)
+        call.assert_called_once()
+        self.assertIn("a:\nWorker rounds:", output.getvalue())
+        self.assertNotIn("Fleet totals:", output.getvalue())
+        self.assertNotIn("hosts live", output.getvalue())
 
     def test_ssh_target_cannot_inject_shell_options_or_commands(self):
         for target in ["-oProxyCommand=bad", "host;bad", "host$(bad)", "user@host/path", "host\ncommand"]:

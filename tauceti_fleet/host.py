@@ -694,6 +694,9 @@ def set_worker_policy(payload):
     return result
 
 
+# Worker states that hold no work in progress.
+IDLE_STATES = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}
+
 def worker_statuses():
     values = []
     for path in (state_dir() / "workers").glob("*.json"):
@@ -1353,11 +1356,10 @@ def rpc(payload):
         return broker.enroll(payload["broker"], code=payload["invitation"])
     if action == "prepare_update":
         config = host_config()
-        waiting = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}
         if config["workers_enabled"] or config["ci_enabled"]:
             raise FleetError("Drain this host before updating")
         if vm.outstanding() or any(
-            w.get("alive") and w.get("state") not in waiting for w in worker_statuses()
+            w.get("alive") and w.get("state") not in IDLE_STATES for w in worker_statuses()
         ):
             raise FleetError("Active work is still draining; wait before updating")
         # A manager-service stop no longer contains all workers. Slice stop
