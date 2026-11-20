@@ -2,9 +2,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_fleet import broker, capacity, github, host, store, vm
+from tauceti_fleet import broker, capacity, github, host, native_runner, store, vm
 
 
 class StagingReservations(unittest.TestCase):
@@ -248,3 +249,92 @@ real_shape = capacity.guest_shape
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarmStagingDisk(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        environment = patch.dict(os.environ, {"TAUCETI_FLEET_" + key.upper(): str(self.root / key)
+                                             for key in ("config", "state", "data")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        memory = patch.object(vm, "start_memory_available", return_value=100 * 1024**3)
+        memory.start()
+        self.addCleanup(memory.stop)
+        self.config = store.update_host(ci_enabled=True, ci_max_jobs=2, ci_kinds=["pr", "staging"],
+                                        ci_staging_slots=1, ci_disk_gib=64, ci_vcpus=4, ci_memory_gib=8)
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+
+    def start(self, index, instance):
+        def run(args, **kwargs):
+            if args[:2] == ["qemu-img", "create"] and args[2:4] == ["-f", "qcow2"] and "-b" not in args:
+                Path(args[4]).write_text("disk")
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with (patch.object(vm, "CI_START_GAP_SECONDS", 0),
+              patch.object(github, "jit_config", return_value=(100 + index, "jit")),
+              patch.object(vm, "run", side_effect=run) as calls,
+              patch.object(vm, "executable", side_effect=lambda name: name),
+              patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"),
+              patch.object(native_runner, "choose", return_value=False),
+              patch.object(vm.secrets, "token_hex", return_value=instance)):
+            vm.start(dict(self.config, ci_slot=index))
+        launch = next(c.args[0] for c in calls.call_args_list if c.args[0][0] == "systemd-run")
+        return [a for a in launch if "serial=" + vm.WARM_SERIAL in a]
+
+    def test_reserved_staging_slot_keeps_one_disk_across_guests(self):
+        first = self.start(0, "a" * 16)
+        path = vm.slot_file(capacity.for_slot(self.config, 0), vm.WARM_DISK)
+        self.assertEqual(first, [f"file={path},format=qcow2,if=virtio,serial=tauceti-warm,"
+                                 "werror=report,rerror=report,discard=unmap"])
+        self.assertEqual(path.read_text(), "disk")
+        path.write_text("kept")
+        guest = store.read(vm.slot_file(self.config, "vm.json"))
+        with patch.object(vm, "run", return_value=SimpleNamespace(returncode=0, stdout="")), \
+             patch.object(github, "retire_runner"):
+            vm.retire(self.config, guest)
+        self.assertEqual(self.start(0, "b" * 16), first)
+        self.assertEqual(path.read_text(), "kept")
+
+    def test_other_slots_get_no_disk_and_drop_a_former_one(self):
+        self.assertEqual(self.start(1, "c" * 16), [])
+        leftover = vm.slot_file(dict(self.config, ci_slot=0), vm.WARM_DISK)
+        leftover.parent.mkdir(parents=True, exist_ok=True)
+        leftover.write_text("old batch")
+        self.config = store.update_host(ci_staging_slots=0)
+        self.assertEqual(self.start(0, "d" * 16), [])
+        self.assertFalse(leftover.exists())
+
+    def test_disk_creation_failure_starts_the_guest_cold(self):
+        with patch.object(vm, "run", side_effect=store.FleetError("qemu-img exited 1")):
+            self.assertIsNone(vm.warm_disk(capacity.for_slot(self.config, 0)))
+
+    def test_corrupt_disk_is_replaced_and_unopenable_disk_is_left_alone(self):
+        config = capacity.for_slot(self.config, 0)
+        path = vm.slot_file(config, vm.WARM_DISK)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for code, expected, content in ((3, path, "old"), (1, None, "old"), (2, path, "new")):
+            path.write_text("old")
+
+            def run(args, code=code, **kwargs):
+                if args[1] == "check":
+                    return SimpleNamespace(returncode=code, stdout="")
+                Path(args[4]).write_text("new")
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with self.subTest(code=code), patch.object(vm, "run", side_effect=run), \
+                 patch.object(vm, "executable", side_effect=lambda name: name):
+                self.assertEqual(vm.warm_disk(config), expected)
+                self.assertEqual(path.read_text(), content)
+        # A leftover that is still open somewhere stays; otherwise any other guest removes it,
+        # including a native guest on the former staging slot.
+        for code, attach, kept in ((1, True, True), (0, True, False), (0, False, False)):
+            path.write_text("old")
+            unreserved = dict(config, ci_staging_reserved=False) if attach else config
+            with self.subTest(code=code, attach=attach), \
+                 patch.object(vm, "run", return_value=SimpleNamespace(returncode=code, stdout="")), \
+                 patch.object(vm, "executable", side_effect=lambda name: name):
+                self.assertIsNone(vm.warm_disk(unreserved, attach=attach))
+                self.assertEqual(path.exists(), kept)

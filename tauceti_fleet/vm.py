@@ -102,7 +102,7 @@ def cloud_seed(directory, commands, *, name):
     return directory / "seed.iso"
 
 
-def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard=False, events=True):
+def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard=False, events=True, warm=None):
     from .capacity import guest_shape
 
     shape = shape or (dict(vcpus=2, memory_gib=2) if small else guest_shape(config))
@@ -126,6 +126,10 @@ def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard
         f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
+        *([
+            "-drive",
+            f"file={warm},format=qcow2,if=virtio,serial={WARM_SERIAL},werror=report,rerror=report,discard=unmap",
+        ] if warm else []),
         "-netdev",
         "user,id=net0",
         "-device",
@@ -393,6 +397,46 @@ def slot_file(config, name):
     return (state_dir() if slot == 0 else state_dir() / "ci-slots" / str(slot)) / name
 
 
+# A reserved staging slot keeps one disk across its disposable guests, so consecutive
+# attempts of the queue's head batch can reuse the previous attempt's build tree. The
+# guest's trusted workflow owns the contents (and reformats the disk for another batch);
+# the host only provides it. No other slot ever sees it.
+WARM_DISK = "warm.qcow2"
+WARM_SERIAL = "tauceti-warm"
+
+
+def warm_disk(config, *, attach=True):
+    """The slot's persistent staging disk, or None (removing a leftover) for any other guest.
+
+    Called with the slot lock held and the slot's previous guest retired. Without the
+    disk the guest takes its normal cold path, so no failure here stops the slot.
+    """
+    path = slot_file(config, WARM_DISK)
+    try:
+        if path.exists():
+            # Metadata only, so this takes about a second. 0 is clean and 3 is leaked
+            # clusters only; 2 is corruption, so start afresh; 1 is an image that could not
+            # be opened (for example still locked by a QEMU that has not exited): leave it.
+            result = run([executable("qemu-img"), "check", "-q", path], timeout=60, check=False)
+            if result.returncode == 1:
+                print("Warm staging disk could not be opened; starting without it", flush=True)
+                return None
+            if result.returncode not in (0, 3) or not (attach and config.get("ci_staging_reserved")):
+                path.unlink()
+        if not (attach and config.get("ci_staging_reserved")):
+            return None
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary = path.with_name(WARM_DISK + ".new")
+            temporary.unlink(missing_ok=True)
+            run([executable("qemu-img"), "create", "-f", "qcow2", temporary, str(config["ci_disk_gib"]) + "G"])
+            os.replace(temporary, path)
+    except (OSError, FleetError) as error:
+        print(f"Warm staging disk unavailable, starting without it: {error}", flush=True)
+        return None
+    return path
+
+
 def slots_in_use():
     """Include old slot zero and every draining slot, regardless of configured limit."""
     return sorted({0} | {int(p.parent.name) for name in ("vm.json", "ci-registration.json")
@@ -439,6 +483,8 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
+    # Before the space check, so a former staging slot's disk is reclaimed first.
+    warm = warm_disk(config, attach=config.get("_ci_backend") != native_runner.RUNTIME)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
@@ -546,7 +592,7 @@ def _start(config):
                 "-p",
                 "RemainAfterExit=yes",
                 *(native_runner.properties() if native else []),
-                *(native_runner.argv(directory) if native else qemu_args(config, directory, disk, seed)),
+                *(native_runner.argv(directory) if native else qemu_args(config, directory, disk, seed, warm=warm)),
             ],
             timeout=30,
         )
