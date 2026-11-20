@@ -56,16 +56,17 @@ class PoolActivity(unittest.TestCase):
         self.assertEqual(row["builds"]["windows"][0]["skipped"], 2)
         self.assertTrue(value["partial"])
 
-    def test_stale_queued_jobs_are_labelled_separately_and_older_servers_omit_them(self):
+    def test_stale_queued_jobs_stay_out_of_the_text_and_older_servers_omit_them(self):
         self.assertEqual(self.report()["value"]["pools"][0]["builds"]["stale_waiting"], 0)
-        self.assertNotIn("Stale queued", self.render())
         zombie = dict(id="126", run_id="80", status="queued", created_at="2026-11-04T00:00:00Z",
                       started_at="2026-11-04T00:00:00Z")
         self.jobs["pool_activity"]["pools"][0]["builds"] = dict(
             self.jobs["pool_activity"]["pools"][0]["builds"], stale_waiting=7, oldest_stale_waiting=zombie)
         text = self.render()
         self.assertIn("namespace  3/2", text)
-        self.assertIn("Stale queued (known GitHub zombies, nothing to do): namespace 7 (oldest 3d00h)", text)
+        self.assertNotIn("Stale", text)
+        self.assertNotIn("zombie", text)
+        self.assertEqual(self.report()["value"]["pools"][0]["builds"]["stale_waiting"], 7)
 
     def test_compact_build_table_has_outcomes_ages_and_partial_freshness(self):
         text = self.render()

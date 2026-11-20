@@ -232,8 +232,53 @@ def pressure_rows(path, identity, account, policies):
     ]
 
 
+REPORT_LIFETIME = 6 * 3600  # longer than a slow round, so a busy worker keeps its last report
+
+
+def reported_pressure_rows(config, account, policies):
+    """Rows from the authoring backpressure live workers report for their own rounds.
+
+    A worker's round counts its open PRs on whichever forge it surveys, so this stays current
+    when the fleet works on Forgejo and no GitHub survey response is cached."""
+    prefix = "fleet-" + config["machine_id"][:8] + "-"
+    rows = {}
+    now = time.time()
+    for path in (state_dir() / "workers").glob("*.json"):
+        try:
+            value = read(path, {})
+        except (OSError, FleetError, ValueError):
+            continue
+        if not str(value.get("id", "")).startswith(prefix) or not value.get("alive"):
+            continue
+        spec = value.get("applied_spec") or {}
+        if value.get("github_account", spec.get("github_account", account)) != account:
+            continue
+        report = value.get("authoring")
+        if not isinstance(report, dict):
+            continue
+        count, limit, stamp = report.get("count"), report.get("limit"), report.get("observed_at")
+        scope, skip = report.get("scope"), report.get("skip", "")
+        if (type(count) is not int or count < 0 or type(limit) is not int or limit <= 0
+                or type(stamp) not in (int, float) or not math.isfinite(stamp)
+                # Never from the future (status rejects that), and not left over from long ago:
+                # a worker that stopped reporting yields to cached surveys.
+                or not now - REPORT_LIFETIME <= stamp <= now + 5
+                or not isinstance(scope, str) or not isinstance(skip, str)):
+            continue
+        skipped = tuple(sorted(set(filter(None, skip.split(",")))))
+        for area, excluded, policy_limit in policies:
+            matches = area == scope or (area in ("any", "auto") and scope in ("any", "auto"))
+            if not matches or excluded != skipped or policy_limit != limit:
+                continue
+            key = (area, ",".join(skipped), limit)
+            if stamp > rows.get(key, {}).get("observed_at", -1):
+                rows[key] = dict(scope=area, skip=",".join(skipped), count=count, limit=limit,
+                                 blocked=count >= limit, observed_at=stamp)
+    return rows
+
+
 def pressure(config):
-    """Reuse complete survey responses for this machine's live Fleet workers."""
+    """Reuse this machine's live Fleet workers' own reports and complete survey responses."""
     policies = worker_policies(config)
     if not policies:
         raise FleetError("No Fleet worker role configured")
@@ -244,7 +289,10 @@ def pressure(config):
     identity = hashlib.sha256((base + "\0" + token).encode()).hexdigest()
     root = Path(os.environ.get("TAUCETI_GITHUB_SHARED_DIR", Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "tauceti/github-shared"))
     directory = root / "gateway" / identity / "responses"
-    scopes = {}
+    # What a worker enforced wins for its scope: a cached GitHub survey counts GitHub alone, and
+    # a fleet working on Forgejo stops producing those. Cached surveys fill the other scopes.
+    reported = reported_pressure_rows(config, account, policies)
+    scopes = dict(reported)
     seen = set()
     deadline = time.monotonic() + 5
 
@@ -255,7 +303,7 @@ def pressure(config):
         try:
             for row in pressure_rows(path, identity, account, policies):
                 key = (row["scope"], row["skip"], row["limit"])
-                if row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
+                if key not in reported and row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
                     scopes[key] = row
         except (OSError, FleetError, KeyError, TypeError, ValueError):
             pass
@@ -267,7 +315,8 @@ def pressure(config):
         args = dict(roadmap=scope, skip=",".join(skip), numbers="", stages=stages)
         key = hashlib.sha256(json.dumps([REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
         observe(directory / (key + ".json"))
-    if len(scopes) < len(policies) or any(scope in ("auto", "any") for scope, _, _ in policies):
+    if directory.is_dir() and (len(scopes) < len(policies) or any(
+            scope in ("auto", "any") and (scope, ",".join(skip), limit) not in reported for scope, skip, limit in policies)):
         newest = []
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -286,7 +335,7 @@ def pressure(config):
                 break
             observe(Path(path))
     if not scopes:
-        raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
+        raise FleetError("No worker report or complete cached survey for this machine's Fleet worker scopes")
     rows = list(scopes.values())
     return dict(account=account, machine_id=config["machine_id"], scopes=rows), max(r["observed_at"] for r in rows)
 
