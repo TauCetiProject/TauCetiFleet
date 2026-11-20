@@ -1178,6 +1178,10 @@ and remove one with `--unset-env NAME`; both repeat. The host stores them as `wo
 writes them into each generated worker definition's `env` table, so they survive the controller
 regenerating `workers.toml` on start. Hand edits to that table do not. Workers pick up the change
 between rounds.
+
+Set the swap the workers slice may use with `tauceti-fleet workers HOST --swap-gib N` (default 1).
+The host stores it as `workers_swap_gib`, rewrites only that line of its workers slice unit and
+reloads systemd, so the running slice takes it immediately; workers and admissions continue.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful

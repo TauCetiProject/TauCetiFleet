@@ -287,11 +287,36 @@ def write_slices(config, caps):
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
-            + (f"MemorySwapMax={GIB}\n" if name == "workers" else "")
+            + (f"MemorySwapMax={workers_swap_bytes(config)}\n" if name == "workers" else "")
             + "TasksMax=16384\n"
         )
     run(["systemctl", "--user", "daemon-reload"])
     return worker
+
+
+def workers_swap_bytes(config):
+    """Swap the workers slice may use: host.json `workers_swap_gib`, 1 GiB by default."""
+    value = config.get("workers_swap_gib", 1)
+    if type(value) is not int or not 0 <= value <= 1024:
+        raise FleetError("workers_swap_gib must be an integer from 0 to 1024")
+    return value * GIB
+
+
+def apply_workers_swap(config):
+    """Rewrite only the workers slice's swap line; systemd applies it to the running slice."""
+    path = units() / "tauceti-fleet-workers.slice"
+    if not path.exists():
+        return  # The next enable writes the slice with this setting.
+    setting = f"MemorySwapMax={workers_swap_bytes(config)}"
+    lines = path.read_text().splitlines()
+    swaps = [i for i, line in enumerate(lines) if line.startswith("MemorySwapMax=")]
+    if swaps:
+        lines[swaps[0]] = setting
+        lines = [line for i, line in enumerate(lines) if i not in swaps[1:]]
+    else:
+        lines.insert(lines.index("[Slice]") + 1 if "[Slice]" in lines else len(lines), setting)
+    path.write_text("\n".join(lines) + "\n")
+    run(["systemctl", "--user", "daemon-reload"])
 
 
 def toml_value(value):
@@ -674,8 +699,11 @@ def set_worker_policy(payload):
     local = payload.get("self_tested")
     native = payload.get("forgejo_workers")
     environment = payload.get("worker_env")
-    if maximum is None and local is None and native is None and environment is None:
-        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count or worker environment")
+    swap = payload.get("swap_gib")
+    if maximum is None and local is None and native is None and environment is None and swap is None:
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count, worker environment or swap")
+    if swap is not None:
+        workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
         environment = merged_worker_env(host_config().get("worker_env"), environment)
     if local is not None and type(local) is not bool:
@@ -713,6 +741,9 @@ def set_worker_policy(payload):
         config = update_host(**changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
+    if swap is not None:
+        apply_workers_swap(update_host(workers_swap_gib=swap))
+        result["workers_swap_gib"] = swap
     return result
 
 
