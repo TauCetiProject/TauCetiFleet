@@ -190,6 +190,11 @@ def display(report, *, now=None, all_jobs=False):
         # reported (TauCetiWorker docs/queue/github-zombie-runs.md). Only --json carries them.
         print("  Run/Wait = running/waiting. Windows: finished (incl skipped/other); f=failures, c=cancellations.")
         print("  — = none observed; unknown = incomplete coverage. Oldest columns show ages; --json includes job identities/URLs.")
+        if any(pool["pool"] == "self-hosted" for pool in value["pools"]):
+            # The shared Fleet PR label names no host, so its jobs wait here and move to
+            # their host's row (brett, eastanglia, ...) once a guest takes them.
+            print("  self-hosted = shared Fleet PR queue waiting for any enrolled host; running jobs appear under"
+                  " their host. Its cancellations are usually superseded runs (new push or self-tested label).")
         if not value["pools"]:
             print("  No pools observed; this does not establish zero activity.")
     except (ValueError, KeyError, TypeError, AttributeError):

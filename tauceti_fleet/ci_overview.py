@@ -24,7 +24,7 @@ BACKLOG_SCHEMA = "tauceti.operations.backlog/v1"
 BACKLOG_STATES = ("pending", "queued", "in_progress", "stuck", "unconfirmed")
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
-    "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
+    "fleet-4fab2fed9a51": "Chris (eastanglia)", "fleet-0fb9966f7c40": "Brett",
     "fleet-11e2756fc110": "Tauchonki", "fleet-a26dbb028408": "Yaël",
 }
 
