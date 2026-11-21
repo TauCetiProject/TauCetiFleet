@@ -10,7 +10,7 @@ from tauceti_fleet import fleet_alert
 MINUTE = 60
 
 
-def report(states, *, enabled=True, finished=40, failed=10, now=0, admission="at_ceiling", detail="leantar crashed",
+def report(states, *, enabled=True, finished=40, failed=10, unknown=0, now=0, admission="at_ceiling", detail="leantar crashed",
            prepared=None):
     return dict(
         workers_enabled=enabled,
@@ -20,7 +20,7 @@ def report(states, *, enabled=True, finished=40, failed=10, now=0, admission="at
             worker_admission=dict(state=admission),
             observed_at=now,
         ),
-        activity=dict(summary=dict(prepared_at=now if prepared is None else prepared, rounds={"1h": {"author": dict(finished=finished, failed=failed)}})),
+        activity=dict(summary=dict(prepared_at=now if prepared is None else prepared, rounds={"1h": {"author": dict(finished=finished, failed=failed, unknown=unknown)}})),
     )
 
 
@@ -140,6 +140,31 @@ class Episodes(unittest.TestCase):
         run.minutes(120, lambda now: report(["idle"] * 20, finished=0, failed=0, now=now, admission="paused"))
         run.minutes(50, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
         self.assertEqual(run.sent, [])
+        # The observed hour still completes after a pause.
+        run.minutes(26, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(len(run.sent), 1)
+
+    def test_disabling_workers_restarts_the_observed_hour(self):
+        run = Run()
+        run.minutes(70, lambda now: report(["running"] * 20, now=now))
+        run.minutes(60, lambda now: report(["running"] * 20, enabled=False, now=now))
+        run.minutes(50, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(run.sent, [])
+
+    def test_explicit_pauses_override_blocked_workers(self):
+        run = Run()
+        run.minutes(60, lambda now: report(["waiting-github"] * 10, now=now, admission="paused"))
+        self.assertEqual(run.sent, [])
+
+    def test_unconfirmed_rounds_and_missing_fields_are_no_evidence(self):
+        run = Run()
+        run.minutes(80, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(len(run.sent), 1)
+        run.minutes(30, lambda now: report(["running"] * 20, finished=3, failed=1, unknown=2, now=now))
+        run.minutes(30, lambda now: {k: v for k, v in report(["running"] * 20, now=now).items()
+                                     if k != "workers_enabled"})
+        run.minutes(30, lambda now: report(["running"] * 20, now=now, admission=None))
+        self.assertEqual(len(run.sent), 1)
 
     def test_each_delivery_is_saved_before_the_next_host(self):
         state, saved = {}, []

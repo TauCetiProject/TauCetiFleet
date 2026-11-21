@@ -1090,15 +1090,16 @@ admission time left in the current slot.
 `tauceti-fleet install-fleet-alert` on the operator's control host installs a systemd timer
 that runs `tauceti-fleet fleet-alert` once a minute from the installed Fleet release, so
 `update local` takes effect at the next run. Each run reads every inventory host's status, as
-`status` does, and judges hosts whose workers are enabled. A host has a problem when at least
-80% of its live workers (and at least three) are in backoff or blocked (`waiting-*` states other
-than the capacity, budget and quota admission waits), when no worker is alive although admission
-is open, or when its admitted workers have completed no round without failure in the last hour
+`status` does, and judges hosts whose workers are enabled and admitted. Such a host has a
+problem when at least 80% of its live workers (and at least three) are in backoff or blocked
+(`waiting-*` states other than the capacity, budget and quota admission waits), when no worker
+is alive, or when its workers have completed no round with a confirmed success in the last hour
 after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
-needs 15 minutes of positive evidence (a successful round in the last hour, or an admission,
-budget or quota pause) and sends one message; disabling the host's workers closes the alert at
-once. Unreachable hosts, cached or stale controller reports and stale round counts neither open
-nor close an incident, and five minutes without evidence restarts any pending period. State
+needs 15 minutes of positive evidence (a confirmed success in the last hour, or an explicit
+admission pause, or most workers waiting for budget or quota) and sends one message; disabling
+the host's workers closes the alert at once. Unreachable hosts, cached or stale controller
+reports, missing fields and stale round counts neither open nor close an incident, and five
+minutes without a fresh report restarts any pending period. State
 lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
 
 Without `--zulip-config` the messages go only to the unit's journal
