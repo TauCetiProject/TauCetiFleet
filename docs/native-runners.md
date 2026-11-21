@@ -50,8 +50,9 @@ are unchanged. There are no canary slot selectors or native enable/disable flags
 
 Protected `infra` slots (`ci_protected_slots` entries with kind `infra`, in the
 TauCetiInfra group) also use native-disk. They run our infrastructure
-repositories' CI, never take PR or staging work, and run at CPU weight 25
-against PR builds' 100, so TauCeti PR builds keep CPU precedence. Once the broker
+repositories' CI, never take PR or staging work, and run at CPU weight 1000,
+between PR builds' 100 and staging's 10000: infra jobs are rare and someone is
+usually waiting on them, while nobody waits on any particular PR build. Once the broker
 authorizes the `infra` class for the host, set them live with:
 
 ```sh
@@ -71,6 +72,17 @@ their count, so PR slots and running guests are untouched. `--slots 0` removes
 them; removed slots finish their current job. The CI autoscaler sizes only the
 PR slots below them. On a host with infra slots it keeps that PR count fixed,
 because changing it would move the infra slot numbers.
+
+`--pr-slots N` sets that PR count in the same step, moving the infra slots to sit
+directly above the new count; `--pr-slots 0` leaves the host running only its
+infra slots:
+
+```sh
+tauceti-fleet infra-slots HOST --slots 12 --pr-slots 0
+```
+
+Busy guests in slots that change class or fall above the new count finish their
+job; idle PR guests in slots that become infra retire after their idle timeout.
 
 `native-runner HOST --prepare` remains available for an explicit image refresh;
 it is not required to enable PR CI through the standard setup.

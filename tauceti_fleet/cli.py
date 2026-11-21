@@ -67,6 +67,7 @@ def parser():
     infra = sub.add_parser("infra-slots", help="run infrastructure-repository CI in slots above the PR slots")
     infra.add_argument("host")
     infra.add_argument("--slots", dest="count", type=int, required=True)
+    infra.add_argument("--pr-slots", type=int, help="also set the PR slot count below them (0: infra only)")
     infra.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
@@ -396,6 +397,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["worker_env"] = changes
             if args.command == "infra-slots":
                 payload.update(count=args.count)
+                if args.pr_slots is not None:
+                    payload.update(pr_slots=args.pr_slots)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
                 if args.memory_gib is not None:

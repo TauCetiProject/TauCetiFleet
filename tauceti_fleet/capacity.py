@@ -6,10 +6,11 @@ from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 # Classes of protected slots, each in its own runner group. `infra` runs our own
-# infrastructure repositories' CI on native-disk slots below PR builds' CPU weight.
+# infrastructure repositories' CI on native-disk slots, above PR builds' CPU
+# weight and below staging's: someone is usually waiting on an infra job.
 PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra")
 # CPU weight of infra jobs; PR builds have 100 and staging 10000.
-INFRA_CPU_WEIGHT = 25
+INFRA_CPU_WEIGHT = 1000
 MAX_JOBS = 4096
 
 
@@ -146,15 +147,18 @@ def pr_jobs(config):
     return jobs(config) - len(infra_slots(config))
 
 
-def with_infra_slots(config, count, group):
-    """Place `count` infra slots directly above the host's PR slots."""
+def with_infra_slots(config, count, group, pr=None):
+    """Place `count` infra slots directly above the host's PR slots, of which
+    there are `pr` (default: keep the current count; 0 leaves only infra)."""
     if type(count) is not int or not 0 <= count <= 64:
         raise FleetError("The infra slot count must be an integer from 0 to 64")
     if count and (type(group) is not int or group <= 0):
         raise FleetError("The CI broker reports no runner group for infra")
-    base = pr_jobs(config)
-    if infra_slots(config) != list(range(base, jobs(config))):
+    if pr is not None and (type(pr) is not int or pr < 0):
+        raise FleetError("The PR slot count must be a non-negative integer")
+    if infra_slots(config) != list(range(pr_jobs(config), jobs(config))):
         raise FleetError("Existing infra slots must sit directly above the PR slots")
+    base = pr_jobs(config) if pr is None else pr
     others = {k: v for k, v in config.get("ci_protected_slots", {}).items() if v["kind"] != "infra"}
     if any(int(k) >= base for k in others):
         raise FleetError("Other protected slots must sit below the infra slots")

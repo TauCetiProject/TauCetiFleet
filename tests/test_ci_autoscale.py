@@ -103,6 +103,13 @@ class CapacityPolicy(unittest.TestCase):
         self.assertTrue(all(d["target"] == 3 for d in recover))
         self.assertFalse([d for d in decisions if d["kind"] == "limit"])
 
+    def test_fixed_hosts_without_pr_slots_hold_at_zero(self):
+        c = auto.Controller(minimum=1, maximum=6, growth_delay=1)
+        s = dict(snapshot(limit=0, available=100), reserved=0, fixed_pr_slots=True)
+        for i in range(5):
+            self.assertEqual(c.decide(s, s['at'])['kind'], 'hold')
+            s = advance(s)
+
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
         s['vms'][0].update(busy=False)
@@ -388,6 +395,16 @@ class HostActions(unittest.TestCase):
         store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=6,instance='6'*16,unit='u6',ci_kinds=['infra'])]))
         with patch.object(vm,'run',return_value=Mock(stdout='')):
             self.assertEqual(auto.host_action(dict(mode='snapshot'))['vms'],[])
+
+    def test_an_infra_only_host_has_no_autoscaled_pr_slots(self):
+        store.update_host(ci_max_jobs=2,ci_kinds=['pr'],ci_staging_slots=0,ci_broker_url='https://fleet.example',
+                          ci_protected_slots={'0':dict(kind='infra',runner_group_id=8),'1':dict(kind='infra',runner_group_id=8)})
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=i,instance=str(i)*16,unit='u%d'%i,ci_kinds=['infra']) for i in range(2)]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            value=auto.host_action(dict(mode='snapshot'))
+        self.assertEqual((value['maximum'],value['fixed_pr_slots'],value['vms']),(0,True,[]))
+        self.assertEqual(auto.host_action(dict(mode='limit',maximum=0)),dict(maximum=2))
+        with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=1))
 
     def test_reserved_and_replaced_instances_cannot_be_retired(self):
         with patch.object(vm,'retire') as retire:
