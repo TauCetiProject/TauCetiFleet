@@ -474,7 +474,7 @@ slows at the ceiling instead of having its VM OOM-killed there. Already-running
 compilers can still grow together past it. The reserved staging guest can boot with
 14 GiB of free RAM instead of 20 GiB, retaining room for guest preparation.
 Staging guests receive CPUWeight=10000 versus
-100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
+1000 for infra guests and 100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
 
 The host serves staging compiler requests first and accounts for all grants in
 one shared ramp allowance. Reserved staging guests need no API classification;

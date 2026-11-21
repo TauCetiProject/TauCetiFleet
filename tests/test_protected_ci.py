@@ -112,7 +112,7 @@ class InfraCI(unittest.TestCase):
                            ci_protected_slots={"3": dict(kind="infra", runner_group_id=8),
                                                "4": dict(kind="infra", runner_group_id=8)})
 
-    def test_infra_slots_are_native_protected_and_below_pr_priority(self):
+    def test_infra_slots_are_native_protected_and_between_pr_and_staging_priority(self):
         infra = capacity.for_slot(self.config, 3)
         self.assertEqual(capacity.kinds(infra), ["infra"])
         self.assertEqual(infra["ci_slot_runner_group_id"], 8)
@@ -131,7 +131,8 @@ class InfraCI(unittest.TestCase):
         self.assertEqual(infra["ci_job_kind"], "infra")
         self.assertFalse(ci_priority.staging(infra))
         self.assertEqual(infra["cpu_weight"], capacity.INFRA_CPU_WEIGHT)
-        self.assertLess(capacity.INFRA_CPU_WEIGHT, 100)
+        self.assertLess(100, capacity.INFRA_CPU_WEIGHT)
+        self.assertLess(capacity.INFRA_CPU_WEIGHT, 10000)
         run.assert_called_once_with(["systemctl", "--user", "set-property", "--runtime", "infra-guest",
                                      "CPUWeight=" + str(capacity.INFRA_CPU_WEIGHT)])
 
@@ -159,11 +160,11 @@ class InfraSlotsCommand(unittest.TestCase):
                           ci_kinds=["pr"], ci_max_jobs=15, ci_broker_url="https://fleet.example")
         self.policy = dict(runner_group_id=3, groups={"queue-control": 6, "pr-status": 7, "infra": 8}, kinds=["pr", "infra"])
 
-    def run_command(self, count, policy=None):
+    def run_command(self, count, policy=None, **extra):
         from tauceti_fleet import host
         with patch.object(github, "capacity_policy", return_value=policy or self.policy), \
                 patch.object(native_runner, "prepare_for_ci") as prepare:
-            result = host.rpc(dict(action="infra-slots", count=count))
+            result = host.rpc(dict(action="infra-slots", count=count, **extra))
         return result, prepare
 
     def test_infra_slots_go_above_the_pr_slots_and_can_change_live(self):
@@ -175,6 +176,18 @@ class InfraSlotsCommand(unittest.TestCase):
         self.assertEqual(self.run_command(2)[0]["infra_slots"], [15, 16])
         self.assertEqual(self.run_command(0)[0], dict(infra_slots=[], pr_slots=15, ci_max_jobs=15, ci_enabled=True))
         self.assertEqual(store.host_config()["ci_protected_slots"], {})
+
+    def test_pr_slots_change_with_the_infra_slots_in_one_step(self):
+        self.run_command(12)
+        result = self.run_command(12, pr_slots=0)[0]
+        self.assertEqual(result, dict(infra_slots=list(range(12)), pr_slots=0, ci_max_jobs=12, ci_enabled=True))
+        self.assertEqual(sorted(store.host_config()["ci_protected_slots"], key=int), [str(i) for i in range(12)])
+        self.assertEqual(self.run_command(12)[0]["pr_slots"], 0)
+        self.assertEqual(self.run_command(2, pr_slots=3)[0], dict(infra_slots=[3, 4], pr_slots=3, ci_max_jobs=5, ci_enabled=True))
+        for count, pr in ((0, 0), (2, -1), (2, "3")):
+            with self.assertRaises(store.FleetError):
+                self.run_command(count, pr_slots=pr)
+        self.assertEqual(store.host_config()["ci_max_jobs"], 5)
 
     def test_infra_slots_require_the_broker_class_and_keep_other_protected_slots_below(self):
         with self.assertRaises(store.FleetError):

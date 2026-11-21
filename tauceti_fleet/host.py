@@ -631,22 +631,25 @@ def reserve_staging(maximum, memory_gib=None):
                 pending_slots=pending)
 
 
-def set_infra_slots(count):
-    """Run `count` infra slots above the PR slots; PR slots and guests are untouched.
+def set_infra_slots(count, pr=None):
+    """Run `count` infra slots above the PR slots, optionally resizing the PR slots to `pr`.
 
-    Added slots start on the controller's next loop; removed ones finish their job.
+    Both change in one step, so the autoscaler never sees the host without its
+    infra slots. Added slots start on the controller's next loop; removed ones
+    finish their job. A slot that moves between PR and infra takes its new class
+    once its current guest finishes its job or, if idle, at once.
     """
     config = host_config()
     if not config.get("ci_broker_url"):
         raise FleetError("Infra slots register through the CI broker; enroll this host first")
     policy = github.capacity_policy(config)
     group = (policy.get("groups") or {}).get("infra")
-    proposed = capacity.with_infra_slots(config, count, group)
+    proposed = capacity.with_infra_slots(config, count, group, pr)
     capacity.authorize(proposed, policy)
     if config["ci_enabled"]:
         native_runner.prepare_for_ci(proposed)
     # Recompute from the locked current file: the autoscaler may write meanwhile.
-    value = change_host(lambda current: capacity.with_infra_slots(current, count, group))
+    value = change_host(lambda current: capacity.with_infra_slots(current, count, group, pr))
     event("ci_infra_slots", count=count, ci_max_jobs=value["ci_max_jobs"])
     return dict(infra_slots=capacity.infra_slots(value), pr_slots=capacity.pr_jobs(value),
                 ci_max_jobs=capacity.jobs(value), ci_enabled=value["ci_enabled"])
@@ -1109,6 +1112,8 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
+                         # infra-slots --pr-slots moves slots between PR and infra.
+                         or (value.get("ci_kinds") == ["infra"]) != (config["ci_kinds"] == ["infra"])
                          or (not value.get("ci_bootstrap_waiting")
                              and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
                              and own.get("status") != "online"))
@@ -1500,7 +1505,7 @@ def rpc(payload):
     if action == "reserve-staging":
         return reserve_staging(payload["maximum"], payload.get("memory_gib"))
     if action == "infra-slots":
-        return set_infra_slots(payload["count"])
+        return set_infra_slots(payload["count"], payload.get("pr_slots"))
     if action == "drain":
         return drain()
     if action == "budget":
