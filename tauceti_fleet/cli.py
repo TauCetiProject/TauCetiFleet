@@ -130,6 +130,10 @@ def parser():
                                    help="directory holding github-app.json and github-private-key.pem (default: the queue App's)")
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
+    sub.add_parser("fleet-alert", help="check every host's worker progress once and send any due alert")
+    install_alert = sub.add_parser("install-fleet-alert",
+                                   help="check worker progress every minute from this account's systemd timer")
+    install_alert.add_argument("--zulip-config", help="mode-0600 Zulip bot configuration; omit to log only")
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
@@ -269,6 +273,14 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         args = parser().parse_args(raw)
         print(json.dumps(install(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
                                  github_app_dir=args.github_app_dir)))
+        return 0
+    if raw[:1] == ["fleet-alert"]:
+        from .fleet_alert import main as alert_main
+        return alert_main(raw[1:])
+    if raw[:1] == ["install-fleet-alert"]:
+        from .fleet_alert import install as install_alert
+        args = parser().parse_args(raw)
+        print(json.dumps(install_alert(args.zulip_config)))
         return 0
     if raw[:1] == ["install-monitoring"]:
         from .monitoring import install_local
