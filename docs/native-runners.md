@@ -63,7 +63,10 @@ Infra slots use their own native image, exported from the same verified VM base
 with what other repositories' ordinary GitHub workflows expect of GitHub's runner
 image: current Git (the git-core PPA), Node.js, and a runner-owned
 `/opt/hostedtoolcache` set as the tool cache, so `actions/setup-python` interpreters
-find their libraries. PR and staging slots keep the minimal image. Setup and live
+find their libraries. PR and staging slots keep the minimal image. Both native
+images include the system C compiler (`gcc`, as `cc`), which Lake uses for
+packages with C sources such as doc-gen4's dependencies; an export without a
+working `cc` fails rather than producing an image. Setup and live
 `update` prepare the infra image when the host has infra slots; an infra slot
 whose image is missing fails explicitly rather than falling back.
 

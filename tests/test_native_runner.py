@@ -168,6 +168,11 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(line == "apt-get update" or line not in joined[False])
         self.assertIn("command -v node && git --version", joined[True])
         self.assertNotIn("command -v node", joined[False])
+        # Both images carry the system C compiler Lake's buildO/compileO call, and
+        # neither exports without one.
+        for infra in (False, True):
+            self.assertIn("apt-get install -y bubblewrap " + native.C_COMPILER_PACKAGES, joined[infra])
+            self.assertIn("cc --version && ", joined[infra])
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])

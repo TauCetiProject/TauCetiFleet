@@ -202,8 +202,11 @@ def prepare_image(config=None):
         disk = staging / "disk.qcow2"
         disk.unlink(missing_ok=True)
         run([executable("qemu-img"), "create", "-f", "qcow2", "-F", "qcow2", "-b", root / "ubuntu.qcow2", disk, "20G"])
+        # gcc and libc6-dev supply the system `cc` that Lake's C builds call (see
+        # native_runner.C_COMPILER_PACKAGES). Native images install them on export
+        # too, so they do not depend on the base image having been rebuilt.
         commands = [
-            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl git sudo python3 jq libicu74 libssl3t64 zlib1g libkrb5-3 liblttng-ust1t64",
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl git sudo python3 jq libicu74 libssl3t64 zlib1g libkrb5-3 liblttng-ust1t64 gcc libc6-dev",
             "curl --fail --location https://github.com/cli/cli/releases/download/v"
             + GH_VERSION
             + "/gh_"
