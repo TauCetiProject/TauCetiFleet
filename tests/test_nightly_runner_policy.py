@@ -9,6 +9,7 @@ NIGHTLY = PREFIX + "nightly-verify.yml@refs/heads/main"
 SMOKE = PREFIX + "fleet-smoke.yml@refs/heads/main"  # deleted from TauCeti; no longer admitted
 PICKER = PREFIX + "pick-runner.yml@refs/heads/main"
 LABEL_ROUTER = PREFIX + "full-lint-label.yml@refs/heads/main"
+API_DOCS = PREFIX + "api-docs.yml@refs/heads/main"
 
 HARNESS = "TauCetiProject/TauCetiTools/.github/workflows/"
 
@@ -28,20 +29,24 @@ class NightlyRunnerPolicy(unittest.TestCase):
             return github.runner_policy(dict(runner_group_id=3))
 
     def test_live_update_accepts_old_and_new_policy(self):
-        for workflows in ([BUILD], [BUILD, NIGHTLY], [BUILD, PICKER], [BUILD, LABEL_ROUTER],
-                          [BUILD, NIGHTLY, PICKER, LABEL_ROUTER]):
+        for workflows in ([BUILD], [BUILD, NIGHTLY], [BUILD, PICKER], [BUILD, LABEL_ROUTER], [BUILD, API_DOCS],
+                          [BUILD, NIGHTLY, PICKER, LABEL_ROUTER, API_DOCS]):
             self.assertEqual(self.check(workflows), 3)
 
     def test_no_pr_refs_other_repositories_or_untrusted_workflows(self):
         for bad in (NIGHTLY.replace("refs/heads/main", "refs/pull/1/merge"),
                     PICKER.replace("refs/heads/main", "refs/pull/1/merge"),
                     LABEL_ROUTER.replace("refs/heads/main", "refs/pull/1/merge"),
+                    API_DOCS.replace("refs/heads/main", "refs/pull/1/merge"),
+                    API_DOCS.replace("refs/heads/main", "refs/heads/other"),
+                    API_DOCS.replace("TauCetiProject/TauCeti/", "someone/Other/"),
                     NIGHTLY.replace("TauCetiProject/TauCeti/", "someone/Other/"),
                     PICKER.replace("TauCetiProject/TauCeti/", "someone/Other/"),
                     PREFIX + "untrusted.yml@refs/heads/main", SMOKE):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
         with self.assertRaises(FleetError): self.check([NIGHTLY])
         with self.assertRaises(FleetError): self.check([PICKER, LABEL_ROUTER])
+        with self.assertRaises(FleetError): self.check([API_DOCS])
 
     def test_shared_harness_at_tools_main_is_allowed_but_no_other_branch_or_fork(self):
         main = HARNESS + "pr-build.yml@refs/heads/main"
