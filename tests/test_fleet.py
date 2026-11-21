@@ -146,13 +146,14 @@ class Isolated(unittest.TestCase):
         host.worker_config(original)
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
         self.assertEqual(len(specs), 3)
-        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        shared = {"TAUCETI_SHARED_ATTEMPTS_DIR": str(store.state_dir() / "worker-attempts")}
+        self.assertTrue(all(s["env"] == {"OTHER": 'a "b"', "TAUCETI_ROUND_WORKTREES": "1", **shared} for s in specs))
         host.set_worker_policy(dict(worker_env={"OTHER": None}))
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
-        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1"} for s in specs))
+        self.assertTrue(all(s["env"] == {"TAUCETI_ROUND_WORKTREES": "1", **shared} for s in specs))
         host.set_worker_policy(dict(worker_env={"TAUCETI_ROUND_WORKTREES": None}))
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
-        self.assertFalse(any("env" in s for s in specs))
+        self.assertTrue(all(s["env"] == shared for s in specs))
 
     def test_worker_env_rejects_unsafe_names_and_values(self):
         original = store.update_host(max_workers=2, workers_enabled=True)
@@ -405,6 +406,94 @@ class Isolated(unittest.TestCase):
             self.assertEqual(os.environ["TAUCETI_WORKER_OOM_SCORE_ADJ"], "500")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_URL"], "https://state.example")
             self.assertEqual(os.environ["TAUCETI_GITHUB_STATE_TOKEN_FILE"], str(self.root / "state-client-token"))
+
+    def test_worker_definitions_carry_the_shared_attempt_budget_and_its_overrides(self):
+        import tomllib
+
+        def generated():
+            return tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+
+        name = "TAUCETI_SHARED_ATTEMPTS_DIR"
+        attempts = store.state_dir() / "worker-attempts"
+        store.update_host(max_workers=2, workers_enabled=True, worker_env={"OTHER": "1"})
+        # The Worker manager replaces a surviving worker only when its definition changes, so the
+        # default must change the definitions written before it, which held only worker_env.
+        with patch.object(host, "worker_statuses", return_value=[]):
+            host.set_worker_policy(dict(worker_env={name: ""}))
+            self.assertEqual([s["env"] for s in generated()], [{name: "", "OTHER": "1"}] * 2)
+            self.assertFalse(attempts.exists())
+            host.set_worker_policy(dict(worker_env={name: "/elsewhere"}))
+            self.assertEqual([s["env"][name] for s in generated()], ["/elsewhere"] * 2)
+            self.assertFalse(attempts.exists())
+            host.set_worker_policy(dict(worker_env={name: None}))
+            specs = generated()
+        self.assertEqual([s["env"] for s in specs], [{name: str(attempts), "OTHER": "1"}] * 2)
+        self.assertEqual(attempts.stat().st_mode & 0o777, 0o700)
+
+    def test_shared_attempt_default_waits_for_a_manager_with_graceful_restarts(self):
+        import socket
+        import threading
+        import time
+        from types import SimpleNamespace
+
+        name = "TAUCETI_SHARED_ATTEMPTS_DIR"
+        definitions = store.config_dir() / "workers.toml"
+        path = store.state_dir() / "worker-runtime/manager.sock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        config = store.update_host(max_workers=2, workers_enabled=True)
+
+        def generate(reply):
+            # None: a socket file nobody answers on. "silent": a manager that never replies.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(path))
+                thread = None
+                if reply is not None:
+                    server.listen(1)
+                if isinstance(reply, dict):
+
+                    def serve():
+                        connection, _ = server.accept()
+                        with connection:
+                            connection.recv(4096)
+                            connection.sendall(json.dumps(reply).encode() + b"\n")
+
+                    thread = threading.Thread(target=serve, daemon=True)
+                    thread.start()
+                with patch.object(host, "worker_statuses", return_value=[dict(alive=True)]):
+                    host.worker_config(config)
+                if thread:
+                    thread.join(5)
+            path.unlink()
+            return definitions.read_text()
+
+        # Definitions written before the default, which an older manager is running.
+        definitions.parent.mkdir(parents=True, exist_ok=True)
+        definitions.write_text('version = 1\n\n[[workers]]\nid = "fleet-legacy-1"\nagent = "claude"\n')
+        for reply in (dict(ok=True), None):
+            generated = generate(reply)
+            self.assertNotIn("env", generated)
+            self.assertEqual(generate(reply), generated)
+            self.assertFalse((store.state_dir() / "worker-attempts").exists())
+        self.assertIn(name, generate(dict(ok=True, graceful_restart=1)))
+        # Once written, the default stays without asking the manager again.
+        started = time.monotonic()
+        self.assertIn(name, generate("silent"))
+        self.assertLess(time.monotonic() - started, 4)
+        # With no manager running, the installed runtime's manager meets any surviving worker.
+        legacy = 'version = 1\n\n[[workers]]\nid = "fleet-legacy-1"\nagent = "claude"\n'
+        for alive, protocol, written in (
+            ([], "{}", True),
+            ([dict(alive=True)], "{}", False),
+            ([dict(alive=True)], '{"graceful_restart":1}', True),
+        ):
+            definitions.write_text(legacy)
+            with (
+                patch.object(host, "worker_statuses", return_value=alive),
+                patch.object(host, "executable", return_value="tauceti"),
+                patch.object(host, "run", return_value=SimpleNamespace(stdout=protocol)),
+            ):
+                host.worker_config(config)
+            self.assertEqual(name in definitions.read_text(), written)
 
     def test_status_with_unreachable_uncached_host_does_not_invent_totals(self):
         entry = dict(machine_id="a", target="unreachable", profile="test")

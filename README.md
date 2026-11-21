@@ -1199,3 +1199,17 @@ Before downgrading to a Worker release without source-selection support, set the
 to `0` and wait for those workers to adopt their GitHub definitions. Keep at least one
 native worker elsewhere while native PRs still need maintenance. A routing rollback
 takes effect at safe idle windows; it is not an emergency stop for an active round.
+
+A host's workers act as one account, so they share one repair attempt budget per PR: each
+generated worker definition's `env` table sets `TAUCETI_SHARED_ATTEMPTS_DIR` to
+`worker-attempts/` in the Fleet state directory, created mode 0700. The manager replaces a
+running worker whose definition changed after its current round, including one that outlived a
+manager restart. A manager without `graceful_restart` support would instead stop those rounds at
+once, so Fleet adds the default only when the running manager's ping reports that support, or, with
+no manager running, when no worker is alive or the installed Worker reports it. Otherwise, and when
+the manager does not answer, the definitions keep their current environment until Fleet next
+writes them (controller start, `enable` or a `workers` policy change). Point the workers elsewhere
+with `--env TAUCETI_SHARED_ATTEMPTS_DIR=PATH` on a local filesystem, or give each worker its own
+budget again with `--env TAUCETI_SHARED_ATTEMPTS_DIR=`. The workers read the directory from their
+own process on the host, never from inside a Bubble sandbox, so it needs no mount. A Worker
+release without shared attempt budgets ignores the variable, so this is safe to deploy before it.

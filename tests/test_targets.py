@@ -65,7 +65,8 @@ class TargetLists(unittest.TestCase):
         host.worker_config(store.host_config())
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
         self.assertEqual({s["roadmap_targets"] for s in specs}, {str(targets.stored())})
-        self.assertEqual([s["env"] for s in specs], [{"OTHER": "value"}] * 2)
+        attempts = str(store.state_dir() / "worker-attempts")
+        self.assertEqual([s["env"] for s in specs], [{"OTHER": "value", host.SHARED_ATTEMPTS_ENV: attempts}] * 2)
         self.assertEqual((specs[1]["github"], specs[1]["forgejo"], specs[1]["new_pr_forge"]), (False, True, "forgejo"))
         targets.configure(dict(clear=True), [])
         host.worker_config(store.host_config())
