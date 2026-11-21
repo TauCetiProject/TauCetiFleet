@@ -101,6 +101,7 @@ def inspect():
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/api-docs.yml@refs/heads/main",
                "TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main"}
     workflows = set(group.get("selected_workflows", []))
     if (group["name"] != "TauCetiFleet" or not group.get("restricted_to_workflows") or required not in workflows
