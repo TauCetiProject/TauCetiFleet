@@ -109,6 +109,14 @@ class CapacityPolicy(unittest.TestCase):
         for i in range(5):
             self.assertEqual(c.decide(s, s['at'])['kind'], 'hold')
             s = advance(s)
+        # A stalled PR guest still finishing above the zero count is recovered without a resize.
+        s = dict(snapshot(limit=1, available=10), reserved=0, fixed_pr_slots=True, maximum=0)
+        decisions = []
+        for i in range(5):
+            decisions.append(c.decide(s, s['at']))
+            s = advance(s)
+        self.assertEqual({d.get('target', 0) for d in decisions}, {0})
+        self.assertTrue([d for d in decisions if d['kind'] == 'recover'])
 
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()

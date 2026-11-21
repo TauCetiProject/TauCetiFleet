@@ -252,7 +252,8 @@ class Controller:
             self.value.setdefault("stall_since", now)
         else:
             self.value.pop("stall_since", None)
-        floor = max(minimum, snapshot["reserved"] + 1)
+        # At most the maximum: an infra-only host is pinned at zero PR slots.
+        floor = min(maximum, max(minimum, snapshot["reserved"] + 1))
         if limit < floor <= maximum and available >= headroom + 21 * GIB:
             return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
         if low and general_idle and limit > floor:

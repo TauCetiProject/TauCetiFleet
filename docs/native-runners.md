@@ -82,7 +82,8 @@ tauceti-fleet infra-slots HOST --slots 12 --pr-slots 0
 ```
 
 Busy guests in slots that change class or fall above the new count finish their
-job; idle PR guests in slots that become infra retire after their idle timeout.
+job; idle guests in slots that move between PR and infra retire and restart in
+their new class.
 
 `native-runner HOST --prepare` remains available for an explicit image refresh;
 it is not required to enable PR CI through the standard setup.

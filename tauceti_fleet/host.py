@@ -636,8 +636,8 @@ def set_infra_slots(count, pr=None):
 
     Both change in one step, so the autoscaler never sees the host without its
     infra slots. Added slots start on the controller's next loop; removed ones
-    finish their job. A slot that changes class takes its new class once its
-    current guest finishes its job or retires idle.
+    finish their job. A slot that moves between PR and infra takes its new class
+    once its current guest finishes its job or, if idle, at once.
     """
     config = host_config()
     if not config.get("ci_broker_url"):
@@ -1112,6 +1112,8 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
+                         # infra-slots --pr-slots moves slots between PR and infra.
+                         or (value.get("ci_kinds") == ["infra"]) != (config["ci_kinds"] == ["infra"])
                          or (not value.get("ci_bootstrap_waiting")
                              and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
                              and own.get("status") != "online"))
