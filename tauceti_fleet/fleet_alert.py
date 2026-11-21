@@ -43,18 +43,30 @@ def fresh(at, now, limit):
     return isinstance(at, (int, float)) and now - at <= limit
 
 
+def counters(hour):
+    """The last hour's round totals, or None unless every row carries all three counters."""
+    keys = ("finished", "failed", "unknown")
+    if not isinstance(hour, dict) or not all(
+            isinstance(r, dict) and all(type(r.get(k)) is int for k in keys) for r in hour.values()):
+        return None
+    return {k: sum(r[k] for r in hour.values()) for k in keys}
+
+
 def assess(value, now):
-    """This host's facts from one status report; None when the report is missing, cached or stale."""
+    """This host's facts from one status report; None when the report is missing, cached, stale or partial."""
     status = value.get("status")
     if (not isinstance(status, dict) or value.get("offline") or value.get("error") or status.get("error")
-            or not fresh(status.get("observed_at"), now, STATUS_MAX_AGE) or type(value.get("workers_enabled")) is not bool):
+            or not fresh(status.get("observed_at"), now, STATUS_MAX_AGE)
+            or type(value.get("workers_enabled")) is not bool or not isinstance(status.get("workers"), list)):
         return None
-    alive = [w for w in status.get("workers") or [] if w.get("alive")]
+    # As in `tauceti-fleet status`, a worker counts as alive only when its report says so.
+    alive = [w for w in status["workers"] if isinstance(w, dict) and w.get("alive") is True]
     blocked = [w for w in alive if w.get("state") == "backoff" or (
         str(w.get("state")).startswith("waiting-") and w.get("state") not in ADMISSION_WAITS)]
     summary = (value.get("activity") or {}).get("summary") or {}
-    hour = (summary.get("rounds") or {}).get("1h")
-    known = fresh(summary.get("prepared_at"), now, ACTIVITY_MAX_AGE) and isinstance(hour, dict)
+    rounds = counters((summary.get("rounds") or {}).get("1h"))
+    if not fresh(summary.get("prepared_at"), now, ACTIVITY_MAX_AGE):
+        rounds = None
     details = collections.Counter(str(w.get("detail") or w.get("state")) for w in blocked)
     return dict(
         enabled=value["workers_enabled"],
@@ -63,8 +75,7 @@ def assess(value, now):
         blocked=len(blocked),
         waiting=sum(w.get("state") in ADMISSION_WAITS for w in alive),
         # Finished rounds include those that failed, timed out or have an unconfirmed outcome.
-        **{key: sum(r.get(key, 0) for r in hour.values()) if known else None
-           for key in ("finished", "failed", "unknown")},
+        rounds=rounds,
         detail=details.most_common(1)[0][0] if details else None,
         admission=(status.get("worker_admission") or {}).get("state"),
     )
@@ -72,22 +83,26 @@ def assess(value, now):
 
 def classify(health, record, now):
     """("bad", description), ("good", None), or None when this report is no evidence either way."""
-    alive = health["alive"]
+    alive, rounds = health["alive"], health["rounds"]
+    if health["enabled"] and health["admission"] not in ("paused", "at_ceiling"):
+        return None
     if (not health["enabled"] or health["admission"] == "paused"
             or (alive and health["waiting"] >= STUCK_SHARE * alive)):
-        # Workers disabled, or a schedule, memory, budget or quota pause: no progress is expected.
+        # Workers disabled, an admission pause (schedule, memory), or workers holding back for capacity
+        # (open PR backpressure), budget or quota: no progress is expected.
         record.pop("admitted_since", None)
         return "good", None
-    if health["admission"] != "at_ceiling":
-        return None
     if alive >= MIN_WORKERS and health["blocked"] >= STUCK_SHARE * alive:
         return "bad", f"{health['blocked']} of {alive} workers in backoff or blocked"
     if not alive:
         return "bad", "no workers alive although admission is open"
+    if now - record.get("admitted_seen", now) > GAP:
+        record.pop("admitted_since", None)
+    record["admitted_seen"] = now
     record.setdefault("admitted_since", now)
-    if health["finished"] is None:
+    if rounds is None:
         return None
-    if health["finished"] > health["failed"] + health["unknown"]:
+    if rounds["finished"] > rounds["failed"] + rounds["unknown"]:
         return "good", None
     if now - record["admitted_since"] >= WARMUP:
         return "bad", f"no rounds succeeded in the last hour with {alive} workers alive"
@@ -96,13 +111,14 @@ def classify(health, record, now):
 
 def step(record, health, now):
     """Advance one host's episode; returns ("alert", description) or ("recovery", None) when one is due."""
-    if now - record.get("observed", now) > GAP:
-        for key in ("clear_since", "admitted_since", *(() if record.get("alerted_at") else ("since",))):
-            record.pop(key, None)
-    record["observed"] = now
     verdict = classify(health, record, now)
     if verdict is None:
         return None
+    if now - record.get("seen", now) > GAP:
+        # Time without a verdict proves nothing: restart pending periods; an open alert stays open.
+        for key in ("clear_since", *(() if record.get("alerted_at") else ("since",))):
+            record.pop(key, None)
+    record["seen"] = now
     kind, description = verdict
     if kind == "bad":
         record.pop("clear_since", None)
@@ -124,10 +140,10 @@ def duration(seconds):
 
 
 def snapshot(health):
-    text = f"{health['working']} of {health['alive']} workers working"
-    if health["finished"] is None:
+    text, rounds = f"{health['working']} of {health['alive']} workers working", health["rounds"]
+    if rounds is None:
         return text + "; rounds in the last hour unknown"
-    return text + f"; {health['finished']} rounds finished in the last hour, {health['failed']} of them failed"
+    return text + f"; {rounds['finished']} rounds finished in the last hour, {rounds['failed']} of them failed"
 
 
 def alert_text(name, description, health, opened_for):

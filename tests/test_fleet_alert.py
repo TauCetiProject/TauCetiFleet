@@ -164,6 +164,24 @@ class Episodes(unittest.TestCase):
         run.minutes(30, lambda now: {k: v for k, v in report(["running"] * 20, now=now).items()
                                      if k != "workers_enabled"})
         run.minutes(30, lambda now: report(["running"] * 20, now=now, admission=None))
+        run.minutes(30, lambda now: report(["waiting-budget"] * 20, now=now, admission=None))
+        partial = report(["running"] * 20)
+        del partial["activity"]["summary"]["rounds"]["1h"]["author"]["failed"]
+        run.minutes(30, lambda now: dict(partial, status=dict(partial["status"], observed_at=now),
+                                         activity=dict(summary=dict(partial["activity"]["summary"], prepared_at=now))))
+        self.assertEqual(len(run.sent), 1)
+
+    def test_missing_worker_lists_and_unknown_admission_are_no_evidence(self):
+        run = Run()
+        run.minutes(30, lambda now: dict(report([], now=now), status=dict(observed_at=now,
+                                                                          worker_admission=dict(state="at_ceiling"))))
+        self.assertEqual(run.sent, [])
+        # Bad, then half an hour without a verdict, then bad again: the 15 minutes start afresh.
+        run.minutes(1, lambda now: report(["backoff"] * 10, now=now))
+        run.minutes(30, lambda now: report(["backoff"] * 10, now=now, admission=None))
+        run.minutes(15, lambda now: report(["backoff"] * 10, now=now))
+        self.assertEqual(run.sent, [])
+        run.minutes(1, lambda now: report(["backoff"] * 10, now=now))
         self.assertEqual(len(run.sent), 1)
 
     def test_each_delivery_is_saved_before_the_next_host(self):

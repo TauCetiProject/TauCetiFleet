@@ -1096,7 +1096,7 @@ problem when at least 80% of its live workers (and at least three) are in backof
 is alive, or when its workers have completed no round with a confirmed success in the last hour
 after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
 needs 15 minutes of positive evidence (a confirmed success in the last hour, or an explicit
-admission pause, or most workers waiting for budget or quota) and sends one message; disabling
+admission pause, or most workers waiting for capacity, budget or quota) and sends one message; disabling
 the host's workers closes the alert at once. Unreachable hosts, cached or stale controller
 reports, missing fields and stale round counts neither open nor close an incident, and five
 minutes without a fresh report restarts any pending period. State
