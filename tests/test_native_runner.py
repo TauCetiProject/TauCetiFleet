@@ -168,6 +168,65 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(line == "apt-get update" or line not in joined[False])
         self.assertIn("command -v node && git --version", joined[True])
         self.assertNotIn("command -v node", joined[False])
+        # Both images carry the system C compiler Lake's buildO/compileO call, and
+        # neither exports without one.
+        for infra in (False, True):
+            self.assertIn("apt-get install -y bubblewrap " + native.C_COMPILER_PACKAGES, joined[infra])
+            self.assertIn("cc --version && ", joined[infra])
+
+    def test_manifests_are_keyed_by_revision_so_older_controllers_keep_theirs(self):
+        # A live update exports before handover; the serving controller still
+        # reads the revision-1 manifests under their original names.
+        images = store.data_dir() / "images"
+        store.atomic(images / "native.json", dict(revision=1, sha256="c" * 64))
+        store.atomic(images / "native-r2.json", dict(revision=2, sha256="d" * 64))
+        with patch.object(native, "IMAGE_REVISION", 2), patch.object(native, "INFRA_IMAGE_REVISION", 2):
+            self.assertEqual(native.manifest_name(), "native-r2.json")
+            self.assertEqual(native.manifest_name(True), "native-infra-r2.json")
+            self.assertEqual(native.image()["sha256"], "d" * 64)
+            self.assertEqual(native.image(True), {})
+        with patch.object(native, "IMAGE_REVISION", 1):
+            self.assertEqual(native.image()["sha256"], "c" * 64)
+
+    def test_export_publishes_under_the_revision_name_and_keeps_older_manifests(self):
+        images = store.data_dir() / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        store.state_dir().mkdir(parents=True, exist_ok=True)
+        old = dict(revision=1, sha256="c" * 64)
+        store.atomic(images / "native.json", old)
+        store.atomic(images / "native-infra.json", old)
+        base = dict(sha256="a" * 64, runner_version="v1")
+
+        def fake_run(argv, **kwargs):
+            argv = [str(a) for a in argv]
+            if argv[0].endswith("qemu-img"):
+                Path(argv[-2]).touch()
+            elif "-xpf" in argv:
+                target = Path(argv[argv.index("-C") + 1])
+                (target / "opt/actions-runner/bin").mkdir(parents=True)
+                (target / "opt/actions-runner/bin/Runner.Listener").touch()
+            elif "systemd-run" in " ".join(argv) or any("qemu-system" in a for a in argv):
+                for staging in store.state_dir().glob("native-image-*"):
+                    (staging / "console.log").write_text("FLEET_NATIVE_IMAGE_READY\n")
+                    (staging / "rootfs.tar.gz").write_bytes(b"x")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        for infra in (False, True):
+            with (patch.object(native, "prerequisites"), patch.object(vm, "prepare_tools"),
+                  patch.object(native, "read", side_effect=lambda path, default=None: base
+                               if Path(path).name == "prepared.json" else store.read(path, default)),
+                  patch.object(vm, "digest", side_effect=lambda path, infra=infra: "a" * 64
+                               if Path(path).name == "prepared.qcow2" else ("f" if infra else "e") * 64),
+                  patch.object(vm, "cloud_seed", return_value="seed.iso"),
+                  patch.object(vm, "qemu_args", return_value=["qemu-system-x86_64"]),
+                  patch.object(vm, "scope_args", side_effect=lambda unit, args, small: ["systemd-run", *args]),
+                  patch.object(native, "executable", side_effect=lambda name: name),
+                  patch.object(native, "run", side_effect=fake_run)):
+                value = native.prepare(dict(ci_kinds=["pr"]), infra=infra)
+            self.assertEqual(store.read(images / native.manifest_name(infra)), value)
+            self.assertNotIn(native.manifest_name(infra), ("native.json", "native-infra.json"))
+        self.assertEqual(store.read(images / "native.json"), old)
+        self.assertEqual(store.read(images / "native-infra.json"), old)
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])

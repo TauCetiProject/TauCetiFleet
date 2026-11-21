@@ -20,7 +20,7 @@ from . import capabilities, capacity, lean_guest, lean_pressure, lean_runtime, l
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
-IMAGE_REVISION = 1
+IMAGE_REVISION = 2
 DISK_START_GIB = 48
 MEMORY_GIB = 54
 RUNTIME = "native-disk"
@@ -30,7 +30,12 @@ CGROUP_ROOT = Path("/sys/fs/cgroup")
 # Infra slots run other repositories' ordinary GitHub workflows, which expect more of
 # GitHub's runner image than TauCeti builds do. They get their own image; PR and
 # staging slots keep the minimal one. Bump INFRA_IMAGE_REVISION to rebuild it.
-INFRA_IMAGE_REVISION = 1
+INFRA_IMAGE_REVISION = 2
+# Lake's `buildO` and `compileO` default to the system `cc`, not the toolchain's
+# bundled clang, so Lean packages with C sources (doc-gen4's leansqlite,
+# UnicodeBasic and MD4Lean, for instance) need one, as on GitHub's runner image.
+# Every native image gets it; an image without a working `cc` never exports.
+C_COMPILER_PACKAGES = "gcc libc6-dev"
 INFRA_RUNNER_ENV = "/opt/tauceti-runner.env"
 INFRA_PACKAGES = [
     "apt-get install -y software-properties-common",
@@ -44,8 +49,16 @@ INFRA_PACKAGES = [
 ]
 
 
+def manifest_name(infra=False):
+    # Keyed by revision, so exporting a new revision during a live update never
+    # replaces the manifest the still-serving older controller reads. Revision 1
+    # predates the key and used the plain name.
+    revision = INFRA_IMAGE_REVISION if infra else IMAGE_REVISION
+    return ("native-infra" if infra else "native") + (f"-r{revision}" if revision > 1 else "") + ".json"
+
+
 def image(infra=False):
-    return read(data_dir() / ("images/native-infra.json" if infra else "images/native.json"), {})
+    return read(data_dir() / "images" / manifest_name(infra), {})
 
 
 def ready(infra=False):
@@ -192,10 +205,11 @@ def prepare(config=None, *, infra=False):
             "mkdir /export; mount -t 9p -o trans=virtio,version=9p2000.L export /export",
             "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer; systemctl mask apt-daily.service apt-daily-upgrade.service",
             "while systemctl is-active --quiet apt-daily.service || systemctl is-active --quiet apt-daily-upgrade.service; do sleep 1; done",
-            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap"
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap " + C_COMPILER_PACKAGES
             + "".join("; " + command for command in (INFRA_PACKAGES if infra else [])),
-            # An incomplete infra image never exports: the archive is then missing.
-            ("command -v node && git --version | grep -qv ' 2\\.43\\.' && test -s " + INFRA_RUNNER_ENV + " && " if infra else "")
+            # An incomplete image never exports: the archive is then missing.
+            "cc --version && "
+            + ("command -v node && git --version | grep -qv ' 2\\.43\\.' && test -s " + INFRA_RUNNER_ENV + " && " if infra else "")
             + "tar --numeric-owner --one-file-system --exclude=./export --exclude=./dev --exclude=./proc --exclude=./sys --exclude=./run --exclude=./tmp --exclude=./var/log --exclude=./lost+found -czf /export/rootfs.tar.gz -C / .",
             "echo FLEET_NATIVE_IMAGE_READY; sync; poweroff",
         ]
@@ -222,7 +236,7 @@ def prepare(config=None, *, infra=False):
                 raise FleetError("Native rootfs export is missing the Actions runner")
             value = dict(revision=INFRA_IMAGE_REVISION if infra else IMAGE_REVISION, sha256=sha, vm_sha256=base["sha256"],
                          runner_version=base["runner_version"], prepared_at=time.time())
-            atomic(root / ("native-infra.json" if infra else "native.json"), value)
+            atomic(root / manifest_name(infra), value)
             complete = True
         finally:
             run(["systemctl", "--user", "stop", unit + ".scope"], check=False)
