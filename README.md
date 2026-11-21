@@ -1085,6 +1085,30 @@ admits nothing and is reported there; `--clear` or a new set of slots replaces
 it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
 admission time left in the current slot.
 
+## Worker progress alerts
+
+`tauceti-fleet install-fleet-alert` on the operator's control host installs a systemd timer
+that runs `tauceti-fleet fleet-alert` once a minute from the installed Fleet release, so
+`update local` takes effect at the next run. Each run reads every inventory host's status, as
+`status` does, and judges hosts whose workers are enabled. A host has a problem when at least
+80% of its live workers (and at least three) are in backoff or blocked (`waiting-*` states other
+than the capacity, budget and quota admission waits), or when its admission is open and its
+live workers have completed no round without failure in the last hour, after an hour of
+observation. A problem lasting 15 minutes sends one alert; 15 minutes without one, or disabling
+the host's workers, sends one recovery message. Unreachable hosts and cached reports neither
+open nor close an incident. State lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
+
+Without `--zulip-config` the messages go only to the unit's journal
+(`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot. The file
+must be mode 0600 and names either a stream and topic or a user to message privately:
+
+```json
+{"site": "https://leanprover.zulipchat.com", "email": "BOT_EMAIL", "api_key": "BOT_API_KEY", "stream": "STREAM", "topic": "TOPIC"}
+```
+
+Use `"recipient_id": USER_ID` in place of `stream` and `topic` for a direct message; this is
+the format of the queue's `TAUCETI_QUEUE_ZULIP_CONFIG`. A failed post is retried on the next run.
+
 ## Public operations telemetry
 
 The existing Tau Ceti `/ci` page can display approved host observations alongside
