@@ -12,7 +12,12 @@ from pathlib import Path
 
 LINK = Path("/fleet-link")
 WORK = Path("/opt/actions-runner/_work")
-DISK_BUDGET_GIB = 56
+# Must admit a from-source build of the whole library, not just a cache-backed PR
+# build: the nightly verification packs every output into a workspace-local Lake
+# cache as well. A 56 GiB budget stopped that build at 97% of its jobs while
+# cache-backed PR builds already peaked at 43 GiB. Host free space and inodes stay
+# checked separately every two seconds.
+DISK_BUDGET_GIB = 128
 # Full roots contain tens of thousands of cache artifacts. A healthy populated
 # runner already takes ~6s to scan; a 10s wall deadline fails under ordinary I/O
 # contention. Space/inode headroom remains checked every two seconds below.

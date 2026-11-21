@@ -95,8 +95,9 @@ budget or the sum of native per-job caps, even when those caps fit that budget.
 
 Native startup checks for 48 GiB free on the instance filesystem before JIT
 registration. This is an estimate for population plus the host margin, not a disk
-reservation. A 56 GiB whole-instance allocated-disk budget and 8 GiB host free-space
-threshold are monitored. These are **not hard filesystem quotas**; bursts and
+reservation. A 128 GiB whole-instance allocated-disk budget and 8 GiB host free-space
+threshold are monitored. The budget must admit a from-source build of the whole
+library, which the nightly verification runs on these slots. These are **not hard filesystem quotas**; bursts and
 other writers can exceed a budget between observations. No quota provisioning or
 FUSE is required.
 

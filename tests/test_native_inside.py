@@ -142,7 +142,7 @@ class DiskMonitor(unittest.TestCase):
             monitor.child.communicate.assert_not_called()
 
     def test_budget_and_unavailable_monitor_stop_the_instance(self):
-        for allocated, failures, reason in ((57*GIB, 0, 'native disk budget'), (None, 3, 'disk usage monitor unavailable')):
+        for allocated, failures, reason in (((inside.DISK_BUDGET_GIB + 1)*GIB, 0, 'native disk budget'), (None, 3, 'disk usage monitor unavailable')):
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory, patch.object(inside, 'LINK', Path(directory)), patch.object(inside, 'WORK', Path(directory)):
                 stop = threading.Event()
                 monitor = inside.DiskUsage()
