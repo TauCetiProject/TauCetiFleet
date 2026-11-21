@@ -276,6 +276,14 @@ class Enrollment(unittest.TestCase):
         self.assertFalse(host.queue_ci_result(store.read(store.state_dir() / "vm.json"), "healthy"))
         self.assertEqual(store.read(store.state_dir() / "pending-ci.json"), [])
 
+    def test_result_receipt_keeps_the_native_infrastructure_error(self):
+        directory = store.state_dir() / "vms" / ("c" * 16)
+        error = dict(reason="native disk budget", disk_allocated=60 * 1024**3)
+        store.atomic(directory / "native-result.json", dict(exit_code=0, infrastructure_error=error))
+        value = dict(instance="c" * 16, run_id=44, runner_id=9, directory=str(directory))
+        self.assertTrue(host.queue_ci_result(value, "fault"))
+        self.assertEqual(store.read(store.state_dir() / "pending-ci.json")[0]["infrastructure_error"], error)
+
     def test_interrupted_result_queueing_deduplicates_before_setting_the_vm_marker(self):
         value = dict(instance="b" * 16, run_id=43, runner_id=8)
         store.atomic(store.state_dir() / "pending-ci.json", [value])

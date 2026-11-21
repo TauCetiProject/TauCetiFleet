@@ -430,6 +430,16 @@ class Collection(unittest.TestCase):
         self.collect()
         self.assertEqual(len(store.export_events()), 1)
 
+    def test_collected_event_names_the_native_infrastructure_error(self):
+        job, _, _ = evidence()
+        error = dict(reason="native disk budget")
+        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="fault", infrastructure_error=error)])
+        with patch.object(host.github, "request", return_value=dict(jobs=[job])):
+            host.collect_ci_results(self.config)
+        [result] = store.export_events()
+        self.assertEqual(result["infrastructure_error"], error)
+        self.assertEqual(result["classification"]["reason"], "host_service_fault")
+
     def test_setup_cancellation_collection_keeps_capacity_without_extra_reads(self):
         self.collect(phase="Install bubblewrap")
         self.assertEqual(self.request_count, 4)  # Jobs/run/statuses, then the duplicate receipt's jobs lookup.

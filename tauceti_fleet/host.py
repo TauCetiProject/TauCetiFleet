@@ -871,6 +871,16 @@ def queue_ci_result(value, service_health):
     if not value.get("run_id") or value.get("result_queued"):
         return False
     value["host_health"] = service_health
+    # A native supervisor names why it stopped an instance (disk budget, monitor or
+    # transport failure). Its archived evidence is pruned after 50 newer results, so
+    # carry the reason into the durable ci_result event. Telemetry never blocks receipts.
+    if value.get("directory"):
+        try:
+            error = read(Path(value["directory"]) / "native-result.json", {}).get("infrastructure_error")
+        except (FleetError, AttributeError):
+            error = None
+        if error:
+            value["infrastructure_error"] = error
     pending = read(state_dir() / "pending-ci.json", [])
     identity = (value.get("instance"), value["run_id"], value["runner_id"])
     if not any((p.get("instance"), p.get("run_id"), p.get("runner_id")) == identity for p in pending):
@@ -965,6 +975,7 @@ def collect_ci_results(config):
                 instance=value.get("instance"),
                 slot=value.get("slot", 0),
                 classification=decision,
+                infrastructure_error=value.get("infrastructure_error"),
                 run_seconds=max(0, completed - started),
                 wait_seconds=max(0, started - created) if created else None,
             )
