@@ -3,11 +3,11 @@
 A systemd timer on the operator's control host runs `tauceti-fleet fleet-alert` once a minute.
 It reads every inventory host's status the way `tauceti-fleet status` does. A host whose workers
 are enabled and admitted has a problem when almost all of its live workers are in backoff or
-blocked, when no worker is alive, or when its workers complete no round with a confirmed success
-in an hour. A problem lasting 15 minutes sends one alert; the host recovers after 15 minutes of
-positive evidence (a confirmed success in the last hour, or an intentional pause) or at once when
-its workers are disabled, with one recovery message. Reports that are missing, cached or stale
-neither open nor close an incident. Without a Zulip configuration the messages go only to the
+blocked, when no worker is alive, or when its workers finish no round without failure in an
+hour. A problem lasting 15 minutes sends one alert; the host recovers after 15 minutes of positive
+evidence (a round finished without failure in the last hour, or an intentional pause), or at once
+when its workers are disabled, with one recovery message. Reports that are missing, cached or
+stale neither open nor close an incident. Without a Zulip configuration the messages go only to the
 unit's journal.
 """
 
@@ -31,7 +31,7 @@ SUSTAIN = 15 * 60  # a problem, or its absence, must last this long before a mes
 WARMUP = 60 * 60  # the hour-long rounds window must lie entirely in observed admitted time
 GAP = 5 * 60  # a longer silence restarts pending periods: unobserved time proves nothing
 STATUS_MAX_AGE = 5 * 60
-ACTIVITY_MAX_AGE = 20 * 60
+ACTIVITY_MAX_AGE = 5 * 60  # summaries are prepared about once a minute
 STUCK_SHARE = 0.8
 MIN_WORKERS = 3  # the share rule needs a few workers; one worker's backoff is ordinary
 # Admission decisions, not failures: the host's capacity, budget or quota is holding workers.
@@ -65,7 +65,9 @@ def assess(value, now):
         str(w.get("state")).startswith("waiting-") and w.get("state") not in ADMISSION_WAITS)]
     summary = (value.get("activity") or {}).get("summary") or {}
     rounds = counters((summary.get("rounds") or {}).get("1h"))
-    if not fresh(summary.get("prepared_at"), now, ACTIVITY_MAX_AGE):
+    if rounds is not None and fresh(summary.get("prepared_at"), now, ACTIVITY_MAX_AGE):
+        rounds["at"] = summary["prepared_at"]
+    else:
         rounds = None
     details = collections.Counter(str(w.get("detail") or w.get("state")) for w in blocked)
     return dict(
@@ -104,8 +106,9 @@ def classify(health, record, now):
         return None
     if rounds["finished"] > rounds["failed"] + rounds["unknown"]:
         return "good", None
-    if now - record["admitted_since"] >= WARMUP:
-        return "bad", f"no rounds succeeded in the last hour with {alive} workers alive"
+    # No-progress rounds count as finished without failure: they are not crashes.
+    if rounds["at"] - record["admitted_since"] >= WARMUP:
+        return "bad", f"no round finished without failure in the last hour with {alive} workers alive"
     return None
 
 

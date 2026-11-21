@@ -96,7 +96,7 @@ class Episodes(unittest.TestCase):
         self.assertEqual(run.sent, [])
         run.minutes(17, lambda now: report(["running"] * 20, finished=30, failed=30, now=now))
         self.assertEqual(len(run.sent), 1)
-        self.assertIn("no rounds succeeded in the last hour with 20 workers alive", run.sent[0])
+        self.assertIn("no round finished without failure in the last hour with 20 workers alive", run.sent[0])
         self.assertIn("30 rounds finished in the last hour, 30 of them failed", run.sent[0])
         other = Run()
         # Outside a schedule slot admission pauses and rounds stop on purpose; stale counts are unknown.

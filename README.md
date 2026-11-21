@@ -1093,9 +1093,9 @@ that runs `tauceti-fleet fleet-alert` once a minute from the installed Fleet rel
 `status` does, and judges hosts whose workers are enabled and admitted. Such a host has a
 problem when at least 80% of its live workers (and at least three) are in backoff or blocked
 (`waiting-*` states other than the capacity, budget and quota admission waits), when no worker
-is alive, or when its workers have completed no round with a confirmed success in the last hour
-after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
-needs 15 minutes of positive evidence (a confirmed success in the last hour, or an explicit
+is alive, or when its workers have finished no round without failure (or with an unconfirmed
+outcome) in the last hour after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
+needs 15 minutes of positive evidence (such a round in the last hour, or an explicit
 admission pause, or most workers waiting for capacity, budget or quota) and sends one message; disabling
 the host's workers closes the alert at once. Unreachable hosts, cached or stale controller
 reports, missing fields and stale round counts neither open nor close an incident, and five
