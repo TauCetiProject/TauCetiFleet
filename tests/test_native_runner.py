@@ -329,6 +329,22 @@ class NativeRunner(unittest.TestCase):
             remove.assert_called_once_with(directory)
         self.assertEqual(store.read(store.state_dir() / "native-results" / directory.name / "native-result.json")["exit_code"], 75)
 
+    def test_archive_pruning_keeps_infrastructure_failures(self):
+        results = store.state_dir() / "native-results"
+        failed = results / ("f" * 16)
+        store.atomic(failed / "native-result.json", dict(exit_code=75, infrastructure_error=dict(reason="native disk budget")))
+        store.atomic(failed / "archived.json", dict(at=0))
+        os.utime(failed / "archived.json", (0, 0))
+        for index in range(51):
+            directory = store.state_dir() / "vms" / f"{index:016x}"
+            store.atomic(directory / "native-result.json", dict(exit_code=0, infrastructure_error={}))
+            with patch.object(native, "run", return_value=Mock(returncode=3)), patch.object(native, "remove_root"):
+                native.cleanup(dict(directory=str(directory), unit="native.service"))
+            os.utime(results / directory.name / "archived.json", (index + 1, index + 1))
+        self.assertTrue(failed.exists())
+        self.assertFalse((results / f"{0:016x}").exists())
+        self.assertEqual(len(list(results.glob("*/archived.json"))), 51)
+
     def test_stage_is_small_and_filesystem_clone_runs_in_the_unit(self):
         (self.root / "control").rmdir()
         with patch.object(native, "image", return_value=dict(sha256="a"*64)), patch.object(native, "run") as run:

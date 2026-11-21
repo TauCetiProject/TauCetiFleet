@@ -431,14 +431,35 @@ class Collection(unittest.TestCase):
         self.assertEqual(len(store.export_events()), 1)
 
     def test_collected_event_names_the_native_infrastructure_error(self):
-        job, _, _ = evidence()
+        # The receipt may be queued before the supervisor writes its result (autoscaler
+        # retirement), so collection reads it from the live root or the archived evidence.
         error = dict(reason="native disk budget")
-        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="fault", infrastructure_error=error)])
+        for place in ("vms", "native-results"):
+            with self.subTest(place=place):
+                instance = ("d" if place == "vms" else "e") * 16
+                store.atomic(Path(self.temp.name) / place / instance / "native-result.json",
+                             dict(exit_code=0, infrastructure_error=error))
+                job, _, _ = evidence()
+                job["id"] = 1000 + len(place)
+                store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="fault", instance=instance)])
+                with patch.object(host.github, "request", return_value=dict(jobs=[job])):
+                    host.collect_ci_results(self.config)
+                result = next(e for e in store.export_events() if e["job_id"] == job["id"])
+                self.assertEqual(result["infrastructure_error"], error)
+                self.assertEqual(result["classification"]["reason"], "host_service_fault")
+
+    def test_collected_event_tolerates_missing_or_corrupt_native_results(self):
+        instance = "f" * 16
+        path = Path(self.temp.name) / "native-results" / instance / "native-result.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json")
+        job, _, _ = evidence()
+        store.atomic(self.pending, [dict(run_id=42, runner_id=12, host_health="fault", instance=instance),
+                                    dict(run_id=43, runner_id=12, host_health="fault", instance="../x")])
         with patch.object(host.github, "request", return_value=dict(jobs=[job])):
             host.collect_ci_results(self.config)
-        [result] = store.export_events()
-        self.assertEqual(result["infrastructure_error"], error)
-        self.assertEqual(result["classification"]["reason"], "host_service_fault")
+        self.assertEqual(store.read(self.pending), [])
+        self.assertIsNone(store.export_events()[0]["infrastructure_error"])
 
     def test_setup_cancellation_collection_keeps_capacity_without_extra_reads(self):
         self.collect(phase="Install bubblewrap")

@@ -871,16 +871,6 @@ def queue_ci_result(value, service_health):
     if not value.get("run_id") or value.get("result_queued"):
         return False
     value["host_health"] = service_health
-    # A native supervisor names why it stopped an instance (disk budget, monitor or
-    # transport failure). Its archived evidence is pruned after 50 newer results, so
-    # carry the reason into the durable ci_result event. Telemetry never blocks receipts.
-    if value.get("directory"):
-        try:
-            error = read(Path(value["directory"]) / "native-result.json", {}).get("infrastructure_error")
-        except (FleetError, AttributeError):
-            error = None
-        if error:
-            value["infrastructure_error"] = error
     pending = read(state_dir() / "pending-ci.json", [])
     identity = (value.get("instance"), value["run_id"], value["runner_id"])
     if not any((p.get("instance"), p.get("run_id"), p.get("runner_id")) == identity for p in pending):
@@ -891,6 +881,26 @@ def queue_ci_result(value, service_health):
     value["result_queued"] = True
     atomic(vm.slot_file({"ci_slot": value.get("slot", 0)}, "vm.json"), value)
     return True
+
+
+def native_infrastructure_error(value):
+    """Why a native supervisor stopped this instance (disk budget, monitor or transport), if it did.
+
+    Read at collection, not when the receipt is queued: an autoscaler retirement queues the
+    receipt before the supervisor has written its result. By collection GitHub has completed
+    the job, and the result is in the live directory or its archived evidence. Telemetry never
+    blocks a receipt."""
+    instance = value.get("instance")
+    if not isinstance(instance, str) or not re.fullmatch(r"[a-f0-9]{16}", instance):
+        return None
+    for directory in (state_dir() / "vms" / instance, state_dir() / "native-results" / instance):
+        try:
+            result = read(directory / "native-result.json", None)
+        except FleetError:
+            continue
+        if isinstance(result, dict):
+            return result.get("infrastructure_error") or None
+    return None
 
 
 def collect_ci_results(config):
@@ -975,7 +985,7 @@ def collect_ci_results(config):
                 instance=value.get("instance"),
                 slot=value.get("slot", 0),
                 classification=decision,
-                infrastructure_error=value.get("infrastructure_error"),
+                infrastructure_error=native_infrastructure_error(value),
                 run_seconds=max(0, completed - started),
                 wait_seconds=max(0, started - created) if created else None,
             )

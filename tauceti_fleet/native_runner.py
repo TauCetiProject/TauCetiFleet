@@ -321,10 +321,13 @@ def cleanup(value, *, asynchronous=False):
             for name in ("phases.tsv", "lake-build.log", "ci-host-resources.json", "runner-diagnostic.log", "artifact-mappings.json"):
                 copy_diagnostic(telemetry / name, evidence / "telemetry" / name)
         atomic(evidence / "archived.json", dict(at=time.time()))
-        # Bounded small evidence; live roots and their ownership are separate.
+        # Bounded small evidence; live roots and their ownership are separate. Instances the
+        # supervisor stopped as infrastructure failures are rare and are what an operator comes
+        # back for, so routine results never push them out.
         archived = sorted((state_dir() / "native-results").glob("*/archived.json"), key=lambda p: p.stat().st_mtime)
         for old in archived[:-50]:
-            shutil.rmtree(old.parent)
+            if not (shared_json(old.parent / "native-result.json", {}) or {}).get("infrastructure_error"):
+                shutil.rmtree(old.parent)
     if asynchronous:
         unit = "tauceti-native-cleanup-" + directory.name + ".service"
         fields = run(["systemctl", "--user", "is-active", unit], check=False)
