@@ -89,9 +89,16 @@ class QueueStatus(unittest.TestCase):
         output = self.render()
         self.assertIn("  Alert: batch 389 repair stalled since 08 Nov 19:04 AEDT", output)
         self.assertIn("  Alert: batch 389 head made no progress since 08 Nov 18:42 AEDT", output)
-        self.document["conditions"] = [dict(kind="repair_stalled", since="2026-11-08T08:04:00Z", batch_id="x")]
-        with self.assertRaises(ValueError):
-            self.report()
+        self.document["conditions"] = [dict(kind=[]), dict(kind={}), "noise",
+                                       dict(kind="repair_stalled", since="1970-01-01T00:00:00Z", batch_id="389")]
+        output = self.render()
+        self.assertIn("  Alert: batch 389 repair stalled since 01 Jan 10:00 AEST", output)
+        self.assertIn("Workers:", output, "the rest of the detail survives")
+        for bad in (dict(batch_id="x"), dict(since=None), dict(since="2026-11-08T08:04:00")):
+            self.document["conditions"] = [dict(dict(kind="repair_stalled", since="2026-11-08T08:04:00Z",
+                                                     batch_id="389"), **bad)]
+            with self.assertRaises(ValueError):
+                self.report()
 
     def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
         identity = "repair-3@chungus2"

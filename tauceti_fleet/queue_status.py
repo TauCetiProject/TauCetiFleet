@@ -193,9 +193,10 @@ def progress_alerts(conditions):
         return []
     found = []
     for condition in conditions[:100]:
-        if isinstance(condition, dict) and condition.get("kind") in PROGRESS_KINDS:
-            found.append(dict(kind=condition["kind"], batch_id=identity(condition.get("batch_id")),
-                              since=condition["since"] if timestamp(condition.get("since")) else None))
+        kind = condition.get("kind") if isinstance(condition, dict) else None
+        if isinstance(kind, str) and kind in PROGRESS_KINDS:
+            timestamp(condition.get("since"))
+            found.append(dict(kind=kind, batch_id=identity(condition.get("batch_id")), since=condition["since"]))
     return found
 
 
