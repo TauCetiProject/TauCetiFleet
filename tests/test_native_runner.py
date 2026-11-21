@@ -174,6 +174,20 @@ class NativeRunner(unittest.TestCase):
             self.assertIn("apt-get install -y bubblewrap " + native.C_COMPILER_PACKAGES, joined[infra])
             self.assertIn("cc --version && ", joined[infra])
 
+    def test_manifests_are_keyed_by_revision_so_older_controllers_keep_theirs(self):
+        # A live update exports before handover; the serving controller still
+        # reads the revision-1 manifests under their original names.
+        images = store.data_dir() / "images"
+        store.atomic(images / "native.json", dict(revision=1, sha256="c" * 64))
+        store.atomic(images / "native-r2.json", dict(revision=2, sha256="d" * 64))
+        with patch.object(native, "IMAGE_REVISION", 2), patch.object(native, "INFRA_IMAGE_REVISION", 2):
+            self.assertEqual(native.manifest_name(), "native-r2.json")
+            self.assertEqual(native.manifest_name(True), "native-infra-r2.json")
+            self.assertEqual(native.image()["sha256"], "d" * 64)
+            self.assertEqual(native.image(True), {})
+        with patch.object(native, "IMAGE_REVISION", 1):
+            self.assertEqual(native.image()["sha256"], "c" * 64)
+
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])
         store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})

@@ -49,8 +49,16 @@ INFRA_PACKAGES = [
 ]
 
 
+def manifest_name(infra=False):
+    # Keyed by revision, so exporting a new revision during a live update never
+    # replaces the manifest the still-serving older controller reads. Revision 1
+    # predates the key and used the plain name.
+    revision = INFRA_IMAGE_REVISION if infra else IMAGE_REVISION
+    return ("native-infra" if infra else "native") + (f"-r{revision}" if revision > 1 else "") + ".json"
+
+
 def image(infra=False):
-    return read(data_dir() / ("images/native-infra.json" if infra else "images/native.json"), {})
+    return read(data_dir() / "images" / manifest_name(infra), {})
 
 
 def ready(infra=False):
@@ -228,7 +236,7 @@ def prepare(config=None, *, infra=False):
                 raise FleetError("Native rootfs export is missing the Actions runner")
             value = dict(revision=INFRA_IMAGE_REVISION if infra else IMAGE_REVISION, sha256=sha, vm_sha256=base["sha256"],
                          runner_version=base["runner_version"], prepared_at=time.time())
-            atomic(root / ("native-infra.json" if infra else "native.json"), value)
+            atomic(root / manifest_name(infra), value)
             complete = True
         finally:
             run(["systemctl", "--user", "stop", unit + ".scope"], check=False)
