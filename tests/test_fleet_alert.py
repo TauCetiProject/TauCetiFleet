@@ -10,15 +10,17 @@ from tauceti_fleet import fleet_alert
 MINUTE = 60
 
 
-def report(states, *, enabled=True, finished=40, failed=10, now=0, admission="at_ceiling", detail="leantar crashed"):
+def report(states, *, enabled=True, finished=40, failed=10, now=0, admission="at_ceiling", detail="leantar crashed",
+           prepared=None):
     return dict(
         workers_enabled=enabled,
         status=dict(
             workers=[dict(id=f"w{i}", state=s, alive=True, detail=detail if s == "backoff" else None)
                      for i, s in enumerate(states)],
             worker_admission=dict(state=admission),
+            observed_at=now,
         ),
-        activity=dict(summary=dict(prepared_at=now, rounds={"1h": {"author": dict(finished=finished, failed=failed)}})),
+        activity=dict(summary=dict(prepared_at=now if prepared is None else prepared, rounds={"1h": {"author": dict(finished=finished, failed=failed)}})),
     )
 
 
@@ -68,7 +70,7 @@ class Episodes(unittest.TestCase):
     def test_disabling_workers_closes_an_open_alert(self):
         run = Run()
         run.minutes(20, lambda now: report(["backoff"] * 10, now=now))
-        run.minutes(16, lambda now: report([], enabled=False, now=now))
+        run.minutes(1, lambda now: report([], enabled=False, now=now))
         self.assertEqual(len(run.sent), 2)
         self.assertIn("workers disabled; closing the alert", run.sent[1])
 
@@ -99,8 +101,55 @@ class Episodes(unittest.TestCase):
         other = Run()
         # Outside a schedule slot admission pauses and rounds stop on purpose; stale counts are unknown.
         other.minutes(120, lambda now: report(["idle"] * 20, finished=0, failed=0, now=now, admission="paused"))
-        other.minutes(120, lambda now: report(["running"] * 20, finished=0, failed=0, now=now - 3600))
+        other.minutes(120, lambda now: report(["running"] * 20, finished=0, failed=0, now=now, prepared=now - 3600))
         self.assertEqual(other.sent, [])
+
+    def test_stale_reports_and_unknown_rounds_are_no_evidence(self):
+        run = Run()
+        run.minutes(80, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(len(run.sent), 1)
+        # A stopped controller's frozen report, or rounds nobody has counted lately, close nothing.
+        run.minutes(30, lambda now: report(["running"] * 20, now=now - 3600))
+        run.minutes(4, lambda now: report(["running"] * 20, now=now, prepared=now - 3600))
+        run.minutes(30, lambda now: dict(report([], now=now), status=dict(error="controller error", observed_at=now)))
+        run.minutes(16, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(len(run.sent), 1)
+        run.minutes(16, lambda now: report(["running"] * 20, now=now))
+        self.assertEqual(len(run.sent), 2)
+
+    def test_silence_restarts_pending_periods(self):
+        run = Run()
+        run.minutes(1, lambda now: report(["backoff"] * 10, now=now))
+        run.minutes(60, lambda now: dict(error="ssh"))
+        run.minutes(15, lambda now: report(["backoff"] * 10, now=now))
+        self.assertEqual(run.sent, [])
+        run.minutes(1, lambda now: report(["backoff"] * 10, now=now))
+        self.assertEqual(len(run.sent), 1)
+
+    def test_no_live_workers_with_open_admission_alerts(self):
+        run = Run()
+        run.minutes(16, lambda now: report([], now=now))
+        self.assertEqual(len(run.sent), 1)
+        self.assertIn("no workers alive although admission is open", run.sent[0])
+
+    def test_pauses_do_not_count_toward_the_observed_hour(self):
+        run = Run()
+        # Budget and quota waits, then a schedule pause, then fifty admitted minutes.
+        run.minutes(120, lambda now: report(["waiting-budget"] * 10 + ["waiting-quota"] * 10, finished=0, failed=0,
+                                            now=now))
+        run.minutes(120, lambda now: report(["idle"] * 20, finished=0, failed=0, now=now, admission="paused"))
+        run.minutes(50, lambda now: report(["running"] * 20, finished=0, failed=0, now=now))
+        self.assertEqual(run.sent, [])
+
+    def test_each_delivery_is_saved_before_the_next_host(self):
+        state, saved = {}, []
+        bad = report(["backoff"] * 10, now=0)
+        for now in range(0, 17 * MINUTE, MINUTE):
+            fleet_alert.tick({"a": ("a" * 32, dict(bad, status=dict(bad["status"], observed_at=now))),
+                              "b": ("b" * 32, dict(bad, status=dict(bad["status"], observed_at=now)))},
+                             state, now, lambda text: True, lambda: saved.append(json.dumps(state, sort_keys=True)))
+        self.assertEqual(len(saved), 2)
+        self.assertIn('"alerted_at"', saved[0])
 
     def test_failed_delivery_is_retried_on_the_next_run(self):
         run = Run()

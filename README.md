@@ -1092,11 +1092,14 @@ that runs `tauceti-fleet fleet-alert` once a minute from the installed Fleet rel
 `update local` takes effect at the next run. Each run reads every inventory host's status, as
 `status` does, and judges hosts whose workers are enabled. A host has a problem when at least
 80% of its live workers (and at least three) are in backoff or blocked (`waiting-*` states other
-than the capacity, budget and quota admission waits), or when its admission is open and its
-live workers have completed no round without failure in the last hour, after an hour of
-observation. A problem lasting 15 minutes sends one alert; 15 minutes without one, or disabling
-the host's workers, sends one recovery message. Unreachable hosts and cached reports neither
-open nor close an incident. State lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
+than the capacity, budget and quota admission waits), when no worker is alive although admission
+is open, or when its admitted workers have completed no round without failure in the last hour
+after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
+needs 15 minutes of positive evidence (a successful round in the last hour, or an admission,
+budget or quota pause) and sends one message; disabling the host's workers closes the alert at
+once. Unreachable hosts, cached or stale controller reports and stale round counts neither open
+nor close an incident, and five minutes without evidence restarts any pending period. State
+lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
 
 Without `--zulip-config` the messages go only to the unit's journal
 (`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot. The file
