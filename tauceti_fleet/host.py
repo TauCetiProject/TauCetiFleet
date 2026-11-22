@@ -381,10 +381,14 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "worker_env", "roadmap_targets"):
+        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "worker_env", "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
+
+
+# Every unrestricted worker stage except roadmap authoring (TauCetiWorker AUTO_STAGES).
+MAINTENANCE_STAGES = ("rebase", "bump", "lint-repair", "progress", "fix-ci", "fix", "review", "overlap-fix", "overlap-scan")
 
 
 def _worker_config(config):
@@ -421,12 +425,18 @@ def _worker_config(config):
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         worker_fields = dict(fields)
-        if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
+        if n < min(config.get("maintenance_workers", 0), config["max_workers"]):
+            # Maintenance slots tend existing PRs on both forges and never author; the lowest
+            # numbers keep admission priority, so a lowered ceiling never strands either forge.
+            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo", only=list(MAINTENANCE_STAGES))
+        elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
+            elif isinstance(value, list):
+                lines.append(key + " = [" + ", ".join(toml_value(v) for v in value) + "]")
             elif value is not None:
                 lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
@@ -752,10 +762,13 @@ def set_worker_policy(payload):
     maximum = payload.get("maximum")
     local = payload.get("self_tested")
     native = payload.get("forgejo_workers")
+    maintenance = payload.get("maintenance_workers")
     environment = payload.get("worker_env")
     swap = payload.get("swap_gib")
-    if maximum is None and local is None and native is None and environment is None and swap is None:
-        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count, worker environment or swap")
+    if (maximum is None and local is None and native is None and maintenance is None and environment is None
+            and swap is None):
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo or maintenance worker count, "
+                         "worker environment or swap")
     if swap is not None:
         workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
@@ -767,19 +780,25 @@ def set_worker_policy(payload):
     if native is not None:
         if type(native) is not int or not 0 <= native <= 4096:
             raise FleetError("Forgejo worker count must be an integer from 0 to 4096")
-    if maximum is not None or native is not None:
+    if maintenance is not None:
+        if type(maintenance) is not int or not 0 <= maintenance <= 4096:
+            raise FleetError("Maintenance worker count must be an integer from 0 to 4096")
+    if maximum is not None or native is not None or maintenance is not None:
         current = host_config()
         ceiling = maximum if maximum is not None else current["max_workers"]
         selected = native if native is not None else current.get("forgejo_workers", 0)
         if selected > ceiling:
             raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
-    if native:
+        tending = maintenance if maintenance is not None else current.get("maintenance_workers", 0)
+        if tending > ceiling:
+            raise FleetError("Maintenance worker count exceeds the worker maximum; lower --maintenance-workers with --max")
+    if native or maintenance:
         require_source_selection_support()
         require_forgejo_credential()
     if local is True:
         require_self_tested_support()
     current = host_config()
-    spec_changes = local is not None or native is not None or environment is not None
+    spec_changes = local is not None or native is not None or maintenance is not None or environment is not None
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
@@ -789,6 +808,8 @@ def set_worker_policy(payload):
         changes["self_tested"] = local
     if native is not None:
         changes["forgejo_workers"] = native
+    if maintenance is not None:
+        changes["maintenance_workers"] = maintenance
     if environment is not None:
         changes["worker_env"] = environment
     if changes:

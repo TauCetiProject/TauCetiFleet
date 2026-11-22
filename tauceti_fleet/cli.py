@@ -83,6 +83,8 @@ def parser():
                          help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--forgejo-workers", type=int, default=None,
                          help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
+    workers.add_argument("--maintenance-workers", type=int, default=None,
+                         help="have this many of the lowest-numbered slots tend PRs on both forges without authoring")
     workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
                          help="set an environment variable in every worker's definition (repeatable)")
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
@@ -342,8 +344,10 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if (args.command == "workers" and args.maximum is None and args.self_tested is None
-                and args.forgejo_workers is None and not args.env and not args.unset_env and args.swap_gib is None):
-            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env, --unset-env or --swap-gib")
+                and args.forgejo_workers is None and args.maintenance_workers is None and not args.env
+                and not args.unset_env and args.swap_gib is None):
+            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --maintenance-workers, "
+                             "--env, --unset-env or --swap-gib")
         if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         selected = {}
@@ -395,6 +399,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["self_tested"] = args.self_tested
                 if args.forgejo_workers is not None:
                     payload["forgejo_workers"] = args.forgejo_workers
+                if args.maintenance_workers is not None:
+                    payload["maintenance_workers"] = args.maintenance_workers
                 if args.swap_gib is not None:
                     payload["swap_gib"] = args.swap_gib
                 if args.env or args.unset_env:

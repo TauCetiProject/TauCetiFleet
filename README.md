@@ -1210,6 +1210,12 @@ worker source flags; remaining slots continue on GitHub. Set the count to `0` to
 them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
 This does not change the admission ceiling, CI routing or active rounds.
 
+Keep some slots tending existing PRs on both forges with `tauceti-fleet workers HOST --maintenance-workers 10`.
+The lowest-numbered selected slots maintain and review PRs on GitHub and Forgejo (every stage except
+`roadmap`), so they never author and keep admission priority under pressure; they take precedence over
+`--forgejo-workers` for those slots. Set the count to `0` to return them to ordinary routing. Like the
+other worker policies this survives controller rewrites and does not change admissions or active rounds.
+
 Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
