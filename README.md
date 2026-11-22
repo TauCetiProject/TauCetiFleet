@@ -1211,8 +1211,9 @@ them to GitHub. Lower-numbered GitHub slots retain admission priority under pres
 This does not change the admission ceiling, CI routing or active rounds.
 
 Keep some slots tending existing PRs on both forges with `tauceti-fleet workers HOST --maintenance-workers 10`.
-The lowest-numbered selected slots maintain and review PRs on GitHub and Forgejo (every stage except
-`roadmap`), so they never author and keep admission priority under pressure; they take precedence over
+The lowest-numbered selected slots rebase, repair, fix and review existing PRs on GitHub and Forgejo
+(`rebase`, `bump`, `lint-repair`, `progress`, `fix-ci`, `fix` and `review`; no `roadmap` or overlap
+stages), so they open no new PRs and keep admission priority under pressure; they take precedence over
 `--forgejo-workers` for those slots. Set the count to `0` to return them to ordinary routing. Like the
 other worker policies this survives controller rewrites and does not change admissions or active rounds.
 
