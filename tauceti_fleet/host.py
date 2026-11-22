@@ -387,7 +387,8 @@ def worker_config(config):
         return _worker_config(config)
 
 
-# TauCetiWorker's unrestricted PR stages, without roadmap authoring. The overlap stages are left out:
+# TauCetiWorker's unrestricted stages, without roadmap authoring: `progress` stays, since its globally
+# paced TauCetiRoadmap reports are not new mathematics. The overlap stages are left out:
 # overlap-fix opens repair PRs, and either one keeps a round off the worker's both-forge discovery.
 MAINTENANCE_STAGES = ("rebase", "bump", "lint-repair", "progress", "fix-ci", "fix", "review")
 
@@ -429,7 +430,7 @@ def _worker_config(config):
         # Not capped by this snapshot's maximum: a stale controller snapshot must not drop the
         # policy from slots it preserves, and set_worker_policy keeps the count within the maximum.
         if n < config.get("maintenance_workers", 0):
-            # Maintenance slots tend existing PRs on both forges and never author; the lowest
+            # Maintenance slots tend existing PRs on both forges and never run roadmap rounds; the lowest
             # numbers keep admission priority, so a lowered ceiling never strands either forge.
             worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo", only=list(MAINTENANCE_STAGES))
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:

@@ -153,6 +153,7 @@ class Isolated(unittest.TestCase):
             self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (True, True, "forgejo"))
             self.assertEqual(spec["only"], list(host.MAINTENANCE_STAGES))
             self.assertFalse({"roadmap", "overlap-fix", "overlap-scan"} & set(spec["only"]))
+            self.assertIn("progress", spec["only"])
         for spec in specs[2:]:
             self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (False, True, "forgejo"))
             self.assertNotIn("only", spec)

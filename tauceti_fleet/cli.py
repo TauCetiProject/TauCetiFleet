@@ -84,7 +84,7 @@ def parser():
     workers.add_argument("--forgejo-workers", type=int, default=None,
                          help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
     workers.add_argument("--maintenance-workers", type=int, default=None,
-                         help="have this many of the lowest-numbered slots tend PRs on both forges without authoring")
+                         help="have this many of the lowest-numbered slots tend PRs on both forges without roadmap authoring")
     workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
                          help="set an environment variable in every worker's definition (repeatable)")
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
