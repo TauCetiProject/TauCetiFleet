@@ -137,6 +137,56 @@ class Isolated(unittest.TestCase):
                 host.set_worker_policy(dict(forgejo_workers=1, maximum=3))
         self.assertEqual(store.host_config(), {**original, "forgejo_workers": 0})
 
+    def test_maintenance_slots_tend_both_forges_without_authoring(self):
+        import tomllib
+        original = store.update_host(max_workers=6, workers_enabled=True, ci_enabled=True)
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(forgejo_workers=6))
+            value = host.set_worker_policy(dict(maintenance_workers=2))
+        self.assertEqual(value["maintenance_workers"], 2)
+        self.assertEqual(store.host_config(), {**original, "forgejo_workers": 6, "maintenance_workers": 2})
+        # A controller rewrite from an older snapshot keeps the maintenance slots.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(specs), 6)
+        for spec in specs[:2]:
+            self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (True, True, "forgejo"))
+            self.assertEqual(spec["only"], list(host.MAINTENANCE_STAGES))
+            self.assertFalse({"roadmap", "overlap-fix", "overlap-scan"} & set(spec["only"]))
+            self.assertIn("progress", spec["only"])
+        for spec in specs[2:]:
+            self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (False, True, "forgejo"))
+            self.assertNotIn("only", spec)
+        for count in (True, -1, 4097, "1", 7):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(maintenance_workers=count))
+        with self.assertRaisesRegex(store.FleetError, "Maintenance"):
+            host.set_worker_policy(dict(maximum=1, forgejo_workers=1))
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(maintenance_workers=0))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertFalse(any("only" in spec or spec["github"] for spec in specs))
+
+    def test_stale_controller_snapshot_keeps_raised_maintenance_slots(self):
+        import tomllib
+        stale = store.update_host(max_workers=2, workers_enabled=True)
+        host.worker_config(stale)
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(maximum=4, maintenance_workers=4))
+        host.worker_config(stale)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(specs), 4)
+        self.assertTrue(all(spec["github"] and spec["forgejo"] and "only" in spec for spec in specs))
+
+    def test_maintenance_count_cli_preserves_explicit_zero(self):
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            for count in (10, 0):
+                self.assertEqual(main(["workers", "test", "--maintenance-workers", str(count), "--json"]), 0)
+                self.assertEqual(call.call_args.args[1], dict(action="workers", maintenance_workers=count))
+
     def test_worker_env_survives_controller_rewrites(self):
         import tomllib
         original = store.update_host(max_workers=3, workers_enabled=True)
