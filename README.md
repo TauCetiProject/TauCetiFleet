@@ -1218,6 +1218,14 @@ TauCetiRoadmap report PRs) and keep admission priority under pressure; they take
 `--forgejo-workers` for those slots. Set the count to `0` to return them to ordinary routing. Like the
 other worker policies this survives controller rewrites and does not change admissions or active rounds.
 
+Give the lowest-numbered maintenance slots a GitHub-first preference with
+`tauceti-fleet workers HOST --github-first-workers 15`. Those slots walk GitHub's rebases,
+re-reviews, fixes and first reviews before any Forgejo work (automatic bumps still come first on
+either forge), and fall back to Forgejo when GitHub has nothing claimable; the other maintenance
+slots keep one closeness-to-landing order across both forges. The count cannot exceed
+`--maintenance-workers`. Set it to `0` to remove the preference. It needs a Worker release and
+running manager that support `prefer_forge`; workers pick it up between rounds.
+
 Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
