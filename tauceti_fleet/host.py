@@ -443,7 +443,9 @@ def _worker_config(config):
                 # fixes, so approvals keep reaching the queue while long rebases hold the others.
                 worker_fields["review_first"] = True
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
-            worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
+            # Forgejo slots author on Forgejo but discover and maintain both forges first: a worker
+            # authors only after a maintenance pass finds nothing claimable on either forge.
+            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())

@@ -129,7 +129,7 @@ class Isolated(unittest.TestCase):
             for index, spec in enumerate(specs):
                 if index >= 6 - count:
                     self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]),
-                                     (False, True, "forgejo"))
+                                     (True, True, "forgejo"))
                 else:
                     self.assertFalse({"github", "forgejo", "new_pr_forge"} & spec.keys())
         with patch.object(host, "require_source_selection_support", side_effect=store.FleetError("old manager")):
@@ -155,7 +155,7 @@ class Isolated(unittest.TestCase):
             self.assertFalse({"roadmap", "overlap-fix", "overlap-scan"} & set(spec["only"]))
             self.assertIn("progress", spec["only"])
         for spec in specs[2:]:
-            self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (False, True, "forgejo"))
+            self.assertEqual((spec["github"], spec["forgejo"], spec["new_pr_forge"]), (True, True, "forgejo"))
             self.assertNotIn("only", spec)
         for count in (True, -1, 4097, "1", 7):
             with self.assertRaises(store.FleetError):
@@ -165,7 +165,9 @@ class Isolated(unittest.TestCase):
         with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
             host.set_worker_policy(dict(maintenance_workers=0))
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
-        self.assertFalse(any("only" in spec or spec["github"] for spec in specs))
+        self.assertFalse(any("only" in spec for spec in specs))
+        self.assertTrue(all((spec["github"], spec["forgejo"], spec["new_pr_forge"]) == (True, True, "forgejo")
+                            for spec in specs))
 
     def test_github_first_slots_are_the_lowest_maintenance_slots(self):
         import tomllib
