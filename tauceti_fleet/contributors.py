@@ -170,22 +170,28 @@ def complete_github(prs, token, *, min_remaining=300):
                 pr.setdefault("refetch", []).append(key)
     pending = [(n, pr) for n, pr in prs.items() if pr.get("more") or pr.get("refetch")]
     for number, pr in pending:
-        for key in sorted(set(pr.get("more", {})) | set(pr.pop("refetch", []))):
+        for key in sorted(set(pr.get("more", {})) | set(pr.get("refetch", []))):
             after = pr.get("more", {}).get(key)
-            if after is None:
-                pr[key] = []
+            # Collected apart and stored only once complete, so a failed read keeps its marker.
+            found = list(pr.get(key, [])) if after is not None else []
             while True:
                 data = graphql(token, dict(owner=GITHUB_REPO[0], name=GITHUB_REPO[1], number=int(number), after=after),
                                query=GRAPHQL_REST % (key, TIME_FIELD[key]))
                 connection = (data["repository"]["pullRequest"] or {}).get(key) or {}
-                pr[key] += [[(n.get("author") or {}).get("login", ""), stamp(n[TIME_FIELD[key]])]
-                            for n in connection.get("nodes", []) if n.get(TIME_FIELD[key])]
-                if not connection.get("pageInfo", {}).get("hasNextPage"):
-                    break
-                after = connection["pageInfo"]["endCursor"]
+                found += [[(n.get("author") or {}).get("login", ""), stamp(n[TIME_FIELD[key]])]
+                          for n in connection.get("nodes", []) if n.get(TIME_FIELD[key])]
+                more = connection.get("pageInfo", {}).get("hasNextPage")
+                after = connection.get("pageInfo", {}).get("endCursor")
                 if data["rateLimit"]["remaining"] < min_remaining:
                     raise FleetError(f"GitHub GraphQL quota below {min_remaining}; rerun after "
                                      f"{data['rateLimit']['resetAt']}")
+                if not more:
+                    break
+            pr[key] = found
+            pr.get("more", {}).pop(key, None)
+            if key in pr.get("refetch", []):
+                pr["refetch"].remove(key)
+        pr.pop("refetch", None)
         pr["more"] = {}
     if pending:
         log(f"GitHub: completed comments and reviews of {len(pending)} PRs with more than one page")
@@ -236,16 +242,18 @@ def sync_github(*, token=None, page=50, min_remaining=300):
 
 # ---- Forgejo --------------------------------------------------------------------------------
 
-def forgejo_get(path, params):
+def forgejo_get(path, params, *, with_next=False):
     url = f"{FORGEJO}/api/v1/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "TauCetiFleet-contributors"})
     for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
-                return json.loads(response.read())
+                value = json.loads(response.read())
+                # Pages can hold fewer rows than the limit (hidden pending reviews), so follow the Link header.
+                return (value, 'rel="next"' in (response.headers.get("Link") or "")) if with_next else value
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                return None
+                return (None, False) if with_next else None
             if exc.code < 500 or attempt == 3:
                 raise FleetError(f"Forgejo read returned HTTP {exc.code}") from None
             time.sleep(3 * (attempt + 1))
@@ -258,11 +266,9 @@ def forgejo_get(path, params):
 def forgejo_pages(path, params, *, pause=0.2):
     page = 1
     while True:
-        rows = forgejo_get(path, dict(params, limit=50, page=page))
-        if not rows:
-            return
-        yield from rows
-        if len(rows) < 50:
+        rows, more = forgejo_get(path, dict(params, limit=50, page=page), with_next=True)
+        yield from rows or []
+        if not rows or not more:
             return
         page += 1
         time.sleep(pause)
@@ -294,9 +300,18 @@ def sync_forgejo(*, review_reads=300):
     # Forgejo has no repository-wide review listing, so reviews are read per PR within a budget.
     due = sorted((n for n, pr in prs.items() if pr.get("reviews_read") is None), key=int, reverse=True)
     for number in due[:review_reads]:
-        rows = list(forgejo_pages(f"repos/{FORGEJO_REPO}/pulls/{number}/reviews", {}))
-        prs[number]["reviews"] = [[(r.get("user") or {}).get("login", ""), stamp(r.get("submitted_at"))]
-                                  for r in rows if r.get("submitted_at")]
+        found = []
+        for review in forgejo_pages(f"repos/{FORGEJO_REPO}/pulls/{number}/reviews", {}):
+            # Review requests and pending drafts are not contributions.
+            if review.get("state") in ("REQUEST_REVIEW", "PENDING") or not review.get("submitted_at"):
+                continue
+            found.append([(review.get("user") or {}).get("login", ""), stamp(review["submitted_at"])])
+            # Replies in a review's threads belong to the review; their authors and days count too.
+            if review.get("comments_count"):
+                for reply in forgejo_pages(f"repos/{FORGEJO_REPO}/pulls/{number}/reviews/{review['id']}/comments", {}):
+                    if reply.get("created_at"):
+                        found.append([(reply.get("user") or {}).get("login", ""), stamp(reply["created_at"])])
+        prs[number]["reviews"] = found
         prs[number]["reviews_read"] = time.time()
     if len(due) > review_reads:
         log(f"Forgejo: {len(due) - review_reads} PRs still need their reviews read; later runs continue")

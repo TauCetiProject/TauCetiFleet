@@ -143,6 +143,43 @@ class Pagination(unittest.TestCase):
         self.assertEqual(prs["1"]["more"], {})
         self.assertEqual(c.complete_github(prs, "token"), 0)
 
+    def test_a_failed_refetch_keeps_the_cached_list_and_the_quota_reserve_holds(self):
+        prs = {"2": dict(comments=[], reviews=[["old", 1.0]] * 40)}
+        with patch.object(c, "graphql", side_effect=c.FleetError("down")), self.assertRaises(c.FleetError):
+            c.complete_github(prs, "token")
+        self.assertEqual(len(prs["2"]["reviews"]), 40)
+        last = dict(rateLimit=dict(remaining=1, resetAt="soon"),
+                    repository=dict(pullRequest=dict(reviews=dict(nodes=[], pageInfo=dict(hasNextPage=False)))))
+        prs["3"] = dict(comments=[], reviews=[["old", 1.0]] * 40)
+        with patch.object(c, "graphql", return_value=last) as call, self.assertRaises(c.FleetError):
+            c.complete_github(prs, "token")
+        self.assertEqual(call.call_count, 1)
+
+
+class ForgejoReviews(unittest.TestCase):
+    def test_requests_are_skipped_replies_count_and_short_pages_continue(self):
+        pages = {
+            ("issues", 1): ([dict(number=4, title="t", state="open", user=dict(login="bob"),
+                                  created_at="2026-11-20T00:00:00Z", updated_at="2026-11-21T00:00:00Z", labels=[])],
+                            False),
+            ("comments", 1): ([], False),
+            ("reviews", 1): ([dict(id=1, state="APPROVED", user=dict(login="alice"), comments_count=1,
+                                   submitted_at="2026-11-21T00:00:00Z")], True),
+            ("reviews", 2): ([dict(id=2, state="REQUEST_REVIEW", user=dict(login="carol"),
+                                   submitted_at="2026-11-21T00:00:00Z")], False),
+            ("replies", 1): ([dict(user=dict(login="dave"), created_at="2026-11-22T00:00:00Z")], False),
+        }
+
+        def fake(path, params, *, with_next=False):
+            kind = ("replies" if path.endswith("/comments") and "/reviews/" in path else
+                    "reviews" if path.endswith("/reviews") else "comments" if path.endswith("comments") else "issues")
+            return pages[(kind, params["page"])]
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"TAUCETI_FLEET_DATA": root}), \
+                patch.object(c, "forgejo_get", side_effect=fake), patch.object(c.time, "sleep"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            cache = c.sync_forgejo()
+        self.assertEqual([r[0] for r in cache["prs"]["4"]["reviews"]], ["alice", "dave"])
+
 
 class Command(unittest.TestCase):
     def test_offline_command_reads_only_the_cache(self):
