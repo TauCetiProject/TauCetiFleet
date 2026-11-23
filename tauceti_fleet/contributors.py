@@ -268,7 +268,8 @@ def forgejo_pages(path, params, *, pause=0.2):
     while True:
         rows, more = forgejo_get(path, dict(params, limit=50, page=page), with_next=True)
         yield from rows or []
-        if not rows or not more:
+        # A page can be empty (all hidden pending reviews) and still have a next one.
+        if not more:
             return
         page += 1
         time.sleep(pause)
@@ -353,21 +354,22 @@ def local_day(at, zone):
     return datetime.fromtimestamp(at, zone).date()
 
 
-def collect_events(github, forgejo, queue, aliases):
+def collect_events(github, forgejo, queue, aliases, *, timezone=TIMEZONE):
     """Per identity: lists of (day-stamp, kind, forge, number) events."""
     events = defaultdict(list)
     accounts = defaultdict(set)
     open_prs = defaultdict(list)
 
     reviewed = set()
+    zone = ZoneInfo(timezone)
 
     def add(login, kind, forge, number, at):
         who = canonical(login, aliases)
         if not (who and at):
             return
         if kind == "review":
-            # Replies in review threads are each a review; count one per account, PR and (UTC) day.
-            key = (login, forge, int(number), int(at // 86400))
+            # Replies in review threads are each a review; count one per account, PR and local day.
+            key = (login, forge, int(number), local_day(at, zone))
             if key in reviewed:
                 return
             reviewed.add(key)
@@ -665,7 +667,8 @@ def main(argv=None):
         identities = read(args.identities or config_dir() / "contributors.json", {}) or {}
         aliases = dict(identities.get("aliases", {}))
         EXCLUDED.update(identities.get("exclude", []))
-        events, accounts, open_prs = collect_events(github or {}, forgejo or {}, queue or {}, aliases)
+        events, accounts, open_prs = collect_events(github or {}, forgejo or {}, queue or {}, aliases,
+                                                    timezone=args.timezone)
         report = analyse(events, accounts, open_prs, timezone=args.timezone)
         known_accounts = read(cache_dir() / "forgejo-accounts.json", {}) or {}
         accounts_on_forgejo = known_accounts if args.offline and known_accounts else None

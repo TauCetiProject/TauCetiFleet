@@ -112,6 +112,13 @@ class Analysis(unittest.TestCase):
         self.assertEqual(people["alice"]["streams"]["review"]["total"], 3)
         self.assertEqual(people["alice"]["accounts"], ["forgejo:alice", "github:alice", "github:alice-bot"])
 
+    def test_reviews_collapse_per_local_day(self):
+        utc = [c.stamp(t) for t in ("2026-11-20T23:00:00Z", "2026-11-21T01:00:00Z", "2026-11-21T14:00:00Z")]
+        prs = {"1": self.pr("bob", "2026-11-20", comments=[("carol", t) for t in utc])}
+        people = {p["identity"]: p for p in self.build(prs)["people"]}
+        # The first two are 21 Nov in Sydney, the third 22 Nov.
+        self.assertEqual(people["carol"]["streams"]["review"]["total"], 2)
+
     def test_equal_peaks_prefer_the_window_with_more_active_days(self):
         counts = {datetime.fromisoformat("2026-08-01").date(): 40}
         for day in days("2026-11-01", 8):
@@ -165,8 +172,12 @@ class ForgejoReviews(unittest.TestCase):
             ("comments", 1): ([], False),
             ("reviews", 1): ([dict(id=1, state="APPROVED", user=dict(login="alice"), comments_count=1,
                                    submitted_at="2026-11-21T00:00:00Z")], True),
-            ("reviews", 2): ([dict(id=2, state="REQUEST_REVIEW", user=dict(login="carol"),
-                                   submitted_at="2026-11-21T00:00:00Z")], False),
+            # A page emptied by hidden pending reviews still links to the next one.
+            ("reviews", 2): ([], True),
+            ("reviews", 3): ([dict(id=2, state="REQUEST_REVIEW", user=dict(login="carol"),
+                                   submitted_at="2026-11-21T00:00:00Z"),
+                              dict(id=3, state="COMMENT", user=dict(login="erin"),
+                                   submitted_at="2026-11-22T00:00:00Z")], False),
             ("replies", 1): ([dict(user=dict(login="dave"), created_at="2026-11-22T00:00:00Z")], False),
         }
 
@@ -178,7 +189,7 @@ class ForgejoReviews(unittest.TestCase):
                 patch.object(c, "forgejo_get", side_effect=fake), patch.object(c.time, "sleep"), \
                 contextlib.redirect_stderr(io.StringIO()):
             cache = c.sync_forgejo()
-        self.assertEqual([r[0] for r in cache["prs"]["4"]["reviews"]], ["alice", "dave"])
+        self.assertEqual([r[0] for r in cache["prs"]["4"]["reviews"]], ["alice", "dave", "erin"])
 
 
 class Command(unittest.TestCase):

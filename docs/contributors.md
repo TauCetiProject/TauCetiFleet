@@ -36,7 +36,7 @@ Every source is read incrementally after the first run.
 Per identity, events are dated in `--timezone` (default Australia/Sydney):
 
 - **opened**: PRs authored, on either forge;
-- **reviews**: one per account, PR and day on which the account posted comments or PR reviews on
+- **reviews**: one per account, PR and (local) day on which the account posted comments or PR reviews on
   a PR it did not author. The AI review scoreboards are PR comments, so PR reviews alone miss
   them, and every reply in a review thread is its own PR review, so raw counts overstate;
 - **landed**: PRs authored that landed;
