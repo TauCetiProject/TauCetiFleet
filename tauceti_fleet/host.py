@@ -381,8 +381,8 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "github_first_workers",
-                      "review_first_workers", "worker_env", "roadmap_targets"):
+        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "both_forge_workers",
+                      "github_first_workers", "review_first_workers", "worker_env", "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
@@ -430,16 +430,22 @@ def _worker_config(config):
         worker_fields = dict(fields)
         # Not capped by this snapshot's maximum: a stale controller snapshot must not drop the
         # policy from slots it preserves, and set_worker_policy keeps the count within the maximum.
-        if n < config.get("maintenance_workers", 0):
-            # Maintenance slots tend existing PRs on both forges and never run roadmap rounds; the lowest
-            # numbers keep admission priority, so a lowered ceiling never strands either forge.
-            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo", only=list(MAINTENANCE_STAGES))
+        maintenance = config.get("maintenance_workers", 0)
+        if n < maintenance + config.get("both_forge_workers", 0):
+            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo")
+            if n < maintenance:
+                # Maintenance slots tend existing PRs on both forges and never run roadmap rounds; the
+                # lowest numbers keep admission priority, so a lowered ceiling never strands either forge.
+                worker_fields["only"] = list(MAINTENANCE_STAGES)
+            # The both-forge slots after them run every stage: PR work on either forge first, then
+            # roadmap authoring on Forgejo when neither forge has claimable PR work. The preferences
+            # below cover the lowest slots of both kinds together.
             if n < config.get("github_first_workers", 0):
-                # The lowest maintenance slots walk GitHub's landing tiers before Forgejo's, so GitHub
+                # The lowest slots walk GitHub's landing tiers before Forgejo's, so GitHub
                 # fixes drain while the other slots take Forgejo's re-reviews first.
                 worker_fields["prefer_forge"] = "github"
             elif n < config.get("github_first_workers", 0) + config.get("review_first_workers", 0):
-                # The next maintenance slots offer re-reviews and first reviews before rebases and
+                # The next both-forge slots offer re-reviews and first reviews before rebases and
                 # fixes, so approvals keep reaching the queue while long rebases hold the others.
                 worker_fields["review_first"] = True
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
@@ -776,14 +782,15 @@ def set_worker_policy(payload):
     local = payload.get("self_tested")
     native = payload.get("forgejo_workers")
     maintenance = payload.get("maintenance_workers")
+    both = payload.get("both_forge_workers")
     github_first = payload.get("github_first_workers")
     review_first = payload.get("review_first_workers")
     environment = payload.get("worker_env")
     swap = payload.get("swap_gib")
-    if (maximum is None and local is None and native is None and maintenance is None and github_first is None
-            and review_first is None and environment is None and swap is None):
-        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance, GitHub-first or "
-                         "review-first worker count, worker environment or swap")
+    if (maximum is None and local is None and native is None and maintenance is None and both is None
+            and github_first is None and review_first is None and environment is None and swap is None):
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance, both-forge, "
+                         "GitHub-first or review-first worker count, worker environment or swap")
     if swap is not None:
         workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
@@ -798,20 +805,23 @@ def set_worker_policy(payload):
     if maintenance is not None:
         if type(maintenance) is not int or not 0 <= maintenance <= 4096:
             raise FleetError("Maintenance worker count must be an integer from 0 to 4096")
+    if both is not None:
+        if type(both) is not int or not 0 <= both <= 4096:
+            raise FleetError("Both-forge worker count must be an integer from 0 to 4096")
     if github_first is not None:
         if type(github_first) is not int or not 0 <= github_first <= 4096:
             raise FleetError("GitHub-first worker count must be an integer from 0 to 4096")
     if review_first is not None:
         if type(review_first) is not int or not 0 <= review_first <= 4096:
             raise FleetError("Review-first worker count must be an integer from 0 to 4096")
-    if maintenance is not None or github_first is not None or review_first is not None:
+    if maintenance is not None or both is not None or github_first is not None or review_first is not None:
         current = dict(host_config())
-        for field, value in (("maintenance_workers", maintenance), ("github_first_workers", github_first),
-                             ("review_first_workers", review_first)):
+        for field, value in (("maintenance_workers", maintenance), ("both_forge_workers", both),
+                             ("github_first_workers", github_first), ("review_first_workers", review_first)):
             if value is not None:
                 current[field] = value
         _preferences_within_maintenance(current)
-    if maximum is not None or native is not None or maintenance is not None:
+    if maximum is not None or native is not None or maintenance is not None or both is not None:
         current = host_config()
         ceiling = maximum if maximum is not None else current["max_workers"]
         selected = native if native is not None else current.get("forgejo_workers", 0)
@@ -820,7 +830,10 @@ def set_worker_policy(payload):
         tending = maintenance if maintenance is not None else current.get("maintenance_workers", 0)
         if tending > ceiling:
             raise FleetError("Maintenance worker count exceeds the worker maximum; lower --maintenance-workers with --max")
-    if native or maintenance:
+        _both_forge_within_maximum(dict(current, max_workers=ceiling, maintenance_workers=tending,
+                                        both_forge_workers=both if both is not None
+                                        else current.get("both_forge_workers", 0)))
+    if native or maintenance or both:
         require_source_selection_support()
         require_forgejo_credential()
     if github_first:
@@ -830,8 +843,8 @@ def set_worker_policy(payload):
     if local is True:
         require_self_tested_support()
     current = host_config()
-    spec_changes = (local is not None or native is not None or maintenance is not None or github_first is not None
-                    or review_first is not None or environment is not None)
+    spec_changes = (local is not None or native is not None or maintenance is not None or both is not None
+                    or github_first is not None or review_first is not None or environment is not None)
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
@@ -843,6 +856,8 @@ def set_worker_policy(payload):
         changes["forgejo_workers"] = native
     if maintenance is not None:
         changes["maintenance_workers"] = maintenance
+    if both is not None:
+        changes["both_forge_workers"] = both
     if github_first is not None:
         changes["github_first_workers"] = github_first
     if review_first is not None:
@@ -850,7 +865,14 @@ def set_worker_policy(payload):
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
-        config = update_host(validate=_preferences_within_maintenance, **changes)
+        def validate(config):
+            _preferences_within_maintenance(config)
+            if maintenance is not None or both is not None:
+                # Only a change to the tending counts is held to the ceiling: lowering the maximum
+                # elsewhere (a pause) must not block unrelated policy changes.
+                _both_forge_within_maximum(config)
+
+        config = update_host(validate=validate, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
     if swap is not None:
@@ -861,14 +883,23 @@ def set_worker_policy(payload):
 
 def _preferences_within_maintenance(config):
     # Also rechecked under the host.json lock: a concurrent command may have lowered the
-    # maintenance count after the early check in set_worker_policy read its snapshot.
-    tending = config.get("maintenance_workers", 0)
+    # maintenance or both-forge count after the early check in set_worker_policy read its snapshot.
+    # The preferences apply to the lowest both-forge slots: the maintenance slots, then the
+    # both-forge authoring slots after them.
+    tending = config.get("maintenance_workers", 0) + config.get("both_forge_workers", 0)
     if config.get("github_first_workers", 0) > tending:
-        raise FleetError("GitHub-first worker count exceeds the maintenance worker count; "
-                         "lower --github-first-workers or raise --maintenance-workers")
+        raise FleetError("GitHub-first worker count exceeds the maintenance and both-forge worker count; "
+                         "lower --github-first-workers or raise --maintenance-workers or --both-forge-workers")
     if config.get("github_first_workers", 0) + config.get("review_first_workers", 0) > tending:
-        raise FleetError("GitHub-first and review-first worker counts together exceed the maintenance worker count; "
-                         "lower --review-first-workers or raise --maintenance-workers")
+        raise FleetError("GitHub-first and review-first worker counts together exceed the maintenance and both-forge "
+                         "worker count; lower --review-first-workers or raise --maintenance-workers or "
+                         "--both-forge-workers")
+
+
+def _both_forge_within_maximum(config):
+    if config.get("maintenance_workers", 0) + config.get("both_forge_workers", 0) > config["max_workers"]:
+        raise FleetError("Maintenance and both-forge worker counts together exceed the worker maximum; "
+                         "lower --maintenance-workers or --both-forge-workers, or raise --max")
 
 
 # Worker states that hold no work in progress.
