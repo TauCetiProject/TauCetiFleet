@@ -137,6 +137,8 @@ def parser():
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
     sub.add_parser("fleet-alert", help="check every host's worker progress once and send any due alert")
+    sub.add_parser("contributors", add_help=False,
+                   help="report contributors whose sustained PR or review volume stopped or slowed sharply")
     install_alert = sub.add_parser("install-fleet-alert",
                                    help="check worker progress every minute from this account's systemd timer")
     install_alert.add_argument("--zulip-config", help="mode-0600 Zulip bot configuration; omit to log only")
@@ -280,6 +282,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         print(json.dumps(install(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
                                  github_app_dir=args.github_app_dir)))
         return 0
+    if raw[:1] == ["contributors"]:
+        from .contributors import main as contributors_main
+        return contributors_main(raw[1:])
     if raw[:1] == ["fleet-alert"]:
         from .fleet_alert import main as alert_main
         return alert_main(raw[1:])
