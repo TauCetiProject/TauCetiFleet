@@ -173,7 +173,7 @@ class Overview(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=stamp))))
-        self.assertIn("all roadmaps: 526/512 blocked, 526/1024 open non-draft roadmap PRs", out.getvalue())
+        self.assertIn("all roadmaps: 526/512 blocked (github 526), 526/1024 (github 526) open non-draft roadmap PRs", out.getvalue())
         self.assertNotIn("stale", out.getvalue())
 
     def test_workers_own_reports_replace_an_old_github_survey(self):
@@ -198,8 +198,48 @@ class Overview(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=stamp))))
-        self.assertIn("all roadmaps: 97/1024 open non-draft roadmap PRs", out.getvalue())
+        self.assertIn("all roadmaps: 97/1024 (forgejo 97) open non-draft roadmap PRs", out.getvalue())
         self.assertNotIn("stale", out.getvalue())
+
+    def test_a_complete_account_count_wins_over_newer_single_forge_reports(self):
+        now = time.time()
+        both = dict(observed_at=now - 300, sources=dict(forgejo=916, github=589), forges=["forgejo", "github"],
+                    complete=True, count=1505, limit=1024, blocked=True, scope="any", skip="")
+        self.worker(1, limit=1024, authoring=both)
+        # An older Forgejo-only worker reported its own forge alone, more recently.
+        self.worker(41, limit=1024, authoring=dict(observed_at=now - 10, sources=dict(forgejo=916), count=916,
+                                                   limit=1024, blocked=False, scope="any", skip=""))
+        # A current worker whose GitHub count was unavailable: blocked, and never preferred either.
+        self.worker(42, limit=1024, authoring=dict(observed_at=now - 5, sources=dict(forgejo=916),
+                                                   forges=["forgejo", "github"], complete=False, count=916,
+                                                   limit=1024, blocked=True, scope="any", skip=""))
+        data, _ = overview.pressure(self.config)
+        self.assertEqual([(r["count"], r["blocked"], r["sources"]) for r in data["scopes"]],
+                         [(1505, True, dict(forgejo=916, github=589))])
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=data, observed_at=now)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=now))))
+        self.assertIn("all roadmaps: 1505/1024 blocked (forgejo 916, github 589) open non-draft", out.getvalue())
+
+        self.worker(1, limit=1024, authoring=dict(both, observed_at=now - 7 * 3600))  # no complete report left
+        data, _ = overview.pressure(self.config)
+        self.assertEqual([(r["count"], r["blocked"], r["complete"]) for r in data["scopes"]], [(916, True, False)])
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=data, observed_at=now)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=now))))
+        self.assertIn("916/1024 blocked (forgejo 916, github unknown)", out.getvalue())
+
+    def test_an_unknown_forge_count_is_blocked_even_below_the_limit(self):
+        row = dict(scope="any", skip="", count=10, limit=1024, observed_at=time.time(), sources=dict(forgejo=10),
+                   forges=["forgejo", "github"], complete=False)
+        value = dict(account="science", scopes=[dict(row, blocked=False)])
+        self.assertIsNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
+        value["scopes"] = [dict(row, blocked=True)]
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
+        value["scopes"] = [dict(row, blocked=True, sources=dict(forgejo=-1))]
+        self.assertIsNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
 
     def test_ci_only_hosts_never_publish_default_worker_pressure(self):
         self.survey_cache("all", "auto", count=200)
