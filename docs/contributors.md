@@ -45,19 +45,26 @@ reported but do not count towards volume.
 ## Thresholds
 
 - **Sustained high volume:** at least 10 a week over the person's best 28-day window, with activity
-  in at least 3 of its 4 weeks. Ten a week separates fleets and regular contributors from people
-  who opened a handful of PRs; the weeks condition drops one-off bursts.
+  on at least 7 of its 28 days. Ten a week separates fleets and regular contributors from people
+  who opened a handful of PRs; a week's worth of active days drops one-off bursts of a day or two
+  while keeping a fleet that ran flat out for a week and then stopped.
 - **Lapsed:** sustained, and the last 14 days ran at 25% of that peak rate or less. Fourteen days
   is long enough that a weekend or a short outage does not trigger it, and short enough to catch
   a fleet that stopped this fortnight. A quarter of the peak is a dramatic drop, not ordinary
   variation.
 - **Stopped:** lapsed and nothing at all in the last 7 days.
-- **One stream lapsed:** still active overall, but opened or reviews (with a peak of at least 5 a
-  week) fell to 25% of its own peak. This catches a fleet that stopped reviewing but still authors.
+- **Gone quiet:** sustained, not lapsed on the 14-day measure, but nothing for 5 days or more.
+  A fleet runs every day, so five silent days is a stop that the 14-day average has not yet
+  absorbed.
+- **Recent:** a lapse whose last strong week ended within 42 days; older lapses are listed apart.
+- **One stream fell this week:** still active overall, but opened or reviews (with a peak of at
+  least 5 a week) ran at 25% of its own peak weekly rate or less over the last 7 days. This catches
+  a fleet that stopped reviewing but still authors, or the reverse.
 - **Last strong week ended:** the last active day of the latest 7 days that still ran at half the
   peak rate or more, a reading of when the drop happened.
 
-People are ranked by lost volume: peak weekly rate minus the last 14 days' weekly rate.
+People are ranked by lost volume: the peak weekly rate minus the current one, the lower of the
+last 7 days' count and the last 14 days' weekly rate.
 
 ## Identities
 

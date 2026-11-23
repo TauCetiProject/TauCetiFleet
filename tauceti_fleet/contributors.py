@@ -46,10 +46,12 @@ EXCLUDED = {
 # Thresholds (see docs/contributors.md for the reasoning).
 PEAK_DAYS = 28            # the sustained window
 SUSTAINED_PER_WEEK = 10   # opened PRs + reviews per week across the peak window
-SUSTAINED_WEEKS = 3       # weeks of the peak window with any activity
+SUSTAINED_DAYS = 7        # active days within the peak window
 RECENT_DAYS = 14
 LAPSED_FRACTION = 0.25    # recent 14-day rate at most this share of the peak rate
 STREAM_FLOOR = 5          # per-stream peak (per week) below which a stream drop is not reported
+QUIET_DAYS = 5            # a sustained contributor silent this long has gone quiet, even if not yet lapsed
+RECENT_LAPSE_DAYS = 42    # lapses whose last strong week ended within this many days are recent
 # Labels saying who an open PR waits on; an author-side label wins over a project-side one.
 AUTHOR_LABELS = {"awaiting-author", "ci-failed", "merge-conflict"}
 PROJECT_LABELS = {"awaiting-review", "awaiting-CI", "ready-to-merge", "bors-staging"}
@@ -188,6 +190,12 @@ def forgejo_get(path, params):
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
                 return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            if exc.code < 500 or attempt == 3:
+                raise FleetError(f"Forgejo read returned HTTP {exc.code}") from None
+            time.sleep(3 * (attempt + 1))
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             if attempt == 3:
                 raise FleetError(f"Forgejo read unavailable ({type(exc).__name__})") from None
@@ -232,11 +240,7 @@ def sync_forgejo():
 
 
 def forgejo_account_exists(login):
-    try:
-        forgejo_get(f"users/{urllib.parse.quote(login)}", {})
-        return True
-    except FleetError:
-        return False
+    return forgejo_get(f"users/{urllib.parse.quote(login)}", {}) is not None
 
 
 # ---- Merge queue ----------------------------------------------------------------------------
@@ -333,14 +337,14 @@ def window_sum(counts, end, days):
 
 
 def peak_window(counts, first, today):
-    """The 28-day window ending on or before today with the most volume; (end day, total, active weeks)."""
+    """The 28-day window ending on or before today with the most volume; (end day, total, active days)."""
     best = (None, 0, 0)
     day = first
     while day <= today:
         total = window_sum(counts, day, PEAK_DAYS)
         if total > best[1]:
-            weeks = sum(window_sum(counts, day - timedelta(days=7 * w), 7) > 0 for w in range(PEAK_DAYS // 7))
-            best = (day, total, weeks)
+            active = sum(counts.get(day - timedelta(days=i), 0) > 0 for i in range(PEAK_DAYS))
+            best = (day, total, active)
         day += timedelta(days=1)
     return best
 
@@ -355,9 +359,9 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
         if not volume:
             continue
         first = min(volume)
-        end, total, weeks = peak_window(volume, first, today)
+        end, total, active_days = peak_window(volume, first, today)
         peak_rate = total / PEAK_DAYS * 7
-        sustained = peak_rate >= SUSTAINED_PER_WEEK and weeks >= SUSTAINED_WEEKS
+        sustained = peak_rate >= SUSTAINED_PER_WEEK and active_days >= SUSTAINED_DAYS
         recent7 = window_sum(volume, today, 7)
         recent14 = window_sum(volume, today, RECENT_DAYS)
         recent_rate = recent14 / RECENT_DAYS * 7
@@ -380,9 +384,11 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
                 break
             day -= timedelta(days=1)
         lapsed = sustained and recent_rate <= LAPSED_FRACTION * peak_rate
+        # A stream that fell this week: its last 7 days ran at a quarter of its own peak or less.
         stream_drops = [k for k in ("opened", "review")
                         if streams[k]["peak_per_week"] >= STREAM_FLOOR
-                        and streams[k]["last14"] / RECENT_DAYS * 7 <= LAPSED_FRACTION * streams[k]["peak_per_week"]]
+                        and streams[k]["last7"] <= LAPSED_FRACTION * streams[k]["peak_per_week"]]
+        quiet_days = (today - last_active).days
         weekly = defaultdict(lambda: dict(opened=0, landed=0, review=0, active_days=set()))
         for at, kind, _, _ in items:
             day = local_day(at, zone)
@@ -400,10 +406,13 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
         shown += [pr for pr in owned if pr not in shown][:max(0, 5 - len(shown))]
         people.append(dict(
             identity=who, accounts=sorted(accounts[who]), sustained=sustained, lapsed=lapsed,
-            stopped=lapsed and recent7 == 0, stream_drops=stream_drops,
+            stopped=lapsed and recent7 == 0, stream_drops=stream_drops, quiet_days=quiet_days,
+            quiet=sustained and not lapsed and quiet_days >= QUIET_DAYS,
+            recent_lapse=lapsed and drop is not None and (today - drop).days <= RECENT_LAPSE_DAYS,
             peak_per_week=round(peak_rate, 1), peak_window_end=end.isoformat() if end else None,
-            peak_active_weeks=weeks, recent7=recent7, recent14=recent14, recent_per_week=round(recent_rate, 1),
-            lost_per_week=round(max(0.0, peak_rate - recent_rate), 1),
+            peak_active_days=active_days, recent7=recent7, recent14=recent14, recent_per_week=round(recent_rate, 1),
+            # The current rate is the lower of the last 7 and 14 days', so a stop this week counts in full.
+            lost_per_week=round(max(0.0, peak_rate - min(recent_rate, recent7)), 1),
             drop_after=drop.isoformat() if drop else None, last_active=last_active.isoformat(),
             first_active=first.isoformat(), streams=streams,
             open_prs=dict(total=len(owned), github=sum(p["forge"] == "github" for p in owned),
@@ -417,8 +426,9 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
     people.sort(key=lambda p: (not p["lapsed"], -p["lost_per_week"]))
     return dict(generated_at=now, today=today.isoformat(), timezone=timezone, people=people,
                 thresholds=dict(peak_days=PEAK_DAYS, sustained_per_week=SUSTAINED_PER_WEEK,
-                                sustained_weeks=SUSTAINED_WEEKS, recent_days=RECENT_DAYS,
-                                lapsed_fraction=LAPSED_FRACTION, stream_floor=STREAM_FLOOR))
+                                sustained_days=SUSTAINED_DAYS, recent_days=RECENT_DAYS,
+                                lapsed_fraction=LAPSED_FRACTION, stream_floor=STREAM_FLOOR,
+                                quiet_days=QUIET_DAYS, recent_lapse_days=RECENT_LAPSE_DAYS))
 
 
 def _label_counts(prs):
@@ -445,12 +455,16 @@ def markdown(report, *, forgejo_accounts=None, include_all=False):
         f"# Lapsed contributors ({generated})", "",
         f"Volume is PRs opened plus reviews given (comments and reviews on other people's PRs), on both forges. "
         f"Sustained: at least {t['sustained_per_week']} per week over the best {t['peak_days']}-day window, with "
-        f"activity in at least {t['sustained_weeks']} of its 4 weeks. Lapsed: the last {t['recent_days']} days ran "
+        f"activity on at least {t['sustained_days']} of its days. Lapsed: the last {t['recent_days']} days ran "
         f"at {t['lapsed_fraction']:.0%} of that peak rate or less. Stopped: lapsed with nothing in the last 7 days. "
         f"Landings come from the merge queue ledger, and from Bors before the ledger begins.", "",
     ]
     lapsed = [p for p in report["people"] if p["lapsed"]]
-    partial = [p for p in report["people"] if p["sustained"] and not p["lapsed"] and p["stream_drops"]]
+    recent = [p for p in lapsed if p["recent_lapse"]]
+    earlier = [p for p in lapsed if not p["recent_lapse"]]
+    quiet = sorted((p for p in report["people"] if p["quiet"]), key=lambda p: -p["peak_per_week"])
+    partial = [p for p in report["people"]
+               if p["sustained"] and not p["lapsed"] and not p["quiet"] and p["stream_drops"]]
 
     def signals(p):
         found = []
@@ -467,7 +481,8 @@ def markdown(report, *, forgejo_accounts=None, include_all=False):
     def row(p):
         s = p["streams"]
         o = p["open_prs"]
-        status = "stopped" if p["stopped"] else "slowed"
+        status = ("stopped" if p["stopped"] else "slowed" if p["lapsed"]
+                  else f"quiet {p['quiet_days']} days")
         return (f"| {p['identity']} | {status} | {p['peak_per_week']} (to {p['peak_window_end']}) | "
                 f"{p['recent_per_week']} | {p['lost_per_week']} | {s['opened']['peak_per_week']} / "
                 f"{s['review']['peak_per_week']} / {s['landed']['peak_per_week']} | {p['drop_after']} | "
@@ -478,7 +493,13 @@ def markdown(report, *, forgejo_accounts=None, include_all=False):
               "per week | last strong week ended | last active | open PRs (waiting on project / on author) | "
               "signals |")
     sep = "|---|---|---|---|---|---|---|---|---|---|"
-    lines += [f"## Lapsed ({len(lapsed)})", "", header, sep, *map(row, lapsed), ""]
+    lines += [f"## Recently lapsed ({len(recent)})", "",
+              f"Last strong week ended within {t['recent_lapse_days']} days.", "", header, sep, *map(row, recent), ""]
+    if quiet:
+        lines += [f"## Gone quiet ({len(quiet)})", "",
+                  f"Sustained, not yet lapsed on the 14-day measure, but nothing for {t['quiet_days']} days or more.",
+                  "", header, sep, *map(row, quiet), ""]
+    lines += [f"## Lapsed earlier ({len(earlier)})", "", header, sep, *map(row, earlier), ""]
     if include_all:
         sustained = [p for p in report["people"] if p["sustained"]]
         lines += [f"## Every sustained contributor ({len(sustained)})", "",
@@ -487,16 +508,21 @@ def markdown(report, *, forgejo_accounts=None, include_all=False):
                   f"{'yes' if p['lapsed'] else 'no'} |" for p in sorted(sustained, key=lambda p: -p["peak_per_week"])]
         lines.append("")
     if partial:
-        lines += ["## Still active, but one stream lapsed", "", "| who | lapsed streams | peak volume/week | "
-                  "last 14 days/week |", "|---|---|---|---|"]
-        lines += [f"| {p['identity']} | {', '.join(p['stream_drops'])} | {p['peak_per_week']} | "
-                  f"{p['recent_per_week']} |" for p in partial]
+        lines += ["## Still active, but one stream fell this week", "",
+                  "The stream's last 7 days ran at a quarter of its own peak weekly rate or less.", "",
+                  "| who | fallen streams | stream peak/week | stream last 7 days | volume peak/week | "
+                  "volume last 7 days |", "|---|---|---|---|---|---|"]
+        lines += [f"| {p['identity']} | {', '.join(p['stream_drops'])} | "
+                  f"{' / '.join(str(p['streams'][k]['peak_per_week']) for k in p['stream_drops'])} | "
+                  f"{' / '.join(str(p['streams'][k]['last7']) for k in p['stream_drops'])} | "
+                  f"{p['peak_per_week']} | {p['recent7']} |" for p in partial]
         lines.append("")
-    lines += ["## Open PRs of lapsed contributors", "",
+    flagged = recent + quiet + earlier
+    lines += ["## Open PRs of lapsed and quiet contributors", "",
               "Up to five each, those waiting on the project first. Waiting on the author: awaiting-author, "
               "ci-failed or merge-conflict; on the project: awaiting-review, awaiting-CI, ready-to-merge "
               "or bors-staging.", ""]
-    for p in lapsed:
+    for p in flagged:
         o = p["open_prs"]
         if not o["total"]:
             continue
@@ -508,13 +534,13 @@ def markdown(report, *, forgejo_accounts=None, include_all=False):
             opened = local_day(pr["created"], zone).isoformat()
             lines.append(f"  - {pr_url(pr['forge'], pr['number'])} {pr['title']} (opened {opened}, "
                          f"waiting on {pr['waits_on']})")
-    lines += ["", "## Weekly series of lapsed contributors", "",
+    lines += ["", "## Weekly series of lapsed and quiet contributors", "",
               "Weeks start on Monday; each cell is opened / landed / reviews / active days.", ""]
-    weeks = sorted({w for p in lapsed for w in p["weekly"]})[-10:]
+    weeks = sorted({w for p in flagged for w in p["weekly"]})[-10:]
     if weeks:
         lines.append("| who | " + " | ".join(weeks) + " |")
         lines.append("|---|" + "---|" * len(weeks))
-        for p in lapsed:
+        for p in flagged:
             cells = []
             for w in weeks:
                 v = p["weekly"].get(w)
@@ -553,14 +579,16 @@ def main(argv=None):
         EXCLUDED.update(identities.get("exclude", []))
         events, accounts, open_prs = collect_events(github or {}, forgejo or {}, queue or {}, aliases)
         report = analyse(events, accounts, open_prs, timezone=args.timezone)
-        accounts_on_forgejo = None
+        known_accounts = read(cache_dir() / "forgejo-accounts.json", {}) or {}
+        accounts_on_forgejo = known_accounts if args.offline and known_accounts else None
         if not args.offline and not args.no_account_check:
             accounts_on_forgejo = {}
             for p in report["people"]:
-                if p["lapsed"]:
+                if p["lapsed"] or p["quiet"] or (p["sustained"] and p["stream_drops"]):
                     logins = {a.split(":", 1)[1] for a in p["accounts"]}
                     accounts_on_forgejo[p["identity"]] = any(map(forgejo_account_exists, sorted(logins)))
                     p["forgejo_account"] = accounts_on_forgejo[p["identity"]]
+            atomic(cache_dir() / "forgejo-accounts.json", accounts_on_forgejo)
         text = markdown(report, forgejo_accounts=accounts_on_forgejo, include_all=args.include_all)
         if args.json_path:
             atomic(args.json_path, report)
