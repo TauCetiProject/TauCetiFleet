@@ -701,7 +701,7 @@ def worker_pool_pressure():
     return bool(memory_pressure(worker_memory(), resources()))
 
 
-def set_worker_maximum(maximum, *, lease_seconds=None):
+def set_worker_maximum(maximum, *, lease_seconds=None, validate=None):
     """Set admissions; optional short leases allow external automation to fail closed."""
     if type(maximum) is not int or not 0 <= maximum <= 4096:
         raise FleetError("Worker maximum must be an integer from 0 to 4096")
@@ -712,7 +712,7 @@ def set_worker_maximum(maximum, *, lease_seconds=None):
         if type(lease_seconds) is not int or not 30 <= lease_seconds <= 3600:
             raise FleetError("Admission lease must be 30 to 3600 seconds")
         atomic(lease, dict(expires_at=time.time() + lease_seconds))
-    update_host(max_workers=maximum)
+    update_host(max_workers=maximum, validate=validate)
     if maximum == 0:
         atomic(
             state_dir() / "admission.json",
@@ -821,12 +821,17 @@ def set_worker_policy(payload):
             if value is not None:
                 current[field] = value
         _preferences_within_maintenance(current)
-    if maximum is not None or native is not None or maintenance is not None or both is not None:
-        current = host_config()
-        ceiling = maximum if maximum is not None else current["max_workers"]
+    # Each count is held to the ceiling only when it or the maximum changes: lowering the maximum
+    # elsewhere (a pause) must not block unrelated policy changes.
+    forgejo_checked = maximum is not None or native is not None
+    tending_checked = maximum is not None or maintenance is not None or both is not None
+    current = host_config()
+    ceiling = maximum if maximum is not None else current["max_workers"]
+    if forgejo_checked:
         selected = native if native is not None else current.get("forgejo_workers", 0)
         if selected > ceiling:
             raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
+    if tending_checked:
         tending = maintenance if maintenance is not None else current.get("maintenance_workers", 0)
         if tending > ceiling:
             raise FleetError("Maintenance worker count exceeds the worker maximum; lower --maintenance-workers with --max")
@@ -848,7 +853,6 @@ def set_worker_policy(payload):
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
-    result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:
         changes["self_tested"] = local
@@ -864,14 +868,20 @@ def set_worker_policy(payload):
         changes["review_first_workers"] = review_first
     if environment is not None:
         changes["worker_env"] = environment
-    if changes:
-        def validate(config):
-            _preferences_within_maintenance(config)
-            if maintenance is not None or both is not None:
-                # Only a change to the tending counts is held to the ceiling: lowering the maximum
-                # elsewhere (a pause) must not block unrelated policy changes.
-                _both_forge_within_maximum(config)
 
+    def validate(config):
+        # The early checks above read an unlocked snapshot; a concurrent command may have changed
+        # the counts since. Recheck under the host.json lock, against this command's own changes.
+        config = {**config, **changes}
+        _preferences_within_maintenance(config)
+        if forgejo_checked and config.get("forgejo_workers", 0) > config["max_workers"]:
+            raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
+        if tending_checked:
+            _both_forge_within_maximum(config)
+
+    # The maximum is written first, already checked against the policy changes that follow it.
+    result = set_worker_maximum(maximum, validate=validate) if maximum is not None else {}
+    if changes:
         config = update_host(validate=validate, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")

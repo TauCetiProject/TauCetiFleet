@@ -303,10 +303,26 @@ class Isolated(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
                 host.set_worker_policy(dict(both_forge_workers=4))
         self.assertEqual(store.host_config()["both_forge_workers"], 3)
+        # A lowered maximum is also rechecked under the lock: both-forge slots raised by a
+        # concurrent command after the early check refuse it.
+        real_update(max_workers=8)
+        def raised_meanwhile(**changes):
+            real_update(both_forge_workers=4)
+            return real_update(**changes)
+        with patch.object(host, "update_host", side_effect=raised_meanwhile):
+            with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
+                host.set_worker_policy(dict(maximum=5))
+        self.assertEqual(store.host_config()["max_workers"], 8)
+        real_update(both_forge_workers=3)
         # A pause lowers the maximum elsewhere; unrelated policy changes still apply.
         real_update(max_workers=0)
         host.set_worker_policy(dict(self_tested=False))
-        real_update(max_workers=8)
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(forgejo_workers=0))
+            with self.assertRaisesRegex(store.FleetError, "Forgejo worker count exceeds"):
+                host.set_worker_policy(dict(forgejo_workers=1))
+            real_update(max_workers=8)
+            host.set_worker_policy(dict(forgejo_workers=2))
         for count in (True, -1, 4097, "1"):
             with self.assertRaises(store.FleetError):
                 host.set_worker_policy(dict(both_forge_workers=count))
