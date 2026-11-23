@@ -1218,19 +1218,30 @@ TauCetiRoadmap report PRs) and keep admission priority under pressure; they take
 `--forgejo-workers` for those slots. Set the count to `0` to return them to ordinary routing. Like the
 other worker policies this survives controller rewrites and does not change admissions or active rounds.
 
-Give the lowest-numbered maintenance slots a GitHub-first preference with
+Run ordinary workers on both forges with `tauceti-fleet workers HOST --both-forge-workers 40`.
+The slots right after the maintenance slots work existing PRs on GitHub and Forgejo like the maintenance
+slots, and when neither forge has claimable PR work they author roadmap PRs on Forgejo
+(`new_pr_forge = "forgejo"`); every stage runs, including `roadmap` and the overlap stages. They also
+take precedence over `--forgejo-workers` for those slots. The maintenance and both-forge counts together
+cannot exceed `--max`. Set it to `0` to return those slots to ordinary routing. To switch a host whose
+maintenance slots should all author, run `tauceti-fleet workers HOST --maintenance-workers 0
+--both-forge-workers N` in one command.
+
+Give the lowest-numbered maintenance or both-forge slots a GitHub-first preference with
 `tauceti-fleet workers HOST --github-first-workers 15`. Those slots walk GitHub's rebases,
 re-reviews, fixes and first reviews before any Forgejo work (automatic bumps still come first on
 either forge), and fall back to Forgejo when GitHub has nothing claimable; the other maintenance
-slots keep one closeness-to-landing order across both forges. The count cannot exceed
-`--maintenance-workers`. Set it to `0` to remove the preference. It needs a Worker release and
+slots keep one closeness-to-landing order across both forges. The preference covers the maintenance
+slots first, then the both-forge slots, so the count cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`. Set it to `0` to remove the preference. It needs a Worker release and
 running manager that support `prefer_forge`; workers pick it up between rounds.
 
-Reserve a few maintenance slots for reviews with `tauceti-fleet workers HOST --review-first-workers 5`.
+Reserve a few maintenance or both-forge slots for reviews with `tauceti-fleet workers HOST --review-first-workers 5`.
 The slots right after the GitHub-first ones offer re-reviews, then first reviews, on either forge before
 any rebase or fix (automatic bumps still come first), and fall back to the normal landing order when no
 review is claimable, so approvals keep reaching the queue while long rebases hold the other slots. The
-GitHub-first and review-first counts together cannot exceed `--maintenance-workers`. Set it to `0` to
+GitHub-first and review-first counts together cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`. Set it to `0` to
 remove the reserve. It needs a Worker release and running manager that support `review_first`; workers
 pick it up between rounds.
 

@@ -259,6 +259,99 @@ class Isolated(unittest.TestCase):
             self.assertEqual(main(["workers", "test", "--review-first-workers", "5", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", review_first_workers=5))
 
+    def test_both_forge_slots_author_on_forgejo_after_the_maintenance_slots(self):
+        import tomllib
+        original = store.update_host(max_workers=8, workers_enabled=True, ci_enabled=True)
+        with (patch.object(host, "require_source_selection_support") as sources,
+              patch.object(host, "require_forgejo_credential") as credential,
+              patch.object(host, "require_worker_support")):
+            value = host.set_worker_policy(dict(both_forge_workers=3))
+            sources.assert_called_once()
+            credential.assert_called_once()
+            host.set_worker_policy(dict(maintenance_workers=2, forgejo_workers=2))
+            # The preferences cover the maintenance slots, then the both-forge slots after them.
+            host.set_worker_policy(dict(github_first_workers=3, review_first_workers=1))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance and both-forge"):
+                host.set_worker_policy(dict(review_first_workers=3))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance and both-forge"):
+                host.set_worker_policy(dict(both_forge_workers=1))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
+                host.set_worker_policy(dict(both_forge_workers=7))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
+                host.set_worker_policy(dict(maximum=4))
+        self.assertEqual(value["both_forge_workers"], 3)
+        self.assertEqual(store.host_config(), {**original, "both_forge_workers": 3, "maintenance_workers": 2,
+                                               "forgejo_workers": 2, "github_first_workers": 3,
+                                               "review_first_workers": 1})
+        # A controller rewrite from an older snapshot keeps the layout.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual(len(specs), 8)
+        self.assertEqual([(s.get("github"), s.get("forgejo"), s.get("new_pr_forge")) for s in specs],
+                         [(True, True, "forgejo")] * 5 + [(None, None, None)] + [(False, True, "forgejo")] * 2)
+        self.assertEqual([s.get("only") for s in specs[:5]], [list(host.MAINTENANCE_STAGES)] * 2 + [None] * 3)
+        self.assertEqual([s.get("prefer_forge") for s in specs], ["github"] * 3 + [None] * 5)
+        self.assertEqual([s.get("review_first", False) for s in specs], [False] * 3 + [True] + [False] * 4)
+        # The ceiling is rechecked under the host.json lock: a maximum lowered by a concurrent
+        # command after the early check still refuses more both-forge slots.
+        real_update = store.update_host
+        def lowered_meanwhile(**changes):
+            real_update(max_workers=5)
+            return real_update(**changes)
+        with (patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"),
+              patch.object(host, "update_host", side_effect=lowered_meanwhile)):
+            with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
+                host.set_worker_policy(dict(both_forge_workers=4))
+        self.assertEqual(store.host_config()["both_forge_workers"], 3)
+        # A lowered maximum is also rechecked under the lock: both-forge slots raised by a
+        # concurrent command after the early check refuse it.
+        real_update(max_workers=8)
+        lease = store.state_dir() / "worker-admission-lease.json"
+        store.atomic(lease, dict(expires_at=12345))
+        def raised_meanwhile(**changes):
+            real_update(both_forge_workers=4)
+            return real_update(**changes)
+        with patch.object(host, "update_host", side_effect=raised_meanwhile):
+            with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
+                host.set_worker_policy(dict(maximum=5))
+        self.assertEqual(store.host_config()["max_workers"], 8)
+        self.assertEqual(store.read(lease), dict(expires_at=12345), "a refused maximum keeps the lease")
+        real_update(both_forge_workers=3)
+        # A pause lowers the maximum elsewhere; unrelated policy changes still apply.
+        real_update(max_workers=0)
+        host.set_worker_policy(dict(self_tested=False))
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.set_worker_policy(dict(forgejo_workers=0))
+            with self.assertRaisesRegex(store.FleetError, "Forgejo worker count exceeds"):
+                host.set_worker_policy(dict(forgejo_workers=1))
+            real_update(max_workers=8)
+            host.set_worker_policy(dict(forgejo_workers=2))
+        for count in (True, -1, 4097, "1"):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(both_forge_workers=count))
+        with patch.object(host, "require_worker_support"):
+            host.set_worker_policy(dict(github_first_workers=0, review_first_workers=0))
+        host.set_worker_policy(dict(both_forge_workers=0))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([s.get("github") for s in specs], [True, True] + [None] * 4 + [False, False])
+        # One command moves every maintenance slot to both-forge authoring, preferences included.
+        with (patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"),
+              patch.object(host, "require_worker_support")):
+            host.set_worker_policy(dict(github_first_workers=1, review_first_workers=1))
+            host.set_worker_policy(dict(maintenance_workers=0, both_forge_workers=2))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([s.get("forgejo") for s in specs[:3]], [True, True, None])
+        self.assertFalse(any("only" in s for s in specs))
+        self.assertEqual([s.get("prefer_forge") for s in specs[:2]], ["github", None])
+        self.assertTrue(specs[1]["review_first"])
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            for count in (40, 0):
+                self.assertEqual(main(["workers", "test", "--both-forge-workers", str(count), "--json"]), 0)
+                self.assertEqual(call.call_args.args[1], dict(action="workers", both_forge_workers=count))
+
     def test_stale_controller_snapshot_keeps_raised_maintenance_slots(self):
         import tomllib
         stale = store.update_host(max_workers=2, workers_enabled=True)

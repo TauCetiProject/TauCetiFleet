@@ -85,6 +85,9 @@ def parser():
                          help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
     workers.add_argument("--maintenance-workers", type=int, default=None,
                          help="have this many of the lowest-numbered slots tend PRs on both forges without roadmap authoring")
+    workers.add_argument("--both-forge-workers", type=int, default=None,
+                         help="have this many slots after the maintenance ones work PRs on both forges, "
+                              "authoring roadmap PRs on Forgejo when none is claimable")
     workers.add_argument("--github-first-workers", type=int, default=None,
                          help="have this many of the lowest-numbered maintenance slots offer GitHub PR work before Forgejo's")
     workers.add_argument("--review-first-workers", type=int, default=None,
@@ -349,10 +352,10 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if (args.command == "workers" and args.maximum is None and args.self_tested is None
                 and args.forgejo_workers is None and args.maintenance_workers is None
-                and args.github_first_workers is None and args.review_first_workers is None and not args.env
+                and args.both_forge_workers is None and args.github_first_workers is None and args.review_first_workers is None and not args.env
                 and not args.unset_env and args.swap_gib is None):
             raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --maintenance-workers, "
-                             "--github-first-workers, --review-first-workers, --env, --unset-env or --swap-gib")
+                             "--both-forge-workers, --github-first-workers, --review-first-workers, --env, --unset-env or --swap-gib")
         if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         selected = {}
@@ -406,6 +409,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["forgejo_workers"] = args.forgejo_workers
                 if args.maintenance_workers is not None:
                     payload["maintenance_workers"] = args.maintenance_workers
+                if args.both_forge_workers is not None:
+                    payload["both_forge_workers"] = args.both_forge_workers
                 if args.github_first_workers is not None:
                     payload["github_first_workers"] = args.github_first_workers
                 if args.review_first_workers is not None:
