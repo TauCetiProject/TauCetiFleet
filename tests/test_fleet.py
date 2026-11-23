@@ -212,6 +212,53 @@ class Isolated(unittest.TestCase):
             self.assertEqual(main(["workers", "test", "--github-first-workers", "15", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", github_first_workers=15))
 
+    def test_review_first_slots_follow_the_github_first_slots(self):
+        import tomllib
+        original = store.update_host(max_workers=7, workers_enabled=True, ci_enabled=True)
+        with (patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"),
+              patch.object(host, "require_worker_support") as support):
+            host.set_worker_policy(dict(maintenance_workers=5))
+            host.set_worker_policy(dict(github_first_workers=2))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance"):
+                host.set_worker_policy(dict(review_first_workers=4))
+            value = host.set_worker_policy(dict(review_first_workers=2))
+            support.assert_called_with("review_first", "--review-first-workers")
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance"):
+                host.set_worker_policy(dict(maintenance_workers=3))
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance"):
+                host.set_worker_policy(dict(github_first_workers=4))
+        self.assertEqual(value["review_first_workers"], 2)
+        # The commit rechecks under the host.json lock.
+        real_update = store.update_host
+        def lowered_meanwhile(**changes):
+            real_update(maintenance_workers=4)
+            return real_update(**changes)
+        with (patch.object(host, "require_worker_support"),
+              patch.object(host, "update_host", side_effect=lowered_meanwhile)):
+            with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance"):
+                host.set_worker_policy(dict(review_first_workers=3))
+        self.assertEqual(store.host_config()["review_first_workers"], 2)
+        real_update(maintenance_workers=5)
+        # A controller rewrite from an older snapshot keeps the reserve.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([spec.get("prefer_forge") for spec in specs], ["github", "github"] + [None] * 5)
+        self.assertEqual([spec.get("review_first", False) for spec in specs],
+                         [False, False, True, True, False, False, False])
+        self.assertTrue(all(spec["github"] and spec["forgejo"] for spec in specs[:5]))
+        for count in (True, -1, 4097, "1"):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(review_first_workers=count))
+        host.set_worker_policy(dict(review_first_workers=0))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertFalse(any("review_first" in spec for spec in specs))
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["workers", "test", "--review-first-workers", "5", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", review_first_workers=5))
+
     def test_stale_controller_snapshot_keeps_raised_maintenance_slots(self):
         import tomllib
         stale = store.update_host(max_workers=2, workers_enabled=True)
