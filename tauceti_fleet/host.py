@@ -381,8 +381,8 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "github_first_workers", "worker_env",
-                      "roadmap_targets"):
+        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "github_first_workers",
+                      "review_first_workers", "worker_env", "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
@@ -438,6 +438,10 @@ def _worker_config(config):
                 # The lowest maintenance slots walk GitHub's landing tiers before Forgejo's, so GitHub
                 # fixes drain while the other slots take Forgejo's re-reviews first.
                 worker_fields["prefer_forge"] = "github"
+            elif n < config.get("github_first_workers", 0) + config.get("review_first_workers", 0):
+                # The next maintenance slots offer re-reviews and first reviews before rebases and
+                # fixes, so approvals keep reaching the queue while long rebases hold the others.
+                worker_fields["review_first"] = True
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
@@ -773,12 +777,13 @@ def set_worker_policy(payload):
     native = payload.get("forgejo_workers")
     maintenance = payload.get("maintenance_workers")
     github_first = payload.get("github_first_workers")
+    review_first = payload.get("review_first_workers")
     environment = payload.get("worker_env")
     swap = payload.get("swap_gib")
     if (maximum is None and local is None and native is None and maintenance is None and github_first is None
-            and environment is None and swap is None):
-        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance or GitHub-first "
-                         "worker count, worker environment or swap")
+            and review_first is None and environment is None and swap is None):
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance, GitHub-first or "
+                         "review-first worker count, worker environment or swap")
     if swap is not None:
         workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
@@ -796,13 +801,16 @@ def set_worker_policy(payload):
     if github_first is not None:
         if type(github_first) is not int or not 0 <= github_first <= 4096:
             raise FleetError("GitHub-first worker count must be an integer from 0 to 4096")
-    if maintenance is not None or github_first is not None:
-        current = host_config()
-        tending = maintenance if maintenance is not None else current.get("maintenance_workers", 0)
-        preferring = github_first if github_first is not None else current.get("github_first_workers", 0)
-        if preferring > tending:
-            raise FleetError("GitHub-first worker count exceeds the maintenance worker count; "
-                             "lower --github-first-workers or raise --maintenance-workers")
+    if review_first is not None:
+        if type(review_first) is not int or not 0 <= review_first <= 4096:
+            raise FleetError("Review-first worker count must be an integer from 0 to 4096")
+    if maintenance is not None or github_first is not None or review_first is not None:
+        current = dict(host_config())
+        for field, value in (("maintenance_workers", maintenance), ("github_first_workers", github_first),
+                             ("review_first_workers", review_first)):
+            if value is not None:
+                current[field] = value
+        _preferences_within_maintenance(current)
     if maximum is not None or native is not None or maintenance is not None:
         current = host_config()
         ceiling = maximum if maximum is not None else current["max_workers"]
@@ -817,11 +825,13 @@ def set_worker_policy(payload):
         require_forgejo_credential()
     if github_first:
         require_worker_support("prefer_forge", "--github-first-workers")
+    if review_first:
+        require_worker_support("review_first", "--review-first-workers")
     if local is True:
         require_self_tested_support()
     current = host_config()
     spec_changes = (local is not None or native is not None or maintenance is not None or github_first is not None
-                    or environment is not None)
+                    or review_first is not None or environment is not None)
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
@@ -835,10 +845,12 @@ def set_worker_policy(payload):
         changes["maintenance_workers"] = maintenance
     if github_first is not None:
         changes["github_first_workers"] = github_first
+    if review_first is not None:
+        changes["review_first_workers"] = review_first
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
-        config = update_host(validate=_github_first_within_maintenance, **changes)
+        config = update_host(validate=_preferences_within_maintenance, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
     if swap is not None:
@@ -847,12 +859,16 @@ def set_worker_policy(payload):
     return result
 
 
-def _github_first_within_maintenance(config):
-    # Rechecked under the host.json lock: a concurrent command may have lowered the maintenance
-    # count after the early check above read its snapshot.
-    if config.get("github_first_workers", 0) > config.get("maintenance_workers", 0):
+def _preferences_within_maintenance(config):
+    # Also rechecked under the host.json lock: a concurrent command may have lowered the
+    # maintenance count after the early check in set_worker_policy read its snapshot.
+    tending = config.get("maintenance_workers", 0)
+    if config.get("github_first_workers", 0) > tending:
         raise FleetError("GitHub-first worker count exceeds the maintenance worker count; "
                          "lower --github-first-workers or raise --maintenance-workers")
+    if config.get("github_first_workers", 0) + config.get("review_first_workers", 0) > tending:
+        raise FleetError("GitHub-first and review-first worker counts together exceed the maintenance worker count; "
+                         "lower --review-first-workers or raise --maintenance-workers")
 
 
 # Worker states that hold no work in progress.

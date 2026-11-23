@@ -87,6 +87,8 @@ def parser():
                          help="have this many of the lowest-numbered slots tend PRs on both forges without roadmap authoring")
     workers.add_argument("--github-first-workers", type=int, default=None,
                          help="have this many of the lowest-numbered maintenance slots offer GitHub PR work before Forgejo's")
+    workers.add_argument("--review-first-workers", type=int, default=None,
+                         help="have this many maintenance slots after the GitHub-first ones offer reviews before other PR work")
     workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
                          help="set an environment variable in every worker's definition (repeatable)")
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
@@ -347,9 +349,10 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if (args.command == "workers" and args.maximum is None and args.self_tested is None
                 and args.forgejo_workers is None and args.maintenance_workers is None
-                and args.github_first_workers is None and not args.env and not args.unset_env and args.swap_gib is None):
+                and args.github_first_workers is None and args.review_first_workers is None and not args.env
+                and not args.unset_env and args.swap_gib is None):
             raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --maintenance-workers, "
-                             "--github-first-workers, --env, --unset-env or --swap-gib")
+                             "--github-first-workers, --review-first-workers, --env, --unset-env or --swap-gib")
         if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         selected = {}
@@ -405,6 +408,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["maintenance_workers"] = args.maintenance_workers
                 if args.github_first_workers is not None:
                     payload["github_first_workers"] = args.github_first_workers
+                if args.review_first_workers is not None:
+                    payload["review_first_workers"] = args.review_first_workers
                 if args.swap_gib is not None:
                     payload["swap_gib"] = args.swap_gib
                 if args.env or args.unset_env:

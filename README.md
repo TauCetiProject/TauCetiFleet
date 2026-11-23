@@ -1226,6 +1226,14 @@ slots keep one closeness-to-landing order across both forges. The count cannot e
 `--maintenance-workers`. Set it to `0` to remove the preference. It needs a Worker release and
 running manager that support `prefer_forge`; workers pick it up between rounds.
 
+Reserve a few maintenance slots for reviews with `tauceti-fleet workers HOST --review-first-workers 5`.
+The slots right after the GitHub-first ones offer re-reviews, then first reviews, on either forge before
+any rebase or fix (automatic bumps still come first), and fall back to the normal landing order when no
+review is claimable, so approvals keep reaching the queue while long rebases hold the other slots. The
+GitHub-first and review-first counts together cannot exceed `--maintenance-workers`. Set it to `0` to
+remove the reserve. It needs a Worker release and running manager that support `review_first`; workers
+pick it up between rounds.
+
 Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
