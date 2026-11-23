@@ -21,8 +21,11 @@ Every source is read incrementally after the first run.
   high-water mark. A first run reads all PRs (about 900 pages, about 2 points each); if the
   quota falls below 300 it stops, saves its cursor and resumes there next time. The token is
   `gh auth token`.
+  PRs with more than 100 comments or reviews have the rest read page by page.
 - **Forgejo** `git.taucetiproject.org`: the issues listing with `type=pulls&state=all` and the
-  repository comment listing, both anonymous and with `since=` after the first run.
+  repository comment listing, both anonymous and with `since=` after the first run. Forgejo has
+  no repository-wide review listing, so each changed PR's reviews are read separately, newest PR
+  first, at most `--forgejo-review-reads` (300) per run; later runs continue a backlog.
 - **Merge queue ledger** `inputs` on `tauchonki2` (`--queue-host`), read with `sqlite3 -readonly`
   over SSH. It is authoritative for landings on both forges. Before the ledger begins
   (4 Nov 2026), landings are Bors's: closed PRs titled `[Merged by Bors]`, or merged PRs.

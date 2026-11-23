@@ -97,6 +97,52 @@ class Analysis(unittest.TestCase):
         self.assertEqual(people["erin"]["streams"]["review"]["total"], 1)
         self.assertEqual(people["erin"]["accounts"], ["forgejo:erin"])
 
+    def test_a_pr_with_several_ledger_rows_lands_once(self):
+        queue = [dict(number=5, forgejo=0, author="bob", state=state, approved_at=at("2026-11-01"),
+                      landed_at=at(day), title="x") for state, day in (("cancelled", "2026-11-03"),
+                                                                       ("landed", "2026-11-05"))]
+        people = {p["identity"]: p for p in self.build({"5": self.pr("bob", "2026-11-01")}, queue)["people"]}
+        self.assertEqual(people["bob"]["streams"]["landed"]["total"], 1)
+
+    def test_reviews_are_counted_per_account_and_forgejo_reviews_count(self):
+        prs = {"1": self.pr("bob", "2026-11-20", comments=[("alice", at("2026-11-21")),
+                                                         ("alice-bot", at("2026-11-21", 13))])}
+        forgejo = {"9": dict(self.pr("bob", "2026-11-20"), reviews=[["alice", at("2026-11-22")]])}
+        people = {p["identity"]: p for p in self.build(prs, forgejo_prs=forgejo)["people"]}
+        self.assertEqual(people["alice"]["streams"]["review"]["total"], 3)
+        self.assertEqual(people["alice"]["accounts"], ["forgejo:alice", "github:alice", "github:alice-bot"])
+
+    def test_equal_peaks_prefer_the_window_with_more_active_days(self):
+        counts = {datetime.fromisoformat("2026-08-01").date(): 40}
+        for day in days("2026-11-01", 8):
+            counts[datetime.fromisoformat(day).date()] = 5
+        end, total, active = c.peak_window(counts, min(counts), datetime.fromisoformat("2026-11-23").date())
+        self.assertEqual((total, active), (40, 8))
+
+
+class Pagination(unittest.TestCase):
+    def test_long_and_legacy_lists_are_completed_page_by_page(self):
+        def node(login, when):
+            return dict(author=dict(login=login), createdAt=when, submittedAt=when)
+        pages = {
+            ("comments", "c1"): dict(nodes=[node("x", "2026-11-02T00:00:00Z")], pageInfo=dict(hasNextPage=True, endCursor="c2")),
+            ("comments", "c2"): dict(nodes=[node("y", "2026-11-03T00:00:00Z")], pageInfo=dict(hasNextPage=False)),
+            ("reviews", None): dict(nodes=[node("z", "2026-11-04T00:00:00Z")], pageInfo=dict(hasNextPage=False)),
+        }
+
+        def fake(token, variables, *, query):
+            key = "comments" if "comments(" in query else "reviews"
+            return dict(rateLimit=dict(remaining=5000, resetAt=""),
+                        repository=dict(pullRequest={key: pages[(key, variables["after"])]}))
+        prs = {"1": dict(comments=[["w", 1.0]], reviews=[], more={"comments": "c1"}),
+               "2": dict(comments=[], reviews=[["old", 1.0]] * 40)}
+        with patch.object(c, "graphql", side_effect=fake):
+            self.assertEqual(c.complete_github(prs, "token"), 2)
+        self.assertEqual([x[0] for x in prs["1"]["comments"]], ["w", "x", "y"])
+        self.assertEqual(prs["2"]["reviews"], [["z", c.stamp("2026-11-04T00:00:00Z")]])
+        self.assertEqual(prs["1"]["more"], {})
+        self.assertEqual(c.complete_github(prs, "token"), 0)
+
 
 class Command(unittest.TestCase):
     def test_offline_command_reads_only_the_cache(self):
@@ -110,7 +156,8 @@ class Command(unittest.TestCase):
                     patch.object(c, "sync_github", side_effect=AssertionError("network")):
                 self.assertEqual(cli.main(["contributors", "--offline", "--json", out]), 0)
             self.assertIn("| alice | stopped |", stdout.getvalue())
-            self.assertTrue(json.load(open(out))["people"][0]["lapsed"])
+            with open(out) as stream:
+                self.assertTrue(json.load(stream)["people"][0]["lapsed"])
 
 
 if __name__ == "__main__":

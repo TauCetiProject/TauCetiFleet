@@ -68,12 +68,24 @@ query($owner:String!,$name:String!,$after:String,$first:Int!){
         number title state createdAt updatedAt closedAt mergedAt isDraft
         author{login}
         labels(first:20){nodes{name}}
-        comments(first:60){totalCount nodes{author{login} createdAt}}
-        reviews(first:40){totalCount nodes{author{login} submittedAt}}
+        comments(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{author{login} createdAt}}
+        reviews(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{author{login} submittedAt}}
       }
     }
   }
 }"""
+# The rest of one PR's comments or reviews, when a PR has more than one page of them.
+GRAPHQL_REST = """
+query($owner:String!,$name:String!,$number:Int!,$after:String){
+  rateLimit{remaining resetAt}
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      %s(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{author{login} %s}}
+    }
+  }
+}"""
+# Comments and reviews fetched per PR before 2026-11-23 releases; such a list may be truncated.
+LEGACY_CAPS = {"comments": 60, "reviews": 40}
 
 
 def log(message):
@@ -113,8 +125,8 @@ def github_token():
     return token
 
 
-def graphql(token, variables, *, attempts=4):
-    body = json.dumps(dict(query=GRAPHQL_PAGE, variables=variables)).encode()
+def graphql(token, variables, *, query=GRAPHQL_PAGE, attempts=4):
+    body = json.dumps(dict(query=query, variables=variables)).encode()
     for attempt in range(attempts):
         req = urllib.request.Request("https://api.github.com/graphql", data=body, method="POST", headers={
             "Authorization": "bearer " + token, "User-Agent": "TauCetiFleet-contributors"})
@@ -140,7 +152,44 @@ def pr_record(node):
         labels=[n["name"] for n in node["labels"]["nodes"]],
         comments=people(node["comments"]["nodes"], "createdAt"),
         reviews=people(node["reviews"]["nodes"], "submittedAt"),
+        # A cursor where a list continues; complete_github reads the rest.
+        more={key: node[key]["pageInfo"]["endCursor"] for key in ("comments", "reviews")
+              if node[key]["pageInfo"]["hasNextPage"]},
     )
+
+
+TIME_FIELD = {"comments": "createdAt", "reviews": "submittedAt"}
+
+
+def complete_github(prs, token, *, min_remaining=300):
+    """Read the remaining pages of comments and reviews for PRs with more than one page."""
+    for pr in prs.values():
+        for key, cap in LEGACY_CAPS.items():
+            # A cache entry from before pagination: refetch from the start if it may be truncated.
+            if "more" not in pr and len(pr.get(key, [])) >= cap:
+                pr.setdefault("refetch", []).append(key)
+    pending = [(n, pr) for n, pr in prs.items() if pr.get("more") or pr.get("refetch")]
+    for number, pr in pending:
+        for key in sorted(set(pr.get("more", {})) | set(pr.pop("refetch", []))):
+            after = pr.get("more", {}).get(key)
+            if after is None:
+                pr[key] = []
+            while True:
+                data = graphql(token, dict(owner=GITHUB_REPO[0], name=GITHUB_REPO[1], number=int(number), after=after),
+                               query=GRAPHQL_REST % (key, TIME_FIELD[key]))
+                connection = (data["repository"]["pullRequest"] or {}).get(key) or {}
+                pr[key] += [[(n.get("author") or {}).get("login", ""), stamp(n[TIME_FIELD[key]])]
+                            for n in connection.get("nodes", []) if n.get(TIME_FIELD[key])]
+                if not connection.get("pageInfo", {}).get("hasNextPage"):
+                    break
+                after = connection["pageInfo"]["endCursor"]
+                if data["rateLimit"]["remaining"] < min_remaining:
+                    raise FleetError(f"GitHub GraphQL quota below {min_remaining}; rerun after "
+                                     f"{data['rateLimit']['resetAt']}")
+        pr["more"] = {}
+    if pending:
+        log(f"GitHub: completed comments and reviews of {len(pending)} PRs with more than one page")
+    return len(pending)
 
 
 def sync_github(*, token=None, page=50, min_remaining=300):
@@ -177,6 +226,10 @@ def sync_github(*, token=None, page=50, min_remaining=300):
         if data["rateLimit"]["remaining"] < min_remaining:
             atomic(path, cache)
             raise FleetError(f"GitHub GraphQL quota below {min_remaining}; rerun after {data['rateLimit']['resetAt']}")
+    try:
+        complete_github(prs, token, min_remaining=min_remaining)
+    finally:
+        atomic(path, cache)
     log(f"GitHub: {pages} pages read, {len(prs)} PRs cached")
     return cache
 
@@ -215,7 +268,8 @@ def forgejo_pages(path, params, *, pause=0.2):
         time.sleep(pause)
 
 
-def sync_forgejo():
+def sync_forgejo(*, review_reads=300):
+    """PRs and comments since the last run; PR reviews for at most review_reads PRs, newest first."""
     path = cache_dir() / "forgejo.json"
     cache = read(path, {}) or {}
     prs, comments = cache.get("prs", {}), cache.get("comments", {})
@@ -224,15 +278,28 @@ def sync_forgejo():
     params = dict(type="pulls", state="all", **({"since": since} if since else {}))
     for row in forgejo_pages(f"repos/{FORGEJO_REPO}/issues", params):
         pull = row.get("pull_request") or {}
+        previous = prs.get(str(row["number"]), {})
         prs[str(row["number"])] = dict(
-            title=row["title"], state=row["state"], author=row["user"]["login"], created=stamp(row["created_at"]),
-            closed=stamp(row.get("closed_at")), merged=stamp(pull.get("merged_at")),
-            labels=[label["name"] for label in row.get("labels") or []], draft=bool(pull.get("draft")))
+            title=row["title"], state=row["state"], author=(row.get("user") or {}).get("login", ""),
+            created=stamp(row["created_at"]), closed=stamp(row.get("closed_at")), merged=stamp(pull.get("merged_at")),
+            labels=[label["name"] for label in row.get("labels") or []], draft=bool(pull.get("draft")),
+            # Reviews are reread whenever the PR changed.
+            reviews=previous.get("reviews", []), reviews_read=previous.get("reviews_read")
+            if previous.get("updated") == row.get("updated_at") else None, updated=row.get("updated_at"))
     for row in forgejo_pages(f"repos/{FORGEJO_REPO}/issues/comments", dict(since=since) if since else {}):
         match = re.search(r"/pulls/(\d+)", row.get("html_url") or "")
         if not match:
             continue
-        comments[str(row["id"])] = [match.group(1), row["user"]["login"], stamp(row["created_at"])]
+        comments[str(row["id"])] = [match.group(1), (row.get("user") or {}).get("login", ""), stamp(row["created_at"])]
+    # Forgejo has no repository-wide review listing, so reviews are read per PR within a budget.
+    due = sorted((n for n, pr in prs.items() if pr.get("reviews_read") is None), key=int, reverse=True)
+    for number in due[:review_reads]:
+        rows = list(forgejo_pages(f"repos/{FORGEJO_REPO}/pulls/{number}/reviews", {}))
+        prs[number]["reviews"] = [[(r.get("user") or {}).get("login", ""), stamp(r.get("submitted_at"))]
+                                  for r in rows if r.get("submitted_at")]
+        prs[number]["reviews_read"] = time.time()
+    if len(due) > review_reads:
+        log(f"Forgejo: {len(due) - review_reads} PRs still need their reviews read; later runs continue")
     cache = dict(prs=prs, comments=comments, since=started.isoformat().replace("+00:00", "Z"), synced_at=time.time())
     atomic(path, cache)
     log(f"Forgejo: {len(prs)} PRs and {len(comments)} comments cached")
@@ -285,7 +352,7 @@ def collect_events(github, forgejo, queue, aliases):
             return
         if kind == "review":
             # Replies in review threads are each a review; count one per account, PR and (UTC) day.
-            key = (who, forge, int(number), int(at // 86400))
+            key = (login, forge, int(number), int(at // 86400))
             if key in reviewed:
                 return
             reviewed.add(key)
@@ -294,9 +361,10 @@ def collect_events(github, forgejo, queue, aliases):
 
     queue_landed = set()
     queue_since = min((r["approved_at"] for r in queue.get("inputs", [])), default=math.inf)
-    for row in queue.get("inputs", []):
+    for row in sorted(queue.get("inputs", []), key=lambda r: r["landed_at"] or math.inf):
         forge = "forgejo" if row["forgejo"] else "github"
-        if row["landed_at"]:
+        # A PR can have several ledger rows (a cancelled input, then a landed one); it lands once.
+        if row["landed_at"] and (forge, row["number"]) not in queue_landed:
             queue_landed.add((forge, row["number"]))
             add(row["author"], "landed", forge, row["number"], row["landed_at"])
     for forge, source in (("github", github), ("forgejo", forgejo)):
@@ -342,9 +410,11 @@ def peak_window(counts, first, today):
     day = first
     while day <= today:
         total = window_sum(counts, day, PEAK_DAYS)
-        if total > best[1]:
+        if total and total >= best[1]:
             active = sum(counts.get(day - timedelta(days=i), 0) > 0 for i in range(PEAK_DAYS))
-            best = (day, total, active)
+            # Among equal totals the window with more active days is the sustained one.
+            if total > best[1] or active > best[2]:
+                best = (day, total, active)
         day += timedelta(days=1)
     return best
 
@@ -564,6 +634,8 @@ def parser():
     p.add_argument("--json", dest="json_path", help="also write the full JSON report here")
     p.add_argument("--timezone", default=TIMEZONE)
     p.add_argument("--no-account-check", action="store_true", help="skip the Forgejo account lookups")
+    p.add_argument("--forgejo-review-reads", type=int, default=300,
+                   help="read the reviews of at most this many changed Forgejo PRs per run (default 300)")
     return p
 
 
@@ -572,7 +644,8 @@ def main(argv=None):
     try:
         skip = set(args.skip) | ({"github", "forgejo", "queue"} if args.offline else set())
         github = read(cache_dir() / "github.json", {}) if "github" in skip else sync_github()
-        forgejo = read(cache_dir() / "forgejo.json", {}) if "forgejo" in skip else sync_forgejo()
+        forgejo = (read(cache_dir() / "forgejo.json", {}) if "forgejo" in skip
+                   else sync_forgejo(review_reads=args.forgejo_review_reads))
         queue = read(cache_dir() / "queue.json", {}) if "queue" in skip else sync_queue(args.queue_host)
         identities = read(args.identities or config_dir() / "contributors.json", {}) or {}
         aliases = dict(identities.get("aliases", {}))
