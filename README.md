@@ -1262,3 +1262,10 @@ Before downgrading to a Worker release without source-selection support, set the
 to `0` and wait for those workers to adopt their GitHub definitions. Keep at least one
 native worker elsewhere while native PRs still need maintenance. A routing rollback
 takes effect at safe idle windows; it is not an emergency stop for an active round.
+
+## Lapsed contributors
+
+`tauceti-fleet contributors` reports people whose sustained PR or review volume stopped or fell
+sharply, from GitHub (GraphQL), Forgejo and the merge queue ledger, with their open PRs and weekly
+series. It only reads. [docs/contributors.md](docs/contributors.md) gives the sources, measures and
+thresholds.
