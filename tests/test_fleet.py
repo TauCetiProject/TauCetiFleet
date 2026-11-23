@@ -182,6 +182,18 @@ class Isolated(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "exceeds the maintenance"):
                 host.set_worker_policy(dict(maintenance_workers=1))
         self.assertEqual(value["github_first_workers"], 2)
+        # The commit rechecks under the host.json lock: a maintenance count lowered by a concurrent
+        # command after the early check still refuses the preference.
+        real_update = store.update_host
+        def lowered_meanwhile(**changes):
+            real_update(maintenance_workers=1)
+            return real_update(**changes)
+        with (patch.object(host, "require_worker_support"),
+              patch.object(host, "update_host", side_effect=lowered_meanwhile)):
+            with self.assertRaisesRegex(store.FleetError, "exceeds the maintenance"):
+                host.set_worker_policy(dict(github_first_workers=3))
+        self.assertEqual(store.host_config()["github_first_workers"], 2)
+        real_update(maintenance_workers=4)
         # A controller rewrite from an older snapshot keeps the preference.
         host.worker_config(original)
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]

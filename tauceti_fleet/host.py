@@ -838,13 +838,21 @@ def set_worker_policy(payload):
     if environment is not None:
         changes["worker_env"] = environment
     if changes:
-        config = update_host(**changes)
+        config = update_host(validate=_github_first_within_maintenance, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
     if swap is not None:
         apply_workers_swap(update_host(workers_swap_gib=swap))
         result["workers_swap_gib"] = swap
     return result
+
+
+def _github_first_within_maintenance(config):
+    # Rechecked under the host.json lock: a concurrent command may have lowered the maintenance
+    # count after the early check above read its snapshot.
+    if config.get("github_first_workers", 0) > config.get("maintenance_workers", 0):
+        raise FleetError("GitHub-first worker count exceeds the maintenance worker count; "
+                         "lower --github-first-workers or raise --maintenance-workers")
 
 
 # Worker states that hold no work in progress.
