@@ -167,6 +167,39 @@ class Isolated(unittest.TestCase):
         specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
         self.assertFalse(any("only" in spec or spec["github"] for spec in specs))
 
+    def test_github_first_slots_are_the_lowest_maintenance_slots(self):
+        import tomllib
+        original = store.update_host(max_workers=6, workers_enabled=True, ci_enabled=True)
+        with (patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"),
+              patch.object(host, "require_worker_support") as support):
+            host.set_worker_policy(dict(maintenance_workers=4))
+            with self.assertRaisesRegex(store.FleetError, "exceeds the maintenance"):
+                host.set_worker_policy(dict(github_first_workers=5))
+            value = host.set_worker_policy(dict(github_first_workers=2))
+            support.assert_called_with("prefer_forge", "--github-first-workers")
+            # Lowering maintenance below the GitHub-first slots would leave a preference on a
+            # GitHub-only roadmap slot; the operator lowers both together.
+            with self.assertRaisesRegex(store.FleetError, "exceeds the maintenance"):
+                host.set_worker_policy(dict(maintenance_workers=1))
+        self.assertEqual(value["github_first_workers"], 2)
+        # A controller rewrite from an older snapshot keeps the preference.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([spec.get("prefer_forge") for spec in specs], ["github", "github", None, None, None, None])
+        self.assertTrue(all(spec["github"] and spec["forgejo"] for spec in specs[:4]))
+        for count in (True, -1, 4097, "1"):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(github_first_workers=count))
+        host.set_worker_policy(dict(github_first_workers=0))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertFalse(any("prefer_forge" in spec for spec in specs))
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["workers", "test", "--github-first-workers", "15", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", github_first_workers=15))
+
     def test_stale_controller_snapshot_keeps_raised_maintenance_slots(self):
         import tomllib
         stale = store.update_host(max_workers=2, workers_enabled=True)
