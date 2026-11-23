@@ -706,13 +706,15 @@ def set_worker_maximum(maximum, *, lease_seconds=None, validate=None):
     if type(maximum) is not int or not 0 <= maximum <= 4096:
         raise FleetError("Worker maximum must be an integer from 0 to 4096")
     lease = state_dir() / "worker-admission-lease.json"
-    if lease_seconds is None:
-        lease.unlink(missing_ok=True)
-    else:
+    if lease_seconds is not None:
         if type(lease_seconds) is not int or not 30 <= lease_seconds <= 3600:
             raise FleetError("Admission lease must be 30 to 3600 seconds")
+        # Written before the maximum, so a leased ceiling always fails closed.
         atomic(lease, dict(expires_at=time.time() + lease_seconds))
     update_host(max_workers=maximum, validate=validate)
+    if lease_seconds is None:
+        # Removed only once the new maximum is committed: a refused change keeps the old lease.
+        lease.unlink(missing_ok=True)
     if maximum == 0:
         atomic(
             state_dir() / "admission.json",

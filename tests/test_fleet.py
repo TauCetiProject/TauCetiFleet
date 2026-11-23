@@ -306,6 +306,8 @@ class Isolated(unittest.TestCase):
         # A lowered maximum is also rechecked under the lock: both-forge slots raised by a
         # concurrent command after the early check refuse it.
         real_update(max_workers=8)
+        lease = store.state_dir() / "worker-admission-lease.json"
+        store.atomic(lease, dict(expires_at=12345))
         def raised_meanwhile(**changes):
             real_update(both_forge_workers=4)
             return real_update(**changes)
@@ -313,6 +315,7 @@ class Isolated(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "together exceed the worker maximum"):
                 host.set_worker_policy(dict(maximum=5))
         self.assertEqual(store.host_config()["max_workers"], 8)
+        self.assertEqual(store.read(lease), dict(expires_at=12345), "a refused maximum keeps the lease")
         real_update(both_forge_workers=3)
         # A pause lowers the maximum elsewhere; unrelated policy changes still apply.
         real_update(max_workers=0)
