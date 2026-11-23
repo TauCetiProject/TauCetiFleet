@@ -8,8 +8,8 @@ Reads three sources into a local cache, each incrementally after the first run:
   ``since=``, read anonymously;
 * the merge queue ledger (``inputs``), read-only over SSH, which is authoritative for landings.
 
-Review volume is counted as comments and PR reviews an account posts on PRs it did not author:
-the AI review scoreboards are PR comments, so GitHub PR reviews alone undercount them.
+A review is an account's comments and PR reviews on one PR it did not author, on one day: the AI
+review scoreboards are PR comments, and every reply in a review thread is a separate PR review.
 
 The report is markdown plus JSON. Nothing is posted anywhere.
 """
@@ -50,6 +50,11 @@ SUSTAINED_WEEKS = 3       # weeks of the peak window with any activity
 RECENT_DAYS = 14
 LAPSED_FRACTION = 0.25    # recent 14-day rate at most this share of the peak rate
 STREAM_FLOOR = 5          # per-stream peak (per week) below which a stream drop is not reported
+# Labels saying who an open PR waits on; an author-side label wins over a project-side one.
+AUTHOR_LABELS = {"awaiting-author", "ci-failed", "merge-conflict"}
+PROJECT_LABELS = {"awaiting-review", "awaiting-CI", "ready-to-merge", "bors-staging"}
+# The GitHub to Forgejo cutover; a drop inside it is flagged.
+CUTOVER = ("2026-11-14", "2026-11-19")
 
 GRAPHQL_PAGE = """
 query($owner:String!,$name:String!,$after:String,$first:Int!){
@@ -88,7 +93,7 @@ def canonical(login, aliases):
         return aliases[login]
     if bare in aliases:
         return aliases[bare]
-    if bare in EXCLUDED or login.endswith("[bot]") and bare.startswith("tauceti-"):
+    if bare in EXCLUDED or login.endswith("[bot]") or re.search(r"bors|copilot", bare, re.I):
         return None
     # A contributor's own automation account (alice-bot) counts as alice.
     return re.sub(r"-bot$", "", bare) or None
@@ -268,11 +273,20 @@ def collect_events(github, forgejo, queue, aliases):
     accounts = defaultdict(set)
     open_prs = defaultdict(list)
 
+    reviewed = set()
+
     def add(login, kind, forge, number, at):
         who = canonical(login, aliases)
-        if who and at:
-            events[who].append((at, kind, forge, int(number)))
-            accounts[who].add(f"{forge}:{login}")
+        if not (who and at):
+            return
+        if kind == "review":
+            # Replies in review threads are each a review; count one per account, PR and (UTC) day.
+            key = (who, forge, int(number), int(at // 86400))
+            if key in reviewed:
+                return
+            reviewed.add(key)
+        events[who].append((at, kind, forge, int(number)))
+        accounts[who].add(f"{forge}:{login}")
 
     queue_landed = set()
     queue_since = min((r["approved_at"] for r in queue.get("inputs", [])), default=math.inf)
@@ -376,6 +390,14 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
             weekly[week][kind] += 1
             weekly[week]["active_days"].add(day)
         owned = sorted(open_prs.get(who, []), key=lambda p: p["created"])
+        for pr in owned:
+            labels = set(pr["labels"])
+            pr["waits_on"] = ("author" if labels & AUTHOR_LABELS else "project" if labels & PROJECT_LABELS
+                              else "unlabelled")
+        waits = {k: sum(pr["waits_on"] == k for pr in owned) for k in ("project", "author", "unlabelled")}
+        # Show the PRs we could move first.
+        shown = [pr for pr in owned if pr["waits_on"] == "project"][:5]
+        shown += [pr for pr in owned if pr not in shown][:max(0, 5 - len(shown))]
         people.append(dict(
             identity=who, accounts=sorted(accounts[who]), sustained=sustained, lapsed=lapsed,
             stopped=lapsed and recent7 == 0, stream_drops=stream_drops,
@@ -387,7 +409,8 @@ def analyse(events, accounts, open_prs, *, now=None, timezone=TIMEZONE):
             open_prs=dict(total=len(owned), github=sum(p["forge"] == "github" for p in owned),
                           forgejo=sum(p["forge"] == "forgejo" for p in owned),
                           labels=dict(sorted(_label_counts(owned).items(), key=lambda kv: -kv[1])[:8]),
-                          oldest=owned[:5]),
+                          waits_on=waits, oldest=shown),
+            dropped_at_cutover=bool(drop and CUTOVER[0] <= drop.isoformat() <= CUTOVER[1]),
             weekly={w: dict(opened=v["opened"], landed=v["landed"], reviews=v["review"],
                             active_days=len(v["active_days"])) for w, v in sorted(weekly.items())},
         ))
@@ -414,7 +437,7 @@ def pr_url(forge, number):
     return f"https://github.com/{'/'.join(GITHUB_REPO)}/pull/{number}"
 
 
-def markdown(report, *, forgejo_accounts=None):
+def markdown(report, *, forgejo_accounts=None, include_all=False):
     t = report["thresholds"]
     zone = ZoneInfo(report["timezone"])
     generated = datetime.fromtimestamp(report["generated_at"], zone).strftime("%a %d %b %Y %H:%M %Z")
@@ -429,36 +452,62 @@ def markdown(report, *, forgejo_accounts=None):
     lapsed = [p for p in report["people"] if p["lapsed"]]
     partial = [p for p in report["people"] if p["sustained"] and not p["lapsed"] and p["stream_drops"]]
 
+    def signals(p):
+        found = []
+        if p["dropped_at_cutover"]:
+            found.append("dropped at the Forgejo cutover")
+        if forgejo_accounts is not None and not forgejo_accounts.get(p["identity"]):
+            found.append("no Forgejo account")
+        if p["open_prs"]["waits_on"]["project"]:
+            found.append(f"{p['open_prs']['waits_on']['project']} PRs waiting on the project")
+        if p["streams"]["review"]["peak_per_week"] >= STREAM_FLOOR and "review" in p["stream_drops"]:
+            found.append("stopped reviewing")
+        return "; ".join(found) or "none"
+
     def row(p):
         s = p["streams"]
+        o = p["open_prs"]
         status = "stopped" if p["stopped"] else "slowed"
-        account = "" if forgejo_accounts is None else (
-            "yes" if forgejo_accounts.get(p["identity"]) else "no")
         return (f"| {p['identity']} | {status} | {p['peak_per_week']} (to {p['peak_window_end']}) | "
                 f"{p['recent_per_week']} | {p['lost_per_week']} | {s['opened']['peak_per_week']} / "
                 f"{s['review']['peak_per_week']} / {s['landed']['peak_per_week']} | {p['drop_after']} | "
-                f"{p['last_active']} | {p['open_prs']['github']} / {p['open_prs']['forgejo']} | {account} |")
+                f"{p['last_active']} | {o['total']} ({o['waits_on']['project']} / {o['waits_on']['author']}) | "
+                f"{signals(p)} |")
 
     header = ("| who | status | peak volume/week | last 14 days/week | lost/week | peak opened / reviews / landed "
-              "per week | last strong week ended | last active | open PRs GitHub / Forgejo | Forgejo account |")
+              "per week | last strong week ended | last active | open PRs (waiting on project / on author) | "
+              "signals |")
     sep = "|---|---|---|---|---|---|---|---|---|---|"
     lines += [f"## Lapsed ({len(lapsed)})", "", header, sep, *map(row, lapsed), ""]
+    if include_all:
+        sustained = [p for p in report["people"] if p["sustained"]]
+        lines += [f"## Every sustained contributor ({len(sustained)})", "",
+                  "| who | peak volume/week | last 14 days/week | last 7 days | lapsed |", "|---|---|---|---|---|"]
+        lines += [f"| {p['identity']} | {p['peak_per_week']} | {p['recent_per_week']} | {p['recent7']} | "
+                  f"{'yes' if p['lapsed'] else 'no'} |" for p in sorted(sustained, key=lambda p: -p["peak_per_week"])]
+        lines.append("")
     if partial:
         lines += ["## Still active, but one stream lapsed", "", "| who | lapsed streams | peak volume/week | "
                   "last 14 days/week |", "|---|---|---|---|"]
         lines += [f"| {p['identity']} | {', '.join(p['stream_drops'])} | {p['peak_per_week']} | "
                   f"{p['recent_per_week']} |" for p in partial]
         lines.append("")
-    lines += ["## Open PRs of lapsed contributors (oldest five)", ""]
+    lines += ["## Open PRs of lapsed contributors", "",
+              "Up to five each, those waiting on the project first. Waiting on the author: awaiting-author, "
+              "ci-failed or merge-conflict; on the project: awaiting-review, awaiting-CI, ready-to-merge "
+              "or bors-staging.", ""]
     for p in lapsed:
         o = p["open_prs"]
         if not o["total"]:
             continue
         labels = ", ".join(f"{k} {v}" for k, v in o["labels"].items()) or "none"
-        lines.append(f"- **{p['identity']}**: {o['total']} open (labels: {labels})")
+        w = o["waits_on"]
+        lines.append(f"- **{p['identity']}**: {o['total']} open, {w['project']} waiting on the project, "
+                     f"{w['author']} on the author, {w['unlabelled']} unlabelled (labels: {labels})")
         for pr in o["oldest"]:
             opened = local_day(pr["created"], zone).isoformat()
-            lines.append(f"  - {pr_url(pr['forge'], pr['number'])} {pr['title']} (opened {opened})")
+            lines.append(f"  - {pr_url(pr['forge'], pr['number'])} {pr['title']} (opened {opened}, "
+                         f"waiting on {pr['waits_on']})")
     lines += ["", "## Weekly series of lapsed contributors", "",
               "Weeks start on Monday; each cell is opened / landed / reviews / active days.", ""]
     weeks = sorted({w for p in lapsed for w in p["weekly"]})[-10:]
@@ -477,7 +526,9 @@ def markdown(report, *, forgejo_accounts=None):
 def parser():
     p = argparse.ArgumentParser(prog="tauceti-fleet contributors",
                                 description="Report contributors whose sustained PR or review volume lapsed")
-    p.add_argument("--lapsed", action="store_true", help="print only lapsed contributors (the default report)")
+    p.add_argument("--lapsed", action="store_true", help="report only lapsed contributors (the default)")
+    p.add_argument("--all", dest="include_all", action="store_true",
+                   help="also list every contributor with sustained volume")
     p.add_argument("--offline", action="store_true", help="use the cached sources without reading anything")
     p.add_argument("--skip", action="append", choices=("github", "forgejo", "queue"), default=[],
                    help="leave one source's cache as it is (repeatable)")
@@ -510,7 +561,7 @@ def main(argv=None):
                     logins = {a.split(":", 1)[1] for a in p["accounts"]}
                     accounts_on_forgejo[p["identity"]] = any(map(forgejo_account_exists, sorted(logins)))
                     p["forgejo_account"] = accounts_on_forgejo[p["identity"]]
-        text = markdown(report, forgejo_accounts=accounts_on_forgejo)
+        text = markdown(report, forgejo_accounts=accounts_on_forgejo, include_all=args.include_all)
         if args.json_path:
             atomic(args.json_path, report)
         if args.markdown:

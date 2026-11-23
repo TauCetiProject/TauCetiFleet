@@ -33,8 +33,9 @@ Every source is read incrementally after the first run.
 Per identity, events are dated in `--timezone` (default Australia/Sydney):
 
 - **opened**: PRs authored, on either forge;
-- **reviews**: comments and PR reviews posted on PRs the account did not author. The AI review
-  scoreboards are PR comments, so GitHub PR reviews alone miss nearly all review work;
+- **reviews**: one per account, PR and day on which the account posted comments or PR reviews on
+  a PR it did not author. The AI review scoreboards are PR comments, so PR reviews alone miss
+  them, and every reply in a review thread is its own PR review, so raw counts overstate;
 - **landed**: PRs authored that landed;
 - **active days**: distinct days with any of these.
 
@@ -61,7 +62,7 @@ People are ranked by lost volume: peak weekly rate minus the last 14 days' weekl
 ## Identities
 
 Shared project and operator accounts (`tauceti-ai-for-science`, `kim-em`, `tauceti-queue`,
-`tauceti-redteam`, `tauceti-review-bot` and other bots) are left out. Contributor sessions that
+`tauceti-redteam`, `tauceti-review-bot`, App accounts, and Bors and Copilot accounts) are left out. Contributor sessions that
 push through a shared account are therefore not counted for their person. An `alice-bot` account
 counts as `alice`. Other merges go in `~/.config/tauceti-fleet/contributors.json` (or `--identities`):
 
