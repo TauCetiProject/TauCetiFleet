@@ -1131,7 +1131,8 @@ person and is not retried at that head; it also withholds the closure `fix`
 makes after spent attempts on that head. `hold_declined` false leaves it out:
 records are still written, and a declined head is retried until its attempts
 run out, each retry rewriting the record. Both keys change worker definitions,
-so on an active host they take the drained `add` that a model change takes. Set
+and unlike the profile's model keys they still take a drained `add` on an
+active host. Set
 `incidents` to false to turn the records off; removing the key from the profile
 leaves the host as it was.
 
