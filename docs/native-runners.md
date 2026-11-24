@@ -68,7 +68,9 @@ images include the system C compiler (`gcc`, as `cc`), which Lake uses for
 packages with C sources such as doc-gen4's dependencies; an export without a
 working `cc` fails rather than producing an image. Setup and live
 `update` prepare the infra image when the host has infra slots; an infra slot
-whose image is missing fails explicitly rather than falling back.
+whose image is missing fails explicitly rather than falling back. Infra never
+runs in a VM: a slot converted to infra that still holds another class's
+pending registration cancels it and starts native.
 
 This places the slots directly above the PR slots and raises `ci_max_jobs` by
 their count, so PR slots and running guests are untouched. `--slots 0` removes
