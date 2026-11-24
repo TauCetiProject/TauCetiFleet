@@ -329,7 +329,9 @@ class DocsStaleness(unittest.TestCase):
                 fleet_alert.newest_run(bad)
         with self.assertRaises(ValueError):
             fleet_alert.newest_run({"workflow_runs": [run("failure", self.START)]}, "success")
-        self.assertIsNone(fleet_alert.newest_run({"workflow_runs": []}))
+        with self.assertRaises(ValueError):
+            fleet_alert.newest_run({"total_count": 1, "workflow_runs": []})
+        self.assertIsNone(fleet_alert.newest_run({"total_count": 0, "workflow_runs": []}))
         listing = {"workflow_runs": [run("failure", self.START)]}
         self.assertEqual(fleet_alert.newest_run(listing)["conclusion"], "failure")
         state, sent = {}, []

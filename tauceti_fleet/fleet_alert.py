@@ -260,6 +260,8 @@ def newest_run(listing, conclusion=None):
     if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
         raise ValueError("unreadable workflow run listing")
     runs = listing["workflow_runs"]
+    if not runs and listing.get("total_count") != 0:
+        raise ValueError("empty workflow run listing that does not say it is empty")
     return checked_run(runs[0], conclusion) if runs else None
 
 
