@@ -54,6 +54,40 @@ class DiskMonitor(unittest.TestCase):
             self.assertIsNone(monitor.allocated)
             self.assertIsNotNone(monitor.error)
 
+    def test_total_is_kept_when_files_vanish_during_the_scan(self):
+        # GNU du exits 1 when files disappear mid-scan but still prints its total.
+        for code, output, allocated, failures in ((1, '12345\t/\n', 12345, 0), (1, '', None, 1), (2, '12345\t/\n', None, 1)):
+            with self.subTest(code=code, output=output):
+                child = Mock(pid=42)
+                child.poll.return_value = code
+                child.communicate.return_value = (output, None)
+                monitor = inside.DiskUsage()
+                with patch.object(inside.subprocess, 'Popen', return_value=child), patch.object(inside.time, 'monotonic', return_value=0) as clock:
+                    monitor.poll()
+                    clock.return_value = 2
+                    monitor.poll()
+                self.assertEqual(monitor.allocated, allocated)
+                self.assertEqual(monitor.failures, failures)
+
+    def test_partial_scans_are_counted_in_total_and_in_a_row(self):
+        monitor = inside.DiskUsage()
+        clock = [0]
+        seen = []
+        # A failed scan (exit 2) measures nothing, so it neither extends nor ends the streak.
+        for code in (1, 1, 2, 1, 0, 1):
+            child = Mock(pid=42)
+            child.poll.return_value = code
+            child.communicate.return_value = ('12345\t/\n', None)
+            with patch.object(inside.subprocess, 'Popen', return_value=child), patch.object(inside.time, 'monotonic', side_effect=lambda: clock[0]):
+                monitor.poll()
+                clock[0] += 2
+                monitor.poll()
+                clock[0] += inside.DISK_SCAN_INTERVAL
+            value = monitor.snapshot()
+            seen.append((value['disk_scan_partial_total'], value['disk_scan_partial_streak']))
+        self.assertEqual(seen, [(1, 1), (2, 2), (2, 2), (3, 3), (3, 0), (4, 1)])
+        self.assertEqual(monitor.snapshot()['disk_scan_failures'], 0)
+
     def test_success_reports_one_whole_instance_allocation_then_waits(self):
         child = Mock(pid=42)
         child.poll.return_value = 0
@@ -142,7 +176,7 @@ class DiskMonitor(unittest.TestCase):
             monitor.child.communicate.assert_not_called()
 
     def test_budget_and_unavailable_monitor_stop_the_instance(self):
-        for allocated, failures, reason in ((57*GIB, 0, 'native disk budget'), (None, 3, 'disk usage monitor unavailable')):
+        for allocated, failures, reason in (((inside.DISK_BUDGET_GIB + 1)*GIB, 0, 'native disk budget'), (None, 3, 'disk usage monitor unavailable')):
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory, patch.object(inside, 'LINK', Path(directory)), patch.object(inside, 'WORK', Path(directory)):
                 stop = threading.Event()
                 monitor = inside.DiskUsage()

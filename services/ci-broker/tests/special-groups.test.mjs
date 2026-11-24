@@ -1,14 +1,15 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub,PolicyError} from '../src/github.mjs';
-import {hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
+import {INFRA_GROUP,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
+import {INFRA_REPOSITORIES} from '../src/github.mjs';
 import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
 
 const workflow=(repo,name)=>'TauCetiProject/'+repo+'/.github/workflows/'+name+'@refs/heads/main';
 const queue=[workflow('TauCeti','pick-runner.yml'),workflow('TauCeti','pr-build.yml'),workflow('TauCeti','publish-lake-cache.yml')];
 const harness=[workflow('TauCetiTools','pr-build.yml'),workflow('TauCetiTools','publish-lake-cache.yml')];
 const status=[workflow('TauCeti','pr-status.yml'),workflow('TauCeti','pr-labels.yml')];
-const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus'};
+const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus',[INFRA_GROUP]:'TauCetiInfra'};
 function client(group,{workflows,visibility='selected',restricted=true,repositories=['TauCetiProject/TauCeti'],name=names[group]},calls=[]) {
   const github=new GitHub({});
   github.request=async path=>{
@@ -52,6 +53,21 @@ test('pr-status requires exactly its two main workflows on TauCeti',async()=>{
     {workflows:status,visibility:'all'},{workflows:status,restricted:false},
     {workflows:status,repositories:['TauCetiProject/TauCeti','someone/Other']}])
     await assert.rejects(client(7,settings).policy({group:7,fresh:true}),PolicyError);
+});
+test('infra admits any workflow of exactly the four infrastructure repositories',async()=>{
+  const infra=INFRA_REPOSITORIES;
+  assert.equal(infra.length,4);
+  assert.deepEqual(groupFor(['infra']),INFRA_GROUP);
+  assert.ok(runnerKinds(['infra']));
+  for (const kinds of [['pr','infra'],['infra','pr-status']]) assert.ok(!runnerKinds(kinds));
+  for (const settings of [{workflows:[],restricted:false,repositories:infra},{workflows:[],restricted:false,repositories:[...infra].reverse()},
+    {workflows:[workflow('TauCetiWorker','ci.yml')],restricted:true,repositories:infra}])
+    assert.deepEqual(await client(INFRA_GROUP,settings).policy({group:INFRA_GROUP,fresh:true}),{runner_group_id:INFRA_GROUP});
+  for (const settings of [{workflows:[],restricted:false,repositories:[...infra,'TauCetiProject/TauCeti']},
+    {workflows:[],restricted:false,repositories:infra.slice(1)},{workflows:[],restricted:false,repositories:['TauCetiProject/TauCeti']},
+    {workflows:[],restricted:false,repositories:[...infra.slice(1),'TauCetiProject/TauCetiRoadmap']},
+    {workflows:[],restricted:false,repositories:infra,visibility:'all'},{workflows:[],restricted:false,repositories:infra,name:'TauCetiFleet'}])
+    await assert.rejects(client(INFRA_GROUP,settings).policy({group:INFRA_GROUP,fresh:true}),PolicyError);
 });
 test('policy is cached per group, and unknown groups are refused without a request',async()=>{
   const calls=[];

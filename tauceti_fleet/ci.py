@@ -19,8 +19,8 @@ QUOTA = "GitHub API quota unavailable"
 QUOTA_STEPS = (
     "Resolve PR head",
     "Scope guard — allow TauCeti sources and validated pins",
-    "Diff size guard — additions, deletions, and changed files each ≤ 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)",
-    "New-file length guard — newly added .lean files must be ≤ 1000 lines",
+    "Diff size guard — additions ≤ 3000, deletions and changed files each ≤ 2000 (rename-aware local Git measure shared with staging; Lake-pin bumps exempt from the line caps)",
+    "New-file length guard — newly added .lean files must be ≤ 1250 lines",
     "Decide the environment-lint scope",
     REPORT,
 )

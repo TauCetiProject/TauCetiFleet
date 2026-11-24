@@ -1,12 +1,15 @@
 """Cached CI capacity control and durable PR-run recovery from an operator host."""
 
 import argparse
+import base64
+import calendar
 import json
 import math
 import os
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from . import capabilities, capacity, native_runner, remote
@@ -15,21 +18,95 @@ from .store import FleetError, atomic, locked, read, state_dir
 GIB = 1024**3
 REPO = "TauCetiProject/TauCeti"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Recovery writes (force-cancel, rerun) only need these. The token is also narrowed to REPO.
+APP_PERMISSIONS = {"actions": "write"}
+
+
+class AppTokens:
+    """Installation tokens for recovery writes, from a GitHub App credential directory.
+
+    The directory holds `github-app.json` (`id`, `installation_id`) and `github-private-key.pem`, the
+    layout the queue App uses; a unit passes them with `LoadCredential=` and `%d`. There is no fallback
+    to a personal account: if a token can't be minted, the write fails.
+    """
+
+    def __init__(self, directory, *, opener=None, clock=time.time):
+        self.directory = Path(directory)
+        self.opener = opener or urllib.request.urlopen
+        self.clock = clock
+        self.cached = None
+
+    def _jwt(self, app_id):
+        key_path = self.directory / "github-private-key.pem"
+        if key_path.stat().st_mode & 0o077:
+            raise FleetError(f"GitHub App key {key_path} is not private; use chmod 600")
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+        except ImportError:
+            raise FleetError("GitHub App credentials need the Python cryptography package") from None
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+
+        def segment(value):
+            raw = value if isinstance(value, bytes) else json.dumps(value, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+        now = int(self.clock())
+        body = segment({"alg": "RS256", "typ": "JWT"}) + b"." + segment({"iat": now - 60, "exp": now + 540, "iss": str(app_id)})
+        return (body + b"." + segment(key.sign(body, padding.PKCS1v15(), hashes.SHA256()))).decode()
+
+    def token(self):
+        if self.cached and self.cached[1] - self.clock() > 300:
+            return self.cached[0]
+        try:
+            app = json.loads((self.directory / "github-app.json").read_text())
+            app_id, installation = int(app["id"]), int(app["installation_id"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise FleetError("GitHub App credentials unavailable: " + type(error).__name__) from None
+        request = urllib.request.Request(
+            f"https://api.github.com/app/installations/{installation}/access_tokens",
+            data=json.dumps({"repositories": [REPO.split("/")[1]], "permissions": APP_PERMISSIONS}).encode(),
+            headers={"Authorization": "Bearer " + self._jwt(app_id), "Accept": "application/vnd.github+json",
+                     "User-Agent": "tauceti-fleet-ci-autoscale"},
+            method="POST",
+        )
+        with self.opener(request, timeout=25) as response:
+            value = json.loads(response.read(65536))
+        token = value.get("token")
+        if not isinstance(token, str) or not token or not all(33 <= ord(c) <= 126 for c in token):
+            raise FleetError("GitHub App returned an invalid installation token")
+        try:
+            expires = calendar.timegm(time.strptime(value["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
+        except (KeyError, TypeError, ValueError):
+            raise FleetError("GitHub App returned an invalid token expiry") from None
+        self.cached = (token, expires)
+        return token
 
 
 def host_action(payload):
     """Authenticated SSH RPCs; no GitHub calls on the observation path."""
     from . import github, host, vm
-    from .store import host_config, update_host
+    from .store import change_host, host_config
 
     config = host_config()
     mode = payload.get("mode", "snapshot")
     if mode == "limit":
-        proposed = dict(config, ci_max_jobs=payload["maximum"])
-        capacity.jobs(proposed)
-        capacity.staging_slots(proposed)
-        update_host(ci_max_jobs=proposed["ci_max_jobs"], validate=capacity.staging_slots)
-        return dict(maximum=proposed["ci_max_jobs"])
+        maximum = payload["maximum"]
+        if type(maximum) is not int:
+            raise FleetError("The CI limit must be an integer")
+
+        def limit(value):
+            # The autoscaler sizes PR slots. Infra slots sit above them, so their
+            # numbers move with the PR count; hosts with infra keep that count fixed.
+            infra = capacity.infra_slots(value)
+            if infra and maximum != capacity.pr_jobs(value):
+                raise FleetError("Hosts with infra slots keep a fixed PR slot count; change it with enable and infra-slots")
+            value = dict(value, ci_max_jobs=maximum + len(infra))
+            capacity.jobs(value)
+            capacity.staging_slots(value)
+            return value
+
+        return dict(maximum=change_host(limit)["ci_max_jobs"])
     if mode == "note":
         value = payload["value"]
         if not isinstance(value, dict) or len(json.dumps(value)) > 4096:
@@ -94,8 +171,12 @@ def host_action(payload):
                     groups[properties["Id"]] = CGROUP_ROOT / group.relative_to("/")
         except (FleetError, OSError):
             pass
+    infra = set(capacity.infra_slots(config))
     vms = []
     for original in status.get("ci_vms", []):
+        # Also a removed infra slot's guest that is still finishing its job.
+        if original.get("slot", 0) in infra or original.get("ci_kinds") == ["infra"]:
+            continue
         value = dict(original)
         try:
             group = groups[value["unit"]]
@@ -109,8 +190,10 @@ def host_action(payload):
             value["memory_bytes"] = value["cpu_usec"] = value["memory_working_bytes"] = None
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
-                enabled=config["ci_enabled"], maximum=capacity.jobs(config),
-                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config))]), cpus=status.get("resources", {}).get("cpus", 1),
+                # Infra slots are outside the autoscaler's view: it sizes the PR slots below them.
+                enabled=config["ci_enabled"], maximum=capacity.pr_jobs(config), fixed_pr_slots=bool(infra),
+                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config) if i not in infra)]),
+                cpus=status.get("resources", {}).get("cpus", 1),
                 pressure=pressure, timing_at=timing.get("at", 0), ci=timing.get("ci", {}),
                 last_admission=timing.get("last_admission_seen", {}).get("ci"),
                 observation_since=timing.get("admission_seen_since", timing.get("at", 0)), vms=vms)
@@ -128,6 +211,13 @@ class Controller:
         self.growth_delay, self.stall_delay = growth_delay, stall_delay
 
     def decide(self, snapshot, now):
+        if not snapshot.get("fixed_pr_slots"):
+            return self._decide(snapshot, now, self.minimum, self.maximum)
+        # Infra slots fix this host's PR count: decide as if pinned to it, so
+        # stall recovery still runs in place and no resize is ever proposed.
+        return self._decide(snapshot, now, snapshot["maximum"], snapshot["maximum"])
+
+    def _decide(self, snapshot, now, minimum, maximum):
         from . import lean_pressure
 
         if not snapshot.get("enabled"):
@@ -162,15 +252,16 @@ class Controller:
             self.value.setdefault("stall_since", now)
         else:
             self.value.pop("stall_since", None)
-        floor = max(self.minimum, snapshot["reserved"] + 1)
-        if limit < floor <= self.maximum and available >= headroom + 21 * GIB:
+        # A fixed host is pinned at its PR count, which an infra-only host has at zero.
+        floor = minimum if snapshot.get("fixed_pr_slots") else max(minimum, snapshot["reserved"] + 1)
+        if limit < floor <= maximum and available >= headroom + 21 * GIB:
             return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
         if low and general_idle and limit > floor:
             self.value.pop("growth_since", None)
             target = max(floor, len(busy) + len(idle) - len(general_idle))
             if target < limit:
                 return dict(kind="limit", target=target, reason="return idle guest RAM to active builds")
-        if stalled and now - self.value["stall_since"] >= 30 and limit >= self.minimum:
+        if stalled and now - self.value["stall_since"] >= 30 and limit >= minimum:
             candidates = [v for v in busy_general if v.get("run_id") and cpu.get(v["instance"], 1) < .2]
             if candidates and now - self.value.get("last_recovery", {}).get("at", 0) >= 120:
                 self.value.pop("growth_since", None)
@@ -188,7 +279,7 @@ class Controller:
         pending = sum(max(0, budget - (footprint(v) if footprint(v) is not None else budget)) for v in growing)
         room = available - pending >= headroom + budget + GIB
         saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
-        growth = (room and saturated and limit < self.maximum
+        growth = (room and saturated and limit < maximum
                   and all(footprint(v) is not None for v in growing))
         if growth and pressure.get("cpu_percent", 100) < 85:
             self.value.setdefault("growth_since", now)
@@ -211,12 +302,13 @@ class Controller:
 
 
 class Operator:
-    def __init__(self, target, identity, *, minimum=1, maximum=4, root=None, github_account=None):
+    def __init__(self, target, identity, *, minimum=1, maximum=4, root=None, github_account=None, app_tokens=None):
         self.target, self.identity = target, identity
         self.path = (root or state_dir()) / ("ci-autoscale-" + target + ".json")
         self.controller = Controller(read(self.path, {}), minimum=minimum, maximum=maximum)
         self.last_note = 0
         self.github_account = github_account
+        self.app_tokens = app_tokens
         self.environments = {}
 
     def save(self):
@@ -227,6 +319,10 @@ class Operator:
                            expected_machine_id=self.identity, **values), timeout=35)
 
     def api(self, path, *, method="GET"):
+        if method != "GET" and self.app_tokens is not None:
+            environment = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN")}
+            environment.update(GH_TOKEN=self.app_tokens.token(), GH_HOST="github.com")
+            return self._gh(path, method, environment)
         account = "tauceti-ai-for-science" if method == "GET" else self.github_account
         if account and account not in self.environments:
             token = subprocess.run(["gh", "auth", "token", "--hostname", "github.com", "--user", account],
@@ -236,9 +332,12 @@ class Operator:
             self.environments[account] = dict(os.environ, GH_TOKEN=token.stdout.strip())
         if not account:
             raise FleetError("CI recovery requires an explicitly selected GitHub write account")
+        return self._gh(path, method, self.environments.get(account))
+
+    def _gh(self, path, method, environment):
         result = subprocess.run(["gh", "api", "repos/" + REPO + "/" + path, "--method", method],
                                 capture_output=True, text=True, timeout=25,
-                                env=self.environments.get(account))
+                                env=environment)
         if result.returncode:
             raise FleetError("GitHub recovery request failed: " + (result.stderr or result.stdout)[-350:])
         return json.loads(result.stdout) if result.stdout.strip() else {}
@@ -349,21 +448,58 @@ class Operator:
         return decision
 
 
-def main():
+UNIT = "tauceti-ci-autoscale.service"
+
+
+def install(target, machine_id, *, minimum, maximum, github_app_dir):
+    """Write and (re)start this account's autoscaler unit; it runs the installed Fleet release."""
+    from .host import unit_argument, units
+    from .process import run
+
+    remote.validate_target(target)
+    if not 1 <= minimum <= maximum <= capacity.MAX_JOBS:
+        raise FleetError("invalid adaptive CI bounds")
+    directory = Path(github_app_dir).expanduser().resolve()
+    dropins = sorted((units() / (UNIT + ".d")).glob("*.conf"))
+    if dropins:
+        raise FleetError(f"systemd drop-in {dropins[0]} overrides {UNIT}; move it away, then rerun")
+    args = [Path.home() / ".local/bin/tauceti-fleet", "ci-autoscale", "--host", target, "--machine-id", machine_id,
+            "--minimum", minimum, "--maximum", maximum]
+    body = (f"[Unit]\nDescription=Adapt {target} CI capacity and recover stalled PR builds\n"
+            "StartLimitIntervalSec=0\n\n[Service]\nType=simple\n"
+            "ExecStart=" + " ".join(unit_argument(a) for a in args) + ' "--github-app-dir" "%d"\n')
+    for name in ("github-app.json", "github-private-key.pem"):
+        # systemd keeps quotes in LoadCredential= values, so only escape specifiers.
+        body += "LoadCredential=" + f"{name}:{directory / name}".replace("%", "%%") + "\n"
+    body += "Environment=" + unit_argument("PATH=" + os.environ.get("PATH", "/usr/bin:/bin")) + "\n"
+    body += "Restart=always\nRestartSec=15\nUMask=0077\nMemoryMax=256M\n\n[Install]\nWantedBy=default.target\n"
+    (units() / UNIT).write_text(body)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", UNIT])
+    run(["systemctl", "--user", "restart", UNIT])
+    return dict(installed=UNIT, host=target, machine_id=machine_id, minimum=minimum, maximum=maximum)
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True)
     parser.add_argument("--machine-id", required=True)
     parser.add_argument("--minimum", type=int, default=1)
     parser.add_argument("--maximum", type=int, default=4)
-    parser.add_argument("--github-account", required=True)
+    writer = parser.add_mutually_exclusive_group(required=True)
+    writer.add_argument("--github-account", help="gh account for recovery writes (force-cancel, rerun)")
+    writer.add_argument("--github-app-dir", type=Path,
+                        help="GitHub App credential directory for recovery writes (e.g. %%d with LoadCredential=)")
     parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     remote.validate_target(args.host)
     if not 1 <= args.minimum <= args.maximum <= capacity.MAX_JOBS:
         parser.error("invalid adaptive CI bounds")
     path = state_dir() / ("ci-autoscale-" + args.host + ".json")
     with locked(path.with_suffix(".lock")):
-        operator = Operator(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum, github_account=args.github_account)
+        tokens = AppTokens(args.github_app_dir) if args.github_app_dir else None
+        operator = Operator(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
+                            github_account=args.github_account, app_tokens=tokens)
         while True:
             try:
                 print(json.dumps(operator.tick()), flush=True)
