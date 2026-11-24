@@ -144,6 +144,24 @@ class Capacity(unittest.TestCase):
         self.assertEqual(retire.call_count, 1)
         self.assertEqual(retire.call_args.args[1]["slot"], 0)
 
+    def test_idle_guests_retire_when_their_slot_moves_between_pr_and_infra(self):
+        # Slot 0 became infra and slot 1 became PR; busy guests keep their job.
+        config = dict(store.host_config(), ci_enabled=True, ci_kinds=["pr"], ci_max_jobs=4,
+                      ci_protected_slots={"0": dict(kind="infra", runner_group_id=8)})
+        inventory = []
+        for slot, kinds in enumerate((["pr"], ["infra"], ["pr"], ["infra"])):
+            busy = slot >= 2
+            store.atomic(vm.slot_file({"ci_slot": slot}, "vm.json"),
+                         dict(slot=slot, unit=f"vm-{slot}", directory=str(self.root / str(slot)), runner_id=100 + slot,
+                              started_at=0, phase="ready", busy=busy, ci_kinds=kinds))
+            inventory.append(dict(id=100 + slot, status="online", busy=busy))
+        config["ci_protected_slots"]["3"] = dict(kind="infra", runner_group_id=8)
+        with patch.object(host, "ci_service_state", return_value=(True, "healthy")), \
+                patch.object(vm, "retire") as retire, patch.object(vm, "start", return_value={}):
+            results = [host.CISlot(i).step(config, inventory=inventory, refresh=True, cooling=False) for i in range(4)]
+        self.assertEqual(sorted(call.args[1]["slot"] for call in retire.call_args_list), [0, 1])
+        self.assertEqual([bool(r) for r in results], [False, False, True, True])
+
     def test_live_slot_increase_preserves_the_busy_guest_and_adds_the_second_slot(self):
         config = capacity.settings(store.host_config(), ci="both", maximum=1, vcpus=16, memory_gib=32)
         store.update_host(**dict(config, ci_enabled=True))

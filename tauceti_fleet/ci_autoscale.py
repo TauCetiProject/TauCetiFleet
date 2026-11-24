@@ -86,16 +86,27 @@ class AppTokens:
 def host_action(payload):
     """Authenticated SSH RPCs; no GitHub calls on the observation path."""
     from . import github, host, vm
-    from .store import host_config, update_host
+    from .store import change_host, host_config
 
     config = host_config()
     mode = payload.get("mode", "snapshot")
     if mode == "limit":
-        proposed = dict(config, ci_max_jobs=payload["maximum"])
-        capacity.jobs(proposed)
-        capacity.staging_slots(proposed)
-        update_host(ci_max_jobs=proposed["ci_max_jobs"], validate=capacity.staging_slots)
-        return dict(maximum=proposed["ci_max_jobs"])
+        maximum = payload["maximum"]
+        if type(maximum) is not int:
+            raise FleetError("The CI limit must be an integer")
+
+        def limit(value):
+            # The autoscaler sizes PR slots. Infra slots sit above them, so their
+            # numbers move with the PR count; hosts with infra keep that count fixed.
+            infra = capacity.infra_slots(value)
+            if infra and maximum != capacity.pr_jobs(value):
+                raise FleetError("Hosts with infra slots keep a fixed PR slot count; change it with enable and infra-slots")
+            value = dict(value, ci_max_jobs=maximum + len(infra))
+            capacity.jobs(value)
+            capacity.staging_slots(value)
+            return value
+
+        return dict(maximum=change_host(limit)["ci_max_jobs"])
     if mode == "note":
         value = payload["value"]
         if not isinstance(value, dict) or len(json.dumps(value)) > 4096:
@@ -160,8 +171,12 @@ def host_action(payload):
                     groups[properties["Id"]] = CGROUP_ROOT / group.relative_to("/")
         except (FleetError, OSError):
             pass
+    infra = set(capacity.infra_slots(config))
     vms = []
     for original in status.get("ci_vms", []):
+        # Also a removed infra slot's guest that is still finishing its job.
+        if original.get("slot", 0) in infra or original.get("ci_kinds") == ["infra"]:
+            continue
         value = dict(original)
         try:
             group = groups[value["unit"]]
@@ -175,8 +190,10 @@ def host_action(payload):
             value["memory_bytes"] = value["cpu_usec"] = value["memory_working_bytes"] = None
         vms.append(value)
     return dict(machine_id=config["machine_id"], at=time.time(), status_at=status.get("observed_at", 0),
-                enabled=config["ci_enabled"], maximum=capacity.jobs(config),
-                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config))]), cpus=status.get("resources", {}).get("cpus", 1),
+                # Infra slots are outside the autoscaler's view: it sizes the PR slots below them.
+                enabled=config["ci_enabled"], maximum=capacity.pr_jobs(config), fixed_pr_slots=bool(infra),
+                reserved=max([capacity.staging_slots(config), *(i + 1 for i in capacity.protected_slots(config) if i not in infra)]),
+                cpus=status.get("resources", {}).get("cpus", 1),
                 pressure=pressure, timing_at=timing.get("at", 0), ci=timing.get("ci", {}),
                 last_admission=timing.get("last_admission_seen", {}).get("ci"),
                 observation_since=timing.get("admission_seen_since", timing.get("at", 0)), vms=vms)
@@ -194,6 +211,13 @@ class Controller:
         self.growth_delay, self.stall_delay = growth_delay, stall_delay
 
     def decide(self, snapshot, now):
+        if not snapshot.get("fixed_pr_slots"):
+            return self._decide(snapshot, now, self.minimum, self.maximum)
+        # Infra slots fix this host's PR count: decide as if pinned to it, so
+        # stall recovery still runs in place and no resize is ever proposed.
+        return self._decide(snapshot, now, snapshot["maximum"], snapshot["maximum"])
+
+    def _decide(self, snapshot, now, minimum, maximum):
         from . import lean_pressure
 
         if not snapshot.get("enabled"):
@@ -228,15 +252,16 @@ class Controller:
             self.value.setdefault("stall_since", now)
         else:
             self.value.pop("stall_since", None)
-        floor = max(self.minimum, snapshot["reserved"] + 1)
-        if limit < floor <= self.maximum and available >= headroom + 21 * GIB:
+        # A fixed host is pinned at its PR count, which an infra-only host has at zero.
+        floor = minimum if snapshot.get("fixed_pr_slots") else max(minimum, snapshot["reserved"] + 1)
+        if limit < floor <= maximum and available >= headroom + 21 * GIB:
             return dict(kind="limit", target=floor, reason="restore general CI capacity alongside reserved staging")
         if low and general_idle and limit > floor:
             self.value.pop("growth_since", None)
             target = max(floor, len(busy) + len(idle) - len(general_idle))
             if target < limit:
                 return dict(kind="limit", target=target, reason="return idle guest RAM to active builds")
-        if stalled and now - self.value["stall_since"] >= 30 and limit >= self.minimum:
+        if stalled and now - self.value["stall_since"] >= 30 and limit >= minimum:
             candidates = [v for v in busy_general if v.get("run_id") and cpu.get(v["instance"], 1) < .2]
             if candidates and now - self.value.get("last_recovery", {}).get("at", 0) >= 120:
                 self.value.pop("growth_since", None)
@@ -254,7 +279,7 @@ class Controller:
         pending = sum(max(0, budget - (footprint(v) if footprint(v) is not None else budget)) for v in growing)
         room = available - pending >= headroom + budget + GIB
         saturated = len(busy_general) > 0 and len(busy_general) + min(1, len(general_idle)) >= limit - snapshot["reserved"]
-        growth = (room and saturated and limit < self.maximum
+        growth = (room and saturated and limit < maximum
                   and all(footprint(v) is not None for v in growing))
         if growth and pressure.get("cpu_percent", 100) < 85:
             self.value.setdefault("growth_since", now)

@@ -1,3 +1,4 @@
+import {INFRA_GROUP} from './capacity.mjs';
 export class UpstreamError extends Error {
   constructor(status,requestId=null) { super('GitHub request failed'); this.status=status; this.requestId=requestId; }
 }
@@ -11,14 +12,20 @@ const TAUCETI='TauCetiProject/TauCeti/.github/workflows/';
 // TauCeti runs the shared harness from TauCetiTools main, never another branch or a fork.
 const HARNESS='TauCetiProject/TauCetiTools/.github/workflows/';
 const main=(prefix,names)=>names.map(name=>prefix+name+'@refs/heads/main');
-const expect=(name,required,optional,repository=null)=>({name,required,allowed:new Set([...required,...optional]),repository});
+const expect=(name,required,optional,repository=null)=>({name,required,allowed:new Set([...required,...optional]),
+  repositories:repository===null?null:[repository].flat()});
+// Our own infrastructure repositories. They take pull requests only from us and
+// our agents, so their group admits any workflow of exactly these repositories;
+// the repository list is the boundary, checked on every registration.
+export const INFRA_REPOSITORIES=['TauCetiCI','TauCetiFleet','TauCetiTools','TauCetiWorker'].map(r=>'TauCetiProject/'+r);
 // Expected settings of each runner group the broker registers runners in.
 export const CHECKS={
   3:expect('TauCetiFleet',main(TAUCETI,['pr-build.yml']),
-    [...main(TAUCETI,['nightly-verify.yml','pick-runner.yml','full-lint-label.yml']),...main(HARNESS,['pr-build.yml'])]),
+    [...main(TAUCETI,['nightly-verify.yml','pick-runner.yml','full-lint-label.yml','api-docs.yml']),...main(HARNESS,['pr-build.yml','api-docs.yml','nightly-verify.yml'])]),
   6:expect('TauCetiQueueControl',main(TAUCETI,['pick-runner.yml','pr-build.yml','publish-lake-cache.yml']),
     main(HARNESS,['pr-build.yml','publish-lake-cache.yml']),'TauCetiProject/TauCeti'),
   7:expect('TauCetiPRStatus',main(TAUCETI,['pr-status.yml','pr-labels.yml']),[],'TauCetiProject/TauCeti'),
+  [INFRA_GROUP]:{name:'TauCetiInfra',workflows:false,repositories:INFRA_REPOSITORIES},
 };
 const encoder=new TextEncoder();
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
@@ -94,16 +101,21 @@ export class GitHub {
     const settings=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}`,{kind:'runners'});
     const check=CHECKS[group];
     const selected=settings.selected_workflows || [];
-    if (settings.id!==group || settings.name!==check.name || !settings.restricted_to_workflows ||
+    if (settings.id!==group || settings.name!==check.name) throw new PolicyError();
+    // A group without a workflow check (infra) is bounded by its repositories alone.
+    if (check.workflows!==false && (!settings.restricted_to_workflows ||
         check.required.some(workflow=>!selected.includes(workflow)) ||
-        selected.some(workflow=>!check.allowed.has(workflow)))
+        selected.some(workflow=>!check.allowed.has(workflow))))
       throw new PolicyError();
-    if (check.repository) {
-      // Special groups run privileged TauCeti workflows; they must select only TauCeti.
+    if (check.repositories) {
+      // Special groups must select exactly their repositories: TauCeti for the
+      // privileged TauCeti workflows, the infrastructure repositories for infra.
       if (settings.visibility!=='selected') throw new PolicyError();
       const repositories=await this.request(`orgs/TauCetiProject/actions/runner-groups/${group}/repositories?per_page=100`,{kind:'runners'});
-      const names=(repositories?.repositories || []).map(r=>r.full_name);
-      if (repositories?.total_count!==1 || names.length!==1 || names[0]!==check.repository) throw new PolicyError();
+      const names=(repositories?.repositories || []).map(r=>r.full_name).sort();
+      const expected=[...check.repositories].sort();
+      if (repositories?.total_count!==expected.length || names.length!==expected.length ||
+          names.some((name,i)=>name!==expected[i])) throw new PolicyError();
     }
     const value={runner_group_id:group};
     this.cachedPolicy.set(group,{expires:Date.now()+60000,value});

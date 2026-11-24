@@ -5,6 +5,12 @@ import math
 from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
+# Classes of protected slots, each in its own runner group. `infra` runs our own
+# infrastructure repositories' CI on native-disk slots, above PR builds' CPU
+# weight and below staging's: someone is usually waiting on an infra job.
+PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra")
+# CPU weight of infra jobs; PR builds have 100 and staging 10000.
+INFRA_CPU_WEIGHT = 1000
 MAX_JOBS = 4096
 
 
@@ -96,7 +102,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"], ["pr-status"]]:
+    if value not in [*KINDS.values(), *([kind] for kind in PROTECTED_KINDS)]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -122,11 +128,43 @@ def protected_slots(config):
         if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
                 or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
                 or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
-                or value["kind"] not in ("control", "roadmap", "queue-control", "pr-status")
+                or value["kind"] not in PROTECTED_KINDS
                 or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
                 or value["runner_group_id"] == config.get("runner_group_id")):
             raise FleetError("Protected slots require a separate runner group and a valid slot")
         result[int(key)] = value
+    return result
+
+
+def infra_slots(config):
+    """Protected infra slot numbers. They sit above the PR slots, so ci_max_jobs
+    minus their count is the host's PR slot count."""
+    return sorted(i for i, v in protected_slots(config).items() if v["kind"] == "infra")
+
+
+def pr_jobs(config):
+    """Slots other than infra ones: what the CI autoscaler sizes."""
+    return jobs(config) - len(infra_slots(config))
+
+
+def with_infra_slots(config, count, group, pr=None):
+    """Place `count` infra slots directly above the host's PR slots, of which
+    there are `pr` (default: keep the current count; 0 leaves only infra)."""
+    if type(count) is not int or not 0 <= count <= 64:
+        raise FleetError("The infra slot count must be an integer from 0 to 64")
+    if count and (type(group) is not int or group <= 0):
+        raise FleetError("The CI broker reports no runner group for infra")
+    if pr is not None and (type(pr) is not int or pr < 0):
+        raise FleetError("The PR slot count must be a non-negative integer")
+    if infra_slots(config) != list(range(pr_jobs(config), jobs(config))):
+        raise FleetError("Existing infra slots must sit directly above the PR slots")
+    base = pr_jobs(config) if pr is None else pr
+    others = {k: v for k, v in config.get("ci_protected_slots", {}).items() if v["kind"] != "infra"}
+    if any(int(k) >= base for k in others):
+        raise FleetError("Other protected slots must sit below the infra slots")
+    slots = dict(others, **{str(i): dict(kind="infra", runner_group_id=group) for i in range(base, base + count)})
+    result = dict(config, ci_max_jobs=base + count, ci_protected_slots=slots)
+    staging_slots(result)
     return result
 
 

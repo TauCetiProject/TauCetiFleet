@@ -25,7 +25,11 @@ def request(path, *, token_file=None, method="GET", data=None):
         "https://api.github.com/" + path.lstrip("/"), data=body, headers=headers, method=method
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        # The CLI may run under a standalone Python whose default CA bundle path is absent on
+        # NixOS; the status client's context falls back to the distribution's bundle.
+        from .ci_overview import status_ssl_context
+
+        with urllib.request.urlopen(req, timeout=20, context=status_ssl_context()) as response:
             if response.status == 204:
                 return None
             raw = response.read(4 * 1024 * 1024 + 1)
@@ -95,13 +99,14 @@ def runner_policy(config):
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
                "TauCetiProject/TauCeti/.github/workflows/pick-runner.yml@refs/heads/main",
-               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main"}
+               "TauCetiProject/TauCeti/.github/workflows/full-lint-label.yml@refs/heads/main",
+               "TauCetiProject/TauCeti/.github/workflows/api-docs.yml@refs/heads/main"}
     selected = set(data.get("selected_workflows", []))
     if (
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not trusted_entries(selected - allowed, ("pr-build.yml",))
+        or not trusted_entries(selected - allowed, ("pr-build.yml", "api-docs.yml", "nightly-verify.yml"))
     ):
         raise FleetError("Runner group must allow only trusted main project workflows and the shared harness at main")
     return group
@@ -118,6 +123,8 @@ def trusted_entries(entries, workflows):
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
+    if kind == "infra":
+        raise FleetError("Infra runners register only through the CI broker")
     expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":
         raise FleetError("Protected runners require a selected-repository " + expected + " group")

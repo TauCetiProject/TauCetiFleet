@@ -68,6 +68,15 @@ class PoolActivity(unittest.TestCase):
         self.assertNotIn("zombie", text)
         self.assertEqual(self.report()["value"]["pools"][0]["builds"]["stale_waiting"], 7)
 
+    def test_shared_fleet_queue_is_explained_only_when_present(self):
+        self.assertNotIn("shared Fleet PR queue", self.render())
+        shared = copy.deepcopy(self.jobs["pool_activity"]["pools"][0])
+        shared["pool"] = "self-hosted"
+        self.jobs["pool_activity"]["pools"].append(shared)
+        text = self.render()
+        self.assertIn("self-hosted = shared Fleet PR queue waiting for any enrolled host", text)
+        self.assertIn("superseded runs", text)
+
     def test_compact_build_table_has_outcomes_ages_and_partial_freshness(self):
         text = self.render()
         self.assertIn("CI pool activity — builds (partial observations", text)
