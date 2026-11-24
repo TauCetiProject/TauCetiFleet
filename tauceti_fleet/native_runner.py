@@ -23,6 +23,10 @@ from .store import FleetError, atomic, data_dir, host_config, locked, read, stat
 IMAGE_REVISION = 2
 DISK_START_GIB = 48
 MEMORY_GIB = 54
+# A native guest's threads count against the host's CI slice. One PR build's
+# cache restore has peaked at 6,666 tasks; the per-guest limit keeps one runaway
+# guest from starving the others' thread creation.
+TASKS_MAX = 16384
 RUNTIME = "native-disk"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
@@ -306,7 +310,7 @@ def properties():
     # applies to that RAM-backed file and kills the stock Actions listener.
     # Bound allocated RAM with the cgroup; the watchdog monitors allocated disk.
     return ["-p", f"MemoryMax={MEMORY_GIB}G", "-p", "OOMPolicy=kill", "-p", "OOMScoreAdjust=1000",
-            "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
+            "-p", f"TasksMax={TASKS_MAX}", "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
 
 

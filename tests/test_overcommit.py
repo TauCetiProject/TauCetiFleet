@@ -163,6 +163,41 @@ class Overcommit(unittest.TestCase):
         self.assertEqual((units / "tauceti.slice").read_text(), f"[Slice]\nMemoryMax={capacity.shared_memory_bytes(caps)}\n")
         self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
 
+    def test_live_update_raises_the_ci_task_limit_and_keeps_memory_settings(self):
+        units = self.root / "units"
+        units.mkdir()
+        (units / "tauceti-fleet-ci.slice").write_text("[Slice]\nCPUWeight=1000\nMemoryMax=7\nTasksMax=16384\n")
+        caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
+        with patch.object(host, "units", return_value=units):
+            self.assertTrue(host.install_ceiling(caps))
+            self.assertFalse(host.install_ceiling(caps))
+        self.assertEqual((units / "tauceti-fleet-ci.slice").read_text(),
+                         f"[Slice]\nCPUWeight=1000\nMemoryMax=7\nTasksMax={host.CI_TASKS_MAX}\n")
+        self.assertEqual((units / "tauceti-fleet.slice").read_text(), f"[Slice]\nTasksMax={host.FLEET_TASKS_MAX}\n")
+        self.assertGreaterEqual(host.FLEET_TASKS_MAX, host.CI_TASKS_MAX + host.WORKER_TASKS_MAX)
+
+    def test_ci_task_limit_rewrite_handles_spacing_duplicates_and_foreign_units(self):
+        units = self.root / "units"
+        units.mkdir()
+        path = units / "tauceti-fleet-ci.slice"
+        with patch.object(host, "units", return_value=units):
+            self.assertFalse(host.set_tasks_max("tauceti-fleet-ci.slice", 9))
+            path.write_text("[Slice]\nTasksMax = 1\nMemoryMax=7\nTasksMax=2\n")
+            self.assertTrue(host.set_tasks_max("tauceti-fleet-ci.slice", 9))
+            self.assertEqual(path.read_text(), "[Slice]\nTasksMax=9\nMemoryMax=7\n")
+            path.write_text("[Slice]\nMemoryMax=7\n")
+            self.assertTrue(host.set_tasks_max("tauceti-fleet-ci.slice", 9))
+            self.assertEqual(path.read_text(), "[Slice]\nTasksMax=9\nMemoryMax=7\n")
+            path.write_text("[Unit]\nDescription=other\n")
+            self.assertFalse(host.set_tasks_max("tauceti-fleet-ci.slice", 9))
+            self.assertEqual(path.read_text(), "[Unit]\nDescription=other\n")
+
+    def test_native_guests_get_their_own_task_limit(self):
+        from tauceti_fleet import native_runner
+        properties = native_runner.properties()
+        self.assertEqual([v for v in properties if v.startswith("TasksMax=")], [f"TasksMax={native_runner.TASKS_MAX}"])
+        self.assertLessEqual(native_runner.TASKS_MAX, host.CI_TASKS_MAX)
+
     def test_hosts_without_a_repair_slice_are_untouched(self):
         with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
             self.assertIsNone(host.refresh_repair_memory())
