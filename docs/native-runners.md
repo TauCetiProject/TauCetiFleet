@@ -131,7 +131,10 @@ five minutes, with a two-minute scan deadline; slow scans do not block the cheap
 checks. Scanner diagnostics cannot fill an unread pipe. A failed scan retains
 the last verified value and its original timestamp, with its error and age
 reported explicitly. A scan that reports a total after `du` met vanishing or unreadable files (exit 1)
-counts as a measurement, not a failure. Three consecutive failed scans still stop
+counts as a measurement, not a failure. Telemetry counts such partial scans
+(`disk_scan_partial_total`, and `disk_scan_partial_streak` among consecutive accepted
+measurements; a failed scan neither extends nor resets it), so a subtree `du` never reads
+stays visible. Three consecutive failed scans still stop
 the instance.
 Telemetry includes scan duration, deadline and interval for live verification.
 A budget breach, low space, inode exhaustion or resource-monitor failure is an

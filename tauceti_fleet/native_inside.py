@@ -84,6 +84,10 @@ class DiskUsage:
         self.error = None
         self.failures = 0
         self.scan_seconds = None
+        # Scans accepted although du met vanishing or unreadable files (exit 1): in total, and
+        # in a row. A long streak can mean a subtree du never reads, hidden from the budget.
+        self.partial_scans = 0
+        self.partial_streak = 0
 
     def failed(self, error):
         # Keep the last verified measurement and its original timestamp. The
@@ -118,6 +122,11 @@ class DiskUsage:
                             raise ValueError("invalid disk usage")
                         self.allocated, self.measured_at = allocated, time.time()
                         self.error, self.failures = None, 0
+                        if code == 1:
+                            self.partial_scans += 1
+                            self.partial_streak += 1
+                        else:
+                            self.partial_streak = 0
                     except (ValueError, IndexError) as error:
                         self.failed(str(error))
             if self.child is None and now >= self.next_scan:
@@ -138,6 +147,7 @@ class DiskUsage:
                     disk_measurement_age=None if self.measured_at is None else max(0, time.time() - self.measured_at),
                     disk_scan_running=self.child is not None, disk_scan_error=self.error,
                     disk_scan_failures=self.failures, disk_scan_seconds=self.scan_seconds,
+                    disk_scan_partial_total=self.partial_scans, disk_scan_partial_streak=self.partial_streak,
                     disk_scan_timeout_seconds=DISK_SCAN_TIMEOUT, disk_scan_interval_seconds=DISK_SCAN_INTERVAL,
                     disk_budget_bytes=DISK_BUDGET_GIB * 1024**3)
 
