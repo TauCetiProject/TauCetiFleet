@@ -45,6 +45,9 @@ from .store import (
 # Resolve once: switching the current symlink must not make an old controller
 # report that it is already running the newly installed release.
 RUNNING_RELEASE = str(Path(__file__).resolve().parent.parent)
+# Lifetime of an admission decision. Workers reject a policy expiring more than 30 s ahead
+# (tauceti_worker/fleet_capacity.py), so this stays below that.
+ADMISSION_TTL = 25
 
 
 def command():
@@ -1315,7 +1318,12 @@ def daemon():
         memory_paused = False
         export = StatusExport()
         previous_tasks = None
+        decided = None
         while not stopping:
+            if decided is not None:
+                # One pass (GitHub inventory, CI slots, cgroup reads) can outlast the sleep on a loaded
+                # host. Renew the previous decision first, so the TTL bounds one pass, not pass + sleep.
+                atomic(state_dir() / "admission.json", dict(decided, expires_at=time.time() + ADMISSION_TTL))
             config = host_config()
             try:
                 capacity.controller_config(config)
@@ -1408,16 +1416,8 @@ def daemon():
                     pause_reason=pause_reason,
                 )
                 roadmap_focus = focus.policy(config, ids[:target])
-                atomic(
-                    state_dir() / "admission.json",
-                    dict(
-                        version=1,
-                        expires_at=time.time() + 15,
-                        workers=ids[:target],
-                        reason=reason,
-                        roadmap_focus=roadmap_focus,
-                    ),
-                )
+                decided = dict(version=1, workers=ids[:target], reason=reason, roadmap_focus=roadmap_focus)
+                atomic(state_dir() / "admission.json", dict(decided, expires_at=time.time() + ADMISSION_TTL))
                 atomic(
                     state_dir() / "status.json",
                     dict(
@@ -1461,6 +1461,7 @@ def daemon():
                 )
                 error = None
             except (FleetError, OSError, ValueError, KeyError) as exc:
+                decided = None
                 message = str(exc)
                 if message != error:
                     print("tauceti-fleet: " + message, file=sys.stderr, flush=True)

@@ -225,6 +225,47 @@ class Controller(unittest.TestCase):
         self.assertEqual(host.rpc(dict(action="schedule", clear=True)), dict(slots=[]))
         self.assertEqual(self.controller_pass()[0]["workers"], ["w1", "w2"])
 
+    def test_each_pass_first_renews_the_previous_admission_decision(self):
+        writes, handlers, statuses = [], {}, []
+
+        def publish(path, value):
+            if Path(path).name == "admission.json":
+                writes.append(dict(value, at=time.time()))
+            if Path(path).name == "status.json":
+                statuses.append(value)
+                if len(statuses) == 2:
+                    handlers[signal.SIGTERM]()
+
+        with (
+            patch.multiple(
+                host,
+                install_pressure_service=Mock(),
+                resources=Mock(return_value=dict(memory_total=32 * GIB, memory_available=30 * GIB)),
+                cpu_sample=Mock(return_value=(10, 9)),
+                collect_ci_results=Mock(),
+                worker_config=Mock(return_value=["w1", "w2"]),
+                start_workers=Mock(),
+                worker_statuses=Mock(return_value=[]),
+                worker_memory=Mock(return_value=None),
+                atomic=publish,
+            ),
+            patch.object(host.vm, "slots_in_use", return_value=[]),
+            patch.object(host.vm, "outstanding", return_value=False),
+            patch.object(host.CISlot, "step", return_value={}),
+            patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
+            patch.object(host.time, "sleep"),
+        ):
+            host.daemon()
+        first, renewal, second = writes[:3]
+        self.assertEqual(first["workers"], ["w1", "w2"])
+        self.assertEqual({k: v for k, v in renewal.items() if k not in ("expires_at", "at")},
+                         {k: v for k, v in first.items() if k not in ("expires_at", "at")})
+        self.assertEqual(second["workers"], ["w1", "w2"])
+        for write in (first, renewal, second):
+            # Workers refuse a policy that expires more than 30 s ahead.
+            self.assertLessEqual(write["expires_at"], write["at"] + 30)
+            self.assertGreater(write["expires_at"], write["at"] + 15)
+
     def test_a_drained_host_keeps_its_own_reason(self):
         store.update_host(workers_enabled=False, worker_schedule=schedule.validate([around_now(2, 4)], "UTC"))
         admission, status = self.controller_pass()
