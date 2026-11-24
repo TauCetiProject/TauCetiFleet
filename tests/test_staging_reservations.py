@@ -313,5 +313,9 @@ class WarmStagingDisk(unittest.TestCase):
                  patch.object(vm, "executable", side_effect=lambda name: name):
                 self.assertIsNone(vm.remove_warm_disk(config))
                 self.assertEqual(path.exists(), kept)
-        with patch.object(vm, "run", side_effect=store.FleetError("qemu-img exited 4")):
+        path.write_text("old")
+        with patch.object(vm, "run", side_effect=store.FleetError("qemu-img exited 4")) as run, \
+             patch.object(vm, "executable", side_effect=lambda name: name):
             self.assertIsNone(vm.remove_warm_disk(config))  # never stops the slot
+        run.assert_called_once()
+        self.assertTrue(path.exists())
