@@ -12,7 +12,12 @@ from pathlib import Path
 
 LINK = Path("/fleet-link")
 WORK = Path("/opt/actions-runner/_work")
-DISK_BUDGET_GIB = 56
+# Must admit a from-source build of the whole library, not just a cache-backed PR
+# build: the nightly verification packs every output into a workspace-local Lake
+# cache as well. A 56 GiB budget stopped that build at 97% of its jobs while
+# cache-backed PR builds already peaked at 43 GiB. Host free space and inodes stay
+# checked separately every two seconds.
+DISK_BUDGET_GIB = 128
 # Full roots contain tens of thousands of cache artifacts. A healthy populated
 # runner already takes ~6s to scan; a 10s wall deadline fails under ordinary I/O
 # contention. Space/inode headroom remains checked every two seconds below.
@@ -79,6 +84,10 @@ class DiskUsage:
         self.error = None
         self.failures = 0
         self.scan_seconds = None
+        # Scans accepted although du met vanishing or unreadable files (exit 1): in total, and
+        # in a row. A long streak can mean a subtree du never reads, hidden from the budget.
+        self.partial_scans = 0
+        self.partial_streak = 0
 
     def failed(self, error):
         # Keep the last verified measurement and its original timestamp. The
@@ -99,13 +108,25 @@ class DiskUsage:
                     stdout, _ = self.child.communicate(timeout=1)
                     self.child = None
                     try:
-                        if code != 0:
-                            raise ValueError("disk usage scan timed out" if code is None else "disk usage scan failed")
+                        # GNU du exits 1 when a file vanishes or cannot be read mid-scan, but
+                        # still prints the total of everything else. A busy Lake build (a stock
+                        # cache restore, doc-gen4) makes that constant, and three such scans in
+                        # a row retired runners mid-job (24 Nov 2026). Accept that total; any
+                        # other status, or no total, is still a failure.
+                        if code is None:
+                            raise ValueError("disk usage scan timed out")
+                        if code not in (0, 1) or not (stdout or "").strip():
+                            raise ValueError("disk usage scan failed")
                         allocated = int(stdout.split()[0])
                         if allocated < 0:
                             raise ValueError("invalid disk usage")
                         self.allocated, self.measured_at = allocated, time.time()
                         self.error, self.failures = None, 0
+                        if code == 1:
+                            self.partial_scans += 1
+                            self.partial_streak += 1
+                        else:
+                            self.partial_streak = 0
                     except (ValueError, IndexError) as error:
                         self.failed(str(error))
             if self.child is None and now >= self.next_scan:
@@ -126,6 +147,7 @@ class DiskUsage:
                     disk_measurement_age=None if self.measured_at is None else max(0, time.time() - self.measured_at),
                     disk_scan_running=self.child is not None, disk_scan_error=self.error,
                     disk_scan_failures=self.failures, disk_scan_seconds=self.scan_seconds,
+                    disk_scan_partial_total=self.partial_scans, disk_scan_partial_streak=self.partial_streak,
                     disk_scan_timeout_seconds=DISK_SCAN_TIMEOUT, disk_scan_interval_seconds=DISK_SCAN_INTERVAL,
                     disk_budget_bytes=DISK_BUDGET_GIB * 1024**3)
 
@@ -187,17 +209,24 @@ def boot():
     os.chown(LINK / 'events.jsonl', 1000, 1000)
     (LINK / 'telemetry').mkdir(exist_ok=True)
     os.chown(LINK / 'telemetry', 1000, 1000)
+    # The host stages the Lean startup file only for slots that run the Lean gate
+    # (not infra); without it, jobs see neither the gate's environment nor its marker.
+    gated = Path('/opt/tauceti-lean-env').exists()
     Path('/usr/local/share/tauceti').mkdir(parents=True, exist_ok=True)
-    Path('/usr/local/share/tauceti/host-pressure.required').touch()
+    if gated:
+        Path('/usr/local/share/tauceti/host-pressure.required').touch()
     for name, kind in (('start','ci_started'), ('complete','ci_completed')):
         target = Path('/opt/hook-'+name+'.sh')
         target.write_text('#!/bin/bash\nexec /usr/bin/python3 /usr/local/bin/tauceti_native_inside.py '+kind+'\n')
         target.chmod(0o755)
     envfile = Path('/opt/actions-runner/.env')
+    lean = ('LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
+            'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
+    # The infra image adds its own runner settings (its tool cache location).
+    extra = Path('/opt/tauceti-runner.env')
     envfile.write_text('ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hook-start.sh\n'
                        'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hook-complete.sh\n'
-                       'LAKE_OVERRIDE_LEAN=true\nLEAN=/usr/local/bin/tauceti-lean\n'
-                       'TAUCETI_LEAN_WRAPPER=/usr/local/bin/tauceti-lean\nBASH_ENV=/opt/tauceti-lean-env\n')
+                       + (lean if gated else '') + (extra.read_text() if extra.is_file() else ''))
     os.chown(envfile, 1000, 1000)
     pressure_fd = int(os.environ['TAUCETI_NATIVE_PRESSURE_FD'])
     receiver = subprocess.Popen([sys.executable, __file__, 'pressure-loop'], pass_fds=(pressure_fd,))

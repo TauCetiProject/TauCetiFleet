@@ -138,8 +138,10 @@ class LeanRuntime(unittest.TestCase):
             ):
                 maximum = host.write_slices(dict(ci_allowed=True, ci_memory_gib=64), caps)
             self.assertGreater(maximum, 100 * GIB)
-            for name in ("tauceti-fleet", "tauceti-fleet-ci", "tauceti-fleet-workers"):
+            for name in ("tauceti", "tauceti-fleet-ci", "tauceti-fleet-workers"):
                 self.assertIn(f"MemoryMax={int(maximum)}\n", (root / (name + ".slice")).read_text())
+            # The ceiling is on the parent, shared with the repair slice beside this one.
+            self.assertNotIn("Memory", (root / "tauceti-fleet.slice").read_text())
             self.assertLess(maximum + GIB, caps["memory_total"])
             self.assertIn("CPUWeight=1000", (root / "tauceti-fleet-ci.slice").read_text())
             self.assertIn("CPUWeight=10", (root / "tauceti-fleet-workers.slice").read_text())
