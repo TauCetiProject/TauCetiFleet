@@ -69,6 +69,23 @@ class DiskMonitor(unittest.TestCase):
                 self.assertEqual(monitor.allocated, allocated)
                 self.assertEqual(monitor.failures, failures)
 
+    def test_partial_scans_are_counted_in_total_and_in_a_row(self):
+        monitor = inside.DiskUsage()
+        clock = [0]
+        for code in (1, 1, 0, 1):
+            child = Mock(pid=42)
+            child.poll.return_value = code
+            child.communicate.return_value = ('12345\t/\n', None)
+            with patch.object(inside.subprocess, 'Popen', return_value=child), patch.object(inside.time, 'monotonic', side_effect=lambda: clock[0]):
+                monitor.poll()
+                clock[0] += 2
+                monitor.poll()
+                clock[0] += inside.DISK_SCAN_INTERVAL
+        value = monitor.snapshot()
+        self.assertEqual(value['disk_scan_partial_total'], 3)
+        self.assertEqual(value['disk_scan_partial_streak'], 1)
+        self.assertEqual(value['disk_scan_failures'], 0)
+
     def test_success_reports_one_whole_instance_allocation_then_waits(self):
         child = Mock(pid=42)
         child.poll.return_value = 0
