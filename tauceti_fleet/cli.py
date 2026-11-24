@@ -5,10 +5,12 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import activity, attention, broker, host, pool_activity, remote, targets, worker_view
+from .activity_summary import amount
 from .store import FleetError, atomic, config_dir, read
 
 
@@ -26,7 +28,8 @@ def parser():
     enroll.add_argument("--replace-machine", action="store_true", help="explicitly enroll a replacement machine at a remembered SSH alias")
     for name in ("doctor", "status", "prepare", "update", "drain"):
         cmd = sub.add_parser(name)
-        cmd.add_argument("host", nargs="?")
+        cmd.add_argument("host", nargs="*" if name == "status" else "?",
+                         help="hosts to show side by side" if name == "status" else None)
         cmd.add_argument("--json", action="store_true")
         if name == "status":
             cmd.add_argument("-f", "--follow", action="store_true", help="follow prepared reports in a live, scrollable view")
@@ -42,7 +45,9 @@ def parser():
             )
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
-    budget.add_argument("--grant")
+    funding = budget.add_mutually_exclusive_group()
+    funding.add_argument("--grant", help="add this many USD to the host's balance")
+    funding.add_argument("--set-grant", help="set the host's balance to this many USD (a logged adjustment)")
     budget.add_argument("--grant-rate")
     budget.add_argument("--json", action="store_true")
     enable = sub.add_parser("enable", help="explicitly activate a prepared role")
@@ -59,17 +64,36 @@ def parser():
     native.add_argument("host")
     native.add_argument("--prepare", action="store_true")
     native.add_argument("--json", action="store_true")
+    infra = sub.add_parser("infra-slots", help="run infrastructure-repository CI in slots above the PR slots")
+    infra.add_argument("host")
+    infra.add_argument("--slots", dest="count", type=int, required=True)
+    infra.add_argument("--pr-slots", type=int, help="also set the PR slot count below them (0: infra only)")
+    infra.add_argument("--json", action="store_true")
     reserve = sub.add_parser("reserve-staging", help="reserve CI slots for staging as current guests finish")
     reserve.add_argument("host")
     reserve.add_argument("--slots", dest="maximum", type=int, required=True)
+    reserve.add_argument("--memory-gib", type=int,
+                         help="GiB of virtual RAM for future reserved staging guests (0: the shared CI ceiling)")
     reserve.add_argument("--json", action="store_true")
     workers = sub.add_parser("workers", help="change worker capacity or self-tested prompting without interrupting active work")
     workers.add_argument("host")
     workers.add_argument("--max", dest="maximum", type=int)
+    workers.add_argument("--swap-gib", type=int, help="swap the workers slice may use, in GiB (default 1)")
     workers.add_argument("--self-tested", action=argparse.BooleanOptionalAction, default=None,
                          help="instruct workers to apply the self-tested label after local verification")
     workers.add_argument("--forgejo-workers", type=int, default=None,
                          help="route this many worker slots to Forgejo; remaining slots continue on GitHub")
+    workers.add_argument("--maintenance-workers", type=int, default=None,
+                         help="have this many of the lowest-numbered slots tend PRs on both forges without roadmap authoring")
+    workers.add_argument("--both-forge-workers", type=int, default=None,
+                         help="have this many slots after the maintenance ones work PRs on both forges, "
+                              "authoring roadmap PRs on Forgejo when none is claimable")
+    workers.add_argument("--github-first-workers", type=int, default=None,
+                         help="have this many of the lowest-numbered maintenance slots offer GitHub PR work before Forgejo's")
+    workers.add_argument("--review-first-workers", type=int, default=None,
+                         help="have this many maintenance slots after the GitHub-first ones offer reviews before other PR work")
+    workers.add_argument("--forgejo-first-workers", type=int, default=None,
+                         help="have this many slots after the review-first ones offer Forgejo PR work before GitHub's")
     workers.add_argument("--env", action="append", default=None, metavar="NAME=VALUE",
                          help="set an environment variable in every worker's definition (repeatable)")
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
@@ -111,8 +135,23 @@ def parser():
     needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
+    sub.add_parser("ci-autoscale", help="run the CI autoscaler for one host (the installed unit's command)")
+    install_autoscale = sub.add_parser("install-ci-autoscale",
+                                       help="install this account's CI autoscaler unit for one SSH host")
+    install_autoscale.add_argument("host", help="SSH alias of the CI host")
+    install_autoscale.add_argument("--machine-id", required=True)
+    install_autoscale.add_argument("--minimum", type=int, required=True)
+    install_autoscale.add_argument("--maximum", type=int, required=True)
+    install_autoscale.add_argument("--github-app-dir", default=str(Path.home() / ".config/tauceti-queue"),
+                                   help="directory holding github-app.json and github-private-key.pem (default: the queue App's)")
     install_monitor = sub.add_parser("install-monitoring", help="enable only the local telemetry sidecar")
     install_monitor.add_argument("--alias", required=True)
+    sub.add_parser("fleet-alert", help="check every host's worker progress once and send any due alert")
+    sub.add_parser("contributors", add_help=False,
+                   help="report contributors whose sustained PR or review volume stopped or slowed sharply")
+    install_alert = sub.add_parser("install-fleet-alert",
+                                   help="check worker progress every minute from this account's systemd timer")
+    install_alert.add_argument("--zulip-config", help="mode-0600 Zulip bot configuration; omit to log only")
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
@@ -156,11 +195,114 @@ def print_isolation(status):
         print("Isolation diagnostics: " + isolation["error"])
 
 
+def local_entry():
+    local = read(config_dir() / "host.json")
+    if not local or not local.get("machine_id"):
+        raise FleetError("This account has no Fleet host configuration; use add or enroll first")
+    return dict(target="local", machine_id=local["machine_id"])
+
+
+def fetch_status(entry):
+    """One host's status, or its last cached snapshot marked offline."""
+    cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
+    try:
+        value = remote.call(entry["target"], dict(action="status"), timeout=3,
+                            expected_machine_id=entry["machine_id"])
+    except FleetError as exc:
+        if not cache.exists():
+            return dict(error=str(exc))
+        saved = read(cache)
+        return dict(saved["value"], error=str(exc), offline=True, collected_at=saved["collected_at"])
+    atomic(cache, dict(collected_at=time.time(), value=value))
+    return value
+
+
+def host_column(value):
+    """The per-host numbers of the side-by-side status view; None where a host reports nothing."""
+    status = value.get("status") or {}
+    alive = [w for w in status.get("workers") or [] if w.get("alive")]
+    working = sum(w.get("state") not in host.IDLE_STATES for w in alive)
+    summary = (value.get("activity") or {}).get("summary") or {}
+    rounds, prs = summary.get("rounds", {}), summary.get("pr_windows", {}).get("24h", {})
+    costs = summary.get("costs", {})
+    spending = costs.get("spending_including_live") or costs.get("spending") or {}
+    funding = costs.get("funding") or {}
+    memory = status.get("worker_memory") or {}
+    if "status" not in value:
+        report = "unreachable"
+    elif value.get("offline"):
+        report = f"cached {max(0, int(time.time() - value['collected_at']))}s"
+    else:
+        report = "live"
+    return {
+        "Report": report,
+        "Workers alive": len(alive) if status else None,
+        "  working": working if status else None,
+        "  idle or waiting": len(alive) - working if status else None,
+        "New-round limit": f"{status.get('active_worker_limit', 0)}/{value.get('max_workers', 0)}" if status else None,
+        "CPU idle": f"{status['cpu_idle_fraction']:.0%}" if "cpu_idle_fraction" in status else None,
+        "Worker working memory": f"{memory['working_set'] / 1024**3:.1f} GiB" if memory else None,
+        **{f"Rounds finished {w}": sum(r["finished"] for r in rounds[w].values()) if w in rounds else None
+           for w in ("1h", "24h")},
+        "PRs authored 24h": prs.get("authored"),
+        "  on Forgejo": prs.get("authored_forgejo"),
+        "Authored PRs landed 24h": prs.get("landed"),
+        "  from Forgejo": prs.get("landed_forgejo"),
+        "Reviews 24h": prs.get("reviews"),
+        "API spend 24h": amount(spending.get("24h", {}).get("spent_usd")),
+        "API spend/hour (1h)": amount(spending.get("1h", {}).get("usd_per_hour")),
+        "Budget available": amount(funding.get("available")),
+        "Budget replenishment": amount(funding.get("grant_rate")) + "/hour" if funding else None,
+        "Open authored PRs": summary.get("open_prs"),
+    }
+
+
+def print_hosts(results):
+    """Worker totals, then the selected hosts' numbers side by side."""
+    columns = {name: host_column(value) for name, value in results.items()}
+    alive, working = (sum(c[key] or 0 for c in columns.values()) for key in ("Workers alive", "  working"))
+    live = sum(c["Report"] == "live" for c in columns.values())
+    print(f"Workers: {alive} alive, {working} working, {alive - working} idle or waiting; "
+          f"{live} of {len(columns)} hosts live")
+    labels = list(next(iter(columns.values())))
+    width = max(map(len, labels))
+    cells = {name: ["—" if c[label] is None else str(c[label]) for label in labels]
+             for name, c in columns.items()}
+    widths = {name: max(len(name), *map(len, values)) for name, values in cells.items()}
+    print(" " * width + "".join(f"  {name:>{widths[name]}}" for name in cells))
+    for row, label in enumerate(labels):
+        print(f"{label:<{width}}" + "".join(f"  {values[row]:>{widths[name]}}" for name, values in cells.items()))
+    for name, value in results.items():
+        for error in (value.get("error"), (value.get("status") or {}).get("error")):
+            if error:
+                print(f"{name}: {error}")
+
+
 def main(argv=None, *, _status_results=None, _standalone=False):
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["monitoring"]:
         from .monitoring import main as monitoring_main
         return monitoring_main(raw[1:])
+    if raw[:1] == ["ci-autoscale"]:
+        from .ci_autoscale import main as autoscale_main
+        return autoscale_main(raw[1:])
+    if raw[:1] == ["install-ci-autoscale"]:
+        from .ci_autoscale import install
+        args = parser().parse_args(raw)
+        print(json.dumps(install(args.host, args.machine_id, minimum=args.minimum, maximum=args.maximum,
+                                 github_app_dir=args.github_app_dir)))
+        return 0
+    if raw[:1] == ["contributors"]:
+        from .contributors import main as contributors_main
+        return contributors_main(raw[1:])
+    if raw[:1] == ["fleet-alert"]:
+        from .fleet_alert import main as alert_main
+        return alert_main(raw[1:])
+    if raw[:1] == ["install-fleet-alert"]:
+        from .fleet_alert import install as install_alert
+        args = parser().parse_args(raw)
+        print(json.dumps(install_alert(args.zulip_config)))
+        return 0
     if raw[:1] == ["install-monitoring"]:
         from .monitoring import install_local
         args = parser().parse_args(raw)
@@ -221,40 +363,51 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         if args.command == "enable" and not args.ci and any(v is not None for v in (args.max_jobs, args.ci_vcpus, args.ci_memory_gib, args.ci_disk_gib, args.ci_memory_budget_gib)):
             raise FleetError("CI capacity options require --ci pr, staging, or both")
         if (args.command == "workers" and args.maximum is None and args.self_tested is None
-                and args.forgejo_workers is None and not args.env and not args.unset_env):
-            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --env or --unset-env")
-        if args.command == "budget" and (args.grant is not None or args.grant_rate is not None) and not args.host:
+                and args.forgejo_workers is None and args.maintenance_workers is None
+                and args.both_forge_workers is None and args.github_first_workers is None and args.review_first_workers is None
+                and args.forgejo_first_workers is None and not args.env and not args.unset_env and args.swap_gib is None):
+            raise FleetError("Select --max, --self-tested, --no-self-tested, --forgejo-workers, --maintenance-workers, "
+                             "--both-forge-workers, --github-first-workers, --review-first-workers, --forgejo-first-workers, "
+                             "--env, --unset-env or --swap-gib")
+        if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
         if args.command == "attention" and args.ack and not args.host:
             raise FleetError("Acknowledging requires one explicit host; listing may cover the fleet")
-        if args.host == "local":
-            local = read(config_dir() / "host.json")
-            if not local or not local.get("machine_id"):
-                raise FleetError("This account has no Fleet host configuration; use add or enroll first")
-            selected = {"local": dict(target="local", machine_id=local["machine_id"])}
-        else:
-            selected = {args.host: remote.resolve(args.host)} if args.host else entries
+        selected = {}
+        for name in args.host if args.command == "status" else [args.host] if args.host else []:
+            entry = local_entry() if name == "local" else remote.resolve(name)
+            # Host aliases never multiply output.
+            if entry["machine_id"] not in (e["machine_id"] for e in selected.values()):
+                selected[name] = entry
+        hosts = list(selected)
+        if args.command == "status":
+            # Several named hosts get the side-by-side view; one host or none keep their own.
+            args.host = hosts[0] if len(hosts) == 1 else None
+        combined = len(hosts) > 1
+        selected = selected or entries
         if not selected:
             raise FleetError("No hosts enrolled; use tauceti-fleet add user@host")
         if args.command == "status" and args.follow:
             from . import status_follow
 
-            command = (["status"] + ([args.host] if args.host else []) + (["--json"] if args.json else [])
+            command = (["status"] + hosts + (["--json"] if args.json else [])
                        + (["--all-jobs"] if args.all_jobs else []) + (["--workers"] if args.workers else [])
                        + (["--timezone", args.timezone] if args.timezone != "Australia/Sydney" else []))
             return status_follow.run(selected, lambda values: status_follow.render_with_cli(command, values),
                                      json_output=args.json, refresh=pool_activity.refresh)
         results = {}
-        for name, entry in selected.items():
-            if _status_results is not None:
-                results[name] = _status_results.get(name, dict(error="Waiting for prepared status"))
-                continue
+        if args.command == "status" and _status_results is not None:
+            results = {name: _status_results.get(name, dict(error="Waiting for prepared status")) for name in selected}
+        elif args.command == "status":
+            with ThreadPoolExecutor(len(selected)) as pool:
+                results = dict(zip(selected, pool.map(fetch_status, selected.values())))
+        for name, entry in ({} if args.command == "status" else selected).items():
             action = args.command
             payload = dict(action=action)
             if args.command == "doctor":
                 payload["smoke"] = args.smoke
             if args.command == "budget":
-                payload.update(grant=args.grant, grant_rate=args.grant_rate)
+                payload.update(grant=args.grant, set_grant=args.set_grant, grant_rate=args.grant_rate)
             if args.command == "enable":
                 payload.update(ci=args.ci, workers=args.workers, maximum=args.max_jobs,
                                vcpus=args.ci_vcpus, memory_gib=args.ci_memory_gib, disk_gib=args.ci_disk_gib,
@@ -269,6 +422,18 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["self_tested"] = args.self_tested
                 if args.forgejo_workers is not None:
                     payload["forgejo_workers"] = args.forgejo_workers
+                if args.maintenance_workers is not None:
+                    payload["maintenance_workers"] = args.maintenance_workers
+                if args.both_forge_workers is not None:
+                    payload["both_forge_workers"] = args.both_forge_workers
+                if args.github_first_workers is not None:
+                    payload["github_first_workers"] = args.github_first_workers
+                if args.review_first_workers is not None:
+                    payload["review_first_workers"] = args.review_first_workers
+                if args.forgejo_first_workers is not None:
+                    payload["forgejo_first_workers"] = args.forgejo_first_workers
+                if args.swap_gib is not None:
+                    payload["swap_gib"] = args.swap_gib
                 if args.env or args.unset_env:
                     changes = {}
                     for item in args.env or []:
@@ -279,8 +444,14 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     for variable in args.unset_env or []:
                         changes[variable] = None
                     payload["worker_env"] = changes
+            if args.command == "infra-slots":
+                payload.update(count=args.count)
+                if args.pr_slots is not None:
+                    payload.update(pr_slots=args.pr_slots)
             if args.command == "reserve-staging":
                 payload.update(maximum=args.maximum)
+                if args.memory_gib is not None:
+                    payload.update(memory_gib=args.memory_gib)
             if args.command == "schedule":
                 slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
                 if (args.clear and slots) or (args.timezone and not slots):
@@ -317,30 +488,20 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                                allow_downgrade=args.allow_downgrade)
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
-            cache = config_dir() / "status-cache" / (entry["machine_id"] + ".json")
             try:
-                value = remote.call(
+                results[name] = remote.call(
                     entry["target"],
                     payload,
-                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging") or (action == "native-runner" and args.prepare) else 3 if action == "status" else 90,
+                    timeout=4500 if action == "prepare" else 2400 if action in ("enable", "reserve-staging", "infra-slots") or (action == "native-runner" and args.prepare) else 90,
                     expected_machine_id=entry["machine_id"],
                 )
-                results[name] = value
-                if args.command == "status":
-                    atomic(cache, dict(collected_at=time.time(), value=value))
             except FleetError as exc:
-                if args.command == "status" and cache.exists():
-                    saved = read(cache)
-                    results[name] = dict(
-                        saved["value"], error=str(exc), offline=True, collected_at=saved["collected_at"]
-                    )
-                else:
-                    results[name] = dict(error=str(exc))
+                results[name] = dict(error=str(exc))
         fleet = None
         if args.command == "status" and not args.host:
             distinct = {}
             for name, value in results.items():
-                distinct.setdefault(value.get("machine_id", entries[name]["machine_id"]), value)
+                distinct.setdefault(value.get("machine_id", selected[name]["machine_id"]), value)
             if len(distinct) > 1:
                 fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
         if args.command == "status":
@@ -377,7 +538,12 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 results["_fleet"] = dict(activity=fleet)
             print(json.dumps(results, indent=2))
         else:
-            for index, (name, value) in enumerate(results.items()):
+            if combined:
+                print_hosts(results)
+                for name, value in results.items() if args.workers else ():
+                    print(f"\n{name} workers:")
+                    worker_view.display(value.get("status") or {})
+            for index, (name, value) in enumerate(() if combined else results.items()):
                 if index:
                     print()
                 print(name + ":")
@@ -433,7 +599,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     if "ci_memory_budget_gib" in value:
                         print(f"CI aggregate physical RAM ceiling: {value['ci_memory_budget_gib']} GiB")
                     if value.get("ci_staging_slots"):
-                        print(f"Reserved for staging: {value['ci_staging_slots']} slots")
+                        print(f"Reserved for staging: {value['ci_staging_slots']} slots"
+                              + (f", {value['ci_staging_memory_gib']} GiB RAM each" if value.get("ci_staging_memory_gib") else ""))
                     if value.get("ci_staging_reservation_error"):
                         print("Staging reservation invalid: " + value["ci_staging_reservation_error"])
                     memory = status.get("worker_memory")

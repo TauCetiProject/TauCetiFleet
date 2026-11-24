@@ -48,6 +48,48 @@ slots. An image, namespace or mapping failure is explicit; it does not silently
 select a different backend. The compiler gate and shared slot/startup controls
 are unchanged. There are no canary slot selectors or native enable/disable flags.
 
+Protected `infra` slots (`ci_protected_slots` entries with kind `infra`, in the
+TauCetiInfra group) also use native-disk. They run our infrastructure
+repositories' CI, never take PR or staging work, and run at CPU weight 1000,
+between PR builds' 100 and staging's 10000: infra jobs are rare and someone is
+usually waiting on them, while nobody waits on any particular PR build. Once the broker
+authorizes the `infra` class for the host, set them live with:
+
+```sh
+tauceti-fleet infra-slots HOST --slots 8
+```
+
+Infra slots use their own native image, exported from the same verified VM base
+with what other repositories' ordinary GitHub workflows expect of GitHub's runner
+image: current Git (the git-core PPA), Node.js, and a runner-owned
+`/opt/hostedtoolcache` set as the tool cache, so `actions/setup-python` interpreters
+find their libraries. PR and staging slots keep the minimal image. Both native
+images include the system C compiler (`gcc`, as `cc`), which Lake uses for
+packages with C sources such as doc-gen4's dependencies; an export without a
+working `cc` fails rather than producing an image. Setup and live
+`update` prepare the infra image when the host has infra slots; an infra slot
+whose image is missing fails explicitly rather than falling back. Infra never
+runs in a VM: a slot converted to infra that still holds another class's
+pending registration cancels it and starts native.
+
+This places the slots directly above the PR slots and raises `ci_max_jobs` by
+their count, so PR slots and running guests are untouched. `--slots 0` removes
+them; removed slots finish their current job. The CI autoscaler sizes only the
+PR slots below them. On a host with infra slots it keeps that PR count fixed,
+because changing it would move the infra slot numbers.
+
+`--pr-slots N` sets that PR count in the same step, moving the infra slots to sit
+directly above the new count; `--pr-slots 0` leaves the host running only its
+infra slots:
+
+```sh
+tauceti-fleet infra-slots HOST --slots 12 --pr-slots 0
+```
+
+Busy guests in slots that change class or fall above the new count finish their
+job; idle guests in slots that move between PR and infra retire and restart in
+their new class.
+
 `native-runner HOST --prepare` remains available for an explicit image refresh;
 it is not required to enable PR CI through the standard setup.
 
@@ -60,9 +102,15 @@ copies work. Writable job files are never shared with another job.
 
 The systemd unit caps whole-job RAM at 54 GiB, disables job swap and preserves
 normal PR CPU priority. `LimitFSIZE` is unlimited because .NET's RAM-backed
-executable mapper otherwise fails. The existing ordinary PR startup RAM check
-(currently 20 GiB), lock and spacing apply to native jobs too. Clean host file
-cache is discounted in native memory estimates. Raw charge and peaks remain
+executable mapper otherwise fails. Unlike a VM's, every thread of a native
+job counts against the host's CI slice, so each job may hold 16,384 tasks and
+the slice 262,144; the old shared 16,384 starved Lean and leantar of threads
+once a few cache restores overlapped. The existing ordinary PR startup RAM check
+(currently 20 GiB), lock and spacing apply to native jobs too. Native infra jobs
+start two seconds after the previous start, like small control VMs, rather than
+ten: they have no VM boot to settle, and their short jobs would otherwise queue
+behind the gap. Clean host file cache is discounted in native memory estimates.
+Raw charge and peaks remain
 visible; the cap is not a reservation. The ordinary autoscaler forecasts future
 growth once and does not inflate VM estimates from native clean cache.
 
@@ -71,8 +119,9 @@ budget or the sum of native per-job caps, even when those caps fit that budget.
 
 Native startup checks for 48 GiB free on the instance filesystem before JIT
 registration. This is an estimate for population plus the host margin, not a disk
-reservation. A 56 GiB whole-instance allocated-disk budget and 8 GiB host free-space
-threshold are monitored. These are **not hard filesystem quotas**; bursts and
+reservation. A 128 GiB whole-instance allocated-disk budget and 8 GiB host free-space
+threshold are monitored. The budget must admit a from-source build of the whole
+library, which the nightly verification runs on these slots. These are **not hard filesystem quotas**; bursts and
 other writers can exceed a budget between observations. No quota provisioning or
 FUSE is required.
 
@@ -81,7 +130,12 @@ Allocated disk is measured by one bounded whole-instance scan at most every
 five minutes, with a two-minute scan deadline; slow scans do not block the cheap
 checks. Scanner diagnostics cannot fill an unread pipe. A failed scan retains
 the last verified value and its original timestamp, with its error and age
-reported explicitly. Three consecutive failed scans still stop the instance.
+reported explicitly. A scan that reports a total after `du` met vanishing or unreadable files (exit 1)
+counts as a measurement, not a failure. Telemetry counts such partial scans
+(`disk_scan_partial_total`, and `disk_scan_partial_streak` among consecutive accepted
+measurements; a failed scan neither extends nor resets it), so a subtree `du` never reads
+stays visible. Three consecutive failed scans still stop
+the instance.
 Telemetry includes scan duration, deadline and interval for live verification.
 A budget breach, low space, inode exhaustion or resource-monitor failure is an
 infrastructure failure. Only the affected instance is stopped and cleaned up.
