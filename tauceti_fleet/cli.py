@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import activity, broker, host, pool_activity, remote, targets, worker_view
+from . import activity, attention, broker, host, pool_activity, remote, targets, worker_view
 from .activity_summary import amount
 from .store import FleetError, atomic, config_dir, read
 
@@ -128,6 +128,11 @@ def parser():
     destination.add_argument("--dir", dest="directory", help="existing absolute directory on the host")
     destination.add_argument("--clear", action="store_true")
     export.add_argument("--json", action="store_true")
+    needs = sub.add_parser("attention", help="list what is waiting for a person, or acknowledge it")
+    needs.add_argument("host", nargs="?")
+    needs.add_argument("--ack", metavar="PR|ID|all", help="archive the records of this pull request or ack id, or every record; needs a host")
+    needs.add_argument("--lookup", action="store_true", help="ask each pull request's forge for its state and that of the ones it names")
+    needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     sub.add_parser("ci-autoscale", help="run the CI autoscaler for one host (the installed unit's command)")
@@ -366,6 +371,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                              "--env, --unset-env or --swap-gib")
         if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
+        if args.command == "attention" and args.ack and not args.host:
+            raise FleetError("Acknowledging requires one explicit host; listing may cover the fleet")
         selected = {}
         for name in args.host if args.command == "status" else [args.host] if args.host else []:
             entry = local_entry() if name == "local" else remote.resolve(name)
@@ -474,6 +481,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["directory"] = args.directory
                 if args.clear:
                     payload["clear"] = True
+            if args.command == "attention":
+                payload.update(ack=args.ack, lookup=args.lookup)
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"],
                                allow_downgrade=args.allow_downgrade)
@@ -540,6 +549,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
+                elif args.command == "attention" and "items" in value:
+                    attention.display(name, value)
                 elif args.command == "targets" and "error" not in value:
                     targets.display(value)
                 elif args.command == "status" and "status" in value:
@@ -551,6 +562,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         if _status_results is not None:
                             print(value.get("error", "Live reports unavailable"))
                         print()
+                    needs = attention.status_lines(name, value.get("attention") or {})
+                    if needs:
+                        print("\n".join(needs) + "\n")
                     workers = status.get("workers")
                     if isinstance(workers, list):
                         running = sum(w.get("state") == "running" for w in workers)
