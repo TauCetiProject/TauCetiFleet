@@ -9,6 +9,10 @@ description = "User-level deployment and reporting for TauCeti worker and CI fle
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+# `ci_autoscale --github-app-dir` signs the App JWT with it.
+app = ["cryptography>=41"]
+
 [project.scripts]
 tauceti-fleet = "tauceti_fleet.cli:main"
 

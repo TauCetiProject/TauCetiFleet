@@ -24,7 +24,7 @@ BACKLOG_SCHEMA = "tauceti.operations.backlog/v1"
 BACKLOG_STATES = ("pending", "queued", "in_progress", "stuck", "unconfirmed")
 POOL_NAMES = {
     "github": "GitHub", "namespace": "Namespace",
-    "fleet-4fab2fed9a51": "Chris", "fleet-0fb9966f7c40": "Brett",
+    "fleet-4fab2fed9a51": "Chris (eastanglia)", "fleet-0fb9966f7c40": "Brett",
     "fleet-11e2756fc110": "Tauchonki", "fleet-a26dbb028408": "Yaël",
 }
 
@@ -226,14 +226,84 @@ def pressure_rows(path, identity, account, policies):
         counts[scope] = sum(not row["pr"].get("isDraft") and row["pr"].get("author", {}).get("login") == account for row in rows)
     return [
         dict(scope=area, skip=",".join(skipped), count=count, limit=limit, blocked=count >= limit,
-             observed_at=stat.st_mtime)
+             observed_at=stat.st_mtime, sources=dict(github=count))
         for area, excluded, limit in policies
         if excluded == skipped and type(count := counts.get(area)) is int and count >= 0
     ]
 
 
+REPORT_LIFETIME = 6 * 3600  # longer than a slow round, so a busy worker keeps its last report
+
+
+def report_coverage(report):
+    """(sources, forges, complete) of a worker's authoring report, or None when malformed.
+
+    A current worker counts the account's open PRs on every project forge, reading the ones it does
+    not survey, and says whether every count was known. An older worker counted only the forges it
+    surveyed and reports no `complete`."""
+    sources = report.get("sources", {})
+    if not isinstance(sources, dict) or any(
+            not isinstance(name, str) or type(value) is not int or value < 0 for name, value in sources.items()):
+        return None
+    forges = report.get("forges", sorted(sources))
+    complete = report.get("complete")
+    if (not isinstance(forges, list) or any(not isinstance(name, str) for name in forges)
+            or not set(sources) <= set(forges) or complete not in (None, True, False)):
+        return None
+    return sources, sorted(forges), complete
+
+
+def reported_pressure_rows(config, account, policies):
+    """Rows from the authoring backpressure live workers report for their own rounds.
+
+    Workers on one machine may survey different forges. The row shown for a scope is the newest
+    report that counted every project forge; a report that counted fewer (an older worker, or one
+    whose other-forge count was unavailable) is used only when no complete report exists, so the
+    displayed count does not change with whichever worker reported last."""
+    prefix = "fleet-" + config["machine_id"][:8] + "-"
+    rows, ranks = {}, {}
+    now = time.time()
+    for path in (state_dir() / "workers").glob("*.json"):
+        try:
+            value = read(path, {})
+        except (OSError, FleetError, ValueError):
+            continue
+        if not str(value.get("id", "")).startswith(prefix) or not value.get("alive"):
+            continue
+        spec = value.get("applied_spec") or {}
+        if value.get("github_account", spec.get("github_account", account)) != account:
+            continue
+        report = value.get("authoring")
+        if not isinstance(report, dict):
+            continue
+        count, limit, stamp = report.get("count"), report.get("limit"), report.get("observed_at")
+        scope, skip = report.get("scope"), report.get("skip", "")
+        if (type(count) is not int or count < 0 or type(limit) is not int or limit <= 0
+                or type(stamp) not in (int, float) or not math.isfinite(stamp)
+                # Never from the future (status rejects that), and not left over from long ago:
+                # a worker that stopped reporting yields to cached surveys.
+                or not now - REPORT_LIFETIME <= stamp <= now + 5
+                or not isinstance(scope, str) or not isinstance(skip, str)
+                or (coverage := report_coverage(report)) is None):
+            continue
+        sources, forges, complete = coverage
+        rank = (complete is True, len(sources), stamp)
+        skipped = tuple(sorted(set(filter(None, skip.split(",")))))
+        for area, excluded, policy_limit in policies:
+            matches = area == scope or (area in ("any", "auto") and scope in ("any", "auto"))
+            if not matches or excluded != skipped or policy_limit != limit:
+                continue
+            key = (area, ",".join(skipped), limit)
+            if key not in ranks or rank > ranks[key]:
+                ranks[key] = rank
+                rows[key] = dict(scope=area, skip=",".join(skipped), count=count, limit=limit,
+                                 blocked=count >= limit or complete is False, observed_at=stamp,
+                                 sources=sources, forges=forges, complete=complete)
+    return rows
+
+
 def pressure(config):
-    """Reuse complete survey responses for this machine's live Fleet workers."""
+    """Reuse this machine's live Fleet workers' own reports and complete survey responses."""
     policies = worker_policies(config)
     if not policies:
         raise FleetError("No Fleet worker role configured")
@@ -244,7 +314,10 @@ def pressure(config):
     identity = hashlib.sha256((base + "\0" + token).encode()).hexdigest()
     root = Path(os.environ.get("TAUCETI_GITHUB_SHARED_DIR", Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "tauceti/github-shared"))
     directory = root / "gateway" / identity / "responses"
-    scopes = {}
+    # What a worker enforced wins for its scope: a cached GitHub survey counts GitHub alone, and
+    # a fleet working on Forgejo stops producing those. Cached surveys fill the other scopes.
+    reported = reported_pressure_rows(config, account, policies)
+    scopes = dict(reported)
     seen = set()
     deadline = time.monotonic() + 5
 
@@ -255,7 +328,7 @@ def pressure(config):
         try:
             for row in pressure_rows(path, identity, account, policies):
                 key = (row["scope"], row["skip"], row["limit"])
-                if row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
+                if key not in reported and row["observed_at"] > scopes.get(key, {}).get("observed_at", -1):
                     scopes[key] = row
         except (OSError, FleetError, KeyError, TypeError, ValueError):
             pass
@@ -267,7 +340,8 @@ def pressure(config):
         args = dict(roadmap=scope, skip=",".join(skip), numbers="", stages=stages)
         key = hashlib.sha256(json.dumps([REPOSITORY, "survey", args, False], sort_keys=True).encode()).hexdigest()
         observe(directory / (key + ".json"))
-    if len(scopes) < len(policies) or any(scope in ("auto", "any") for scope, _, _ in policies):
+    if directory.is_dir() and (len(scopes) < len(policies) or any(
+            scope in ("auto", "any") and (scope, ",".join(skip), limit) not in reported for scope, skip, limit in policies)):
         newest = []
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -286,7 +360,7 @@ def pressure(config):
                 break
             observe(Path(path))
     if not scopes:
-        raise FleetError("No complete cached survey for this machine's Fleet worker scopes")
+        raise FleetError("No worker report or complete cached survey for this machine's Fleet worker scopes")
     rows = list(scopes.values())
     return dict(account=account, machine_id=config["machine_id"], scopes=rows), max(r["observed_at"] for r in rows)
 
@@ -404,7 +478,9 @@ def source_value(name, source):
             if not isinstance(data.get("account"), str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", data["account"]) or not isinstance(data.get("scopes"), list):
                 return None
             if any(not isinstance(r, dict) or not integer(r.get("count")) or not integer(r.get("limit")) or r["limit"] == 0
-                   or type(r.get("blocked")) is not bool or r["blocked"] != (r["count"] >= r["limit"])
+                   or type(r.get("blocked")) is not bool
+                   or r["blocked"] != (r["count"] >= r["limit"] or r.get("complete") is False)
+                   or report_coverage(r) is None
                    or not timestamp(r.get("observed_at")) or not isinstance(r.get("scope"), str) or not r["scope"].isprintable()
                    or not isinstance(r.get("skip"), str) for r in data["scopes"]):
                 return None
@@ -562,6 +638,11 @@ def display(value, *, section="all"):
         parts = []
         for limit, row in sorted(rows.items()):
             parts.append(f"{row['count']}/{limit}" + (" blocked" if row["blocked"] else ""))
+            sources, forges, complete = report_coverage(row)
+            if forges:
+                # Per-forge counts; an unknown count blocks authoring, so it is never shown as zero.
+                parts[-1] += " (" + ", ".join(
+                    f"{forge} {sources[forge]}" if forge in sources else f"{forge} unknown" for forge in forges) + ")"
             scope_age = max(0, int(time.time() - row["observed_at"]))
             if scope_age > 600 and row["observed_at"] < newest:
                 parts[-1] += f" (stale {scope_age}s)"

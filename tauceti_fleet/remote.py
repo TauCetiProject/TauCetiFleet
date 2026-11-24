@@ -102,6 +102,9 @@ print(json.dumps(dict(installed=True,release=digest)))
 
 REVISION = re.compile(r"[a-f0-9]{40}")
 REPOSITORY = "TauCetiProject/TauCetiFleet"
+# A live update may export both native images (up to 2,100 s each: the export VM
+# plus extraction) before worker staging and handover.
+LIVE_UPDATE_TIMEOUT = 5400
 
 INSTALLED_REVISION = r"""import json,os,pathlib
 base=pathlib.Path(os.environ.get('TAUCETI_FLEET_DATA',pathlib.Path.home()/'.local/share/tauceti-fleet')).expanduser()
@@ -300,12 +303,12 @@ def deploy(target, *, live=False, expected_machine_id=None, allow_downgrade=Fals
     if target != "local":
         command = "python3 -c " + shlex.quote(BOOTSTRAP)
         command += "".join(" " + shlex.quote(a) for a in args)
-        result = ssh(target, command, input=archive(), timeout=3000 if live else 120)
+        result = ssh(target, command, input=archive(), timeout=LIVE_UPDATE_TIMEOUT if live else 120)
     else:
         import sys
 
         python = getattr(sys, "_base_executable", sys.executable)
-        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=3000 if live else 120)
+        result = run([python, "-c", BOOTSTRAP, *args], input=archive(), timeout=LIVE_UPDATE_TIMEOUT if live else 120)
     try:
         reply = json.loads(result.stdout)
     except ValueError:

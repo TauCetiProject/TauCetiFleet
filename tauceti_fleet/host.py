@@ -18,13 +18,14 @@ from . import (
     ci_priority,
     focus,
     github,
+    lean_pressure,
     native_runner,
     shared_host,
     targets,
     vm,
     worker_view,
 )
-from .capabilities import GIB, doctor, memory_pressure, resources, task_observation, worker_memory
+from .capabilities import GIB, clean_file_bytes, doctor, memory_pressure, resources, task_observation, worker_memory
 from .process import executable, run
 from .report import snapshot
 from .store import (
@@ -39,11 +40,15 @@ from .store import (
     read,
     state_dir,
     update_host,
+    change_host,
 )
 
 # Resolve once: switching the current symlink must not make an old controller
 # report that it is already running the newly installed release.
 RUNNING_RELEASE = str(Path(__file__).resolve().parent.parent)
+# Lifetime of an admission decision. Workers reject a policy expiring more than 30 s ahead
+# (tauceti_worker/fleet_capacity.py), so this stays below that.
+ADMISSION_TTL = 25
 
 
 def command():
@@ -139,8 +144,10 @@ def configure(payload):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
     capacity.staging_slots(dict(current, **updates))
+    # Worker definition settings apply between rounds, like `workers`; the rest need a drain.
+    live = {"max_open_prs", "author_model", "author_effort", "github_state_url"}
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
-        if any(current.get(k) != v for k, v in updates.items()):
+        if any(current.get(k) != v for k, v in updates.items() if k not in live):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
         if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
@@ -165,6 +172,8 @@ def configure(payload):
     value = update_host(validate=capacity.staging_slots, **updates)
     if not value["ci_allowed"]:
         value = update_host(ci_enabled=False)
+    if value["workers_enabled"]:
+        worker_config(value)
     # Inactive installation never adopts or starts the existing worker fleet.
     service_error = None
     try:
@@ -210,6 +219,24 @@ def worker_headroom(caps, *, ci_busy=False):
     return reserve
 
 
+def worker_cache_headroom(caps, *, ci_busy=False):
+    """Headroom the worker slice's memory.high leaves for active CI: one worst-case Lean file.
+
+    Admission still pauses at worker_headroom's two-file gate. CI's gate counts reclaimable
+    page cache as available, so worker file cache between the two still yields to CI.
+    Holding memory.high at two files squeezed worker cache until Lean re-read oleans from
+    disk (chungus5, 24 Nov 2026: 3 GiB of worker cache, 77k refaults/s, both NVMe at 100%).
+    """
+    reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+    if ci_busy:
+        from . import lean_pressure
+
+        total = capacity.shared_memory_bytes(caps)
+        one_file = int(total * (1 - lean_pressure.memory_limit(total, staging=True) / 100))
+        reserve = min(max(reserve, one_file) + GIB, worker_headroom(caps, ci_busy=True))
+    return reserve
+
+
 def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False, share=1):
     """Use this install's share of presently spare RAM; retain a fixed host/swap emergency bound.
 
@@ -218,7 +245,7 @@ def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False, share=1):
     processes grow, MemAvailable falls and the existing controller lowers high.
     Only high moves during work: lowering max could kill an active paid round.
     """
-    reserve = worker_headroom(caps, ci_busy=ci_busy)
+    reserve = worker_cache_headroom(caps, ci_busy=ci_busy)
     maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
@@ -291,6 +318,91 @@ def announced_ci_busy():
     return False
 
 
+REPAIR_SLICE = "tauceti-repair.slice"
+# Task (thread) limits. A QEMU guest costs the host a few dozen threads, but every
+# thread of a native guest's Lake, Lean and leantar counts against the CI slice: one
+# PR build's cache restore peaked at 6,666 tasks on chungus5, and 27 guests sharing
+# 16,384 made Lean and leantar fail with "Resource temporarily unavailable" (23 Nov
+# 2026). Each native guest has its own native_runner.TASKS_MAX; the slice only bounds
+# their sum (on chungus5 well below RLIMIT_NPROC 513,578 and threads-max 1,027,156).
+WORKER_TASKS_MAX = 16384
+CI_TASKS_MAX = 262144
+FLEET_TASKS_MAX = CI_TASKS_MAX + WORKER_TASKS_MAX
+# Free memory kept under the shared ceiling ahead of repair: the new-guest start
+# check's requirement, which also exceeds the normal two-file compiler headroom.
+REPAIR_HEADROOM = max(vm.START_MEMORY_BYTES, 2 * lean_pressure.WORST_FILE_RSS_BYTES) + GIB
+
+
+def refresh_repair_memory():
+    """Give TauCetiWorker's repair slice what the VMs leave under the shared ceiling.
+
+    memory.high follows repair's unreclaimable use plus the free memory under the
+    ceiling, less REPAIR_HEADROOM: far above repair's use while the VMs are quiet,
+    and below it while a staging build grows, so the kernel reclaims, swaps and
+    slows repair before the VMs reach the ceiling. None where there is no repair slice.
+    """
+    result = run(["systemctl", "--user", "show", REPAIR_SLICE, "-p", "ControlGroup", "--value"], check=False)
+    relative = (result.stdout or "").strip() if result.returncode == 0 else ""
+    cg = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    if not relative or not cg.is_dir():
+        return None
+    _, available = lean_pressure.memory(relative)
+    stats = {k: int(v) for k, v in (line.split() for line in (cg / "memory.stat").read_text().splitlines())}
+    pinned = max(0, int((cg / "memory.current").read_text()) - clean_file_bytes(stats))
+    high = max(GIB, pinned + available - REPAIR_HEADROOM)
+    current = (cg / "memory.high").read_text().strip()
+    # Same write as the workers slice: skip small rises, never block on reclaim.
+    if current == "max" or high < int(current) or high - int(current) >= 256 * 1024**2:
+        fd = os.open(cg / "memory.high", os.O_WRONLY | os.O_TRUNC | os.O_NONBLOCK)
+        try:
+            os.write(fd, str(high).encode())
+        finally:
+            os.close(fd)
+    return dict(high=int((cg / "memory.high").read_text()), pinned=pinned, available=available)
+
+
+def install_ceiling(caps):
+    """Write the shared hard ceiling; True when a unit file changed.
+
+    The existing hyphenated child slice names already belong to this parent.
+    Both may use free RAM; their combined usage still leaves OS/swap headroom.
+    The hard ceiling sits one level up, on tauceti.slice, so it also covers work
+    that yields to the VMs from beside this slice (TauCetiWorker's repair slice).
+    VM memory is never swapped, so reclaim at the ceiling takes that work's memory,
+    and its compiler admission, which reads every capped ancestor, measures it too.
+    """
+    changed = False
+    for name, text in (("tauceti.slice", f"[Slice]\nMemoryMax={int(capacity.shared_memory_bytes(caps))}\n"),
+                       ("tauceti-fleet.slice", f"[Slice]\nTasksMax={FLEET_TASKS_MAX}\n")):
+        path = units() / name
+        if not path.exists() or path.read_text() != text:
+            path.write_text(text)
+            changed = True
+    # Only enable writes the CI slice; a live update carries its task limit forward.
+    return set_tasks_max("tauceti-fleet-ci.slice", CI_TASKS_MAX) or changed
+
+
+def set_tasks_max(name, value):
+    """Rewrite only the TasksMax of an existing Fleet slice unit; True when it changed."""
+    path = units() / name
+    if not path.exists():
+        return False
+    lines = path.read_text().splitlines()
+    if "[Slice]" not in lines:
+        return False  # Not a unit this module wrote; the next enable rewrites it.
+    setting = f"TasksMax={value}"
+    old = [i for i, line in enumerate(lines) if line.split("=", 1)[0].strip() == "TasksMax"]
+    if old:
+        updated = [setting if i == old[0] else line for i, line in enumerate(lines) if i not in old[1:]]
+    else:
+        updated = list(lines)
+        updated.insert(updated.index("[Slice]") + 1, setting)
+    if updated == lines:
+        return False
+    path.write_text("\n".join(updated) + "\n")
+    return True
+
+
 def write_slices(config, caps):
     reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
     shared = capacity.shared_memory_bytes(caps)
@@ -319,19 +431,40 @@ def write_slices(config, caps):
             "Insufficient memory for bounded workers after CI and OS reservations; configure a smaller CI shape or --no-ci"
         )
     worker = max(16 * 1024**2, worker)
-    # The existing hyphenated child slice names already belong to this parent.
-    # Both may use free RAM; their combined usage still leaves OS/swap headroom.
-    (units() / "tauceti-fleet.slice").write_text(
-        f"[Slice]\nMemoryHigh={int(shared)}\nMemoryMax={int(shared)}\nTasksMax=32768\n"
-    )
+    install_ceiling(caps)
     for name, weight, maximum in (("ci", 1000, ci or caps["memory_total"] - reserve), ("workers", 10, worker)):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
-            + (f"MemorySwapMax={GIB}\n" if name == "workers" else "")
-            + "TasksMax=16384\n"
+            + (f"MemorySwapMax={workers_swap_bytes(config)}\n" if name == "workers" else "")
+            + f"TasksMax={CI_TASKS_MAX if name == 'ci' else WORKER_TASKS_MAX}\n"
         )
     run(["systemctl", "--user", "daemon-reload"])
     return worker
+
+
+def workers_swap_bytes(config):
+    """Swap the workers slice may use: host.json `workers_swap_gib`, 1 GiB by default."""
+    value = config.get("workers_swap_gib", 1)
+    if type(value) is not int or not 0 <= value <= 1024:
+        raise FleetError("workers_swap_gib must be an integer from 0 to 1024")
+    return value * GIB
+
+
+def apply_workers_swap(config):
+    """Rewrite only the workers slice's swap line; systemd applies it to the running slice."""
+    path = units() / "tauceti-fleet-workers.slice"
+    if not path.exists():
+        return  # The next enable writes the slice with this setting.
+    setting = f"MemorySwapMax={workers_swap_bytes(config)}"
+    lines = path.read_text().splitlines()
+    swaps = [i for i, line in enumerate(lines) if line.startswith("MemorySwapMax=")]
+    if swaps:
+        lines[swaps[0]] = setting
+        lines = [line for i, line in enumerate(lines) if i not in swaps[1:]]
+    else:
+        lines.insert(lines.index("[Slice]") + 1 if "[Slice]" in lines else len(lines), setting)
+    path.write_text("\n".join(lines) + "\n")
+    run(["systemctl", "--user", "daemon-reload"])
 
 
 def toml_value(value):
@@ -345,10 +478,18 @@ def worker_config(config):
     with locked(config_dir() / "worker-policy.lock"):
         current = host_config()
         config = dict(config)
-        for field in ("self_tested", "forgejo_workers", "worker_env", "roadmap_targets"):
+        for field in ("self_tested", "forgejo_workers", "maintenance_workers", "both_forge_workers",
+                      "github_first_workers", "review_first_workers", "forgejo_first_workers", "worker_env",
+                      "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
+
+
+# TauCetiWorker's unrestricted stages, without roadmap authoring: `progress` stays, since its globally
+# paced TauCetiRoadmap reports are not new mathematics. The overlap stages are left out:
+# overlap-fix opens repair PRs, and either one keeps a round off the worker's both-forge discovery.
+MAINTENANCE_STAGES = ("rebase", "bump", "lint-repair", "progress", "fix-ci", "fix", "review")
 
 
 def _worker_config(config):
@@ -385,12 +526,39 @@ def _worker_config(config):
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
         worker_fields = dict(fields)
-        if config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
+        # Not capped by this snapshot's maximum: a stale controller snapshot must not drop the
+        # policy from slots it preserves, and set_worker_policy keeps the count within the maximum.
+        maintenance = config.get("maintenance_workers", 0)
+        if n < maintenance + config.get("both_forge_workers", 0):
+            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo")
+            if n < maintenance:
+                # Maintenance slots tend existing PRs on both forges and never run roadmap rounds; the
+                # lowest numbers keep admission priority, so a lowered ceiling never strands either forge.
+                worker_fields["only"] = list(MAINTENANCE_STAGES)
+            # The both-forge slots after them run every stage: PR work on either forge first, then
+            # roadmap authoring on Forgejo when neither forge has claimable PR work. The preferences
+            # below cover the lowest slots of both kinds together.
+            if n < config.get("github_first_workers", 0):
+                # The lowest slots walk GitHub's landing tiers before Forgejo's, so GitHub
+                # fixes drain while the other slots take Forgejo's re-reviews first.
+                worker_fields["prefer_forge"] = "github"
+            elif n < config.get("github_first_workers", 0) + config.get("review_first_workers", 0):
+                # The next both-forge slots offer re-reviews and first reviews before rebases and
+                # fixes, so approvals keep reaching the queue while long rebases hold the others.
+                worker_fields["review_first"] = True
+            elif n < (config.get("github_first_workers", 0) + config.get("review_first_workers", 0)
+                      + config.get("forgejo_first_workers", 0)):
+                # The slots after those walk Forgejo's landing tiers before GitHub's, so Forgejo
+                # work keeps moving while GitHub's per-account posting limit holds GitHub reviews.
+                worker_fields["prefer_forge"] = "forgejo"
+        elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
+            elif isinstance(value, list):
+                lines.append(key + " = [" + ", ".join(toml_value(v) for v in value) + "]")
             elif value is not None:
                 lines.append(key + " = " + (str(value).lower() if isinstance(value, bool) else toml_value(value)))
     path = config_dir() / "workers.toml"
@@ -506,7 +674,15 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
             and capacity.kinds(proposed) == capacity.kinds(config)
             and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
         )
-        if changed and not growing and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
+        # Dropping PR from a host with a staging reservation is live too: the
+        # reserved and protected guests keep their shape and labels, and the
+        # other slots retire their runners as their jobs finish.
+        narrowing = (
+            capacity.kinds(config) == ["pr", "staging"] and capacity.kinds(proposed) == ["staging"]
+            and capacity.staging_slots(config) > 0 and capacity.jobs(proposed) == capacity.jobs(config)
+            and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
+        )
+        if changed and not (growing or narrowing) and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
             raise FleetError("Drain this host and wait for every CI slot to retire before changing its CI classes or capacity")
         config = proposed
     result = doctor(config)
@@ -547,34 +723,77 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
                 ci_memory_budget_gib=capacity.memory_budget_gib(value))
 
 
-def reserve_staging(maximum):
-    """Change future guest classes without stopping guests or either admission role."""
+def reserve_staging(maximum, memory_gib=None):
+    """Change future guest classes without stopping guests or either admission role.
+
+    ``memory_gib`` sets the reserved guests' virtual RAM (0 restores the shared CI
+    ceiling); None keeps the current setting. Running guests keep their size.
+    """
     config = host_config()
-    proposed = dict(config, ci_staging_slots=maximum)
-    capacity.staging_slots(proposed)
+    changes = dict(ci_staging_slots=maximum)
+    if memory_gib is not None:
+        if type(memory_gib) is not int or not 0 <= memory_gib <= 4096:
+            raise FleetError("The staging guest memory must be an integer from 0 to 4096 GiB")
+        changes["ci_staging_memory_gib"] = memory_gib or None
+    proposed = dict(config, **changes)
+
+    def validate(value):
+        capacity.staging_slots(value)
+        capacity.staging_memory_gib(value)
+
+    validate(proposed)
     if config["ci_enabled"]:
         native_runner.prepare_for_ci(proposed)
-    value = update_host(ci_staging_slots=maximum, validate=capacity.staging_slots)
+    value = update_host(validate=validate, **changes)
+    staging_memory = capacity.staging_memory_gib(value)
     pending = []
     for index in range(maximum):
         guest = read(vm.slot_file({"ci_slot": index}, "vm.json"), {})
-        if guest and guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]:
+        if guest and (guest.get("ci_kinds", capacity.kinds(config)) != ["staging"]
+                      or (guest.get("memory_gib") is not None and not native_runner.is_native(guest)
+                          and guest["memory_gib"] != capacity.guest_shape(capacity.for_slot(value, index))["memory_gib"])):
             pending.append(index)
         elif not guest:
             intent = read(vm.slot_file({"ci_slot": index}, "ci-registration.json"), {})
             if intent and intent.get("ci_kinds") != ["staging"]:
                 pending.append(index)
-    event("ci_staging_reservation", staging_slots=maximum, pending_slots=pending)
-    return dict(ci_staging_slots=maximum, ci_max_jobs=capacity.jobs(value),
+    event("ci_staging_reservation", staging_slots=maximum, staging_memory_gib=staging_memory, pending_slots=pending)
+    return dict(ci_staging_slots=maximum, ci_staging_memory_gib=staging_memory, ci_max_jobs=capacity.jobs(value),
                 ci_enabled=value["ci_enabled"], workers_enabled=value["workers_enabled"],
                 pending_slots=pending)
 
 
+def set_infra_slots(count, pr=None):
+    """Run `count` infra slots above the PR slots, optionally resizing the PR slots to `pr`.
+
+    Both change in one step, so the autoscaler never sees the host without its
+    infra slots. Added slots start on the controller's next loop; removed ones
+    finish their job. A slot that moves between PR and infra takes its new class
+    once its current guest finishes its job or, if idle, at once.
+    """
+    config = host_config()
+    if not config.get("ci_broker_url"):
+        raise FleetError("Infra slots register through the CI broker; enroll this host first")
+    policy = github.capacity_policy(config)
+    group = (policy.get("groups") or {}).get("infra")
+    proposed = capacity.with_infra_slots(config, count, group, pr)
+    capacity.authorize(proposed, policy)
+    if config["ci_enabled"]:
+        native_runner.prepare_for_ci(proposed)
+    # Recompute from the locked current file: the autoscaler may write meanwhile.
+    value = change_host(lambda current: capacity.with_infra_slots(current, count, group, pr))
+    event("ci_infra_slots", count=count, ci_max_jobs=value["ci_max_jobs"])
+    return dict(infra_slots=capacity.infra_slots(value), pr_slots=capacity.pr_jobs(value),
+                ci_max_jobs=capacity.jobs(value), ci_enabled=value["ci_enabled"])
+
+
 def drain():
     update_host(ci_enabled=False, workers_enabled=False, draining=True)
-    atomic(
-        state_dir() / "admission.json", dict(version=1, expires_at=time.time() + 15, workers=[], reason="host draining")
-    )
+    with admission_lock():
+        atomic(
+            state_dir() / "admission.json",
+            dict(version=1, expires_at=time.time() + 15, workers=[], reason="host draining"),
+        )
     return dict(state="draining", detail="Active work finishes; no new worker rounds or CI guests are admitted")
 
 
@@ -587,23 +806,26 @@ def worker_pool_pressure():
     return bool(memory_pressure(worker_memory(), resources()))
 
 
-def set_worker_maximum(maximum, *, lease_seconds=None):
+def set_worker_maximum(maximum, *, lease_seconds=None, validate=None):
     """Set admissions; optional short leases allow external automation to fail closed."""
     if type(maximum) is not int or not 0 <= maximum <= 4096:
         raise FleetError("Worker maximum must be an integer from 0 to 4096")
     lease = state_dir() / "worker-admission-lease.json"
-    if lease_seconds is None:
-        lease.unlink(missing_ok=True)
-    else:
+    if lease_seconds is not None:
         if type(lease_seconds) is not int or not 30 <= lease_seconds <= 3600:
             raise FleetError("Admission lease must be 30 to 3600 seconds")
+        # Written before the maximum, so a leased ceiling always fails closed.
         atomic(lease, dict(expires_at=time.time() + lease_seconds))
-    update_host(max_workers=maximum)
+    update_host(max_workers=maximum, validate=validate)
+    if lease_seconds is None:
+        # Removed only once the new maximum is committed: a refused change keeps the old lease.
+        lease.unlink(missing_ok=True)
     if maximum == 0:
-        atomic(
-            state_dir() / "admission.json",
-            dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
-        )
+        with admission_lock():
+            atomic(
+                state_dir() / "admission.json",
+                dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
+            )
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
@@ -667,9 +889,20 @@ def set_worker_policy(payload):
     maximum = payload.get("maximum")
     local = payload.get("self_tested")
     native = payload.get("forgejo_workers")
+    maintenance = payload.get("maintenance_workers")
+    both = payload.get("both_forge_workers")
+    github_first = payload.get("github_first_workers")
+    review_first = payload.get("review_first_workers")
+    forgejo_first = payload.get("forgejo_first_workers")
     environment = payload.get("worker_env")
-    if maximum is None and local is None and native is None and environment is None:
-        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo worker count or worker environment")
+    swap = payload.get("swap_gib")
+    if (maximum is None and local is None and native is None and maintenance is None and both is None
+            and github_first is None and review_first is None and forgejo_first is None and environment is None
+            and swap is None):
+        raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance, both-forge, "
+                         "GitHub-first, review-first or Forgejo-first worker count, worker environment or swap")
+    if swap is not None:
+        workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
         environment = merged_worker_env(host_config().get("worker_env"), environment)
     if local is not None and type(local) is not bool:
@@ -679,36 +912,132 @@ def set_worker_policy(payload):
     if native is not None:
         if type(native) is not int or not 0 <= native <= 4096:
             raise FleetError("Forgejo worker count must be an integer from 0 to 4096")
-    if maximum is not None or native is not None:
-        current = host_config()
-        ceiling = maximum if maximum is not None else current["max_workers"]
+    if maintenance is not None:
+        if type(maintenance) is not int or not 0 <= maintenance <= 4096:
+            raise FleetError("Maintenance worker count must be an integer from 0 to 4096")
+    if both is not None:
+        if type(both) is not int or not 0 <= both <= 4096:
+            raise FleetError("Both-forge worker count must be an integer from 0 to 4096")
+    if github_first is not None:
+        if type(github_first) is not int or not 0 <= github_first <= 4096:
+            raise FleetError("GitHub-first worker count must be an integer from 0 to 4096")
+    if review_first is not None:
+        if type(review_first) is not int or not 0 <= review_first <= 4096:
+            raise FleetError("Review-first worker count must be an integer from 0 to 4096")
+    if forgejo_first is not None:
+        if type(forgejo_first) is not int or not 0 <= forgejo_first <= 4096:
+            raise FleetError("Forgejo-first worker count must be an integer from 0 to 4096")
+    preferences = (github_first, review_first, forgejo_first)
+    if maintenance is not None or both is not None or any(value is not None for value in preferences):
+        current = dict(host_config())
+        for field, value in (("maintenance_workers", maintenance), ("both_forge_workers", both),
+                             ("github_first_workers", github_first), ("review_first_workers", review_first),
+                             ("forgejo_first_workers", forgejo_first)):
+            if value is not None:
+                current[field] = value
+        _preferences_within_maintenance(current)
+    # Each count is held to the ceiling only when it or the maximum changes: lowering the maximum
+    # elsewhere (a pause) must not block unrelated policy changes.
+    forgejo_checked = maximum is not None or native is not None
+    tending_checked = maximum is not None or maintenance is not None or both is not None
+    current = host_config()
+    ceiling = maximum if maximum is not None else current["max_workers"]
+    if forgejo_checked:
         selected = native if native is not None else current.get("forgejo_workers", 0)
         if selected > ceiling:
             raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
-    if native:
+    if tending_checked:
+        tending = maintenance if maintenance is not None else current.get("maintenance_workers", 0)
+        if tending > ceiling:
+            raise FleetError("Maintenance worker count exceeds the worker maximum; lower --maintenance-workers with --max")
+        _both_forge_within_maximum(dict(current, max_workers=ceiling, maintenance_workers=tending,
+                                        both_forge_workers=both if both is not None
+                                        else current.get("both_forge_workers", 0)))
+    if native or maintenance or both:
         require_source_selection_support()
         require_forgejo_credential()
+    if github_first:
+        require_worker_support("prefer_forge", "--github-first-workers")
+    if review_first:
+        require_worker_support("review_first", "--review-first-workers")
+    if forgejo_first:
+        require_worker_support("prefer_forge", "--forgejo-first-workers")
     if local is True:
         require_self_tested_support()
     current = host_config()
-    spec_changes = local is not None or native is not None or environment is not None
+    spec_changes = (local is not None or native is not None or maintenance is not None or both is not None
+                    or any(value is not None for value in preferences) or environment is not None)
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
-    result = set_worker_maximum(maximum) if maximum is not None else {}
     changes = {}
     if local is not None:
         changes["self_tested"] = local
     if native is not None:
         changes["forgejo_workers"] = native
+    if maintenance is not None:
+        changes["maintenance_workers"] = maintenance
+    if both is not None:
+        changes["both_forge_workers"] = both
+    if github_first is not None:
+        changes["github_first_workers"] = github_first
+    if review_first is not None:
+        changes["review_first_workers"] = review_first
+    if forgejo_first is not None:
+        changes["forgejo_first_workers"] = forgejo_first
     if environment is not None:
         changes["worker_env"] = environment
+
+    def validate(config):
+        # The early checks above read an unlocked snapshot; a concurrent command may have changed
+        # the counts since. Recheck under the host.json lock, against this command's own changes.
+        config = {**config, **changes}
+        _preferences_within_maintenance(config)
+        if forgejo_checked and config.get("forgejo_workers", 0) > config["max_workers"]:
+            raise FleetError("Forgejo worker count exceeds the worker maximum; lower --forgejo-workers with --max")
+        if tending_checked:
+            _both_forge_within_maximum(config)
+
+    # The maximum is written first, already checked against the policy changes that follow it.
+    result = set_worker_maximum(maximum, validate=validate) if maximum is not None else {}
     if changes:
-        config = update_host(**changes)
+        config = update_host(validate=validate, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
+    if swap is not None:
+        apply_workers_swap(update_host(workers_swap_gib=swap))
+        result["workers_swap_gib"] = swap
     return result
 
+
+def _preferences_within_maintenance(config):
+    # Also rechecked under the host.json lock: a concurrent command may have lowered the
+    # maintenance or both-forge count after the early check in set_worker_policy read its snapshot.
+    # The preferences apply to the lowest both-forge slots: the maintenance slots, then the
+    # both-forge authoring slots after them.
+    tending = config.get("maintenance_workers", 0) + config.get("both_forge_workers", 0)
+    if config.get("github_first_workers", 0) > tending:
+        raise FleetError("GitHub-first worker count exceeds the maintenance and both-forge worker count; "
+                         "lower --github-first-workers or raise --maintenance-workers or --both-forge-workers")
+    if config.get("github_first_workers", 0) + config.get("review_first_workers", 0) > tending:
+        raise FleetError("GitHub-first and review-first worker counts together exceed the maintenance and both-forge "
+                         "worker count; lower --review-first-workers or raise --maintenance-workers or "
+                         "--both-forge-workers")
+    if (config.get("github_first_workers", 0) + config.get("review_first_workers", 0)
+            + config.get("forgejo_first_workers", 0) > tending):
+        raise FleetError("GitHub-first, review-first and Forgejo-first worker counts together exceed the maintenance "
+                         "and both-forge worker count; lower --forgejo-first-workers or raise --maintenance-workers "
+                         "or --both-forge-workers")
+
+
+def _both_forge_within_maximum(config):
+    if config.get("maintenance_workers", 0) + config.get("both_forge_workers", 0) > config["max_workers"]:
+        raise FleetError("Maintenance and both-forge worker counts together exceed the worker maximum; "
+                         "lower --maintenance-workers or --both-forge-workers, or raise --max")
+
+
+# Worker states that hold no work in progress.
+IDLE_STATES = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}
 
 def worker_statuses():
     values = []
@@ -798,6 +1127,9 @@ def collect_ci_results(config):
     for value in read(path, []):
         if time.time() - value.get("started_at", time.time()) > 7 * 86400:
             event("ci_result_unavailable", run_id=value["run_id"], runner_id=value["runner_id"])
+            continue
+        if value.get("ci_kinds") == ["infra"]:
+            # The broker reads TauCeti only; an infra job's result stays with GitHub.
             continue
         try:
             repository = value.get("repository", "TauCetiProject/TauCeti")
@@ -931,7 +1263,9 @@ class CISlot:
 
     def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False):
         config = dict(capacity.for_slot(config, self.index),
-                      ci_enabled=config["ci_enabled"] and (self.index < capacity.jobs(config) if admitted is None else admitted))
+                      # An unused slot still recreates a retired identity a queued job targets.
+                      ci_enabled=config["ci_enabled"] and (recovery is not None or not capacity.unused(config, self.index))
+                      and (self.index < capacity.jobs(config) if admitted is None else admitted))
         cooling = cooling or read(vm.slot_file(config, "ci-slot-backoff.json"), {}).get("until", 0) > time.time()
         path = vm.slot_file(config, "vm.json")
         value = read(path, {})
@@ -987,6 +1321,8 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
+                         # infra-slots --pr-slots moves slots between PR and infra.
+                         or (value.get("ci_kinds") == ["infra"]) != (config["ci_kinds"] == ["infra"])
                          or (not value.get("ci_bootstrap_waiting")
                              and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
                              and own.get("status") != "online"))
@@ -1058,6 +1394,43 @@ class CISlot:
                     pass
 
 
+def admission_lock():
+    """Serializes renewal with the drain and pause denials, so a denial is never overwritten."""
+    return locked(state_dir() / "admission.lock")
+
+
+def renew_admission(published):
+    """Extend the previous pass's admission decision while it still stands.
+
+    One pass (GitHub inventory, CI slots, cgroup reads) can outlast the sleep on a loaded host, so
+    renewing before the pass makes the TTL bound one pass rather than pass plus sleep. A newer write
+    (drain, pause, error) or a withdrawal the configuration, lease or schedule already shows keeps
+    the decision from renewing; the pass itself recomputes everything else.
+    """
+    if not published or not published["workers"]:
+        return
+    path = state_dir() / "admission.json"
+    try:
+        with admission_lock():
+            config = host_config()
+            if (
+                not config.get("workers_enabled")
+                or len(published["workers"]) > (config.get("max_workers") or 0)
+                or read(path) != published
+            ):
+                return
+            lease = read(state_dir() / "worker-admission-lease.json")
+            if lease is not None and time.time() >= lease.get("expires_at", 0):
+                return
+            from . import schedule
+
+            if schedule.state(config).get("reason"):
+                return
+            atomic(path, dict(published, expires_at=time.time() + ADMISSION_TTL))
+    except (FleetError, OSError, ValueError, KeyError, TypeError):
+        return  # The pass that follows reports the same failure and publishes its own policy.
+
+
 def daemon():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(state_dir() / "daemon.lock"):
@@ -1093,8 +1466,11 @@ def daemon():
         heartbeat = shared_host.Heartbeat(announced_ci_busy)
         export = StatusExport()
         previous_tasks = None
+        published = None
         while not stopping:
+            renew_admission(published)
             config = host_config()
+            published = None
             try:
                 capacity.controller_config(config)
                 shared = host_share(config, heartbeat, ci_busy=observed_ci_busy(slots, config))
@@ -1169,6 +1545,10 @@ def daemon():
                         # Retain the last applied limit and admissions on a transient
                         # tuning error; status keeps the operation and failure visible.
                         memory["allocation_error"] = f"worker memory.high refresh failed: {exc}"
+                try:
+                    repair_memory = refresh_repair_memory()
+                except (OSError, ValueError, KeyError) as exc:
+                    repair_memory = dict(error=f"repair memory.high refresh failed: {exc}")
                 pressure = memory_pressure(memory, caps, recovering=memory_paused, reserve=reserve) if memory else []
                 memory_paused = bool(pressure)
                 pause_reason = (
@@ -1185,16 +1565,14 @@ def daemon():
                     pause_reason=pause_reason,
                 )
                 roadmap_focus = focus.policy(config, ids[:target])
-                atomic(
-                    state_dir() / "admission.json",
-                    dict(
-                        version=1,
-                        expires_at=time.time() + 15,
-                        workers=ids[:target],
-                        reason=reason,
-                        roadmap_focus=roadmap_focus,
-                    ),
+                published = dict(
+                    version=1,
+                    expires_at=time.time() + ADMISSION_TTL,
+                    workers=ids[:target],
+                    reason=reason,
+                    roadmap_focus=roadmap_focus,
                 )
+                atomic(state_dir() / "admission.json", published)
                 atomic(
                     state_dir() / "status.json",
                     dict(
@@ -1216,6 +1594,7 @@ def daemon():
                         worker_admission=scaler.decision,
                         worker_schedule=window,
                         worker_memory=memory,
+                        repair_memory=repair_memory,
                         memory_pressure=pressure,
                         resources=caps,
                         cpu_idle_fraction=idle,
@@ -1230,6 +1609,7 @@ def daemon():
                         ci_memory_budget_gib=capacity.memory_budget_gib(config, caps),
                         ci_kinds=capacity.kinds(config),
                         ci_staging_slots=capacity.reservation(config)[0],
+                        ci_staging_memory_gib=config.get("ci_staging_memory_gib"),
                         ci_staging_reservation_error=capacity.reservation(config)[1],
                         ci_errors=slot_errors,
                         **({"shared_host": shared} if shared else {}),
@@ -1237,6 +1617,7 @@ def daemon():
                 )
                 error = None
             except (FleetError, OSError, ValueError, KeyError) as exc:
+                published = None
                 message = str(exc)
                 if message != error:
                     print("tauceti-fleet: " + message, file=sys.stderr, flush=True)
@@ -1282,6 +1663,7 @@ def status_report(config):
         ci_max_jobs=capacity.jobs(config),
         ci_memory_budget_gib=capacity.memory_budget_gib(config),
         ci_staging_slots=capacity.reservation(config)[0],
+        ci_staging_memory_gib=config.get("ci_staging_memory_gib"),
         ci_staging_reservation_error=capacity.reservation(config)[1],
         ci_enrolled=bool(config.get("ci_broker_url")),
         workers_enabled=config["workers_enabled"],
@@ -1345,15 +1727,16 @@ def budget(payload):
     args = [binary, "budget", "--json"]
     from decimal import Decimal, InvalidOperation
 
-    for name in ("grant", "grant_rate"):
+    for name in ("grant", "set_grant", "grant_rate"):
         if payload.get(name) is not None:
             try:
                 amount = Decimal(str(payload[name]))
-                if not amount.is_finite() or amount < 0:
+                # A balance may be set below zero; additions and rates may not.
+                if not amount.is_finite() or (amount < 0 and name != "set_grant"):
                     raise ValueError("amount")
             except (InvalidOperation, ValueError):
-                raise FleetError("Budget amounts must be finite and nonnegative") from None
-            args += ["--" + name.replace("_", "-"), str(amount)]
+                raise FleetError("Grants and rates must be finite and nonnegative; balances finite") from None
+            args.append("--" + name.replace("_", "-") + "=" + str(amount))  # "=" keeps negatives one argument
     return json.loads(run(args, timeout=30).stdout)
 
 
@@ -1380,11 +1763,10 @@ def rpc(payload):
         return broker.enroll(payload["broker"], code=payload["invitation"])
     if action == "prepare_update":
         config = host_config()
-        waiting = {"idle", "waiting-capacity", "waiting-budget", "waiting-quota", "backoff", "stopped", "exited"}
         if config["workers_enabled"] or config["ci_enabled"]:
             raise FleetError("Drain this host before updating")
         if vm.outstanding() or any(
-            w.get("alive") and w.get("state") not in waiting for w in worker_statuses()
+            w.get("alive") and w.get("state") not in IDLE_STATES for w in worker_statuses()
         ):
             raise FleetError("Active work is still draining; wait before updating")
         # A manager-service stop no longer contains all workers. Slice stop
@@ -1414,7 +1796,9 @@ def rpc(payload):
 
         return schedule.configure(payload)
     if action == "reserve-staging":
-        return reserve_staging(payload["maximum"])
+        return reserve_staging(payload["maximum"], payload.get("memory_gib"))
+    if action == "infra-slots":
+        return set_infra_slots(payload["count"], payload.get("pr_slots"))
     if action == "drain":
         return drain()
     if action == "budget":
