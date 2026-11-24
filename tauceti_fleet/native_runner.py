@@ -20,23 +20,58 @@ from . import capabilities, capacity, lean_guest, lean_pressure, lean_runtime, l
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
-IMAGE_REVISION = 1
+IMAGE_REVISION = 2
 DISK_START_GIB = 48
 MEMORY_GIB = 54
+# A native guest's threads count against the host's CI slice. One PR build's
+# cache restore has peaked at 6,666 tasks; the per-guest limit keeps one runaway
+# guest from starving the others' thread creation.
+TASKS_MAX = 16384
 RUNTIME = "native-disk"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
-def image():
-    return read(data_dir() / "images/native.json", {})
+# Infra slots run other repositories' ordinary GitHub workflows, which expect more of
+# GitHub's runner image than TauCeti builds do. They get their own image; PR and
+# staging slots keep the minimal one. Bump INFRA_IMAGE_REVISION to rebuild it.
+INFRA_IMAGE_REVISION = 2
+# Lake's `buildO` and `compileO` default to the system `cc`, not the toolchain's
+# bundled clang, so Lean packages with C sources (doc-gen4's leansqlite,
+# UnicodeBasic and MD4Lean, for instance) need one, as on GitHub's runner image.
+# Every native image gets it; an image without a working `cc` never exports.
+C_COMPILER_PACKAGES = "gcc libc6-dev"
+INFRA_RUNNER_ENV = "/opt/tauceti-runner.env"
+INFRA_PACKAGES = [
+    "apt-get install -y software-properties-common",
+    # Ubuntu 24.04's Git 2.43 lacks behaviour these workflows' tests rely on.
+    "add-apt-repository -y ppa:git-core/ppa",
+    "apt-get update",
+    "apt-get install -y git nodejs",
+    # GitHub-built toolcache Pythons find libpython only under /opt/hostedtoolcache.
+    "install -d -o runner -g runner /opt/hostedtoolcache",
+    "printf 'AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache\\n' > " + INFRA_RUNNER_ENV,
+]
 
 
-def ready():
-    value = image()
+def manifest_name(infra=False):
+    # Keyed by revision, so exporting a new revision during a live update never
+    # replaces the manifest the still-serving older controller reads. Revision 1
+    # predates the key and used the plain name.
+    revision = INFRA_IMAGE_REVISION if infra else IMAGE_REVISION
+    return ("native-infra" if infra else "native") + (f"-r{revision}" if revision > 1 else "") + ".json"
+
+
+def image(infra=False):
+    return read(data_dir() / "images" / manifest_name(infra), {})
+
+
+def ready(infra=False):
+    value = image(infra)
     if not re.fullmatch(r"[a-f0-9]{64}", value.get("sha256", "")):
         return False
     root = data_dir() / "images/native" / value.get("sha256", "missing") / "rootfs"
-    return value.get("revision") == IMAGE_REVISION and (root / "opt/actions-runner/bin/Runner.Listener").is_file()
+    revision = INFRA_IMAGE_REVISION if infra else IMAGE_REVISION
+    return value.get("revision") == revision and (root / "opt/actions-runner/bin/Runner.Listener").is_file()
 
 
 def mapping_ok():
@@ -56,14 +91,16 @@ def selected(config):
     # Native setup has a weaker boundary and only registers for PR work.
     return (type(index) is int and type(reserved) is int
             and 0 <= reserved <= index < capacity.jobs(config)
-            and "pr" in kinds and (kinds == ["pr"] or reserved > 0))
+            and (kinds == ["infra"] or "pr" in kinds and (kinds == ["pr"] or reserved > 0)))
 
 
 def prepare_for_ci(config):
     """Provision the default PR backend before enabling or handing over CI."""
+    infra = any(value["kind"] == "infra" for value in capacity.protected_slots(config).values())
+    infra_image = prepare(config, infra=True) if infra else None
     if selected(dict(config, ci_slot=config.get("ci_staging_slots", 0))):
         return prepare(config)
-    return None
+    return infra_image
 
 
 def is_native(value):
@@ -71,9 +108,14 @@ def is_native(value):
 
 
 def idle_expired(value, own):
-    return (is_native(value) and not value.get("busy") and not value.get("run_id")
-            and own.get("status") == "online" and not own.get("busy")
-            and time.time() - value.get("online_observed_at", time.time()) >= 300)
+    idle = (is_native(value) and not value.get("busy") and not value.get("run_id")
+            and own.get("status") == "online" and not own.get("busy"))
+    if value.get("ci_kinds") == ["infra"]:
+        # Protected infra slots are always wanted, so retiring an idle one only
+        # restarts it: do that only to move it onto a newer infra image.
+        current = image(True).get("sha256")
+        return idle and bool(current) and value.get("native_image_sha256") != current
+    return idle and time.time() - value.get("online_observed_at", time.time()) >= 300
 
 
 def instances():
@@ -113,7 +155,7 @@ def status():
                            unit_inactive=inactive, memory_max_gib=value.get("memory_max_gib"),
                            disk_budget_gib=value.get("disk_budget_gib"), workspace_storage="disk",
                            progress=shared_json(Path(value["directory"]) / "control/native-progress.json", {})))
-    return dict(pr_backend=RUNTIME, image=image(), ready=ready(),
+    return dict(pr_backend=RUNTIME, image=image(), ready=ready(), infra_image=image(True), infra_ready=ready(True),
                 choice=read(state_dir() / "native-choice.json", {}),
                 instances=active)
 
@@ -124,12 +166,14 @@ def choose(config, available):
         return False
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
-    # A lost registration reply must retain the original job classes.
-    if intent and intent.get("ci_kinds") != ["pr"]:
+    infra = config.get("ci_kinds") == ["infra"]
+    # A lost registration reply must retain the original job classes. Infra
+    # never runs in a VM: the start cancels a mismatched intent instead.
+    if intent and not infra and intent.get("ci_kinds") not in (["pr"], ["infra"]):
         atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
                backend="vm", reason="preserve existing runner classes"))
         return False
-    reason = ("native image not prepared" if not ready() else
+    reason = (("native infra image not prepared" if infra else "native image not prepared") if not ready(infra) else
               "native host mapping limit is too small" if not mapping_ok() else None)
     atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
            backend=RUNTIME, reason=reason, available_bytes=available,
@@ -139,8 +183,11 @@ def choose(config, available):
     return True
 
 
-def prepare(config=None):
-    """Export the prepared Ubuntu OS through a small, unregistered user VM."""
+def prepare(config=None, *, infra=False):
+    """Export the prepared Ubuntu OS through a small, unregistered user VM.
+
+    `infra=True` exports the infra slots' image, which adds INFRA_PACKAGES.
+    """
     from . import vm
     config = config or host_config()
     prerequisites()
@@ -150,8 +197,8 @@ def prepare(config=None):
         base = read(root / "prepared.json", {})
         if not base or vm.digest(root / "prepared.qcow2") != base.get("sha256"):
             raise FleetError("Prepare and verify the ordinary VM image first")
-        current = image()
-        if ready() and current.get("vm_sha256") == base["sha256"]:
+        current = image(infra)
+        if ready(infra) and current.get("vm_sha256") == base["sha256"]:
             return current
         staging = state_dir() / ("native-image-" + secrets.token_hex(6))
         staging.mkdir(mode=0o700)
@@ -163,8 +210,12 @@ def prepare(config=None):
             "mkdir /export; mount -t 9p -o trans=virtio,version=9p2000.L export /export",
             "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer; systemctl mask apt-daily.service apt-daily-upgrade.service",
             "while systemctl is-active --quiet apt-daily.service || systemctl is-active --quiet apt-daily-upgrade.service; do sleep 1; done",
-            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap",
-            "tar --numeric-owner --one-file-system --exclude=./export --exclude=./dev --exclude=./proc --exclude=./sys --exclude=./run --exclude=./tmp --exclude=./var/log --exclude=./lost+found -czf /export/rootfs.tar.gz -C / .",
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y bubblewrap " + C_COMPILER_PACKAGES
+            + "".join("; " + command for command in (INFRA_PACKAGES if infra else [])),
+            # An incomplete image never exports: the archive is then missing.
+            "cc --version && "
+            + ("command -v node && git --version | grep -qv ' 2\\.43\\.' && test -s " + INFRA_RUNNER_ENV + " && " if infra else "")
+            + "tar --numeric-owner --one-file-system --exclude=./export --exclude=./dev --exclude=./proc --exclude=./sys --exclude=./run --exclude=./tmp --exclude=./var/log --exclude=./lost+found -czf /export/rootfs.tar.gz -C / .",
             "echo FLEET_NATIVE_IMAGE_READY; sync; poweroff",
         ]
         seed = vm.cloud_seed(staging, commands, name=unit)
@@ -188,9 +239,9 @@ def prepare(config=None):
             (extracted / "tmp").chmod(0o1777)
             if not (extracted / "opt/actions-runner/bin/Runner.Listener").is_file():
                 raise FleetError("Native rootfs export is missing the Actions runner")
-            value = dict(revision=IMAGE_REVISION, sha256=sha, vm_sha256=base["sha256"],
+            value = dict(revision=INFRA_IMAGE_REVISION if infra else IMAGE_REVISION, sha256=sha, vm_sha256=base["sha256"],
                          runner_version=base["runner_version"], prepared_at=time.time())
-            atomic(root / "native.json", value)
+            atomic(root / manifest_name(infra), value)
             complete = True
         finally:
             run(["systemctl", "--user", "stop", unit + ".scope"], check=False)
@@ -209,14 +260,19 @@ def remove_root(root):
         raise FleetError("Native filesystem cleanup is incomplete; retain instance ownership")
 
 
-def stage(directory, jit):
-    """Stage a small durable launch intent; allocate OS/workspace inside its unit."""
+def stage(directory, jit, *, infra=False):
+    """Stage a small durable launch intent; allocate OS/workspace inside its unit.
+
+    `infra=True` uses the infra image and omits the Lean pressure gate's job
+    environment: those jobs are not TauCeti builds, and some of their tests read `LEAN`.
+    """
     directory = Path(directory)
-    value = image()
+    value = image(infra)
     (directory / "control").mkdir(mode=0o700)
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
-    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB))
+    atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB,
+                                           lean_runtime=not infra))
     return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
                 disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
@@ -234,7 +290,9 @@ def materialize(directory):
         target = root / "usr/local/bin" / name
         target.write_text(Path(module.__file__).read_text())
         target.chmod(0o755)
-    (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
+    if read(directory / "native.json").get("lean_runtime", True):
+        # Its presence also tells the job unit to export the Lean gate's environment.
+        (root / "opt/tauceti-lean-env").write_text(lean_runtime.STARTUP)
 
 
 def prerequisites():
@@ -253,7 +311,7 @@ def properties():
     # applies to that RAM-backed file and kills the stock Actions listener.
     # Bound allocated RAM with the cgroup; the watchdog monitors allocated disk.
     return ["-p", f"MemoryMax={MEMORY_GIB}G", "-p", "OOMPolicy=kill", "-p", "OOMScoreAdjust=1000",
-            "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
+            "-p", f"TasksMax={TASKS_MAX}", "-p", "LimitFSIZE=infinity", "-p", "LimitCORE=0", "-p", "Delegate=yes", "-p", "TimeoutStopSec=8",
             "--setenv=PYTHONPATH=" + str(Path(__file__).resolve().parent.parent)]
 
 

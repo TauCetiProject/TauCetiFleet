@@ -5,6 +5,12 @@ import math
 from .store import FleetError
 
 KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
+# Classes of protected slots, each in its own runner group. `infra` runs our own
+# infrastructure repositories' CI on native-disk slots, above PR builds' CPU
+# weight and below staging's: someone is usually waiting on an infra job.
+PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra")
+# CPU weight of infra jobs; PR builds have 100 and staging 10000.
+INFRA_CPU_WEIGHT = 1000
 MAX_JOBS = 4096
 
 
@@ -20,8 +26,21 @@ def guest_shape(config, caps=None):
         from .capabilities import resources
 
         caps = resources()
-    return dict(vcpus=min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"]))),
-                memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
+    vcpus = min(255, max(config["ci_vcpus"], math.ceil(caps["cpus"])))
+    staging_memory = staging_memory_gib(config)
+    if config.get("ci_staging_reserved") and staging_memory is not None:
+        # A reserved staging guest's RAM is set explicitly, which reduces how far
+        # it and the other CI on the host can overcommit the host between them.
+        return dict(vcpus=vcpus, memory_gib=staging_memory)
+    return dict(vcpus=vcpus, memory_gib=max(config["ci_memory_gib"], math.ceil(memory_budget_gib(config, caps))))
+
+
+def staging_memory_gib(config):
+    """Virtual RAM of reserved staging guests; None exposes the shared CI ceiling."""
+    value = config.get("ci_staging_memory_gib")
+    if value is not None and (type(value) is not int or not 1 <= value <= 4096):
+        raise FleetError("ci_staging_memory_gib must be an integer between 1 and 4096")
+    return value
 
 
 def settings(config, *, ci, maximum=None, vcpus=None, memory_gib=None, disk_gib=None, memory_budget_gib=None):
@@ -83,7 +102,7 @@ def jobs(config):
 
 def kinds(config):
     value = config.get("ci_kinds", ["staging"])
-    if value not in [*KINDS.values(), ["control"], ["roadmap"], ["queue-control"], ["pr-status"]]:
+    if value not in [*KINDS.values(), *([kind] for kind in PROTECTED_KINDS)]:
         raise FleetError("ci_kinds must explicitly select pr, staging, or both")
     return value
 
@@ -109,11 +128,43 @@ def protected_slots(config):
         if (not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
                 or not config.get("ci_staging_slots", 0) <= int(key) < jobs(config)
                 or not isinstance(value, dict) or set(value) != {"kind", "runner_group_id"}
-                or value["kind"] not in ("control", "roadmap", "queue-control", "pr-status")
+                or value["kind"] not in PROTECTED_KINDS
                 or type(value["runner_group_id"]) is not int or value["runner_group_id"] <= 0
                 or value["runner_group_id"] == config.get("runner_group_id")):
             raise FleetError("Protected slots require a separate runner group and a valid slot")
         result[int(key)] = value
+    return result
+
+
+def infra_slots(config):
+    """Protected infra slot numbers. They sit above the PR slots, so ci_max_jobs
+    minus their count is the host's PR slot count."""
+    return sorted(i for i, v in protected_slots(config).items() if v["kind"] == "infra")
+
+
+def pr_jobs(config):
+    """Slots other than infra ones: what the CI autoscaler sizes."""
+    return jobs(config) - len(infra_slots(config))
+
+
+def with_infra_slots(config, count, group, pr=None):
+    """Place `count` infra slots directly above the host's PR slots, of which
+    there are `pr` (default: keep the current count; 0 leaves only infra)."""
+    if type(count) is not int or not 0 <= count <= 64:
+        raise FleetError("The infra slot count must be an integer from 0 to 64")
+    if count and (type(group) is not int or group <= 0):
+        raise FleetError("The CI broker reports no runner group for infra")
+    if pr is not None and (type(pr) is not int or pr < 0):
+        raise FleetError("The PR slot count must be a non-negative integer")
+    if infra_slots(config) != list(range(pr_jobs(config), jobs(config))):
+        raise FleetError("Existing infra slots must sit directly above the PR slots")
+    base = pr_jobs(config) if pr is None else pr
+    others = {k: v for k, v in config.get("ci_protected_slots", {}).items() if v["kind"] != "infra"}
+    if any(int(k) >= base for k in others):
+        raise FleetError("Other protected slots must sit below the infra slots")
+    slots = dict(others, **{str(i): dict(kind="infra", runner_group_id=group) for i in range(base, base + count)})
+    result = dict(config, ci_max_jobs=base + count, ci_protected_slots=slots)
+    staging_slots(result)
     return result
 
 
@@ -131,6 +182,7 @@ def controller_config(config):
     kinds(config)
     if config.get("ci_memory_budget_gib") is not None:
         memory_budget_gib(config)
+    staging_memory_gib(config)
     if config["ci_enabled"]:
         protected_slots(config)
         if config.get("ci_broker_url"):
@@ -148,13 +200,21 @@ def reservation(config):
         return 0, str(exc)
 
 
+def unused(config, index):
+    """A staging-only host with a reservation runs staging in its reserved slots only."""
+    reserved, _ = reservation(config)
+    return kinds(config) == ["staging"] and 0 < reserved <= index and index not in protected_slots(config)
+
+
 def for_slot(config, index):
     protected = protected_slots(config).get(index)
     if protected:
         return dict(config, ci_slot=index, ci_kinds=[protected["kind"]],
                     ci_slot_runner_group_id=protected["runner_group_id"])
     reserved, _ = reservation(config)
-    return dict(config, ci_slot=index, ci_kinds=["staging"] if index < reserved else kinds(config))
+    if index < reserved:
+        return dict(config, ci_slot=index, ci_kinds=["staging"], ci_staging_reserved=True)
+    return dict(config, ci_slot=index, ci_kinds=kinds(config), ci_staging_reserved=False)
 
 
 def broker_slot_group(index, value, policy):

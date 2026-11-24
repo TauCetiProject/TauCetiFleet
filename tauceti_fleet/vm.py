@@ -186,8 +186,11 @@ def prepare_image(config=None):
         disk = staging / "disk.qcow2"
         disk.unlink(missing_ok=True)
         run([executable("qemu-img"), "create", "-f", "qcow2", "-F", "qcow2", "-b", root / "ubuntu.qcow2", disk, "20G"])
+        # gcc and libc6-dev supply the system `cc` that Lake's C builds call (see
+        # native_runner.C_COMPILER_PACKAGES). Native images install them on export
+        # too, so they do not depend on the base image having been rebuilt.
         commands = [
-            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl git sudo python3 jq libicu74 libssl3t64 zlib1g libkrb5-3 liblttng-ust1t64",
+            "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl git sudo python3 jq libicu74 libssl3t64 zlib1g libkrb5-3 liblttng-ust1t64 gcc libc6-dev",
             "curl --fail --location https://github.com/cli/cli/releases/download/v"
             + GH_VERSION
             + "/gh_"
@@ -312,14 +315,16 @@ def start(config):
             available = start_memory_available()
             boot_reservation = control_boot_reservation()
             small_control = config.get("ci_kinds") in SMALL_CONTROL_KINDS
-            fast_control = small_control and available is not None
             measured_available = available
             if available is not None:
                 available = max(0, available - boot_reservation)
             native = native_runner.choose(config, available)
+            # A native infra guest is a cgroup-limited process tree with no VM boot
+            # to settle; its RAM grows with the job, as the startup check expects.
+            fast_control = (small_control or (native and config.get("ci_kinds") == ["infra"])) and available is not None
             config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available,
                           _ci_start_measured_available=measured_available, _ci_start_boot_reservation=boot_reservation)
-            if native:
+            if native and config.get("ci_kinds") != ["infra"]:
                 config["ci_kinds"] = ["pr"]
             if not start_memory_ok(config):
                 # Defer without consuming the startup interval; the slot retries in 5s.
@@ -328,7 +333,8 @@ def start(config):
             def reserve(*, starting=False):
                 # Heavy guests keep their existing ten-second settling time.
                 # Small, isolated control VMs need only two seconds, backed by
-                # explicit reservations for every unobserved control boot.
+                # explicit reservations for every unobserved control boot, and
+                # so do native infra guests, which have no boot to reserve.
                 gap = CONTROL_START_GAP_SECONDS if fast_control and not starting else CI_START_GAP_SECONDS
                 atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + gap, starting=starting,
                                   measured_available_bytes=measured_available, boot_reserved_bytes=boot_reservation))
@@ -393,6 +399,31 @@ def slot_file(config, name):
     return (state_dir() if slot == 0 else state_dir() / "ci-slots" / str(slot)) / name
 
 
+# Reserved staging slots used to keep one disk (`warm.qcow2`) across their guests so a batch's
+# next attempt could reuse its build tree. TauCetiTools no longer uses it (the reuse never
+# activated: TauCetiTools #354), so each slot deletes its leftover disk when it next starts a guest.
+WARM_DISK = "warm.qcow2"
+
+
+def remove_warm_disk(config):
+    """Delete the slot's leftover staging disk, unless something still holds it open.
+
+    Called with the slot lock held and the slot's previous guest retired. A disk that
+    `qemu-img check` cannot open (exit 1, for example one a QEMU that has not exited still
+    locks) is left for the next start. No failure here stops the slot.
+    """
+    path = slot_file(config, WARM_DISK)
+    try:
+        if path.exists():
+            result = run([executable("qemu-img"), "check", "-q", path], timeout=60, check=False)
+            if result.returncode == 1:
+                print("Leftover staging disk is still open; keeping it until the next start", flush=True)
+                return
+            path.unlink()
+    except (OSError, FleetError) as error:
+        print(f"Leftover staging disk not removed: {error}", flush=True)
+
+
 def slots_in_use():
     """Include old slot zero and every draining slot, regardless of configured limit."""
     return sorted({0} | {int(p.parent.name) for name in ("vm.json", "ci-registration.json")
@@ -426,7 +457,7 @@ def _cancel_registration(config):
 
 def _start(config):
     from . import native_runner
-    from .capacity import disk_root, disk_startup_gib, guest_shape
+    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_shape
 
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
@@ -439,6 +470,10 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
+    if config.get("ci_kinds") == ["infra"] and config.get("_ci_backend") != native_runner.RUNTIME:
+        raise FleetError("Infra slots run only on the native backend")
+    # Before the space check, so a leftover staging disk is reclaimed first.
+    remove_warm_disk(config)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
@@ -468,7 +503,7 @@ def _start(config):
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
         if native:
-            runtime_fields = native_runner.stage(directory, jit)
+            runtime_fields = native_runner.stage(directory, jit, infra=config.get("ci_kinds") == ["infra"])
         else:
             run(
                 [
@@ -536,7 +571,8 @@ def _start(config):
                 "--unit=" + unit,
                 "--slice=tauceti-fleet-ci.slice",
                 "-p",
-                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"]) else "100"),
+                "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"])
+                                else str(INFRA_CPU_WEIGHT) if config.get("ci_kinds") == ["infra"] else "100"),
                 "-p",
                 "ManagedOOMPreference=avoid",
                 "-p",

@@ -87,6 +87,37 @@ class CapacityPolicy(unittest.TestCase):
         decision=c.decide(s,s['at'])
         self.assertEqual(decision['kind'],'hold')
 
+    def test_fixed_pr_slot_hosts_hold_resizes_and_recover_in_place(self):
+        c = auto.Controller(minimum=1, maximum=6)
+        # An idle guest under RAM pressure would normally shrink the host.
+        s = dict(snapshot(idle=True, available=10), fixed_pr_slots=True)
+        self.assertEqual(auto.Controller(minimum=1, maximum=6).decide(dict(s, fixed_pr_slots=False), 1000)["kind"], "limit")
+        self.assertEqual(c.decide(s, 1000)["kind"], "hold")
+        # An idle guest does not block stall recovery, which keeps the PR count.
+        decisions = []
+        for i in range(5):
+            decisions.append(c.decide(s, 1000 + 30 * i))
+            s = advance(s)
+        recover = [d for d in decisions if d["kind"] == "recover"]
+        self.assertTrue(recover)
+        self.assertTrue(all(d["target"] == 3 for d in recover))
+        self.assertFalse([d for d in decisions if d["kind"] == "limit"])
+
+    def test_fixed_hosts_without_pr_slots_hold_at_zero(self):
+        c = auto.Controller(minimum=1, maximum=6, growth_delay=1)
+        s = dict(snapshot(limit=0, available=100), reserved=0, fixed_pr_slots=True)
+        for i in range(5):
+            self.assertEqual(c.decide(s, s['at'])['kind'], 'hold')
+            s = advance(s)
+        # A stalled PR guest still finishing above the zero count is recovered without a resize.
+        s = dict(snapshot(limit=1, available=10), reserved=0, fixed_pr_slots=True, maximum=0)
+        decisions = []
+        for i in range(5):
+            decisions.append(c.decide(s, s['at']))
+            s = advance(s)
+        self.assertEqual({d.get('target', 0) for d in decisions}, {0})
+        self.assertTrue([d for d in decisions if d['kind'] == 'recover'])
+
     def test_idle_reserved_staging_guest_is_preserved(self):
         s = snapshot()
         s['vms'][0].update(busy=False)
@@ -270,6 +301,61 @@ class RecoveryTransactions(unittest.TestCase):
                 request.assert_called_once()
                 self.assertEqual(request.call_args.args[0][:3],['gh','auth','token'])
 
+    def test_app_tokens_carry_writes_and_reads_stay_on_the_ai_account(self):
+        tokens=Mock(); tokens.token.return_value='ghs_apptoken'
+        op=auto.Operator('host','machine',root=Path(self.temp.name)/'app',app_tokens=tokens)
+        with patch.object(auto.subprocess,'run',return_value=Mock(returncode=0,stdout='{}',stderr='')) as request:
+            op.api('actions/runs/1/rerun',method='POST')
+            self.assertEqual(request.call_args.kwargs['env']['GH_TOKEN'],'ghs_apptoken')
+            self.assertEqual(request.call_args.kwargs['env']['GH_HOST'],'github.com')
+            self.assertNotIn('GITHUB_TOKEN',request.call_args.kwargs['env'])
+        tokens.token.side_effect=store.FleetError('no key')
+        with patch.object(auto.subprocess,'run') as request:
+            with self.assertRaises(store.FleetError):op.api('actions/runs/1/force-cancel',method='POST')
+            request.assert_not_called()  # no fallback to an ambient or personal credential
+        with patch.object(auto.subprocess,'run',side_effect=[Mock(returncode=0,stdout='ghr_read\n'),Mock(returncode=0,stdout='{}',stderr='')]) as request:
+            op.api('actions/runs/1')
+            self.assertEqual(request.call_args_list[0].args[0][-1],'tauceti-ai-for-science')
+
+    def test_app_token_is_minted_for_the_repository_and_cached(self):
+        directory=Path(self.temp.name)/'creds'; directory.mkdir()
+        pem=directory/'github-private-key.pem'; pem.write_text('unused'); pem.chmod(0o600)
+        (directory/'github-app.json').write_text(json.dumps(dict(id=7,installation_id=99)))
+        requests=[]
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*a):return False
+            def read(self,n):return json.dumps(dict(token='ghs_x',expires_at='2030-01-01T00:00:00Z')).encode()
+        def opener(request,timeout):
+            requests.append(request);return Response()
+        tokens=auto.AppTokens(directory,opener=opener,clock=lambda:1800000000)
+        with patch.object(auto.AppTokens,'_jwt',return_value='app.jwt') as jwt:
+            self.assertEqual(tokens.token(),'ghs_x'); self.assertEqual(tokens.token(),'ghs_x')
+            jwt.assert_called_once_with(7)
+        self.assertEqual(len(requests),1)
+        self.assertTrue(requests[0].full_url.endswith('/app/installations/99/access_tokens'))
+        self.assertEqual(requests[0].get_header('Authorization'),'Bearer app.jwt')
+        self.assertEqual(json.loads(requests[0].data),dict(repositories=['TauCeti'],permissions=dict(actions='write')))
+        pem.chmod(0o644)
+        with self.assertRaises(store.FleetError):auto.AppTokens(directory,opener=opener).token()
+
+    def test_app_jwt_is_a_valid_rs256_signature(self):
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        except ImportError:
+            self.skipTest('cryptography is not installed')
+        import base64
+        directory=Path(self.temp.name)/'jwt'; directory.mkdir()
+        key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        pem=directory/'github-private-key.pem'
+        pem.write_bytes(key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+        pem.chmod(0o600)
+        head,body,sig=auto.AppTokens(directory,clock=lambda:1000)._jwt(7).split('.')
+        pad=lambda s:base64.urlsafe_b64decode(s+'='*(-len(s)%4))
+        self.assertEqual(json.loads(pad(body)),dict(iat=940,exp=1540,iss='7'))
+        key.public_key().verify(pad(sig),(head+'.'+body).encode(),padding.PKCS1v15(),hashes.SHA256())
+
     def test_staging_and_stale_runner_ownership_are_never_cancelled(self):
         for staging in (True,False):
             with self.subTest(staging=staging):
@@ -297,6 +383,36 @@ class HostActions(unittest.TestCase):
         self.assertEqual(config['ci_max_jobs'],2)
         self.assertTrue(config['ci_enabled']);self.assertTrue(config['workers_enabled']);self.assertEqual(config['max_workers'],40)
         with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=0))
+
+    def test_infra_slots_sit_outside_the_autoscaled_pr_slots(self):
+        store.update_host(ci_max_jobs=5,ci_kinds=['pr'],ci_staging_slots=0,ci_broker_url='https://fleet.example',
+                          ci_protected_slots={'3':dict(kind='infra',runner_group_id=8),'4':dict(kind='infra',runner_group_id=8)})
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=i,instance=str(i)*16,unit='u%d'%i) for i in range(5)]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            value=auto.host_action(dict(mode='snapshot'))
+        self.assertEqual((value['maximum'],value['reserved']),(3,0))
+        self.assertEqual(sorted(v['slot'] for v in value['vms']),[0,1,2])
+        # The autoscaler's PR count maps to the slots below infra; changing it would move them.
+        self.assertEqual(auto.host_action(dict(mode='limit',maximum=3)),dict(maximum=5))
+        self.assertEqual(store.host_config()['ci_max_jobs'],5)
+        for maximum in (2,4):
+            with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=maximum))
+        self.assertEqual(store.host_config()['ci_max_jobs'],5)
+        with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=True))
+        # A removed infra slot's guest finishing its job is not a PR recovery candidate.
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=6,instance='6'*16,unit='u6',ci_kinds=['infra'])]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            self.assertEqual(auto.host_action(dict(mode='snapshot'))['vms'],[])
+
+    def test_an_infra_only_host_has_no_autoscaled_pr_slots(self):
+        store.update_host(ci_max_jobs=2,ci_kinds=['pr'],ci_staging_slots=0,ci_broker_url='https://fleet.example',
+                          ci_protected_slots={'0':dict(kind='infra',runner_group_id=8),'1':dict(kind='infra',runner_group_id=8)})
+        store.atomic(store.state_dir()/'status.json',dict(observed_at=1,ci_vms=[dict(slot=i,instance=str(i)*16,unit='u%d'%i,ci_kinds=['infra']) for i in range(2)]))
+        with patch.object(vm,'run',return_value=Mock(stdout='')):
+            value=auto.host_action(dict(mode='snapshot'))
+        self.assertEqual((value['maximum'],value['fixed_pr_slots'],value['vms']),(0,True,[]))
+        self.assertEqual(auto.host_action(dict(mode='limit',maximum=0)),dict(maximum=2))
+        with self.assertRaises(store.FleetError):auto.host_action(dict(mode='limit',maximum=1))
 
     def test_reserved_and_replaced_instances_cannot_be_retired(self):
         with patch.object(vm,'retire') as retire:
@@ -386,3 +502,34 @@ class HostActions(unittest.TestCase):
             result=auto.host_action({})
         self.assertEqual(result['maximum'],3)
         self.assertEqual(result['vms'],[])
+
+
+class Install(unittest.TestCase):
+    def test_install_writes_unit_from_the_installed_launcher_with_app_credentials(self):
+        from tauceti_fleet import process
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            with patch.object(host, "units", return_value=path), patch.object(process, "run") as run:
+                result = auto.install("chungus5", "a" * 32, minimum=15, maximum=15, github_app_dir=path / "app")
+            unit = (path / auto.UNIT).read_text()
+            self.assertIn('"ci-autoscale" "--host" "chungus5" "--machine-id" "' + "a" * 32 + '"', unit)
+            self.assertIn('"--minimum" "15" "--maximum" "15" "--github-app-dir" "%d"', unit)
+            self.assertIn(str(Path.home() / ".local/bin/tauceti-fleet"), unit)
+            self.assertIn(f"\nLoadCredential=github-private-key.pem:{path / 'app'}/github-private-key.pem\n", unit)
+            self.assertNotIn("PYTHONPATH", unit)
+            self.assertEqual(result["maximum"], 15)
+            self.assertEqual(run.call_args.args[0], ["systemctl", "--user", "restart", auto.UNIT])
+
+    def test_install_refuses_a_drop_in(self):
+        from tauceti_fleet import process
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / (auto.UNIT + ".d")).mkdir()
+            (path / (auto.UNIT + ".d") / "90-hand.conf").write_text("[Service]\n")
+            with patch.object(host, "units", return_value=path), patch.object(process, "run") as run:
+                with self.assertRaises(store.FleetError):
+                    auto.install("chungus5", "a" * 32, minimum=1, maximum=4, github_app_dir=path)
+            run.assert_not_called()
+            self.assertFalse((path / auto.UNIT).exists())
