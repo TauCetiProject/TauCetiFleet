@@ -25,7 +25,11 @@ def request(path, *, token_file=None, method="GET", data=None):
         "https://api.github.com/" + path.lstrip("/"), data=body, headers=headers, method=method
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        # The CLI may run under a standalone Python whose default CA bundle path is absent on
+        # NixOS; the status client's context falls back to the distribution's bundle.
+        from .ci_overview import status_ssl_context
+
+        with urllib.request.urlopen(req, timeout=20, context=status_ssl_context()) as response:
             if response.status == 204:
                 return None
             raw = response.read(4 * 1024 * 1024 + 1)
