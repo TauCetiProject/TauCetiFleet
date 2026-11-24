@@ -101,8 +101,10 @@ copies work. Writable job files are never shared with another job.
 The systemd unit caps whole-job RAM at 54 GiB, disables job swap and preserves
 normal PR CPU priority. `LimitFSIZE` is unlimited because .NET's RAM-backed
 executable mapper otherwise fails. The existing ordinary PR startup RAM check
-(currently 20 GiB), lock and spacing apply to native jobs too. Clean host file
-cache is discounted in native memory estimates. Raw charge and peaks remain
+(currently 20 GiB), lock and spacing apply to native jobs too. Native infra jobs
+start two seconds after the previous start, like small control VMs, rather than
+ten: they have no VM boot to settle, and their short jobs would otherwise queue
+behind the gap. Clean host file cache is discounted in native memory estimates. Raw charge and peaks remain
 visible; the cap is not a reservation. The ordinary autoscaler forecasts future
 growth once and does not inflate VM estimates from native clean cache.
 
