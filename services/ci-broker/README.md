@@ -218,8 +218,12 @@ cover these repositories, so Fleet records no per-job result for infra slots.
 ## Shared-harness entries
 
 TauCeti runs its shared harness from TauCetiTools `main`. `TauCetiFleet` admits
-`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main`, and
-`TauCetiQueueControl` admits that and `publish-lake-cache.yml@refs/heads/main`.
+`TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main`,
+`api-docs.yml@refs/heads/main` and `nightly-verify.yml@refs/heads/main` (TauCeti's API-docs and
+nightly verification jobs, once their TauCeti files are stubs calling Tools), and
+`TauCetiQueueControl` admits `pr-build.yml` and `publish-lake-cache.yml@refs/heads/main`.
+TauCetiTools' `workflow-contract.yml` checks that every Tools job reaching a restricted group is
+defined in a file the group's entry here admits.
 These are static entries an organization owner sets once; the broker never edits
 runner groups. Host and broker policy accept no other harness entry: no exact
 revision, no other branch and no fork.

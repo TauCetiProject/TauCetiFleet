@@ -21,7 +21,7 @@ export const INFRA_REPOSITORIES=['TauCetiCI','TauCetiFleet','TauCetiTools','TauC
 // Expected settings of each runner group the broker registers runners in.
 export const CHECKS={
   3:expect('TauCetiFleet',main(TAUCETI,['pr-build.yml']),
-    [...main(TAUCETI,['nightly-verify.yml','pick-runner.yml','full-lint-label.yml','api-docs.yml']),...main(HARNESS,['pr-build.yml'])]),
+    [...main(TAUCETI,['nightly-verify.yml','pick-runner.yml','full-lint-label.yml','api-docs.yml']),...main(HARNESS,['pr-build.yml','api-docs.yml','nightly-verify.yml'])]),
   6:expect('TauCetiQueueControl',main(TAUCETI,['pick-runner.yml','pr-build.yml','publish-lake-cache.yml']),
     main(HARNESS,['pr-build.yml','publish-lake-cache.yml']),'TauCetiProject/TauCeti'),
   7:expect('TauCetiPRStatus',main(TAUCETI,['pr-status.yml','pr-labels.yml']),[],'TauCetiProject/TauCeti'),
