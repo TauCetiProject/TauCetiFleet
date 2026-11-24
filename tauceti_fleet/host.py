@@ -253,6 +253,15 @@ def refresh_worker_memory(config, caps, memory, *, ci_busy=False):
 
 
 REPAIR_SLICE = "tauceti-repair.slice"
+# Task (thread) limits. A QEMU guest costs the host a few dozen threads, but every
+# thread of a native guest's Lake, Lean and leantar counts against the CI slice: one
+# PR build's cache restore peaked at 6,666 tasks on chungus5, and 27 guests sharing
+# 16,384 made Lean and leantar fail with "Resource temporarily unavailable" (23 Nov
+# 2026). Each native guest has its own native_runner.TASKS_MAX; the slice only bounds
+# their sum, below the host's RLIMIT_NPROC and threads-max.
+WORKER_TASKS_MAX = 16384
+CI_TASKS_MAX = 262144
+FLEET_TASKS_MAX = CI_TASKS_MAX + WORKER_TASKS_MAX
 # Free memory kept under the shared ceiling ahead of repair: the new-guest start
 # check's requirement, which also exceeds the normal two-file compiler headroom.
 REPAIR_HEADROOM = max(vm.START_MEMORY_BYTES, 2 * lean_pressure.WORST_FILE_RSS_BYTES) + GIB
@@ -298,12 +307,32 @@ def install_ceiling(caps):
     """
     changed = False
     for name, text in (("tauceti.slice", f"[Slice]\nMemoryMax={int(capacity.shared_memory_bytes(caps))}\n"),
-                       ("tauceti-fleet.slice", "[Slice]\nTasksMax=32768\n")):
+                       ("tauceti-fleet.slice", f"[Slice]\nTasksMax={FLEET_TASKS_MAX}\n")):
         path = units() / name
         if not path.exists() or path.read_text() != text:
             path.write_text(text)
             changed = True
-    return changed
+    # Only enable writes the CI slice; a live update carries its task limit forward.
+    return set_tasks_max("tauceti-fleet-ci.slice", CI_TASKS_MAX) or changed
+
+
+def set_tasks_max(name, value):
+    """Rewrite only an existing slice's TasksMax line; True when the unit changed."""
+    path = units() / name
+    if not path.exists():
+        return False
+    lines = path.read_text().splitlines()
+    setting = f"TasksMax={value}"
+    old = [i for i, line in enumerate(lines) if line.startswith("TasksMax=")]
+    if old:
+        updated = [setting if i == old[0] else line for i, line in enumerate(lines) if i not in old[1:]]
+    else:
+        updated = list(lines)
+        updated.insert(updated.index("[Slice]") + 1 if "[Slice]" in updated else len(updated), setting)
+    if updated == lines:
+        return False
+    path.write_text("\n".join(updated) + "\n")
+    return True
 
 
 def write_slices(config, caps):
@@ -339,7 +368,7 @@ def write_slices(config, caps):
         (units() / f"tauceti-fleet-{name}.slice").write_text(
             f"[Slice]\nCPUWeight={weight}\nMemoryHigh={int(maximum * (1 if name == 'ci' else 0.95))}\nMemoryMax={int(maximum)}\n"
             + (f"MemorySwapMax={workers_swap_bytes(config)}\n" if name == "workers" else "")
-            + "TasksMax=16384\n"
+            + f"TasksMax={CI_TASKS_MAX if name == 'ci' else WORKER_TASKS_MAX}\n"
         )
     run(["systemctl", "--user", "daemon-reload"])
     return worker

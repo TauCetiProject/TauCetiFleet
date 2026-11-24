@@ -163,6 +163,19 @@ class Overcommit(unittest.TestCase):
         self.assertEqual((units / "tauceti.slice").read_text(), f"[Slice]\nMemoryMax={capacity.shared_memory_bytes(caps)}\n")
         self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
 
+    def test_live_update_raises_the_ci_task_limit_and_keeps_memory_settings(self):
+        units = self.root / "units"
+        units.mkdir()
+        (units / "tauceti-fleet-ci.slice").write_text("[Slice]\nCPUWeight=1000\nMemoryMax=7\nTasksMax=16384\n")
+        caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
+        with patch.object(host, "units", return_value=units):
+            self.assertTrue(host.install_ceiling(caps))
+            self.assertFalse(host.install_ceiling(caps))
+        self.assertEqual((units / "tauceti-fleet-ci.slice").read_text(),
+                         f"[Slice]\nCPUWeight=1000\nMemoryMax=7\nTasksMax={host.CI_TASKS_MAX}\n")
+        self.assertEqual((units / "tauceti-fleet.slice").read_text(), f"[Slice]\nTasksMax={host.FLEET_TASKS_MAX}\n")
+        self.assertGreaterEqual(host.FLEET_TASKS_MAX, host.CI_TASKS_MAX + host.WORKER_TASKS_MAX)
+
     def test_hosts_without_a_repair_slice_are_untouched(self):
         with patch.object(host, "run", return_value=subprocess.CompletedProcess([], 1, stdout="")):
             self.assertIsNone(host.refresh_repair_memory())

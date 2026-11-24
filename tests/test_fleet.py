@@ -606,6 +606,8 @@ class Isolated(unittest.TestCase):
         ci = (self.root / "tauceti-fleet-ci.slice").read_text()
         self.assertIn("CPUWeight=10\n", workers)
         self.assertIn("CPUWeight=1000\n", ci)
+        self.assertIn(f"TasksMax={host.CI_TASKS_MAX}\n", ci)
+        self.assertIn(f"TasksMax={host.WORKER_TASKS_MAX}\n", workers)
         self.assertIn(f"MemorySwapMax={gib}\n", workers)
         self.assertIn(f"MemoryMax={int(worker)}\n", workers)
         self.assertIn(f"MemoryHigh={int(worker * 0.95)}\n", workers)
