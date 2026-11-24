@@ -127,6 +127,16 @@ def natural(worker):
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", str(worker.get("id", "")))]
 
 
+def state(worker):
+    from .host import FORGE_NAMES, halt_forge  # host imports this module
+
+    value, reason = str(worker.get("state") or "unknown"), worker.get("halt_reason")
+    if value != "halted" or not reason:
+        return value
+    forge, verdict = halt_forge(reason)
+    return f"halted ({FORGE_NAMES.get(forge, forge)} {verdict})"
+
+
 def display(status, *, now=None):
     now = time.time() if now is None else now
     workers = sorted((w for w in status.get("workers") or [] if isinstance(w, dict)), key=natural)
@@ -141,7 +151,7 @@ def display(status, *, now=None):
             held = worker.get("state") in (*IN_ROUND, "backoff")
             table.append([
                 str(worker.get("id", "?")),
-                str(worker.get("state") or "unknown"),
+                state(worker),
                 str(held and worker.get("phase") or "—"),
                 f"#{pr}" if held and pr else str(held and worker.get("target") or "—").split("  ")[0][:40],
                 f"{agent}→{provider}" if provider and agent not in (None, provider) else str(provider or agent or "—"),

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import activity, broker, host, pool_activity, remote, targets, worker_view
+from . import activity, attention, broker, claude_credentials, host, pool_activity, remote, targets, worker_view
 from .activity_summary import amount
 from .store import FleetError, atomic, config_dir, read
 
@@ -43,6 +43,7 @@ def parser():
             cmd.add_argument(
                 "--smoke", action="store_true", help="boot small disposable guests without production registration"
             )
+    sub.add_parser("claude-usage-login", help="sign in this host's Claude usage login")
     budget = sub.add_parser("budget", help="inspect or explicitly fund local host grant pools")
     budget.add_argument("host", nargs="?")
     funding = budget.add_mutually_exclusive_group()
@@ -99,6 +100,10 @@ def parser():
     workers.add_argument("--unset-env", action="append", default=None, metavar="NAME",
                          help="remove a worker environment variable set with --env (repeatable)")
     workers.add_argument("--json", action="store_true")
+    clear = sub.add_parser("clear-halt", help="clear a worker's identity halt and restart that worker")
+    clear.add_argument("host")
+    clear.add_argument("worker", nargs="?", help="worker id (default: every halted worker on the host)")
+    clear.add_argument("--json", action="store_true")
     schedule = sub.add_parser("schedule", help="admit new worker rounds only inside weekly time slots")
     schedule.add_argument("host")
     schedule.add_argument("slots", nargs="*", metavar="SLOT", help='for example "Mon 23:00 -> Thu 07:00"; omit to show the saved schedule')
@@ -128,6 +133,11 @@ def parser():
     destination.add_argument("--dir", dest="directory", help="existing absolute directory on the host")
     destination.add_argument("--clear", action="store_true")
     export.add_argument("--json", action="store_true")
+    needs = sub.add_parser("attention", help="list what is waiting for a person, or acknowledge it")
+    needs.add_argument("host", nargs="?")
+    needs.add_argument("--ack", metavar="PR|ID|all", help="archive the records of this pull request or ack id, or every record; needs a host")
+    needs.add_argument("--lookup", action="store_true", help="ask each pull request's forge for its state and that of the ones it names")
+    needs.add_argument("--json", action="store_true")
     monitor = sub.add_parser("monitoring", help="publish prepared observations independently of host work")
     monitor.add_argument("arguments", nargs=argparse.REMAINDER)
     sub.add_parser("ci-autoscale", help="run the CI autoscaler for one host (the installed unit's command)")
@@ -329,6 +339,10 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             except (FleetError, OSError, ValueError, KeyError) as exc:
                 print(json.dumps(dict(ok=False, error=str(exc))))
             return 0
+        if args.command == "claude-usage-login":
+            claude_credentials.sign_in()
+            print("Usage login signed in; doctor counts its four weeks from now.")
+            return 0
         if args.command == "host-daemon":
             host.daemon()
             return 0
@@ -366,6 +380,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                              "--env, --unset-env or --swap-gib")
         if args.command == "budget" and (args.grant is not None or args.set_grant is not None or args.grant_rate is not None) and not args.host:
             raise FleetError("Budget changes require one explicit host; queries may aggregate the fleet")
+        if args.command == "attention" and args.ack and not args.host:
+            raise FleetError("Acknowledging requires one explicit host; listing may cover the fleet")
         selected = {}
         for name in args.host if args.command == "status" else [args.host] if args.host else []:
             entry = local_entry() if name == "local" else remote.resolve(name)
@@ -445,6 +461,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 payload.update(maximum=args.maximum)
                 if args.memory_gib is not None:
                     payload.update(memory_gib=args.memory_gib)
+            if args.command == "clear-halt":
+                payload.update(worker=args.worker)
             if args.command == "schedule":
                 slots = [s.strip() for text in args.slots for s in text.split(",") if s.strip()]
                 if (args.clear and slots) or (args.timezone and not slots):
@@ -474,6 +492,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     payload["directory"] = args.directory
                 if args.clear:
                     payload["clear"] = True
+            if args.command == "attention":
+                payload.update(ack=args.ack, lookup=args.lookup)
             if args.command == "update":
                 options = dict(live=True, expected_machine_id=entry["machine_id"],
                                allow_downgrade=args.allow_downgrade)
@@ -540,6 +560,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 print(name + ":")
                 if args.command == "doctor" and "readiness" in value:
                     print_doctor(value)
+                elif args.command == "attention" and "items" in value:
+                    attention.display(name, value)
                 elif args.command == "targets" and "error" not in value:
                     targets.display(value)
                 elif args.command == "status" and "status" in value:
@@ -551,6 +573,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         if _status_results is not None:
                             print(value.get("error", "Live reports unavailable"))
                         print()
+                    needs = attention.status_lines(name, value.get("attention") or {})
+                    if needs:
+                        print("\n".join(needs) + "\n")
                     workers = status.get("workers")
                     if isinstance(workers, list):
                         running = sum(w.get("state") == "running" for w in workers)
@@ -561,6 +586,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     else:
                         print("Worker rounds: unknown")
                     print(f"New-round admission limit: {status.get('active_worker_limit', 0)} / {value.get('max_workers', 0)}")
+                    claude_credentials.display(value.get("claude_credentials", []))
                     pressure = value.get("lean_host_pressure")
                     if pressure is not None:
                         health = "healthy" if pressure.get("healthy") else "STALE or unavailable; new CI compilers wait"
@@ -676,19 +702,31 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         print("\n".join(targets.summary_lines(listed)))
                     if status.get("workers"):
                         print()
-                    groups = {}
+                    groups, remedies = {}, {}
                     for worker in status.get("workers", []):
                         state = worker.get("state", "unknown")
                         if state == "waiting-capacity":
                             state = "waiting for RAM headroom" if status.get("memory_pressure") else "waiting for admission"
+                        detail = worker.get("detail") or ""
+                        if state == "halted":
+                            reason = worker.get("halt_reason")
+                            forge, verdict = host.halt_forge(reason)
+                            state = f"halted ({host.FORGE_NAMES.get(forge, forge)} {verdict})" if reason else "halted (reason not recorded)"
+                            detail = worker.get("failure_reason") or detail
+                            remedy = host.HALT_REMEDY.get(verdict, {}).get(forge) if reason else None
+                            remedies[state] = (f"{remedy}, then clear the halt" if remedy
+                                               else "The worker stays stopped; clear the halt once the account is in order")
                         error = worker.get("isolation_error")
-                        key = (state, worker.get("detail") or "", error, worker["id"] if error else None)
+                        key = (state, detail, error, worker["id"] if error else None)
                         groups.setdefault(key, []).append(worker["id"])
                     for (state, detail, error, _), workers in groups.items():
                         label = workers[0] if len(workers) == 1 else f"{len(workers)} workers"
                         print(f"  {label}: {state} — {detail}")
                         if error:
                             print("    Isolation degraded: " + error)
+                        if state in remedies:
+                            print(f"    {remedies[state]}: tauceti-fleet clear-halt {name} "
+                                  + (workers[0] if len(workers) == 1 else "[WORKER]"))
                     if args.workers:
                         print()
                         worker_view.display(status)
