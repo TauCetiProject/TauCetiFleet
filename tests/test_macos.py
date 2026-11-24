@@ -199,7 +199,7 @@ class MacOS(unittest.TestCase):
         with patch.object(host, "executable", return_value="/fake/tauceti"), \
                 patch.object(host, "run", return_value=funded) as run:
             host.budget(dict(grant=100))
-        self.assertEqual(run.call_args.args[0][-2:], ["--grant", "100"])
+        self.assertEqual(run.call_args.args[0][-1], "--grant=100")
         self.assertEqual(run.call_args.kwargs["env"]["TAUCETI_BUDGET_DIR"], ledger)
         self.assertNotIn("TAUCETI_BUDGET_DIR", os.environ)
         secret = self.home / "token"

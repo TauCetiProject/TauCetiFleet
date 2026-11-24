@@ -298,6 +298,7 @@ FLEET_TASKS_MAX = CI_TASKS_MAX + WORKER_TASKS_MAX
 REPAIR_HEADROOM = max(vm.START_MEMORY_BYTES, 2 * lean_pressure.WORST_FILE_RSS_BYTES) + GIB
 
 
+@hostos.linux
 def refresh_repair_memory():
     """Give TauCetiWorker's repair slice what the VMs leave under the shared ceiling.
 
@@ -326,6 +327,7 @@ def refresh_repair_memory():
     return dict(high=int((cg / "memory.high").read_text()), pinned=pinned, available=available)
 
 
+@hostos.linux
 def install_ceiling(caps):
     """Write the shared hard ceiling; True when a unit file changed.
 

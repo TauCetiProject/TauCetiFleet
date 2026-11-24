@@ -127,6 +127,14 @@ def write_slices(config, caps):
     return None
 
 
+def install_ceiling(caps):
+    return False
+
+
+def refresh_repair_memory():
+    return None
+
+
 def service():
     result = run(["launchctl", "print", f"{domain()}/{CONTROLLER}"], check=False)
     pid = re.search(r"^\s*pid = (\d+)$", result.stdout, re.MULTILINE) if result.returncode == 0 else None
