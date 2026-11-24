@@ -17,7 +17,7 @@ message after the next success. It reads two public workflow-run listings withou
 
 import argparse
 import base64
-import calendar
+import datetime
 import collections
 import json
 import os
@@ -233,7 +233,8 @@ def tick(results, state, now, send, commit=lambda: None):
 def parse_time(value):
     """Seconds since the epoch for GitHub's `2026-11-24T14:43:14Z`, or None."""
     try:
-        return float(calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")))
+        moment = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")  # rejects out-of-range fields
+        return moment.replace(tzinfo=datetime.timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
 

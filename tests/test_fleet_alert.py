@@ -320,7 +320,8 @@ class DocsStaleness(unittest.TestCase):
 
     def test_unreadable_listings_are_rejected(self):
         for listing in ({}, {"workflow_runs": None}, {"workflow_runs": [{}]},
-                        {"workflow_runs": [{"conclusion": "failure", "updated_at": "yesterday"}]}):
+                        {"workflow_runs": [{"conclusion": "failure", "updated_at": "yesterday"}]},
+                        {"workflow_runs": [{"conclusion": "failure", "updated_at": "2026-11-20T00:00:61Z"}]}):
             with self.subTest(listing=listing), self.assertRaises(ValueError):
                 fleet_alert.newest_run(listing)
         for bad in ({"workflow_runs": [run("", self.START)]}, {"workflow_runs": [{"conclusion": None, "updated_at": "2026-11-24T00:00:00Z"}]}):
