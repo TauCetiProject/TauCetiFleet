@@ -259,6 +259,54 @@ class Isolated(unittest.TestCase):
             self.assertEqual(main(["workers", "test", "--review-first-workers", "5", "--json"]), 0)
             self.assertEqual(call.call_args.args[1], dict(action="workers", review_first_workers=5))
 
+    def test_forgejo_first_slots_follow_the_review_first_slots(self):
+        import tomllib
+        original = store.update_host(max_workers=8, workers_enabled=True, ci_enabled=True)
+        with (patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"),
+              patch.object(host, "require_worker_support") as support):
+            host.set_worker_policy(dict(maintenance_workers=2, both_forge_workers=4))
+            host.set_worker_policy(dict(github_first_workers=2, review_first_workers=1))
+            with self.assertRaisesRegex(store.FleetError, "Forgejo-first worker counts together exceed the maintenance"):
+                host.set_worker_policy(dict(forgejo_first_workers=4))
+            value = host.set_worker_policy(dict(forgejo_first_workers=3))
+            support.assert_called_with("prefer_forge", "--forgejo-first-workers")
+            # Lowering the both-forge count or raising another preference would make the slots overlap.
+            for changes in (dict(both_forge_workers=3), dict(github_first_workers=3), dict(review_first_workers=2)):
+                with self.assertRaisesRegex(store.FleetError, "together exceed the maintenance"):
+                    host.set_worker_policy(changes)
+        self.assertEqual(value["forgejo_first_workers"], 3)
+        # The commit rechecks under the host.json lock: a both-forge count lowered by a concurrent
+        # command after the early check still refuses the preference.
+        real_update = store.update_host
+        def lowered_meanwhile(**changes):
+            real_update(both_forge_workers=3)
+            return real_update(**changes)
+        with (patch.object(host, "require_worker_support"),
+              patch.object(host, "update_host", side_effect=lowered_meanwhile)):
+            with self.assertRaisesRegex(store.FleetError, "Forgejo-first worker counts together exceed"):
+                host.set_worker_policy(dict(forgejo_first_workers=3))
+        self.assertEqual(store.host_config()["forgejo_first_workers"], 3)
+        real_update(both_forge_workers=4)
+        # A controller rewrite from an older snapshot keeps the preferences, in disjoint slots.
+        host.worker_config(original)
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([spec.get("prefer_forge") for spec in specs],
+                         ["github", "github", None, "forgejo", "forgejo", "forgejo", None, None])
+        self.assertEqual([spec.get("review_first", False) for spec in specs], [False, False, True] + [False] * 5)
+        self.assertTrue(all(spec["github"] and spec["forgejo"] for spec in specs[:6]))
+        for count in (True, -1, 4097, "1"):
+            with self.assertRaises(store.FleetError):
+                host.set_worker_policy(dict(forgejo_first_workers=count))
+        host.set_worker_policy(dict(forgejo_first_workers=0))
+        specs = tomllib.loads((store.config_dir() / "workers.toml").read_text())["workers"]
+        self.assertEqual([spec.get("prefer_forge") for spec in specs], ["github", "github"] + [None] * 6)
+        with (patch.object(remote, "inventory", return_value={}),
+              patch.object(remote, "resolve", return_value=dict(target="target", machine_id="m")),
+              patch.object(remote, "call", return_value={}) as call,
+              patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["workers", "test", "--forgejo-first-workers", "20", "--json"]), 0)
+            self.assertEqual(call.call_args.args[1], dict(action="workers", forgejo_first_workers=20))
+
     def test_both_forge_slots_author_on_forgejo_after_the_maintenance_slots(self):
         import tomllib
         original = store.update_host(max_workers=8, workers_enabled=True, ci_enabled=True)
