@@ -238,21 +238,28 @@ def parse_time(value):
         return None
 
 
-def checked_run(value):
-    """A run from GitHub's list, validated; raises ValueError on anything unexpected."""
-    if not isinstance(value, dict) or not isinstance(value.get("conclusion"), str):
-        raise ValueError("workflow run without a conclusion")
+CONCLUSIONS = {"success", "failure", "cancelled", "timed_out", "startup_failure", "action_required",
+               "neutral", "skipped", "stale"}
+
+
+def checked_run(value, conclusion=None):
+    """A run from GitHub's list, validated; raises ValueError on anything unexpected, including a
+    run whose conclusion is not `conclusion` when one is required."""
+    if not isinstance(value, dict) or value.get("conclusion") not in CONCLUSIONS:
+        raise ValueError("workflow run without a known conclusion")
+    if conclusion is not None and value["conclusion"] != conclusion:
+        raise ValueError(f"workflow run listed as {conclusion} has another conclusion")
     if parse_time(value.get("updated_at")) is None:
         raise ValueError("workflow run without a readable time")
     return value
 
 
-def newest_run(listing):
+def newest_run(listing, conclusion=None):
     """The first run of a workflow-run listing, None for an empty history; ValueError when unreadable."""
     if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
         raise ValueError("unreadable workflow run listing")
     runs = listing["workflow_runs"]
-    return checked_run(runs[0]) if runs else None
+    return checked_run(runs[0], conclusion) if runs else None
 
 
 def docs_verdict(last_success, last_finished, now):
@@ -275,7 +282,8 @@ def fetch_docs_runs(request=None):
     if request is None:
         from .github import request
     base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=1"
-    return newest_run(request(base + "&status=success")), newest_run(request(base + "&status=completed"))
+    return (newest_run(request(base + "&status=success"), "success"),
+            newest_run(request(base + "&status=completed")))
 
 
 def docs_due(state, now):

@@ -323,6 +323,11 @@ class DocsStaleness(unittest.TestCase):
                         {"workflow_runs": [{"conclusion": "failure", "updated_at": "yesterday"}]}):
             with self.subTest(listing=listing), self.assertRaises(ValueError):
                 fleet_alert.newest_run(listing)
+        for bad in ({"workflow_runs": [run("", self.START)]}, {"workflow_runs": [{"conclusion": None, "updated_at": "2026-11-24T00:00:00Z"}]}):
+            with self.subTest(listing=bad), self.assertRaises(ValueError):
+                fleet_alert.newest_run(bad)
+        with self.assertRaises(ValueError):
+            fleet_alert.newest_run({"workflow_runs": [run("failure", self.START)]}, "success")
         self.assertIsNone(fleet_alert.newest_run({"workflow_runs": []}))
         listing = {"workflow_runs": [run("failure", self.START)]}
         self.assertEqual(fleet_alert.newest_run(listing)["conclusion"], "failure")
