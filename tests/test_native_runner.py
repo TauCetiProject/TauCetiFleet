@@ -111,7 +111,7 @@ class NativeRunner(unittest.TestCase):
     def test_infra_start_refuses_the_vm_backend(self):
         (store.data_dir() / "images").mkdir(parents=True)
         store.atomic(store.data_dir() / "images/prepared.json", {})
-        with patch.object(vm, "warm_disk") as warm, patch.object(github, "jit_config") as jit:
+        with patch.object(vm, "remove_warm_disk") as warm, patch.object(github, "jit_config") as jit:
             with self.assertRaisesRegex(store.FleetError, "only on the native backend"):
                 vm._start(dict(self.config, ci_kinds=["infra"], _ci_backend="vm"))
             warm.assert_not_called()

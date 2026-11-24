@@ -315,17 +315,11 @@ runs staging in its reserved slots only: they and any `ci_protected_slots` keep 
 guests, while each other slot retires its idle runner and lets a busy one finish its
 job, then stays empty. Nothing is cancelled.
 
-Each reserved staging slot also keeps one persistent, sparse disk, `warm.qcow2` in
-the slot's state directory (`ci_disk_gib` virtual size), attached to every guest of
-that slot as a second virtio disk with serial `tauceti-warm`. The disposable guests
-are otherwise unchanged. The trusted staging workflow decides what the disk holds:
-it keeps one batch's build tree for that batch's next attempt and reformats the disk
-for any other batch. No other slot sees the disk, and a slot deletes it when it next
-starts a guest without the staging reservation (before its free-space check). Before
-each attach, `qemu-img check` reads the disk's metadata: a corrupt disk is replaced by
-an empty one, and a disk that cannot be opened (for example one a QEMU still holds) or
-created is left alone, so the guest starts without it and the workflow takes its
-normal cold path.
+Reserved staging slots used to keep a persistent `warm.qcow2` disk for reusing a
+batch's build tree between attempts. TauCetiTools no longer uses it, so guests get no
+such disk, and a slot deletes its leftover `warm.qcow2` when it next starts a guest
+(before its free-space check). A leftover that cannot be opened (for example one a
+QEMU still holds) is left for the next start.
 
 Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
 host they and the other CI guests together overcommit its RAM. `--memory-gib N`

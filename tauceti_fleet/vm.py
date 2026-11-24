@@ -102,7 +102,7 @@ def cloud_seed(directory, commands, *, name):
     return directory / "seed.iso"
 
 
-def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard=False, events=True, warm=None):
+def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard=False, events=True):
     from .capacity import guest_shape
 
     shape = shape or (dict(vcpus=2, memory_gib=2) if small else guest_shape(config))
@@ -122,26 +122,10 @@ def qemu_args(config, directory, disk, seed, *, small=False, shape=None, discard
         "none",
         "-serial",
         "file:" + str(directory / "console.log"),
-        # With a second disk, SeaBIOS may try to boot the blank one and halt, so the
-        # system disk gets bootindex=0 (the only bootable device that has one).
-        *([
-            "-drive",
-            f"file={disk},format=qcow2,if=none,id=system,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
-            "-device",
-            "virtio-blk-pci,drive=system,bootindex=0",
-        ] if warm else [
-            "-drive",
-            f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
-        ]),
+        "-drive",
+        f"file={disk},format=qcow2,if=virtio,werror=report,rerror=report" + (",discard=unmap" if discard else ""),
         "-drive",
         f"file={seed},format=raw,media=cdrom,readonly=on",
-        # QEMU 10 rejects `serial` as a -drive option, so the serial goes on the device.
-        *([
-            "-drive",
-            f"file={warm},format=qcow2,if=none,id=warm,werror=report,rerror=report,discard=unmap",
-            "-device",
-            f"virtio-blk-pci,drive=warm,serial={WARM_SERIAL}",
-        ] if warm else []),
         "-netdev",
         "user,id=net0",
         "-device",
@@ -331,11 +315,13 @@ def start(config):
             available = start_memory_available()
             boot_reservation = control_boot_reservation()
             small_control = config.get("ci_kinds") in SMALL_CONTROL_KINDS
-            fast_control = small_control and available is not None
             measured_available = available
             if available is not None:
                 available = max(0, available - boot_reservation)
             native = native_runner.choose(config, available)
+            # A native infra guest is a cgroup-limited process tree with no VM boot
+            # to settle; its RAM grows with the job, as the startup check expects.
+            fast_control = (small_control or (native and config.get("ci_kinds") == ["infra"])) and available is not None
             config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available,
                           _ci_start_measured_available=measured_available, _ci_start_boot_reservation=boot_reservation)
             if native and config.get("ci_kinds") != ["infra"]:
@@ -347,7 +333,8 @@ def start(config):
             def reserve(*, starting=False):
                 # Heavy guests keep their existing ten-second settling time.
                 # Small, isolated control VMs need only two seconds, backed by
-                # explicit reservations for every unobserved control boot.
+                # explicit reservations for every unobserved control boot, and
+                # so do native infra guests, which have no boot to reserve.
                 gap = CONTROL_START_GAP_SECONDS if fast_control and not starting else CI_START_GAP_SECONDS
                 atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + gap, starting=starting,
                                   measured_available_bytes=measured_available, boot_reserved_bytes=boot_reservation))
@@ -412,44 +399,29 @@ def slot_file(config, name):
     return (state_dir() if slot == 0 else state_dir() / "ci-slots" / str(slot)) / name
 
 
-# A reserved staging slot keeps one disk across its disposable guests, so consecutive
-# attempts of the queue's head batch can reuse the previous attempt's build tree. The
-# guest's trusted workflow owns the contents (and reformats the disk for another batch);
-# the host only provides it. No other slot ever sees it.
+# Reserved staging slots used to keep one disk (`warm.qcow2`) across their guests so a batch's
+# next attempt could reuse its build tree. TauCetiTools no longer uses it (the reuse never
+# activated: TauCetiTools #354), so each slot deletes its leftover disk when it next starts a guest.
 WARM_DISK = "warm.qcow2"
-WARM_SERIAL = "tauceti-warm"
 
 
-def warm_disk(config, *, attach=True):
-    """The slot's persistent staging disk, or None (removing a leftover) for any other guest.
+def remove_warm_disk(config):
+    """Delete the slot's leftover staging disk, unless something still holds it open.
 
-    Called with the slot lock held and the slot's previous guest retired. Without the
-    disk the guest takes its normal cold path, so no failure here stops the slot.
+    Called with the slot lock held and the slot's previous guest retired. A disk that
+    `qemu-img check` cannot open (exit 1, for example one a QEMU that has not exited still
+    locks) is left for the next start. No failure here stops the slot.
     """
     path = slot_file(config, WARM_DISK)
     try:
         if path.exists():
-            # Metadata only, so this takes about a second. 0 is clean and 3 is leaked
-            # clusters only; 2 is corruption, so start afresh; 1 is an image that could not
-            # be opened (for example still locked by a QEMU that has not exited): leave it.
             result = run([executable("qemu-img"), "check", "-q", path], timeout=60, check=False)
             if result.returncode == 1:
-                print("Warm staging disk could not be opened; starting without it", flush=True)
-                return None
-            if result.returncode not in (0, 3) or not (attach and config.get("ci_staging_reserved")):
-                path.unlink()
-        if not (attach and config.get("ci_staging_reserved")):
-            return None
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temporary = path.with_name(WARM_DISK + ".new")
-            temporary.unlink(missing_ok=True)
-            run([executable("qemu-img"), "create", "-f", "qcow2", temporary, str(config["ci_disk_gib"]) + "G"])
-            os.replace(temporary, path)
+                print("Leftover staging disk is still open; keeping it until the next start", flush=True)
+                return
+            path.unlink()
     except (OSError, FleetError) as error:
-        print(f"Warm staging disk unavailable, starting without it: {error}", flush=True)
-        return None
-    return path
+        print(f"Leftover staging disk not removed: {error}", flush=True)
 
 
 def slots_in_use():
@@ -500,8 +472,8 @@ def _start(config):
             return {}
     if config.get("ci_kinds") == ["infra"] and config.get("_ci_backend") != native_runner.RUNTIME:
         raise FleetError("Infra slots run only on the native backend")
-    # Before the space check, so a former staging slot's disk is reclaimed first.
-    warm = warm_disk(config, attach=config.get("_ci_backend") != native_runner.RUNTIME)
+    # Before the space check, so a leftover staging disk is reclaimed first.
+    remove_warm_disk(config)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")
@@ -610,7 +582,7 @@ def _start(config):
                 "-p",
                 "RemainAfterExit=yes",
                 *(native_runner.properties() if native else []),
-                *(native_runner.argv(directory) if native else qemu_args(config, directory, disk, seed, warm=warm)),
+                *(native_runner.argv(directory) if native else qemu_args(config, directory, disk, seed)),
             ],
             timeout=30,
         )
