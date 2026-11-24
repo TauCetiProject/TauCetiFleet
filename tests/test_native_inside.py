@@ -72,7 +72,9 @@ class DiskMonitor(unittest.TestCase):
     def test_partial_scans_are_counted_in_total_and_in_a_row(self):
         monitor = inside.DiskUsage()
         clock = [0]
-        for code in (1, 1, 0, 1):
+        seen = []
+        # A failed scan (exit 2) measures nothing, so it neither extends nor ends the streak.
+        for code in (1, 1, 2, 1, 0, 1):
             child = Mock(pid=42)
             child.poll.return_value = code
             child.communicate.return_value = ('12345\t/\n', None)
@@ -81,10 +83,10 @@ class DiskMonitor(unittest.TestCase):
                 clock[0] += 2
                 monitor.poll()
                 clock[0] += inside.DISK_SCAN_INTERVAL
-        value = monitor.snapshot()
-        self.assertEqual(value['disk_scan_partial_total'], 3)
-        self.assertEqual(value['disk_scan_partial_streak'], 1)
-        self.assertEqual(value['disk_scan_failures'], 0)
+            value = monitor.snapshot()
+            seen.append((value['disk_scan_partial_total'], value['disk_scan_partial_streak']))
+        self.assertEqual(seen, [(1, 1), (2, 2), (2, 2), (3, 3), (3, 0), (4, 1)])
+        self.assertEqual(monitor.snapshot()['disk_scan_failures'], 0)
 
     def test_success_reports_one_whole_instance_allocation_then_waits(self):
         child = Mock(pid=42)
