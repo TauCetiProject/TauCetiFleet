@@ -238,53 +238,78 @@ def parse_time(value):
         return None
 
 
+def checked_run(value):
+    """A run from GitHub's list, validated; raises ValueError on anything unexpected."""
+    if not isinstance(value, dict) or not isinstance(value.get("conclusion"), str):
+        raise ValueError("workflow run without a conclusion")
+    if parse_time(value.get("updated_at")) is None:
+        raise ValueError("workflow run without a readable time")
+    return value
+
+
+def newest_run(listing):
+    """The first run of a workflow-run listing, None for an empty history; ValueError when unreadable."""
+    if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
+        raise ValueError("unreadable workflow run listing")
+    runs = listing["workflow_runs"]
+    return checked_run(runs[0]) if runs else None
+
+
 def docs_verdict(last_success, last_finished, now):
     """("bad", description), ("good", None), or None from the newest successful and finished runs."""
-    if not isinstance(last_finished, dict):
+    if last_finished is None:
         return None
-    if last_finished.get("conclusion") == "success":
+    if last_finished["conclusion"] == "success":
         return "good", None
-    succeeded = parse_time((last_success or {}).get("updated_at"))
+    succeeded = None if last_success is None else parse_time(last_success["updated_at"])
     if succeeded is not None and now - succeeded <= DOCS_STALE:
         return None  # failing, but the published docs are recent enough
     since = "no successful run on record" if succeeded is None else f"last success {duration(now - succeeded)} ago"
     url = last_finished.get("html_url") or ""
-    return "bad", f"TauCeti's API docs build keeps failing ({since}; latest run {last_finished.get('conclusion')}: {url})"
+    return "bad", f"TauCeti's API docs build keeps failing ({since}; latest run {last_finished['conclusion']}: {url})"
 
 
 def fetch_docs_runs(request=None):
-    """The newest successful and the newest finished api-docs runs on the default branch."""
+    """The newest successful and the newest finished api-docs runs on main; ValueError or FleetError
+    when GitHub's answer is unavailable or unreadable."""
     if request is None:
         from .github import request
     base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=1"
-    success = (request(base + "&status=success").get("workflow_runs") or [None])[0]
-    finished = (request(base + "&status=completed").get("workflow_runs") or [None])[0]
-    return success, finished
+    return newest_run(request(base + "&status=success")), newest_run(request(base + "&status=completed"))
+
+
+def docs_due(state, now):
+    return now - (state.get(DOCS_STATE) or {}).get("checked_at", 0) >= DOCS_INTERVAL
 
 
 def docs_tick(state, now, send, fetch=fetch_docs_runs, commit=lambda: None):
-    """At most hourly: alert once when the API docs build has failed for over a day, recover once."""
-    record = state.setdefault(DOCS_STATE, {})
-    if now - record.get("checked_at", 0) < DOCS_INTERVAL:
+    """At most hourly: alert once when the API docs build has failed for over a day, recover once.
+    `fetch` may raise; an unreadable answer neither opens nor closes the alert."""
+    if not docs_due(state, now):
         return state
+    record = state.setdefault(DOCS_STATE, {})
     record["checked_at"] = now
     try:
-        verdict = docs_verdict(*fetch(), now)
-    except (FleetError, AttributeError, TypeError, ValueError, IndexError) as error:
+        last_success, last_finished = fetch()
+        verdict = docs_verdict(last_success, last_finished, now)
+    except (FleetError, AttributeError, KeyError, TypeError, ValueError, IndexError) as error:
         print(f"fleet alert: API docs runs unreadable ({type(error).__name__})", file=sys.stderr, flush=True)
         return state
-    if verdict is None:
+    success_at = None if last_success is None else parse_time(last_success["updated_at"])
+    if record.get("alerted_at"):
+        # Any success after the one the alert was about ends the incident, even if a later run
+        # failed again before this check: that failure starts a new day-long wait.
+        if success_at is not None and success_at > record.get("success_at", 0):
+            if send(f":check: TauCeti's API docs build succeeded again; closing the alert opened "
+                    f"{duration(now - record['alerted_at'])} ago."):
+                record.pop("alerted_at", None)
+                record.pop("success_at", None)
+                commit()
         return state
-    kind, description = verdict
-    if kind == "bad" and not record.get("alerted_at"):
-        if send(":warning: " + description + "."):
-            record["alerted_at"] = now
-            commit()
-    elif kind == "good" and record.get("alerted_at"):
-        if send(f":check: TauCeti's API docs build succeeded again; closing the alert opened "
-                f"{duration(now - record['alerted_at'])} ago."):
-            record.pop("alerted_at", None)
-            commit()
+    if verdict is not None and verdict[0] == "bad" and send(":warning: " + verdict[1] + "."):
+        record["alerted_at"] = now
+        record["success_at"] = success_at or 0
+        commit()
     return state
 
 
@@ -321,11 +346,27 @@ def main(argv=None):
     with ThreadPoolExecutor(len(entries)) as pool:
         values = dict(zip(entries, pool.map(fetch_status, entries.values()), strict=True))
     path = state_dir() / "fleet-alert.json"
+    # Read GitHub before taking the lock, so slow requests never delay other runs; the check
+    # itself is re-decided under the lock.
+    docs = None
+    if docs_due(read(path, {}), time.time()):
+        try:
+            docs = fetch_docs_runs()
+        except (FleetError, ValueError) as error:
+            docs = error
+
+    def docs_fetch():
+        if docs is None:
+            raise ValueError("API docs runs were not read before the lock")
+        if isinstance(docs, Exception):
+            raise docs
+        return docs
+
     with locked(path.with_suffix(".lock")):
         state = read(path, {})
         tick({name: (entries[name]["machine_id"], value) for name, value in values.items()}, state, time.time(),
              send, lambda: atomic(path, state))
-        docs_tick(state, time.time(), send, commit=lambda: atomic(path, state))
+        docs_tick(state, time.time(), send, fetch=docs_fetch, commit=lambda: atomic(path, state))
         atomic(path, state)
     return 0
 
