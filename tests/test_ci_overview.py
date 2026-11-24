@@ -25,10 +25,13 @@ class Overview(unittest.TestCase):
         self.addCleanup(env.stop)
         self.config = dict(store.host_config(), github_account="science", profile="ai-for-science", max_open_prs=128, workers_enabled=True)
 
-    def worker(self, slot, scope=None, limit=128):
+    def worker(self, slot, scope=None, limit=128, authoring=None):
         identity = "fleet-" + self.config["machine_id"][:8] + "-" + str(slot)
-        store.atomic(store.state_dir() / "workers" / (identity + ".json"), dict(id=identity, alive=True, max_open_prs=limit,
-                     applied_spec=dict(github_account="science", roadmap_only=scope, roadmap_skip=[])))
+        value = dict(id=identity, alive=True, max_open_prs=limit,
+                     applied_spec=dict(github_account="science", roadmap_only=scope, roadmap_skip=[]))
+        if authoring is not None:
+            value["authoring"] = authoring
+        store.atomic(store.state_dir() / "workers" / (identity + ".json"), value)
 
     def snapshot(self, sources):
         value = dict(version=1, repository=overview.REPOSITORY, sources=sources)
@@ -170,8 +173,73 @@ class Overview(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=stamp))))
-        self.assertIn("all roadmaps: 526/512 blocked, 526/1024 open non-draft roadmap PRs", out.getvalue())
+        self.assertIn("all roadmaps: 526/512 blocked (github 526), 526/1024 (github 526) open non-draft roadmap PRs", out.getvalue())
         self.assertNotIn("stale", out.getvalue())
+
+    def test_workers_own_reports_replace_an_old_github_survey(self):
+        now = time.time()
+        report = dict(observed_at=now - 30, sources=dict(forgejo=97), count=97, limit=1024, blocked=False,
+                      scope="any", skip="")
+        self.worker(1, limit=1024, authoring=dict(report, observed_at=now - 90, count=95))
+        self.worker(2, limit=1024, authoring=report)
+        self.worker(3, limit=1024, authoring=dict(report, count="many"))  # malformed: ignored
+        self.worker(4, limit=1024, authoring=dict(report, observed_at=now + 3600, count=1))  # future: ignored
+        self.worker(5, limit=1024, authoring=dict(report, observed_at=now - 7 * 3600, count=2))  # long ago
+        data, stamp = overview.pressure(self.config)  # no gateway cache on this host at all
+        self.assertEqual([(r["scope"], r["count"], r["limit"], r["blocked"]) for r in data["scopes"]],
+                         [("auto", 97, 1024, False)])
+        self.assertEqual(stamp, now - 30)
+        old = self.survey_cache(None, "auto", count=800)
+        os.utime(old, (now - 93_870, now - 93_870))
+        newer = self.survey_cache("newer", "auto", count=800)  # GitHub alone, even when newer
+        os.utime(newer, (now, now))
+        data, _ = overview.pressure(self.config)
+        self.assertEqual([r["count"] for r in data["scopes"]], [97])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=stamp))))
+        self.assertIn("all roadmaps: 97/1024 (forgejo 97) open non-draft roadmap PRs", out.getvalue())
+        self.assertNotIn("stale", out.getvalue())
+
+    def test_a_complete_account_count_wins_over_newer_single_forge_reports(self):
+        now = time.time()
+        both = dict(observed_at=now - 300, sources=dict(forgejo=916, github=589), forges=["forgejo", "github"],
+                    complete=True, count=1505, limit=1024, blocked=True, scope="any", skip="")
+        self.worker(1, limit=1024, authoring=both)
+        # An older Forgejo-only worker reported its own forge alone, more recently.
+        self.worker(41, limit=1024, authoring=dict(observed_at=now - 10, sources=dict(forgejo=916), count=916,
+                                                   limit=1024, blocked=False, scope="any", skip=""))
+        # A current worker whose GitHub count was unavailable: blocked, and never preferred either.
+        self.worker(42, limit=1024, authoring=dict(observed_at=now - 5, sources=dict(forgejo=916),
+                                                   forges=["forgejo", "github"], complete=False, count=916,
+                                                   limit=1024, blocked=True, scope="any", skip=""))
+        data, _ = overview.pressure(self.config)
+        self.assertEqual([(r["count"], r["blocked"], r["sources"]) for r in data["scopes"]],
+                         [(1505, True, dict(forgejo=916, github=589))])
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=data, observed_at=now)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=now))))
+        self.assertIn("all roadmaps: 1505/1024 blocked (forgejo 916, github 589) open non-draft", out.getvalue())
+
+        self.worker(1, limit=1024, authoring=dict(both, observed_at=now - 7 * 3600))  # no complete report left
+        data, _ = overview.pressure(self.config)
+        self.assertEqual([(r["count"], r["blocked"], r["complete"]) for r in data["scopes"]], [(916, True, False)])
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=data, observed_at=now)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            overview.display(dict(sources=dict(pressure=dict(value=data, observed_at=now))))
+        self.assertIn("916/1024 blocked (forgejo 916, github unknown)", out.getvalue())
+
+    def test_an_unknown_forge_count_is_blocked_even_below_the_limit(self):
+        row = dict(scope="any", skip="", count=10, limit=1024, observed_at=time.time(), sources=dict(forgejo=10),
+                   forges=["forgejo", "github"], complete=False)
+        value = dict(account="science", scopes=[dict(row, blocked=False)])
+        self.assertIsNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
+        value["scopes"] = [dict(row, blocked=True)]
+        self.assertIsNotNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
+        value["scopes"] = [dict(row, blocked=True, sources=dict(forgejo=-1))]
+        self.assertIsNone(overview.source_value("pressure", dict(value=value, observed_at=time.time())))
 
     def test_ci_only_hosts_never_publish_default_worker_pressure(self):
         self.survey_cache("all", "auto", count=200)

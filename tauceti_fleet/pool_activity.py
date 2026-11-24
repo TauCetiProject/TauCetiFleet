@@ -186,16 +186,15 @@ def display(report, *, now=None, all_jobs=False):
         widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
         for row in rows:
             print("  " + "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
-        stale = [(pool["pool"], pool["all" if all_jobs else "builds"]) for pool in value["pools"]]
-        stale = [f"{name} {scope.get('stale_waiting', 0)}" + (
-                    f" (oldest {age(scope['oldest_stale_waiting']['created_at'], now)})"
-                    if scope.get("oldest_stale_waiting") else "")
-                 for name, scope in stale if scope.get("stale_waiting")]
-        if stale:
-            print("  Stale queued (known GitHub zombies, nothing to do): " + ", ".join(stale)
-                  + ". Queued over 24h; excluded from Run/Wait. Do not report them.")
+        # Jobs queued over 24h are known GitHub zombies or missed completions: harmless, never
+        # reported (TauCetiWorker docs/queue/github-zombie-runs.md). Only --json carries them.
         print("  Run/Wait = running/waiting. Windows: finished (incl skipped/other); f=failures, c=cancellations.")
         print("  — = none observed; unknown = incomplete coverage. Oldest columns show ages; --json includes job identities/URLs.")
+        if any(pool["pool"] == "self-hosted" for pool in value["pools"]):
+            # The shared Fleet PR label names no host, so its jobs wait here and move to
+            # their host's row (brett, eastanglia, ...) once a guest takes them.
+            print("  self-hosted = shared Fleet PR queue waiting for any enrolled host; running jobs appear under"
+                  " their host. Its cancellations are usually superseded runs (new push or self-tested label).")
         if not value["pools"]:
             print("  No pools observed; this does not establish zero activity.")
     except (ValueError, KeyError, TypeError, AttributeError):
