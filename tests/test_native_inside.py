@@ -54,6 +54,21 @@ class DiskMonitor(unittest.TestCase):
             self.assertIsNone(monitor.allocated)
             self.assertIsNotNone(monitor.error)
 
+    def test_total_is_kept_when_files_vanish_during_the_scan(self):
+        # GNU du exits 1 when files disappear mid-scan but still prints its total.
+        for code, output, allocated, failures in ((1, '12345\t/\n', 12345, 0), (1, '', None, 1), (2, '12345\t/\n', None, 1)):
+            with self.subTest(code=code, output=output):
+                child = Mock(pid=42)
+                child.poll.return_value = code
+                child.communicate.return_value = (output, None)
+                monitor = inside.DiskUsage()
+                with patch.object(inside.subprocess, 'Popen', return_value=child), patch.object(inside.time, 'monotonic', return_value=0) as clock:
+                    monitor.poll()
+                    clock.return_value = 2
+                    monitor.poll()
+                self.assertEqual(monitor.allocated, allocated)
+                self.assertEqual(monitor.failures, failures)
+
     def test_success_reports_one_whole_instance_allocation_then_waits(self):
         child = Mock(pid=42)
         child.poll.return_value = 0

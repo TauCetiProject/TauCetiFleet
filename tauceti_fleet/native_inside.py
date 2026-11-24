@@ -104,8 +104,15 @@ class DiskUsage:
                     stdout, _ = self.child.communicate(timeout=1)
                     self.child = None
                     try:
-                        if code != 0:
-                            raise ValueError("disk usage scan timed out" if code is None else "disk usage scan failed")
+                        # GNU du exits 1 when a file vanishes or cannot be read mid-scan, but
+                        # still prints the total of everything else. A busy Lake build (a stock
+                        # cache restore, doc-gen4) makes that constant, and three such scans in
+                        # a row retired runners mid-job (24 Nov 2026). Accept that total; any
+                        # other status, or no total, is still a failure.
+                        if code is None:
+                            raise ValueError("disk usage scan timed out")
+                        if code not in (0, 1) or not (stdout or "").strip():
+                            raise ValueError("disk usage scan failed")
                         allocated = int(stdout.split()[0])
                         if allocated < 0:
                             raise ValueError("invalid disk usage")
