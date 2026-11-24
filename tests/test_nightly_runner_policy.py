@@ -62,6 +62,10 @@ class NightlyRunnerPolicy(unittest.TestCase):
         for bad in (HARNESS + "pick-runner.yml@refs/heads/main", HARNESS + "pages.yml@refs/heads/main",
                     HARNESS + "api-docs.yml@refs/heads/other"):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
+        for name in ("api-docs.yml", "nightly-verify.yml"):
+            with self.assertRaises(FleetError):
+                self.check([BUILD, HARNESS + name + "@refs/heads/main",
+                            HARNESS + name + "@abf810bf5064bf549ba76fac568da9d1dbb32362"])
         with self.assertRaises(FleetError): self.check([HARNESS + "nightly-verify.yml@refs/heads/main"])
 
     def test_exact_harness_revisions_are_no_longer_admitted(self):

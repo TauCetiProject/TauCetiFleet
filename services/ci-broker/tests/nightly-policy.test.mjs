@@ -53,6 +53,9 @@ test('the API-docs and nightly harness files at TauCetiTools main are accepted, 
  for (const bad of [harness('pick-runner.yml'),harness('pages.yml'),harness('api-docs.yml').replace('refs/heads/main','refs/heads/other'),
    harness('nightly-verify.yml').replace('TauCetiProject/','someone/')])
   await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
+ for (const name of ['api-docs.yml','nightly-verify.yml'])
+  await assert.rejects(client([build,harness(name),harness(name).replace('refs/heads/main','abf810bf5064bf549ba76fac568da9d1dbb32362')])
+    .policy({fresh:true}),PolicyError);
  await assert.rejects(client([harness('api-docs.yml')]).policy({fresh:true}),PolicyError);
 });
 
