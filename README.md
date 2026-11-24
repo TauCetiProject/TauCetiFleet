@@ -617,8 +617,9 @@ decisions:
   it. The share is of the RAM spare at that moment and is recomputed each cycle,
   so RAM that an idle install leaves unused goes to the others over successive
   cycles.
-- A CI job in any install raises the worker reserve in all of them to the
-  compiler gate's headroom, as an install's own CI does.
+- A CI job in any install raises the worker reserves in all of them as an
+  install's own CI does: admission pauses at the compiler gate's headroom, and
+  the soft limit keeps one worst-case Lean file free.
 
 Everything else stays per install. Each account's `tauceti-fleet.slice` keeps
 its own hard limit of host RAM minus the OS reserve, so across accounts the

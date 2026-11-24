@@ -152,7 +152,9 @@ class SharedHost(unittest.TestCase):
         status, high = self.run_controller_once(18 * GIB, cgroup)
         self.assertEqual((status["active_worker_limit"], status["memory_pressure"]), (0, ["host memory headroom low"]))
         self.assertEqual((status["ci_busy"], status["shared_host"]["ci_busy"]), (False, True))
-        self.assertEqual(high, 5 * GIB)
+        # The soft limit keeps one Lean file free for that CI, not the whole admission gate.
+        kept = host.worker_cache_headroom(self.caps, ci_busy=True)
+        self.assertEqual(high, max(5 * GIB, 4 * GIB + (18 * GIB - kept) // 4))
 
         # Lowering the ceiling does not give up the part of a pool whose workers are still alive.
         store.update_host(max_workers=2)
