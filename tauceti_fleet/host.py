@@ -16,6 +16,7 @@ from . import (
     ci_overview,
     ci_pool,
     ci_priority,
+    claude_credentials,
     focus,
     github,
     lean_pressure,
@@ -120,6 +121,10 @@ def configure(payload):
         "github_account",
         "author_model",
         "author_effort",
+        "agent",
+        "claude_billing",
+        "sandbox",
+        "pace",
         "runner_group_id",
         "github_state_url",
         "ci_broker_url",
@@ -142,18 +147,28 @@ def configure(payload):
     if not isinstance(credentials, dict):
         raise FleetError("credentials must be a JSON object")
     current = host_config()
+    updates.update(claude_credentials.selected(dict(payload, credentials=credentials)))
     capacity.staging_slots(dict(current, **updates))
+    worker_fields(dict(current, **updates))
     # Worker definition settings apply between rounds, like `workers`; the rest need a drain.
     live = {"max_open_prs", "author_model", "author_effort", "github_state_url"}
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items() if k not in live):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
     for key, secret in credentials.items():
-        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file"):
+        if key not in ("anthropic_api_key_file", "github_token_file", "ci_token_file", "github_state_token_file", "ci_broker_token_file", *claude_credentials.KINDS):
             raise FleetError("Unknown credential kind")
         if not isinstance(secret, str) or not secret.strip() or len(secret) > 65536:
             raise FleetError("Invalid credential value")
+        claude_credentials.validate(key, secret)
+    times = payload.get("credential_times")
+    # The usage login first: the stored token takes its subscription fields from it.
+    for key in reversed(claude_credentials.KINDS):
+        if key in credentials:
+            claude_credentials.install(key, credentials[key], times.get(key) if isinstance(times, dict) else None)
     for key, secret in credentials.items():
+        if key in claude_credentials.KINDS:
+            continue
         path = config_dir() / "secrets" / key
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Private atomic secret installation. Never return credential values.
@@ -397,6 +412,80 @@ def write_slices(config, caps):
     return worker
 
 
+WORKER_OWNED_ENV = {"TAUCETI_RUNTIME_STATUS", "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+# What run_workers() sets besides TAUCETI_FLEET_*, and what locates a worker
+# store Fleet reads from its own environment (activity, the GitHub gateway
+# cache). The worker manager lays a definition's env over its own environment,
+# so these must stay out of env.
+FLEET_OWNED_ENV = {
+    "TAUCETI_WORKER_SLICE", "TAUCETI_WORKERS_STATE_DIR", "TAUCETI_RUNTIME_DIR", "TAUCETI_WORKER_OOM_SCORE_ADJ",
+    "TAUCETI_BUDGET_DIR", "TAUCETI_GITHUB_STATE_URL", "TAUCETI_GITHUB_STATE_TOKEN_FILE", "GH_TOKEN", "GH_CONFIG_DIR", "PATH",
+    "TAUCETI_ACTIVITY_DIR", "TAUCETI_GITHUB_SHARED_DIR", "XDG_STATE_HOME",
+}
+# The worker copies an agent login into a worker id's home once and keeps that
+# source for the id's lifetime; Fleet's slot ids never change, so a different
+# source named here would never reach an existing slot.
+CREDENTIAL_SOURCE_ENV = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME"}
+
+
+def pace_curve(spec):
+    points = {}
+    for token in spec.split(","):
+        match = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)\s*", token)
+        at, share = map(float, match.groups()) if match else (101, 0)
+        if at > 100 or points.setdefault(at, share) != share:
+            return False
+    return True
+
+
+def worker_fields(config):
+    """Keys shared by every worker definition; unset profile keys give API-billed Claude workers.
+
+    Rejects what the worker's own parser rejects: one invalid definition stops
+    the manager from loading any of them.
+    """
+    agent = config.get("agent") or "claude"
+    billing = config.get("claude_billing") or "api"
+    pace = config.get("pace")
+    api = billing == "api"
+    if agent not in ("claude", "codex", "auto"):
+        raise FleetError("agent must be claude, codex, or auto")
+    if billing not in ("api", "subscription"):
+        raise FleetError("claude_billing must be api or subscription")
+    if api and (agent != "claude" or pace):
+        raise FleetError("claude_billing api requires agent claude and no pace; select claude_billing subscription")
+    if agent == "auto" and (config.get("author_model") or config.get("author_effort")):
+        raise FleetError("author_model and author_effort require agent claude or codex")
+    if (config.get("sandbox") or "host") not in ("host", "bubble"):
+        raise FleetError("sandbox must be host or bubble")
+    if pace and not (isinstance(pace, str) and pace_curve(pace)):
+        raise FleetError("pace must list time%:budget% points, for example 0:10,50:70,90:90")
+    fields = dict(
+        agent=agent,
+        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
+        claude_billing=billing,
+        # The grant ledger admits API sessions only; the worker rejects both keys under a subscription.
+        budget=api or None,
+        github_account=config.get("github_account", "tauceti-ai-for-science"),
+        anthropic_api_key_file=config.get("anthropic_api_key_file") if api else None,
+    )
+    if config.get("self_tested"):
+        fields["self_tested"] = True
+    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets", "sandbox", "pace"):
+        if config.get(key):
+            fields[key] = config[key]
+    if config.get("worker_env"):
+        fields["env"] = dict(sorted(config["worker_env"].items()))
+    if claude_env := claude_credentials.worker_env(config):
+        fields["env"] = dict(fields.get("env", {}), **claude_env)
+        if sum(len(k) + len(v) + 2 for k, v in fields["env"].items()) > 16 * 1024:
+            raise FleetError("worker_env and the Claude credential paths Fleet adds to it exceed 16 KB; shorten worker_env")
+    if config.get(claude_credentials.USAGE):
+        # Nothing else on the host uses the stored usage login, so the workers may renew it.
+        fields["auto_refresh"] = True
+    return fields
+
+
 def workers_swap_bytes(config):
     """Swap the workers slice may use: host.json `workers_swap_gib`, 1 GiB by default."""
     value = config.get("workers_swap_gib", 1)
@@ -451,21 +540,7 @@ def _worker_config(config):
     if config.get("roadmap_targets"):
         targets.require_support()
     # Existing worker definitions and the operator's manager are never rewritten.
-    fields = dict(
-        agent="claude",
-        max_open_prs=config.get("max_open_prs", 128 if config.get("profile") == "ai-for-science" else 8),
-        claude_billing="api",
-        budget=True,
-        github_account=config.get("github_account", "tauceti-ai-for-science"),
-        anthropic_api_key_file=config.get("anthropic_api_key_file"),
-    )
-    if config.get("self_tested"):
-        fields["self_tested"] = True
-    for key in ("author_model", "author_effort", "github_state_url", "github_state_token_file", "roadmap_targets"):
-        if config.get(key):
-            fields[key] = config[key]
-    if config.get("worker_env"):
-        fields["env"] = dict(sorted(config["worker_env"].items()))
+    fields = worker_fields(config)
     lines = ["version = 1"]
     ids = []
     # Keep existing definitions when reducing admissions: removing a definition
@@ -480,35 +555,35 @@ def _worker_config(config):
         wid = "fleet-" + config["machine_id"][:8] + f"-{n + 1}"
         ids.append(wid)
         lines += ["", "[[workers]]", "id = " + json.dumps(wid)]
-        worker_fields = dict(fields)
+        slot = dict(fields)
         # Not capped by this snapshot's maximum: a stale controller snapshot must not drop the
         # policy from slots it preserves, and set_worker_policy keeps the count within the maximum.
         maintenance = config.get("maintenance_workers", 0)
         if n < maintenance + config.get("both_forge_workers", 0):
-            worker_fields.update(github=True, forgejo=True, new_pr_forge="forgejo")
+            slot.update(github=True, forgejo=True, new_pr_forge="forgejo")
             if n < maintenance:
                 # Maintenance slots tend existing PRs on both forges and never run roadmap rounds; the
                 # lowest numbers keep admission priority, so a lowered ceiling never strands either forge.
-                worker_fields["only"] = list(MAINTENANCE_STAGES)
+                slot["only"] = list(MAINTENANCE_STAGES)
             # The both-forge slots after them run every stage: PR work on either forge first, then
             # roadmap authoring on Forgejo when neither forge has claimable PR work. The preferences
             # below cover the lowest slots of both kinds together.
             if n < config.get("github_first_workers", 0):
                 # The lowest slots walk GitHub's landing tiers before Forgejo's, so GitHub
                 # fixes drain while the other slots take Forgejo's re-reviews first.
-                worker_fields["prefer_forge"] = "github"
+                slot["prefer_forge"] = "github"
             elif n < config.get("github_first_workers", 0) + config.get("review_first_workers", 0):
                 # The next both-forge slots offer re-reviews and first reviews before rebases and
                 # fixes, so approvals keep reaching the queue while long rebases hold the others.
-                worker_fields["review_first"] = True
+                slot["review_first"] = True
             elif n < (config.get("github_first_workers", 0) + config.get("review_first_workers", 0)
                       + config.get("forgejo_first_workers", 0)):
                 # The slots after those walk Forgejo's landing tiers before GitHub's, so Forgejo
                 # work keeps moving while GitHub's per-account posting limit holds GitHub reviews.
-                worker_fields["prefer_forge"] = "forgejo"
+                slot["prefer_forge"] = "forgejo"
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
-            worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
-        for key, value in worker_fields.items():
+            slot.update(github=False, forgejo=True, new_pr_forge="forgejo")
+        for key, value in slot.items():
             if isinstance(value, dict):
                 pairs = ", ".join(f"{toml_value(k)} = {toml_value(v)}" for k, v in value.items())
                 lines.append(key + " = { " + pairs + " }")
@@ -833,6 +908,8 @@ def merged_worker_env(current, changes):
             raise FleetError(f"Worker environment variable names are upper-case shell names, not {name!r}")
         if value is None:
             env.pop(name, None)
+        elif name in WORKER_OWNED_ENV | FLEET_OWNED_ENV | CREDENTIAL_SOURCE_ENV or name.startswith("TAUCETI_FLEET_"):
+            raise FleetError(f"{name} is set by the worker or Fleet, or names a login source, and cannot be a worker environment variable")
         elif not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
             raise FleetError(f"Worker environment value for {name} must be a single-line string")
         else:
@@ -956,6 +1033,7 @@ def set_worker_policy(payload):
     # The maximum is written first, already checked against the policy changes that follow it.
     result = set_worker_maximum(maximum, validate=validate) if maximum is not None else {}
     if changes:
+        worker_fields(dict(host_config(), **changes))
         config = update_host(validate=validate, **changes)
         worker_config(config)
         result.update(changes, detail="Worker policy changes between rounds; active work continues")
@@ -1611,6 +1689,7 @@ def status_report(config):
         status=read(state_dir() / "status.json", {}),
         activity=activity.cached(config["machine_id"]),
         ci_overview=ci_overview.cached(config),
+        claude_credentials=claude_credentials.report(config, wait=False),
     )
 
 
