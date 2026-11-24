@@ -315,11 +315,13 @@ def start(config):
             available = start_memory_available()
             boot_reservation = control_boot_reservation()
             small_control = config.get("ci_kinds") in SMALL_CONTROL_KINDS
-            fast_control = small_control and available is not None
             measured_available = available
             if available is not None:
                 available = max(0, available - boot_reservation)
             native = native_runner.choose(config, available)
+            # A native infra guest is a cgroup-limited process tree with no VM boot
+            # to settle; its RAM grows with the job, as the startup check expects.
+            fast_control = (small_control or (native and config.get("ci_kinds") == ["infra"])) and available is not None
             config = dict(config, _ci_backend=native_runner.RUNTIME if native else "vm", _ci_start_available=available,
                           _ci_start_measured_available=measured_available, _ci_start_boot_reservation=boot_reservation)
             if native and config.get("ci_kinds") != ["infra"]:
@@ -331,7 +333,8 @@ def start(config):
             def reserve(*, starting=False):
                 # Heavy guests keep their existing ten-second settling time.
                 # Small, isolated control VMs need only two seconds, backed by
-                # explicit reservations for every unobserved control boot.
+                # explicit reservations for every unobserved control boot, and
+                # so do native infra guests, which have no boot to reserve.
                 gap = CONTROL_START_GAP_SECONDS if fast_control and not starting else CI_START_GAP_SECONDS
                 atomic(path, dict(boot_id=boot, next_start_monotonic=time.monotonic() + gap, starting=starting,
                                   measured_available_bytes=measured_available, boot_reserved_bytes=boot_reservation))
