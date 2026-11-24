@@ -49,13 +49,22 @@ class SlotGroups(unittest.TestCase):
 
     def daemon_passes(self, *between):
         """Controller iterations, each of `between` run before the next; the admission policy of each."""
-        handlers, written, steps, sleeps = {}, [], list(between), []
+        handlers, written, steps, sleeps, renewing = {}, [], list(between), [], []
         atomic = store.atomic
+        renew = host.renew_admission
 
         def record(path, value):
-            if Path(path).name == "admission.json":
+            # A renewal re-publishes the previous pass's decision; only a pass's own decision is recorded.
+            if Path(path).name == "admission.json" and not renewing:
                 written.append(value)
             atomic(path, value)
+
+        def renewal(published):
+            renewing.append(1)
+            try:
+                renew(published)
+            finally:
+                renewing.pop()
 
         def sleep(_):
             # A pass ends in ten half-second sleeps.
@@ -75,6 +84,9 @@ class SlotGroups(unittest.TestCase):
             patch.object(host, "resources", return_value=dict(cpus=8, memory_total=64 * gib, memory_available=64 * gib)),
             patch.object(host, "worker_memory", return_value=None),
             patch.object(host, "start_workers"),
+            patch.object(host, "install_pressure_service"),
+            patch.object(host, "refresh_repair_memory", return_value=None),
+            patch.object(host, "renew_admission", side_effect=renewal),
             patch.object(host, "atomic", side_effect=record),
         ):
             host.daemon()
@@ -165,6 +177,28 @@ class SlotGroups(unittest.TestCase):
         self.assertIsNone(host.rpc(dict(action="slots", clear=True))["slots"])
         order, workers = self.definitions()
         self.assertEqual((order, set(self.shape(workers).values())), (list(range(1, 17)), {("claude", "")}))
+
+    def test_maintenance_slots_and_groups_exclude_each_other_and_both_forge_slots_keep_their_group(self):
+        store.update_host(max_workers=9)
+        with patch.object(host, "require_source_selection_support"), patch.object(host, "require_forgejo_credential"):
+            host.rpc(dict(action="workers", maintenance_workers=2))
+            with self.assertRaisesRegex(store.FleetError, "maintenance"):
+                host.rpc(dict(action="slots", groups=MIXED))
+            with self.assertRaisesRegex(store.FleetError, "maintenance"):
+                host.configure(dict(slots=MIXED))
+            host.rpc(dict(action="workers", maintenance_workers=0, both_forge_workers=2))
+            host.rpc(dict(action="slots", groups=MIXED))
+            with self.assertRaisesRegex(store.FleetError, "maintenance"):
+                host.rpc(dict(action="workers", maintenance_workers=1))
+        self.assertEqual(store.host_config().get("maintenance_workers"), 0)
+        _, workers = self.definitions()
+        self.assertEqual(self.shape(workers)[1], ("auto", ""))
+        self.assertEqual({n: (w.get("github"), w.get("forgejo")) for n, w in workers.items() if n <= 3},
+                         {1: (True, True), 2: (True, True), 3: (None, None)})
+        # The both-forge keys change no agent or phases, so a repeated write holds back no further worker.
+        held = store.read(store.state_dir() / "unapplied-workers.json", {})
+        self.assertEqual(self.definitions()[1], workers)
+        self.assertEqual(store.read(store.state_dir() / "unapplied-workers.json", {}), held)
 
     def test_rejected_groups_leave_the_saved_ones_and_a_live_profile_edit_needs_no_drain(self):
         host.configure(dict(slots=MIXED, author_effort=None))
