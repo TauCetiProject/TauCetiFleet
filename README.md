@@ -1245,6 +1245,16 @@ GitHub-first and review-first counts together cannot exceed `--maintenance-worke
 remove the reserve. It needs a Worker release and running manager that support `review_first`; workers
 pick it up between rounds.
 
+Give the maintenance or both-forge slots after the review-first ones a Forgejo-first preference with
+`tauceti-fleet workers HOST --forgejo-first-workers 20`. Those slots walk Forgejo's rebases,
+re-reviews, fixes and first reviews before any GitHub work (automatic bumps still come first on
+either forge), and fall back to GitHub when Forgejo has nothing claimable. Forgejo has no per-account
+posting limit, so these slots keep producing approvals while GitHub's limit holds GitHub reviews. The
+GitHub-first, review-first and Forgejo-first counts together cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`, so the three never share a slot. Set it to `0` to remove the preference. It
+needs a Worker release and running manager that support `prefer_forge`; workers pick it up between
+rounds.
+
 Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller

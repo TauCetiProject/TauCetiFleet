@@ -382,7 +382,8 @@ def worker_config(config):
         current = host_config()
         config = dict(config)
         for field in ("self_tested", "forgejo_workers", "maintenance_workers", "both_forge_workers",
-                      "github_first_workers", "review_first_workers", "worker_env", "roadmap_targets"):
+                      "github_first_workers", "review_first_workers", "forgejo_first_workers", "worker_env",
+                      "roadmap_targets"):
             if field in current:
                 config[field] = current[field]
         return _worker_config(config)
@@ -448,6 +449,11 @@ def _worker_config(config):
                 # The next both-forge slots offer re-reviews and first reviews before rebases and
                 # fixes, so approvals keep reaching the queue while long rebases hold the others.
                 worker_fields["review_first"] = True
+            elif n < (config.get("github_first_workers", 0) + config.get("review_first_workers", 0)
+                      + config.get("forgejo_first_workers", 0)):
+                # The slots after those walk Forgejo's landing tiers before GitHub's, so Forgejo
+                # work keeps moving while GitHub's per-account posting limit holds GitHub reviews.
+                worker_fields["prefer_forge"] = "forgejo"
         elif config["max_workers"] - config.get("forgejo_workers", 0) <= n < config["max_workers"]:
             worker_fields.update(github=False, forgejo=True, new_pr_forge="forgejo")
         for key, value in worker_fields.items():
@@ -787,12 +793,14 @@ def set_worker_policy(payload):
     both = payload.get("both_forge_workers")
     github_first = payload.get("github_first_workers")
     review_first = payload.get("review_first_workers")
+    forgejo_first = payload.get("forgejo_first_workers")
     environment = payload.get("worker_env")
     swap = payload.get("swap_gib")
     if (maximum is None and local is None and native is None and maintenance is None and both is None
-            and github_first is None and review_first is None and environment is None and swap is None):
+            and github_first is None and review_first is None and forgejo_first is None and environment is None
+            and swap is None):
         raise FleetError("Select a worker maximum, self-tested prompting, Forgejo, maintenance, both-forge, "
-                         "GitHub-first or review-first worker count, worker environment or swap")
+                         "GitHub-first, review-first or Forgejo-first worker count, worker environment or swap")
     if swap is not None:
         workers_swap_bytes(dict(workers_swap_gib=swap))
     if environment is not None:
@@ -816,10 +824,15 @@ def set_worker_policy(payload):
     if review_first is not None:
         if type(review_first) is not int or not 0 <= review_first <= 4096:
             raise FleetError("Review-first worker count must be an integer from 0 to 4096")
-    if maintenance is not None or both is not None or github_first is not None or review_first is not None:
+    if forgejo_first is not None:
+        if type(forgejo_first) is not int or not 0 <= forgejo_first <= 4096:
+            raise FleetError("Forgejo-first worker count must be an integer from 0 to 4096")
+    preferences = (github_first, review_first, forgejo_first)
+    if maintenance is not None or both is not None or any(value is not None for value in preferences):
         current = dict(host_config())
         for field, value in (("maintenance_workers", maintenance), ("both_forge_workers", both),
-                             ("github_first_workers", github_first), ("review_first_workers", review_first)):
+                             ("github_first_workers", github_first), ("review_first_workers", review_first),
+                             ("forgejo_first_workers", forgejo_first)):
             if value is not None:
                 current[field] = value
         _preferences_within_maintenance(current)
@@ -847,11 +860,13 @@ def set_worker_policy(payload):
         require_worker_support("prefer_forge", "--github-first-workers")
     if review_first:
         require_worker_support("review_first", "--review-first-workers")
+    if forgejo_first:
+        require_worker_support("prefer_forge", "--forgejo-first-workers")
     if local is True:
         require_self_tested_support()
     current = host_config()
     spec_changes = (local is not None or native is not None or maintenance is not None or both is not None
-                    or github_first is not None or review_first is not None or environment is not None)
+                    or any(value is not None for value in preferences) or environment is not None)
     growing = maximum is not None and maximum > current["max_workers"]
     if current.get("roadmap_targets") and (spec_changes or growing):
         targets.require_support()  # Admission-only decreases need no definition change.
@@ -868,6 +883,8 @@ def set_worker_policy(payload):
         changes["github_first_workers"] = github_first
     if review_first is not None:
         changes["review_first_workers"] = review_first
+    if forgejo_first is not None:
+        changes["forgejo_first_workers"] = forgejo_first
     if environment is not None:
         changes["worker_env"] = environment
 
@@ -906,6 +923,11 @@ def _preferences_within_maintenance(config):
         raise FleetError("GitHub-first and review-first worker counts together exceed the maintenance and both-forge "
                          "worker count; lower --review-first-workers or raise --maintenance-workers or "
                          "--both-forge-workers")
+    if (config.get("github_first_workers", 0) + config.get("review_first_workers", 0)
+            + config.get("forgejo_first_workers", 0) > tending):
+        raise FleetError("GitHub-first, review-first and Forgejo-first worker counts together exceed the maintenance "
+                         "and both-forge worker count; lower --forgejo-first-workers or raise --maintenance-workers "
+                         "or --both-forge-workers")
 
 
 def _both_forge_within_maximum(config):
