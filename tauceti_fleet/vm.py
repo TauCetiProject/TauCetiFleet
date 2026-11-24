@@ -498,6 +498,8 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
+    if config.get("ci_kinds") == ["infra"] and config.get("_ci_backend") != native_runner.RUNTIME:
+        raise FleetError("Infra slots run only on the native backend")
     # Before the space check, so a former staging slot's disk is reclaimed first.
     warm = warm_disk(config, attach=config.get("_ci_backend") != native_runner.RUNTIME)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)

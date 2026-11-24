@@ -166,12 +166,13 @@ def choose(config, available):
         return False
     from . import vm
     intent = read(vm.slot_file(config, "ci-registration.json"), {}) if config.get("ci_broker_url") else {}
-    # A lost registration reply must retain the original job classes.
-    if intent and intent.get("ci_kinds") not in (["pr"], ["infra"]):
+    infra = config.get("ci_kinds") == ["infra"]
+    # A lost registration reply must retain the original job classes. Infra
+    # never runs in a VM: the start cancels a mismatched intent instead.
+    if intent and not infra and intent.get("ci_kinds") not in (["pr"], ["infra"]):
         atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),
                backend="vm", reason="preserve existing runner classes"))
         return False
-    infra = config.get("ci_kinds") == ["infra"]
     reason = (("native infra image not prepared" if infra else "native image not prepared") if not ready(infra) else
               "native host mapping limit is too small" if not mapping_ok() else None)
     atomic(state_dir() / "native-choice.json", dict(at=time.time(), slot=config.get("ci_slot", 0),

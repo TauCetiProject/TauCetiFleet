@@ -100,6 +100,23 @@ class NativeRunner(unittest.TestCase):
             self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", intent["ci_kinds"]))
             self.assertEqual(store.read(vm.slot_file(config, "ci-registration.json")), intent)
 
+    def test_converted_infra_slot_stays_native_despite_a_pending_mixed_registration(self):
+        config = dict(self.config, ci_kinds=["infra"], ci_broker_url="https://broker.invalid")
+        store.atomic(vm.slot_file(config, "ci-registration.json"),
+                     dict(instance="0123456789abcdef", ci_kinds=["pr", "staging"]))
+        with patch.object(native, "ready", return_value=True):
+            self.assertTrue(native.choose(config, 80 * GIB))
+        self.assertEqual(store.read(store.state_dir() / "native-choice.json")["backend"], native.RUNTIME)
+
+    def test_infra_start_refuses_the_vm_backend(self):
+        (store.data_dir() / "images").mkdir(parents=True)
+        store.atomic(store.data_dir() / "images/prepared.json", {})
+        with patch.object(vm, "warm_disk") as warm, patch.object(github, "jit_config") as jit:
+            with self.assertRaisesRegex(store.FleetError, "only on the native backend"):
+                vm._start(dict(self.config, ci_kinds=["infra"], _ci_backend="vm"))
+            warm.assert_not_called()
+            jit.assert_not_called()
+
     def test_unsuitable_host_mapping_limit_is_an_explicit_native_fault(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(native, "mapping_ok", return_value=False)):
