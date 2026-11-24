@@ -212,9 +212,14 @@ def worker_headroom(caps, *, ci_busy=False):
         from . import lean_pressure
 
         total = capacity.shared_memory_bytes(caps)
-        # CI cannot start Lean below its two-file gate. Let workers yield
-        # before that gate closes, including a small admission cushion.
-        reserve = max(reserve, int(total * (1 - lean_pressure.memory_limit(total) / 100)) + GIB)
+        # Let workers yield one worst-case Lean file of headroom to active CI,
+        # plus a cushion above the idle reserve. CI's two-file gate counts
+        # reclaimable page cache as available, so worker file cache above this
+        # reserve still yields to CI. Reserving two files here squeezed worker
+        # cache until Lean re-read oleans from disk (chungus5, 24 Nov 2026: 3 GiB
+        # of worker cache, 77k refaults/s, both NVMe drives at 100%).
+        one_file = int(total * (1 - lean_pressure.memory_limit(total, staging=True) / 100))
+        reserve = max(reserve, one_file) + GIB
     return reserve
 
 

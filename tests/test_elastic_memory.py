@@ -45,11 +45,14 @@ class ElasticMemory(unittest.TestCase):
             self.assertTrue(opened.call_args.args[1] & os.O_NONBLOCK)
 
     def test_workers_yield_before_active_ci_loses_compiler_headroom(self):
-        caps = dict(memory_total=125 * GIB, memory_available=18 * GIB)
+        caps = dict(memory_total=125 * GIB, memory_available=13 * GIB)
         ci_total = capacity.shared_memory_bytes(caps)
-        ci_floor = ci_total * (1 - lean_pressure.memory_limit(ci_total) / 100)
+        one_file = ci_total * (1 - lean_pressure.memory_limit(ci_total, staging=True) / 100)
+        two_files = ci_total * (1 - lean_pressure.memory_limit(ci_total) / 100)
         active = host.worker_headroom(caps, ci_busy=True)
-        self.assertGreater(active, ci_floor)
+        self.assertGreater(active, one_file)
+        self.assertGreater(active, lean_pressure.WORST_FILE_RSS_BYTES)
+        self.assertLess(active, two_files, "worker file cache beyond one file of CI headroom is kept")
         self.assertGreater(active, host.worker_headroom(caps, ci_busy=False))
         memory = dict(working_set=2 * GIB, maximum=100 * GIB)
         self.assertEqual(memory_pressure(memory, caps), [])
