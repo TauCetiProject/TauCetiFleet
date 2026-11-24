@@ -175,9 +175,11 @@ export class FleetRegistry extends DurableObject {
         const input=await req.json();
         if (!hostKinds(input.kinds)) return json({error:'invalid CI classes'},400);
         const previous=capacity(host).kinds;
-        const unchanged=input.kinds.length===previous.length && input.kinds.every(k=>previous.includes(k));
-        if (!unchanged && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
-          return json({error:'retire all slots before changing classes'},409);
+        // Adding classes keeps every registered runner's classes authorized, so it
+        // applies live; removing one still requires retiring the slots first.
+        const widening=previous.every(k=>input.kinds.includes(k));
+        if (!widening && Object.values(slots(host)).some(s=>s.runner_id || s.pending))
+          return json({error:'retire all slots before removing classes'},409);
         host.kinds=input.kinds;
         delete host.max_jobs;
         await this.ctx.storage.put('host:'+host.machine_id,host);
