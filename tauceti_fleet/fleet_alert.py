@@ -9,10 +9,15 @@ evidence (a round finished without failure in the last hour, or an intentional p
 when its workers are disabled, with one recovery message. Reports that are missing, cached or
 stale neither open nor close an incident. Without a Zulip configuration the messages go only to the
 unit's journal.
+
+Once an hour it also checks TauCeti's API docs build: when the newest finished api-docs run did
+not succeed and the last success is more than a day old, it sends one alert, and one recovery
+message after the next success. It reads two public workflow-run listings without credentials.
 """
 
 import argparse
 import base64
+import calendar
 import collections
 import json
 import os
@@ -37,6 +42,11 @@ MIN_WORKERS = 3  # the share rule needs a few workers; one worker's backoff is o
 # Admission decisions, not failures: the host's capacity, budget or quota is holding workers.
 ADMISSION_WAITS = {"waiting-capacity", "waiting-budget", "waiting-quota"}
 UNIT = "tauceti-fleet-alert"
+DOCS_STATE = "api-docs"  # fleet-alert.json key; host records are keyed by 32-hex machine ids
+DOCS_REPO = "TauCetiProject/TauCeti"
+DOCS_WORKFLOW = "api-docs.yml"
+DOCS_STALE = 24 * 60 * 60  # the docs may lag this long before the failing build is an incident
+DOCS_INTERVAL = 60 * 60  # two unauthenticated reads an hour
 
 
 def fresh(at, now, limit):
@@ -220,6 +230,64 @@ def tick(results, state, now, send, commit=lambda: None):
     return state
 
 
+def parse_time(value):
+    """Seconds since the epoch for GitHub's `2026-11-24T14:43:14Z`, or None."""
+    try:
+        return float(calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")))
+    except (TypeError, ValueError):
+        return None
+
+
+def docs_verdict(last_success, last_finished, now):
+    """("bad", description), ("good", None), or None from the newest successful and finished runs."""
+    if not isinstance(last_finished, dict):
+        return None
+    if last_finished.get("conclusion") == "success":
+        return "good", None
+    succeeded = parse_time((last_success or {}).get("updated_at"))
+    if succeeded is not None and now - succeeded <= DOCS_STALE:
+        return None  # failing, but the published docs are recent enough
+    since = "no successful run on record" if succeeded is None else f"last success {duration(now - succeeded)} ago"
+    url = last_finished.get("html_url") or ""
+    return "bad", f"TauCeti's API docs build keeps failing ({since}; latest run {last_finished.get('conclusion')}: {url})"
+
+
+def fetch_docs_runs(request=None):
+    """The newest successful and the newest finished api-docs runs on the default branch."""
+    if request is None:
+        from .github import request
+    base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=1"
+    success = (request(base + "&status=success").get("workflow_runs") or [None])[0]
+    finished = (request(base + "&status=completed").get("workflow_runs") or [None])[0]
+    return success, finished
+
+
+def docs_tick(state, now, send, fetch=fetch_docs_runs, commit=lambda: None):
+    """At most hourly: alert once when the API docs build has failed for over a day, recover once."""
+    record = state.setdefault(DOCS_STATE, {})
+    if now - record.get("checked_at", 0) < DOCS_INTERVAL:
+        return state
+    record["checked_at"] = now
+    try:
+        verdict = docs_verdict(*fetch(), now)
+    except (FleetError, AttributeError, TypeError, ValueError, IndexError) as error:
+        print(f"fleet alert: API docs runs unreadable ({type(error).__name__})", file=sys.stderr, flush=True)
+        return state
+    if verdict is None:
+        return state
+    kind, description = verdict
+    if kind == "bad" and not record.get("alerted_at"):
+        if send(":warning: " + description + "."):
+            record["alerted_at"] = now
+            commit()
+    elif kind == "good" and record.get("alerted_at"):
+        if send(f":check: TauCeti's API docs build succeeded again; closing the alert opened "
+                f"{duration(now - record['alerted_at'])} ago."):
+            record.pop("alerted_at", None)
+            commit()
+    return state
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tauceti-fleet fleet-alert", description=__doc__)
     parser.add_argument("--zulip-config", type=Path,
@@ -257,6 +325,7 @@ def main(argv=None):
         state = read(path, {})
         tick({name: (entries[name]["machine_id"], value) for name, value in values.items()}, state, time.time(),
              send, lambda: atomic(path, state))
+        docs_tick(state, time.time(), send, commit=lambda: atomic(path, state))
         atomic(path, state)
     return 0
 

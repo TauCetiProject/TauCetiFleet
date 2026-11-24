@@ -1,6 +1,7 @@
 """Fleet progress alerts: one message per incident, one on recovery, none for disabled hosts."""
 
 import json
+import time
 import unittest
 import urllib.parse
 from unittest.mock import patch
@@ -243,3 +244,60 @@ class Delivery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def run(conclusion, at, url="https://example.invalid/run"):
+    return dict(conclusion=conclusion, updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), html_url=url)
+
+
+class DocsStaleness(unittest.TestCase):
+    """The API docs check: one alert after a day of failing, one recovery after the next success."""
+
+    HOUR = 60 * 60
+    START = 1_795_000_000
+
+    def tick(self, state, now, success, finished, sent):
+        return fleet_alert.docs_tick(state, now, lambda text: sent.append(text) or True,
+                                     fetch=lambda: (success, finished))
+
+    def test_alerts_once_after_a_day_and_recovers_once(self):
+        state, sent = {}, []
+        good = run("success", self.START)
+        for hours in range(1, 30):
+            self.tick(state, self.START + hours * self.HOUR, good, run("failure", self.START + hours * self.HOUR), sent)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("keeps failing", sent[0])
+        self.assertIn("last success 25h 00m ago", sent[0])
+        now = self.START + 31 * self.HOUR
+        self.tick(state, now, run("success", now), run("success", now), sent)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("succeeded again", sent[1])
+
+    def test_checks_at_most_hourly(self):
+        state, sent, calls = {}, [], []
+        def fetch():
+            calls.append(1)
+            return run("success", self.START), run("success", self.START)
+        for minutes in range(0, 120, 1):
+            fleet_alert.docs_tick(state, self.START + minutes * 60, sent.append, fetch=fetch)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sent, [])
+
+    def test_recent_success_or_unreadable_runs_are_no_incident(self):
+        now = self.START + 10 * self.HOUR
+        self.assertIsNone(fleet_alert.docs_verdict(run("success", self.START), run("failure", now), now))
+        self.assertIsNone(fleet_alert.docs_verdict(None, None, now))
+        self.assertEqual(fleet_alert.docs_verdict(None, run("failure", now), now)[0], "bad")
+        state, sent = {}, []
+        def broken():
+            raise fleet_alert.FleetError("GitHub request unavailable")
+        fleet_alert.docs_tick(state, now, sent.append, fetch=broken)
+        self.assertEqual(sent, [])
+
+    def test_docs_record_does_not_disturb_host_records(self):
+        state = {}
+        self.tick(state, self.START, run("success", self.START), run("success", self.START), [])
+        fleet_alert.tick({"tauchonki": ("m" * 32, report(["working"] * 4, now=self.START))}, state, self.START,
+                         lambda text: True)
+        self.assertIn(fleet_alert.DOCS_STATE, state)
+        self.assertIn("m" * 32, state)
