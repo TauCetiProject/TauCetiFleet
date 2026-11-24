@@ -218,6 +218,24 @@ def worker_headroom(caps, *, ci_busy=False):
     return reserve
 
 
+def worker_cache_headroom(caps, *, ci_busy=False):
+    """Headroom the worker slice's memory.high leaves for active CI: one worst-case Lean file.
+
+    Admission still pauses at worker_headroom's two-file gate. CI's gate counts reclaimable
+    page cache as available, so worker file cache between the two still yields to CI.
+    Holding memory.high at two files squeezed worker cache until Lean re-read oleans from
+    disk (chungus5, 24 Nov 2026: 3 GiB of worker cache, 77k refaults/s, both NVMe at 100%).
+    """
+    reserve = max(4 * GIB, int(caps["memory_total"] * 0.1))
+    if ci_busy:
+        from . import lean_pressure
+
+        total = capacity.shared_memory_bytes(caps)
+        one_file = int(total * (1 - lean_pressure.memory_limit(total, staging=True) / 100))
+        reserve = min(max(reserve, one_file) + GIB, worker_headroom(caps, ci_busy=True))
+    return reserve
+
+
 def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
     """Use presently spare RAM; retain a fixed host/swap emergency bound.
 
@@ -226,7 +244,7 @@ def worker_memory_limits(config, caps, pinned=0, *, ci_busy=False):
     processes grow, MemAvailable falls and the existing controller lowers high.
     Only high moves during work: lowering max could kill an active paid round.
     """
-    reserve = worker_headroom(caps, ci_busy=ci_busy)
+    reserve = worker_cache_headroom(caps, ci_busy=ci_busy)
     maximum = capacity.shared_memory_bytes(caps)
     # MemAvailable already includes reclaimable worker cache. Add only pinned
     # memory, and don't force pointless reclaim below that plus a small cushion.
