@@ -412,10 +412,10 @@ def slot_file(config, name):
     return (state_dir() if slot == 0 else state_dir() / "ci-slots" / str(slot)) / name
 
 
-# A reserved staging slot keeps one disk across its disposable guests, so consecutive
-# attempts of the queue's head batch can reuse the previous attempt's build tree. The
-# guest's trusted workflow owns the contents (and reformats the disk for another batch);
-# the host only provides it. No other slot ever sees it.
+# Reserved staging slots used to keep one disk (`warm.qcow2`) across their guests so a batch's
+# next attempt could reuse its build tree. TauCetiTools no longer uses it (the reuse never
+# activated: TauCetiTools #354), so no guest gets one, and each slot deletes its leftover disk
+# when it next starts a guest.
 WARM_DISK = "warm.qcow2"
 WARM_SERIAL = "tauceti-warm"
 
@@ -498,8 +498,8 @@ def _start(config):
             return prior
         if _retire(config, prior) is False:
             return {}
-    # Before the space check, so a former staging slot's disk is reclaimed first.
-    warm = warm_disk(config, attach=config.get("_ci_backend") != native_runner.RUNTIME)
+    # Before the space check, so a leftover staging disk is reclaimed first.
+    warm = warm_disk(config, attach=False)
     startup_disk = native_runner.DISK_START_GIB if config.get("_ci_backend") == native_runner.RUNTIME else disk_startup_gib(config)
     if shutil.disk_usage(disk_root()).free < startup_disk * 1024**3:
         raise FleetError("Insufficient free space on the guest overlay filesystem for another guest")

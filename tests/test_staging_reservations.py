@@ -284,21 +284,13 @@ class WarmStagingDisk(unittest.TestCase):
         launch = next(c.args[0] for c in calls.call_args_list if c.args[0][0] == "systemd-run")
         return [a for a in launch if "id=warm" in a or "serial=" + vm.WARM_SERIAL in a or "bootindex" in a]
 
-    def test_reserved_staging_slot_keeps_one_disk_across_guests(self):
-        first = self.start(0, "a" * 16)
+    def test_reserved_staging_slot_gets_no_disk_and_drops_a_leftover(self):
+        # TauCetiTools no longer reuses a staging tree, so no guest gets the disk any more.
         path = vm.slot_file(capacity.for_slot(self.config, 0), vm.WARM_DISK)
-        self.assertEqual(first, ["virtio-blk-pci,drive=system,bootindex=0",
-                                 f"file={path},format=qcow2,if=none,id=warm,"
-                                 "werror=report,rerror=report,discard=unmap",
-                                 "virtio-blk-pci,drive=warm,serial=tauceti-warm"])
-        self.assertEqual(path.read_text(), "disk")
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("kept")
-        guest = store.read(vm.slot_file(self.config, "vm.json"))
-        with patch.object(vm, "run", return_value=SimpleNamespace(returncode=0, stdout="")), \
-             patch.object(github, "retire_runner"):
-            vm.retire(self.config, guest)
-        self.assertEqual(self.start(0, "b" * 16), first)
-        self.assertEqual(path.read_text(), "kept")
+        self.assertEqual(self.start(0, "a" * 16), [])
+        self.assertFalse(path.exists())
 
     def test_other_slots_get_no_disk_and_drop_a_former_one(self):
         self.assertEqual(self.start(1, "c" * 16), [])
