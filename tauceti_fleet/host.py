@@ -258,7 +258,7 @@ REPAIR_SLICE = "tauceti-repair.slice"
 # PR build's cache restore peaked at 6,666 tasks on chungus5, and 27 guests sharing
 # 16,384 made Lean and leantar fail with "Resource temporarily unavailable" (23 Nov
 # 2026). Each native guest has its own native_runner.TASKS_MAX; the slice only bounds
-# their sum, below the host's RLIMIT_NPROC and threads-max.
+# their sum (on chungus5 well below RLIMIT_NPROC 513,578 and threads-max 1,027,156).
 WORKER_TASKS_MAX = 16384
 CI_TASKS_MAX = 262144
 FLEET_TASKS_MAX = CI_TASKS_MAX + WORKER_TASKS_MAX
@@ -317,18 +317,20 @@ def install_ceiling(caps):
 
 
 def set_tasks_max(name, value):
-    """Rewrite only an existing slice's TasksMax line; True when the unit changed."""
+    """Rewrite only the TasksMax of an existing Fleet slice unit; True when it changed."""
     path = units() / name
     if not path.exists():
         return False
     lines = path.read_text().splitlines()
+    if "[Slice]" not in lines:
+        return False  # Not a unit this module wrote; the next enable rewrites it.
     setting = f"TasksMax={value}"
-    old = [i for i, line in enumerate(lines) if line.startswith("TasksMax=")]
+    old = [i for i, line in enumerate(lines) if line.split("=", 1)[0].strip() == "TasksMax"]
     if old:
         updated = [setting if i == old[0] else line for i, line in enumerate(lines) if i not in old[1:]]
     else:
         updated = list(lines)
-        updated.insert(updated.index("[Slice]") + 1 if "[Slice]" in updated else len(updated), setting)
+        updated.insert(updated.index("[Slice]") + 1, setting)
     if updated == lines:
         return False
     path.write_text("\n".join(updated) + "\n")
