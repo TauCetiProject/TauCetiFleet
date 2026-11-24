@@ -113,6 +113,16 @@ def update_host(*, validate=None, **changes):
         return value
 
 
+def change_host(change):
+    """Replace host.json with `change(current)`, computed and written under its lock."""
+    host_config()
+    path = config_dir() / "host.json"
+    with locked(path.with_suffix(".lock")):
+        value = change(read(path))
+        atomic(path, value)
+        return value
+
+
 @contextlib.contextmanager
 def database():
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -83,6 +83,25 @@ class QueueStatus(unittest.TestCase):
         self.assertIn("  Stuck heads: 0+ (no final state", self.render())
         self.assertIn("; partial pass).", self.render())
 
+    def test_progress_alerts_name_the_batch_and_start_in_local_time(self):
+        self.assertNotIn("Alert:", self.render())
+        self.document["conditions"] = [dict(kind="repair_stalled", since="2026-11-08T08:04:00Z", batch_id="389"),
+                                       dict(kind="head_no_progress", since="2026-11-08T07:42:00Z", batch_id="389"),
+                                       dict(kind="source_condition")]
+        output = self.render()
+        self.assertIn("  Alert: batch 389 repair stalled since 08 Nov 19:04 AEDT", output)
+        self.assertIn("  Alert: batch 389 head made no progress since 08 Nov 18:42 AEDT", output)
+        self.document["conditions"] = [dict(kind=[]), dict(kind={}), "noise",
+                                       dict(kind="repair_stalled", since="1970-01-01T00:00:00Z", batch_id="389")]
+        output = self.render()
+        self.assertIn("  Alert: batch 389 repair stalled since 01 Jan 10:00 AEST", output)
+        self.assertIn("Workers:", output, "the rest of the detail survives")
+        for bad in (dict(batch_id="x"), dict(since=None), dict(since="2026-11-08T08:04:00")):
+            self.document["conditions"] = [dict(dict(kind="repair_stalled", since="2026-11-08T08:04:00Z",
+                                                     batch_id="389"), **bad)]
+            with self.assertRaises(ValueError):
+                self.report()
+
     def test_worker_inventory_names_disambiguate_hosts_during_migration(self):
         identity = "repair-3@chungus2"
         alias = "queue-worker-" + hashlib.sha256(identity.encode()).hexdigest()[:12]

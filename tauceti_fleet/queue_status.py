@@ -165,6 +165,7 @@ def parse(manifest, queue):
                 partial=queue.get("coverage") != "observed" or bool(queue.get("truncated")),
                 batches=active, waiting=count(queue.get("counts", {}).get("waiting")),
                 workers=workers, claims=claims, stuck_heads=stuck_heads(queue.get("conditions")),
+                progress_alerts=progress_alerts(queue.get("conditions")),
                 last_landing=max(landed, key=lambda b: timestamp(b["landed_at"])) if landed else None)
 
 
@@ -179,6 +180,24 @@ def stuck_heads(conditions):
     pushes = [timestamp(c["since"]) for c in conditions if isinstance(c, dict) and c.get("kind") == "stuck_head"]
     return dict(count=len(pushes), truncated="stuck_heads_truncated" in kinds,
                 partial="stuck_heads_partial" in kinds, oldest=min(pushes) if pushes else None)
+
+
+PROGRESS_KINDS = {"repair_stalled": "repair stalled", "head_no_progress": "head made no progress"}
+
+
+def progress_alerts(conditions):
+    """The queue's progress alerts: a head repair that keeps retaining the same tip with the same
+    findings (`repair_stalled`) and a head without progress (`head_no_progress`), each with its batch
+    and start. The findings and the agent's conclusion stay in the queue's own status."""
+    if not isinstance(conditions, list):
+        return []
+    found = []
+    for condition in conditions[:100]:
+        kind = condition.get("kind") if isinstance(condition, dict) else None
+        if isinstance(kind, str) and kind in PROGRESS_KINDS:
+            timestamp(condition.get("since"))
+            found.append(dict(kind=kind, batch_id=identity(condition.get("batch_id")), since=condition["since"]))
+    return found
 
 
 def task(original, batch_id):
@@ -607,6 +626,9 @@ def display(report, *, now=None, timezone=DEFAULT_TIMEZONE):
                 line += f", oldest {max(0, int(now - stuck['oldest'])) // 3600}h"
             line += " (no final state and, 3h after the last push, no CI or only interrupted builds"
             print(line + ("; partial pass)." if stuck.get("partial") else ")."))
+        for alert in value.get("progress_alerts") or []:
+            print(f"  Alert: batch {alert['batch_id']} {PROGRESS_KINDS[alert['kind']]} since "
+                  + clock(alert["since"], timezone) + " (see the queue's status alerts).")
         visible = [w for w in workers if w.get("state") not in ("stopped","unknown") and w.get("coverage") != "unavailable"]
         if visible:
             print("  Workers: " + "; ".join(f"{names[w['id']]} {w['state']}" for w in visible))

@@ -58,6 +58,22 @@ class ElasticMemory(unittest.TestCase):
         self.assertEqual(memory_pressure(memory, caps, reserve=active), ["host memory headroom low"])
         self.assertEqual(memory_pressure(memory, dict(caps, memory_available=30 * GIB), reserve=active), [])
 
+    def test_busy_ci_keeps_two_files_for_admission_but_only_one_against_worker_cache(self):
+        caps = dict(memory_total=125 * GIB, memory_available=18 * GIB)
+        total = capacity.shared_memory_bytes(caps)
+        one_file = total * (1 - lean_pressure.memory_limit(total, staging=True) / 100)
+        admission = host.worker_headroom(caps, ci_busy=True)
+        cache = host.worker_cache_headroom(caps, ci_busy=True)
+        self.assertGreater(cache, one_file)
+        self.assertGreater(cache, host.worker_cache_headroom(caps, ci_busy=False))
+        self.assertLess(cache, admission)
+        # Below normal CI's gate, new worker rounds still pause...
+        memory = dict(working_set=70 * GIB, pinned=70 * GIB, maximum=110 * GIB)
+        self.assertEqual(memory_pressure(memory, caps, reserve=admission), ["host memory headroom low"])
+        # ...while memory.high keeps the file cache already above the one-file reserve.
+        high, _ = host.worker_memory_limits({}, caps, 70 * GIB, ci_busy=True)
+        self.assertEqual(high, int(70 * GIB + 18 * GIB - cache))
+
     def test_ci_priority_changes_only_the_opportunistic_worker_soft_budget(self):
         caps = dict(memory_total=125 * GIB, memory_available=30 * GIB)
         idle_high, maximum = host.worker_memory_limits(self.config, caps, 4 * GIB)

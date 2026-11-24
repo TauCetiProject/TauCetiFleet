@@ -39,6 +39,10 @@ class LiveUpdate(unittest.TestCase):
         latest = patch.object(update, "latest_worker_revision", return_value=self.revision)
         latest.start()
         self.addCleanup(latest.stop)
+        # Unmeasured host RAM: updates leave slice units and systemd alone unless a test measures it.
+        unmeasured = patch.object(host, "resources", return_value=dict(cpus=0, memory_total=0, memory_available=0))
+        unmeasured.start()
+        self.addCleanup(unmeasured.stop)
         store.atomic(self.release / "release.json", dict(worker_revision=self.revision))
         store.atomic(store.data_dir() / "release.json", dict(worker_revision="b" * 40))
         store.atomic(store.data_dir() / "worker-runtime.json", dict(revision="b" * 40))
@@ -84,6 +88,30 @@ class LiveUpdate(unittest.TestCase):
         self.assertTrue(result["installed"])
         self.assertIn("running managers and workers retain", result["worker_runtime_scope"])
         self.assert_work_preserved()
+
+    def test_handed_over_update_moves_the_memory_ceiling_to_the_parent_slice(self):
+        units = self.home / ".config/systemd/user"
+        units.mkdir(parents=True)
+        (units / "tauceti-fleet.slice").write_text("[Slice]\nMemoryHigh=1\nMemoryMax=1\nTasksMax=32768\n")
+        caps = dict(cpus=96, memory_total=125 * 1024**3, memory_available=90 * 1024**3)
+        with patch.object(update, "service", return_value=dict(MainPID="1", Restart="on-failure")), \
+                patch.object(update, "stage_worker", return_value=store.data_dir() / "worker-runtimes" / self.revision), \
+                patch.object(update, "handover", side_effect=lambda release, **_: dict(controller_release=str(release))), \
+                patch.object(host, "resources", return_value=caps), patch.object(update, "run") as run:
+            self.install()
+        self.assertIn(f"MemoryMax={int(host.capacity.shared_memory_bytes(caps))}", (units / "tauceti.slice").read_text())
+        self.assertNotIn("Memory", (units / "tauceti-fleet.slice").read_text())
+        run.assert_called_once_with(["systemctl", "--user", "daemon-reload"])
+
+    def test_update_of_a_stopped_controller_also_moves_the_ceiling(self):
+        caps = dict(cpus=96, memory_total=125 * 1024**3, memory_available=90 * 1024**3)
+        with patch.object(update, "service", return_value=dict(MainPID="0", Restart="on-failure")), \
+                patch.object(update, "stage_worker", return_value=store.data_dir() / "worker-runtimes" / self.revision), \
+                patch.object(update, "handover", return_value=None), \
+                patch.object(host, "resources", return_value=caps), patch.object(update, "run") as run:
+            self.assertEqual(self.install()["controller"], "stopped")
+        self.assertTrue((self.home / ".config/systemd/user/tauceti.slice").exists())
+        run.assert_called_once_with(["systemctl", "--user", "daemon-reload"])
 
     def test_update_uses_main_instead_of_bundled_or_independently_selected_revision(self):
         store.atomic(self.release / "release.json", dict(worker_revision="c" * 40))

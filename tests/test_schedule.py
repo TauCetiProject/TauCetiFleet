@@ -2,6 +2,7 @@ import io
 import os
 import signal
 import tempfile
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -226,6 +227,99 @@ class Controller(unittest.TestCase):
 
         self.assertEqual(host.rpc(dict(action="schedule", clear=True)), dict(slots=[]))
         self.assertEqual(self.controller_pass()[0]["workers"], ["w1", "w2"])
+
+    def test_each_pass_first_renews_the_previous_admission_decision(self):
+        writes, handlers, statuses = [], {}, []
+
+        def publish(path, value):
+            store.atomic(path, value)
+            if Path(path).name == "admission.json":
+                writes.append(dict(value, at=time.time()))
+            if Path(path).name == "status.json":
+                statuses.append(value)
+                if len(statuses) == 2:
+                    handlers[signal.SIGTERM]()
+
+        with (
+            patch.multiple(
+                host,
+                install_pressure_service=Mock(),
+                resources=Mock(return_value=dict(memory_total=32 * GIB, memory_available=30 * GIB)),
+                cpu_sample=Mock(return_value=(10, 9)),
+                collect_ci_results=Mock(),
+                worker_config=Mock(return_value=["w1", "w2"]),
+                start_workers=Mock(),
+                worker_statuses=Mock(return_value=[]),
+                worker_memory=Mock(return_value=None),
+                atomic=publish,
+            ),
+            patch.object(host.vm, "slots_in_use", return_value=[]),
+            patch.object(host.vm, "outstanding", return_value=False),
+            patch.object(host.CISlot, "step", return_value={}),
+            patch.object(host.signal, "signal", side_effect=handlers.__setitem__),
+            patch.object(host.time, "sleep"),
+        ):
+            host.daemon()
+        first, renewal, second = writes[:3]
+        self.assertEqual(first["workers"], ["w1", "w2"])
+        self.assertEqual({k: v for k, v in renewal.items() if k not in ("expires_at", "at")},
+                         {k: v for k, v in first.items() if k not in ("expires_at", "at")})
+        self.assertEqual(second["workers"], ["w1", "w2"])
+        for write in (first, renewal, second):
+            # Workers refuse a policy that expires more than 30 s ahead.
+            self.assertLessEqual(write["expires_at"], write["at"] + 30)
+            self.assertGreater(write["expires_at"], write["at"] + 15)
+
+    def test_a_newer_denial_between_passes_is_never_renewed_into_an_admission(self):
+        published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
+        path = store.state_dir() / "admission.json"
+        store.atomic(path, published)
+        host.renew_admission(published)
+        self.assertGreaterEqual(store.read(path)["expires_at"], published["expires_at"])
+        denial = dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused")
+        store.atomic(path, denial)
+        host.renew_admission(published)
+        self.assertEqual(store.read(path), denial)
+        store.atomic(path, published)
+        store.atomic(store.state_dir() / "worker-admission-lease.json", dict(expires_at=time.time() - 1))
+        host.renew_admission(published)
+        self.assertEqual(store.read(path), published)
+        (store.state_dir() / "worker-admission-lease.json").unlink()
+        store.update_host(max_workers=0)
+        host.renew_admission(published)
+        self.assertEqual(store.read(path), published, "a committed pause is read inside the lock")
+        store.update_host(max_workers=2, workers_enabled=False)
+        host.renew_admission(published)
+        self.assertEqual(store.read(path), published)
+        two = dict(published, workers=["w1", "w2"])
+        store.atomic(path, two)
+        store.update_host(max_workers=1, workers_enabled=True)
+        host.renew_admission(two)
+        self.assertEqual(store.read(path), two, "a lowered ceiling is not renewed past")
+
+    def test_a_pause_racing_a_renewal_publishes_its_denial_last(self):
+        published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
+        path = store.state_dir() / "admission.json"
+        store.atomic(path, published)
+        renewing = host.renew_admission
+
+        def pause_during_renewal(path_, value):
+            store.atomic(path_, value)
+            if threads:
+                return  # The pause's own denial write.
+            # The pause commits its maximum now; its denial write must wait for the renewal's lock.
+            pause = threading.Thread(target=host.set_worker_maximum, args=(0,))
+            pause.start()
+            pause.join(0.2)
+            self.assertTrue(pause.is_alive(), "the denial waits for the renewal's lock")
+            threads.append(pause)
+
+        threads = []
+        with patch.object(host, "atomic", side_effect=pause_during_renewal):
+            renewing(published)
+            threads[0].join()
+        self.assertEqual(store.read(path)["workers"], [])
+        self.assertEqual(len(threads), 1)
 
     def test_a_drained_host_keeps_its_own_reason(self):
         store.update_host(workers_enabled=False, worker_schedule=schedule.validate([around_now(2, 4)], "UTC"))

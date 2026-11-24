@@ -137,6 +137,39 @@ class StartPacing(unittest.TestCase):
             self.assertTrue(vm.start(dict(config, ci_slot=3)))
             self.assertEqual(launch.call_count, 4)
 
+    def test_native_infra_starts_two_seconds_apart(self):
+        config = dict(self.config, ci_max_jobs=4, ci_protected_slots={
+            str(i): dict(kind="infra", runner_group_id=8) for i in (1, 2, 3)})
+        with (patch.object(vm.time, "monotonic", return_value=100) as clock,
+              patch("tauceti_fleet.native_runner.choose", side_effect=lambda c, a: c.get("ci_kinds") == ["infra"]),
+              patch.object(vm, "_start", return_value={"started": True}) as launch):
+            self.assertTrue(vm.start(dict(config, ci_slot=1)))
+            clock.return_value = 101.9
+            self.assertEqual(vm.start(dict(config, ci_slot=2)), {})
+            clock.return_value = 102
+            self.assertTrue(vm.start(dict(config, ci_slot=2)))
+            # A heavy VM guest still settles for ten seconds before the next infra start.
+            clock.return_value = 104
+            self.assertTrue(vm.start(dict(config, ci_slot=0)))
+            clock.return_value = 113.9
+            self.assertEqual(vm.start(dict(config, ci_slot=3)), {})
+            clock.return_value = 114
+            self.assertTrue(vm.start(dict(config, ci_slot=3)))
+            self.assertEqual(launch.call_count, 4)
+
+    def test_infra_without_measurable_memory_keeps_the_ten_second_gap(self):
+        config = dict(self.config, ci_max_jobs=3, ci_protected_slots={
+            str(i): dict(kind="infra", runner_group_id=8) for i in (1, 2)})
+        with (patch.object(vm.time, "monotonic", return_value=100) as clock,
+              patch.object(vm, "start_memory_available", return_value=None),
+              patch("tauceti_fleet.native_runner.choose", return_value=True),
+              patch.object(vm, "_start", return_value={"started": True})):
+            self.assertTrue(vm.start(dict(config, ci_slot=1)))
+            clock.return_value = 102
+            self.assertEqual(vm.start(dict(config, ci_slot=2)), {})
+            clock.return_value = 110
+            self.assertTrue(vm.start(dict(config, ci_slot=2)))
+
     def test_unobserved_control_boots_reserve_their_full_ram(self):
         config = self.control_config()
         guest = dict(ci_kinds=["queue-control"], memory_gib=8, started_at=1)

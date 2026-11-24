@@ -178,6 +178,25 @@ class ActivityTests(unittest.TestCase):
             activity.display(dict(available=True, summary=older))
         self.assertNotIn("closed own PR", output.getvalue())
 
+    def test_forgejo_pr_counts_show_beneath_the_totals_and_stay_unknown_for_older_hosts(self):
+        def host(forgejo):
+            counts = dict(authored=5, landed=2) | (dict(authored_forgejo=3, landed_forgejo=1) if forgejo else {})
+            return dict(available=True, summary=dict(
+                prepared_at=100, history_since=1, rounds={w: {} for w in activity.WINDOWS},
+                pr_windows={w: dict(counts) for w in activity.WINDOWS},
+                running=0, open_prs=0, unknown_prs=0, unknown_landings=0,
+            ))
+
+        both = activity_summary.combine([host(True), host(True)])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            activity.display(both)
+        self.assertRegex(output.getvalue(), r"\nPRs authored +10 .*\n  on Forgejo +6 .*\nAuthored PRs landed +4 .*\n  from Forgejo +2 ")
+        mixed = activity_summary.combine([host(True), host(False)])
+        self.assertIsNone(mixed["summary"]["pr_windows"]["24h"]["authored_forgejo"])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            activity.display(mixed)
+        self.assertNotIn("Forgejo", output.getvalue())
+
     def test_storage_and_expansion_status_uses_only_prepared_data(self):
         summary = dict(
             prepared_at=100,
