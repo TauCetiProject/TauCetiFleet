@@ -1306,7 +1306,11 @@ def renew_admission(published):
     try:
         with admission_lock():
             config = host_config()
-            if not config.get("workers_enabled") or not config.get("max_workers") or read(path) != published:
+            if (
+                not config.get("workers_enabled")
+                or len(published["workers"]) > (config.get("max_workers") or 0)
+                or read(path) != published
+            ):
                 return
             lease = read(state_dir() / "worker-admission-lease.json")
             if lease is not None and time.time() >= lease.get("expires_at", 0):

@@ -289,6 +289,11 @@ class Controller(unittest.TestCase):
         store.update_host(max_workers=2, workers_enabled=False)
         host.renew_admission(published)
         self.assertEqual(store.read(path), published)
+        two = dict(published, workers=["w1", "w2"])
+        store.atomic(path, two)
+        store.update_host(max_workers=1, workers_enabled=True)
+        host.renew_admission(two)
+        self.assertEqual(store.read(path), two, "a lowered ceiling is not renewed past")
 
     def test_a_pause_racing_a_renewal_publishes_its_denial_last(self):
         published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
