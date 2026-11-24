@@ -229,6 +229,7 @@ class Controller(unittest.TestCase):
         writes, handlers, statuses = [], {}, []
 
         def publish(path, value):
+            store.atomic(path, value)
             if Path(path).name == "admission.json":
                 writes.append(dict(value, at=time.time()))
             if Path(path).name == "status.json":
@@ -265,6 +266,26 @@ class Controller(unittest.TestCase):
             # Workers refuse a policy that expires more than 30 s ahead.
             self.assertLessEqual(write["expires_at"], write["at"] + 30)
             self.assertGreater(write["expires_at"], write["at"] + 15)
+
+    def test_a_newer_denial_between_passes_is_never_renewed_into_an_admission(self):
+        published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
+        path = store.state_dir() / "admission.json"
+        store.atomic(path, published)
+        config = store.host_config()
+        host.renew_admission(config, published)
+        self.assertGreaterEqual(store.read(path)["expires_at"], published["expires_at"])
+        denial = dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused")
+        store.atomic(path, denial)
+        host.renew_admission(config, published)
+        self.assertEqual(store.read(path), denial)
+        store.atomic(path, published)
+        store.atomic(store.state_dir() / "worker-admission-lease.json", dict(expires_at=time.time() - 1))
+        host.renew_admission(config, published)
+        self.assertEqual(store.read(path), published)
+        store.update_host(workers_enabled=False)
+        (store.state_dir() / "worker-admission-lease.json").unlink()
+        host.renew_admission(store.host_config(), published)
+        self.assertEqual(store.read(path), published)
 
     def test_a_drained_host_keeps_its_own_reason(self):
         store.update_host(workers_enabled=False, worker_schedule=schedule.validate([around_now(2, 4)], "UTC"))
