@@ -102,7 +102,7 @@ def runner_policy(config):
         data.get("name") != "TauCetiFleet"
         or not data.get("restricted_to_workflows")
         or required not in selected
-        or not trusted_entries(selected - allowed, ("pr-build.yml",))
+        or not trusted_entries(selected - allowed, ("pr-build.yml", "api-docs.yml", "nightly-verify.yml"))
     ):
         raise FleetError("Runner group must allow only trusted main project workflows and the shared harness at main")
     return group

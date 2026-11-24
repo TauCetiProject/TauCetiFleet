@@ -45,6 +45,20 @@ test('the shared harness at TauCetiTools main is accepted, but no other branch o
   await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
 });
 
+test('the API-docs and nightly harness files at TauCetiTools main are accepted, nothing else of the harness',async()=>{
+ const harness=name=>'TauCetiProject/TauCetiTools/.github/workflows/'+name+'@refs/heads/main';
+ assert.deepEqual(await client([build,harness('pr-build.yml'),harness('api-docs.yml'),harness('nightly-verify.yml')])
+   .policy({fresh:true}),{runner_group_id:3});
+ assert.deepEqual(await client([build,apiDocs,nightly,harness('api-docs.yml')]).policy({fresh:true}),{runner_group_id:3});
+ for (const bad of [harness('pick-runner.yml'),harness('pages.yml'),harness('api-docs.yml').replace('refs/heads/main','refs/heads/other'),
+   harness('nightly-verify.yml').replace('TauCetiProject/','someone/')])
+  await assert.rejects(client([build,bad]).policy({fresh:true}),PolicyError);
+ for (const name of ['api-docs.yml','nightly-verify.yml'])
+  await assert.rejects(client([build,harness(name),harness(name).replace('refs/heads/main','abf810bf5064bf549ba76fac568da9d1dbb32362')])
+    .policy({fresh:true}),PolicyError);
+ await assert.rejects(client([harness('api-docs.yml')]).policy({fresh:true}),PolicyError);
+});
+
 test('exact harness revisions are no longer admitted, even on TauCetiTools main',async()=>{
  const main='TauCetiProject/TauCetiTools/.github/workflows/pr-build.yml@refs/heads/main';
  for (const pinned of [main.replace('refs/heads/main','abf810bf5064bf549ba76fac568da9d1dbb32362'),

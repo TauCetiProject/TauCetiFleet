@@ -56,6 +56,18 @@ class NightlyRunnerPolicy(unittest.TestCase):
                     HARNESS + "publish-lake-cache.yml@refs/heads/main"):
             with self.assertRaises(FleetError): self.check([BUILD, bad])
 
+    def test_api_docs_and_nightly_harness_at_tools_main_are_allowed(self):
+        self.assertEqual(self.check([BUILD, HARNESS + "api-docs.yml@refs/heads/main",
+                                     HARNESS + "nightly-verify.yml@refs/heads/main"]), 3)
+        for bad in (HARNESS + "pick-runner.yml@refs/heads/main", HARNESS + "pages.yml@refs/heads/main",
+                    HARNESS + "api-docs.yml@refs/heads/other"):
+            with self.assertRaises(FleetError): self.check([BUILD, bad])
+        for name in ("api-docs.yml", "nightly-verify.yml"):
+            with self.assertRaises(FleetError):
+                self.check([BUILD, HARNESS + name + "@refs/heads/main",
+                            HARNESS + name + "@abf810bf5064bf549ba76fac568da9d1dbb32362"])
+        with self.assertRaises(FleetError): self.check([HARNESS + "nightly-verify.yml@refs/heads/main"])
+
     def test_exact_harness_revisions_are_no_longer_admitted(self):
         # Even a revision on TauCetiTools main: the groups list only the `main` entry now.
         for pinned in (HARNESS + "pr-build.yml@abf810bf5064bf549ba76fac568da9d1dbb32362",
