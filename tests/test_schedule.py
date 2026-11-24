@@ -2,6 +2,7 @@ import io
 import os
 import signal
 import tempfile
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -271,21 +272,47 @@ class Controller(unittest.TestCase):
         published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
         path = store.state_dir() / "admission.json"
         store.atomic(path, published)
-        config = store.host_config()
-        host.renew_admission(config, published)
+        host.renew_admission(published)
         self.assertGreaterEqual(store.read(path)["expires_at"], published["expires_at"])
         denial = dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused")
         store.atomic(path, denial)
-        host.renew_admission(config, published)
+        host.renew_admission(published)
         self.assertEqual(store.read(path), denial)
         store.atomic(path, published)
         store.atomic(store.state_dir() / "worker-admission-lease.json", dict(expires_at=time.time() - 1))
-        host.renew_admission(config, published)
+        host.renew_admission(published)
         self.assertEqual(store.read(path), published)
-        store.update_host(workers_enabled=False)
         (store.state_dir() / "worker-admission-lease.json").unlink()
-        host.renew_admission(store.host_config(), published)
+        store.update_host(max_workers=0)
+        host.renew_admission(published)
+        self.assertEqual(store.read(path), published, "a committed pause is read inside the lock")
+        store.update_host(max_workers=2, workers_enabled=False)
+        host.renew_admission(published)
         self.assertEqual(store.read(path), published)
+
+    def test_a_pause_racing_a_renewal_publishes_its_denial_last(self):
+        published = dict(version=1, expires_at=time.time() + 25, workers=["w1"], reason="allowed")
+        path = store.state_dir() / "admission.json"
+        store.atomic(path, published)
+        renewing = host.renew_admission
+
+        def pause_during_renewal(path_, value):
+            store.atomic(path_, value)
+            if threads:
+                return  # The pause's own denial write.
+            # The pause commits its maximum now; its denial write must wait for the renewal's lock.
+            pause = threading.Thread(target=host.set_worker_maximum, args=(0,))
+            pause.start()
+            pause.join(0.2)
+            self.assertTrue(pause.is_alive(), "the denial waits for the renewal's lock")
+            threads.append(pause)
+
+        threads = []
+        with patch.object(host, "atomic", side_effect=pause_during_renewal):
+            renewing(published)
+            threads[0].join()
+        self.assertEqual(store.read(path)["workers"], [])
+        self.assertEqual(len(threads), 1)
 
     def test_a_drained_host_keeps_its_own_reason(self):
         store.update_host(workers_enabled=False, worker_schedule=schedule.validate([around_now(2, 4)], "UTC"))

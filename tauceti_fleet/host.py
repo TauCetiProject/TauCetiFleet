@@ -695,9 +695,11 @@ def set_infra_slots(count, pr=None):
 
 def drain():
     update_host(ci_enabled=False, workers_enabled=False, draining=True)
-    atomic(
-        state_dir() / "admission.json", dict(version=1, expires_at=time.time() + 15, workers=[], reason="host draining")
-    )
+    with admission_lock():
+        atomic(
+            state_dir() / "admission.json",
+            dict(version=1, expires_at=time.time() + 15, workers=[], reason="host draining"),
+        )
     return dict(state="draining", detail="Active work finishes; no new worker rounds or CI guests are admitted")
 
 
@@ -725,10 +727,11 @@ def set_worker_maximum(maximum, *, lease_seconds=None, validate=None):
         # Removed only once the new maximum is committed: a refused change keeps the old lease.
         lease.unlink(missing_ok=True)
     if maximum == 0:
-        atomic(
-            state_dir() / "admission.json",
-            dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
-        )
+        with admission_lock():
+            atomic(
+                state_dir() / "admission.json",
+                dict(version=1, expires_at=time.time() + 15, workers=[], reason="new worker work paused"),
+            )
     return dict(max_workers=maximum, detail="Admission ceiling; already admitted sessions finish")
 
 
@@ -1284,28 +1287,35 @@ class CISlot:
         return value
 
 
-def renew_admission(config, published):
+def admission_lock():
+    """Serializes renewal with the drain and pause denials, so a denial is never overwritten."""
+    return locked(state_dir() / "admission.lock")
+
+
+def renew_admission(published):
     """Extend the previous pass's admission decision while it still stands.
 
     One pass (GitHub inventory, CI slots, cgroup reads) can outlast the sleep on a loaded host, so
-    renewing before the pass makes the TTL bound one pass rather than pass plus sleep. Any newer
-    write (drain, pause, error) and any withdrawal the configuration, lease or schedule already
-    shows keeps the decision from renewing; the pass itself recomputes everything else.
+    renewing before the pass makes the TTL bound one pass rather than pass plus sleep. A newer write
+    (drain, pause, error) or a withdrawal the configuration, lease or schedule already shows keeps
+    the decision from renewing; the pass itself recomputes everything else.
     """
-    if not published or not published["workers"] or not config.get("workers_enabled"):
+    if not published or not published["workers"]:
         return
     path = state_dir() / "admission.json"
     try:
-        if read(path) != published:
-            return
-        lease = read(state_dir() / "worker-admission-lease.json")
-        if lease is not None and time.time() >= lease.get("expires_at", 0):
-            return
-        from . import schedule
+        with admission_lock():
+            config = host_config()
+            if not config.get("workers_enabled") or not config.get("max_workers") or read(path) != published:
+                return
+            lease = read(state_dir() / "worker-admission-lease.json")
+            if lease is not None and time.time() >= lease.get("expires_at", 0):
+                return
+            from . import schedule
 
-        if schedule.state(config).get("reason"):
-            return
-        atomic(path, dict(published, expires_at=time.time() + ADMISSION_TTL))
+            if schedule.state(config).get("reason"):
+                return
+            atomic(path, dict(published, expires_at=time.time() + ADMISSION_TTL))
     except (FleetError, OSError, ValueError, KeyError, TypeError):
         return  # The pass that follows reports the same failure and publishes its own policy.
 
@@ -1346,8 +1356,8 @@ def daemon():
         previous_tasks = None
         published = None
         while not stopping:
+            renew_admission(published)
             config = host_config()
-            renew_admission(config, published)
             published = None
             try:
                 capacity.controller_config(config)
