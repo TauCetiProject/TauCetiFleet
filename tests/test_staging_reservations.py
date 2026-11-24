@@ -282,7 +282,7 @@ class WarmStagingDisk(unittest.TestCase):
               patch.object(vm.secrets, "token_hex", return_value=instance)):
             vm.start(dict(self.config, ci_slot=index))
         launch = next(c.args[0] for c in calls.call_args_list if c.args[0][0] == "systemd-run")
-        return [a for a in launch if "id=warm" in a or "serial=" + vm.WARM_SERIAL in a or "bootindex" in a]
+        return [a for a in launch if "id=warm" in a or "serial=tauceti-warm" in a or "bootindex" in a]
 
     def test_reserved_staging_slot_gets_no_disk_and_drops_a_leftover(self):
         # TauCetiTools no longer reuses a staging tree, so no guest gets the disk any more.
@@ -301,34 +301,17 @@ class WarmStagingDisk(unittest.TestCase):
         self.assertEqual(self.start(0, "d" * 16), [])
         self.assertFalse(leftover.exists())
 
-    def test_disk_creation_failure_starts_the_guest_cold(self):
-        with patch.object(vm, "run", side_effect=store.FleetError("qemu-img exited 1")):
-            self.assertIsNone(vm.warm_disk(capacity.for_slot(self.config, 0)))
-
-    def test_corrupt_disk_is_replaced_and_unopenable_disk_is_left_alone(self):
+    def test_an_open_leftover_disk_is_kept_and_any_other_is_removed(self):
         config = capacity.for_slot(self.config, 0)
         path = vm.slot_file(config, vm.WARM_DISK)
         path.parent.mkdir(parents=True, exist_ok=True)
-        for code, expected, content in ((3, path, "old"), (1, None, "old"), (2, path, "new")):
+        # 1: qemu-img cannot open it (a QEMU still holds it); 0 clean, 2 corrupt, 3 leaked clusters.
+        for code, kept in ((1, True), (0, False), (2, False), (3, False)):
             path.write_text("old")
-
-            def run(args, code=code, **kwargs):
-                if args[1] == "check":
-                    return SimpleNamespace(returncode=code, stdout="")
-                Path(args[4]).write_text("new")
-                return SimpleNamespace(returncode=0, stdout="")
-
-            with self.subTest(code=code), patch.object(vm, "run", side_effect=run), \
-                 patch.object(vm, "executable", side_effect=lambda name: name):
-                self.assertEqual(vm.warm_disk(config), expected)
-                self.assertEqual(path.read_text(), content)
-        # A leftover that is still open somewhere stays; otherwise any other guest removes it,
-        # including a native guest on the former staging slot.
-        for code, attach, kept in ((1, True, True), (0, True, False), (0, False, False)):
-            path.write_text("old")
-            unreserved = dict(config, ci_staging_reserved=False) if attach else config
-            with self.subTest(code=code, attach=attach), \
+            with self.subTest(code=code), \
                  patch.object(vm, "run", return_value=SimpleNamespace(returncode=code, stdout="")), \
                  patch.object(vm, "executable", side_effect=lambda name: name):
-                self.assertIsNone(vm.warm_disk(unreserved, attach=attach))
+                self.assertIsNone(vm.remove_warm_disk(config))
                 self.assertEqual(path.exists(), kept)
+        with patch.object(vm, "run", side_effect=store.FleetError("qemu-img exited 4")):
+            self.assertIsNone(vm.remove_warm_disk(config))  # never stops the slot
