@@ -1097,7 +1097,8 @@ minutes without a fresh report restarts any pending period. State
 lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
 
 The same run checks TauCeti's API docs build at most once an hour, with two unauthenticated
-reads of the public `api-docs.yml` run list on `main`. When the newest finished run did not succeed
+reads of the public `api-docs.yml` run list on `main` (the 20 newest successful and finished
+runs, taking whichever finished last, so a rerun of an older run counts). When the newest finished run did not succeed
 and the last success is more than 24 hours old, it sends one alert; the next successful run sends
 one recovery message. An unreadable run list neither opens nor closes the alert.
 

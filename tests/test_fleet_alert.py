@@ -332,6 +332,10 @@ class DocsStaleness(unittest.TestCase):
         with self.assertRaises(ValueError):
             fleet_alert.newest_run({"total_count": 1, "workflow_runs": []})
         self.assertIsNone(fleet_alert.newest_run({"total_count": 0, "workflow_runs": []}))
+        # A rerun of an older run finishes last although GitHub lists it second.
+        rerun = run("success", self.START + 50)
+        listing = {"workflow_runs": [run("success", self.START), rerun]}
+        self.assertIs(fleet_alert.newest_run(listing, "success"), rerun)
         listing = {"workflow_runs": [run("failure", self.START)]}
         self.assertEqual(fleet_alert.newest_run(listing)["conclusion"], "failure")
         state, sent = {}, []

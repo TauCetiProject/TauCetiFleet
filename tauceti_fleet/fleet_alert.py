@@ -46,7 +46,7 @@ DOCS_STATE = "api-docs"  # fleet-alert.json key; host records are keyed by 32-he
 DOCS_REPO = "TauCetiProject/TauCeti"
 DOCS_WORKFLOW = "api-docs.yml"
 DOCS_STALE = 24 * 60 * 60  # the docs may lag this long before the failing build is an incident
-DOCS_INTERVAL = 60 * 60  # two unauthenticated reads an hour
+DOCS_INTERVAL = 60 * 60  # two unauthenticated reads an hour, of the 20 newest runs each
 
 
 def fresh(at, now, limit):
@@ -256,13 +256,16 @@ def checked_run(value, conclusion=None):
 
 
 def newest_run(listing, conclusion=None):
-    """The first run of a workflow-run listing, None for an empty history; ValueError when unreadable."""
+    """The most recently finished run of a workflow-run listing, None for an empty history;
+    ValueError when unreadable. GitHub lists runs by creation, so a rerun of an older run can
+    finish after a newer one: pick by `updated_at`, not by position."""
     if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
         raise ValueError("unreadable workflow run listing")
     runs = listing["workflow_runs"]
     if not runs and listing.get("total_count") != 0:
         raise ValueError("empty workflow run listing that does not say it is empty")
-    return checked_run(runs[0], conclusion) if runs else None
+    runs = [checked_run(run, conclusion) for run in runs]
+    return max(runs, key=lambda run: parse_time(run["updated_at"])) if runs else None
 
 
 def docs_verdict(last_success, last_finished, now):
@@ -284,7 +287,7 @@ def fetch_docs_runs(request=None):
     when GitHub's answer is unavailable or unreadable."""
     if request is None:
         from .github import request
-    base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=1"
+    base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=20"
     return (newest_run(request(base + "&status=success"), "success"),
             newest_run(request(base + "&status=completed")))
 
