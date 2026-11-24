@@ -1096,6 +1096,12 @@ reports, missing fields and stale round counts neither open nor close an inciden
 minutes without a fresh report restarts any pending period. State
 lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
 
+The same run checks TauCeti's API docs build at most once an hour, with two unauthenticated
+reads of the public `api-docs.yml` run list on `main` (the 20 newest successful and finished
+runs, taking whichever finished last, so a rerun of an older run counts). When the newest finished run did not succeed
+and the last success is more than 24 hours old, it sends one alert; the next successful run sends
+one recovery message. An unreadable run list neither opens nor closes the alert.
+
 Without `--zulip-config` the messages go only to the unit's journal
 (`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot. The file
 must be mode 0600 and names either a stream and topic or a user to message privately:

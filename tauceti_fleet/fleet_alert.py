@@ -9,10 +9,15 @@ evidence (a round finished without failure in the last hour, or an intentional p
 when its workers are disabled, with one recovery message. Reports that are missing, cached or
 stale neither open nor close an incident. Without a Zulip configuration the messages go only to the
 unit's journal.
+
+Once an hour it also checks TauCeti's API docs build: when the newest finished api-docs run did
+not succeed and the last success is more than a day old, it sends one alert, and one recovery
+message after the next success. It reads two public workflow-run listings without credentials.
 """
 
 import argparse
 import base64
+import datetime
 import collections
 import json
 import os
@@ -37,6 +42,11 @@ MIN_WORKERS = 3  # the share rule needs a few workers; one worker's backoff is o
 # Admission decisions, not failures: the host's capacity, budget or quota is holding workers.
 ADMISSION_WAITS = {"waiting-capacity", "waiting-budget", "waiting-quota"}
 UNIT = "tauceti-fleet-alert"
+DOCS_STATE = "api-docs"  # fleet-alert.json key; host records are keyed by 32-hex machine ids
+DOCS_REPO = "TauCetiProject/TauCeti"
+DOCS_WORKFLOW = "api-docs.yml"
+DOCS_STALE = 24 * 60 * 60  # the docs may lag this long before the failing build is an incident
+DOCS_INTERVAL = 60 * 60  # two unauthenticated reads an hour, of the 20 newest runs each
 
 
 def fresh(at, now, limit):
@@ -220,6 +230,103 @@ def tick(results, state, now, send, commit=lambda: None):
     return state
 
 
+def parse_time(value):
+    """Seconds since the epoch for GitHub's `2026-11-24T14:43:14Z`, or None."""
+    try:
+        moment = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")  # rejects out-of-range fields
+        return moment.replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+CONCLUSIONS = {"success", "failure", "cancelled", "timed_out", "startup_failure", "action_required",
+               "neutral", "skipped", "stale"}
+
+
+def checked_run(value, conclusion=None):
+    """A run from GitHub's list, validated; raises ValueError on anything unexpected, including a
+    run whose conclusion is not `conclusion` when one is required."""
+    if not isinstance(value, dict) or value.get("conclusion") not in CONCLUSIONS:
+        raise ValueError("workflow run without a known conclusion")
+    if conclusion is not None and value["conclusion"] != conclusion:
+        raise ValueError(f"workflow run listed as {conclusion} has another conclusion")
+    if parse_time(value.get("updated_at")) is None:
+        raise ValueError("workflow run without a readable time")
+    return value
+
+
+def newest_run(listing, conclusion=None):
+    """The most recently finished run of a workflow-run listing, None for an empty history;
+    ValueError when unreadable. GitHub lists runs by creation, so a rerun of an older run can
+    finish after a newer one: pick by `updated_at`, not by position."""
+    if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
+        raise ValueError("unreadable workflow run listing")
+    runs = listing["workflow_runs"]
+    if not runs and listing.get("total_count") != 0:
+        raise ValueError("empty workflow run listing that does not say it is empty")
+    runs = [checked_run(run, conclusion) for run in runs]
+    return max(runs, key=lambda run: parse_time(run["updated_at"])) if runs else None
+
+
+def docs_verdict(last_success, last_finished, now):
+    """("bad", description), ("good", None), or None from the newest successful and finished runs."""
+    if last_finished is None:
+        return None
+    if last_finished["conclusion"] == "success":
+        return "good", None
+    succeeded = None if last_success is None else parse_time(last_success["updated_at"])
+    if succeeded is not None and now - succeeded <= DOCS_STALE:
+        return None  # failing, but the published docs are recent enough
+    since = "no successful run on record" if succeeded is None else f"last success {duration(now - succeeded)} ago"
+    url = last_finished.get("html_url") or ""
+    return "bad", f"TauCeti's API docs build keeps failing ({since}; latest run {last_finished['conclusion']}: {url})"
+
+
+def fetch_docs_runs(request=None):
+    """The newest successful and the newest finished api-docs runs on main; ValueError or FleetError
+    when GitHub's answer is unavailable or unreadable."""
+    if request is None:
+        from .github import request
+    base = f"repos/{DOCS_REPO}/actions/workflows/{DOCS_WORKFLOW}/runs?branch=main&exclude_pull_requests=true&per_page=20"
+    return (newest_run(request(base + "&status=success"), "success"),
+            newest_run(request(base + "&status=completed")))
+
+
+def docs_due(state, now):
+    return now - (state.get(DOCS_STATE) or {}).get("checked_at", 0) >= DOCS_INTERVAL
+
+
+def docs_tick(state, now, send, fetch=fetch_docs_runs, commit=lambda: None):
+    """At most hourly: alert once when the API docs build has failed for over a day, recover once.
+    `fetch` may raise; an unreadable answer neither opens nor closes the alert."""
+    if not docs_due(state, now):
+        return state
+    record = state.setdefault(DOCS_STATE, {})
+    record["checked_at"] = now
+    try:
+        last_success, last_finished = fetch()
+        verdict = docs_verdict(last_success, last_finished, now)
+    except (FleetError, AttributeError, KeyError, TypeError, ValueError, IndexError) as error:
+        print(f"fleet alert: API docs runs unreadable ({type(error).__name__})", file=sys.stderr, flush=True)
+        return state
+    success_at = None if last_success is None else parse_time(last_success["updated_at"])
+    if record.get("alerted_at"):
+        # Any success after the one the alert was about ends the incident, even if a later run
+        # failed again before this check: that failure starts a new day-long wait.
+        if success_at is not None and success_at > record.get("success_at", 0):
+            if send(f":check: TauCeti's API docs build succeeded again; closing the alert opened "
+                    f"{duration(now - record['alerted_at'])} ago."):
+                record.pop("alerted_at", None)
+                record.pop("success_at", None)
+                commit()
+        return state
+    if verdict is not None and verdict[0] == "bad" and send(":warning: " + verdict[1] + "."):
+        record["alerted_at"] = now
+        record["success_at"] = success_at or 0
+        commit()
+    return state
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tauceti-fleet fleet-alert", description=__doc__)
     parser.add_argument("--zulip-config", type=Path,
@@ -253,10 +360,27 @@ def main(argv=None):
     with ThreadPoolExecutor(len(entries)) as pool:
         values = dict(zip(entries, pool.map(fetch_status, entries.values()), strict=True))
     path = state_dir() / "fleet-alert.json"
+    # Read GitHub before taking the lock, so slow requests never delay other runs; the check
+    # itself is re-decided under the lock.
+    docs = None
+    if docs_due(read(path, {}), time.time()):
+        try:
+            docs = fetch_docs_runs()
+        except (FleetError, ValueError) as error:
+            docs = error
+
+    def docs_fetch():
+        if docs is None:
+            raise ValueError("API docs runs were not read before the lock")
+        if isinstance(docs, Exception):
+            raise docs
+        return docs
+
     with locked(path.with_suffix(".lock")):
         state = read(path, {})
         tick({name: (entries[name]["machine_id"], value) for name, value in values.items()}, state, time.time(),
              send, lambda: atomic(path, state))
+        docs_tick(state, time.time(), send, fetch=docs_fetch, commit=lambda: atomic(path, state))
         atomic(path, state)
     return 0
 

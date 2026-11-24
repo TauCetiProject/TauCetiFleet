@@ -1,6 +1,7 @@
 """Fleet progress alerts: one message per incident, one on recovery, none for disabled hosts."""
 
 import json
+import time
 import unittest
 import urllib.parse
 from unittest.mock import patch
@@ -239,6 +240,110 @@ class Delivery(unittest.TestCase):
         for bad in (dict(base, site="http://example.zulipchat.com", stream="ops", topic="t"), base):
             with self.assertRaises(ValueError):
                 fleet_alert.zulip(bad, "hello")
+
+
+
+
+def run(conclusion, at, url="https://example.invalid/run"):
+    return dict(conclusion=conclusion, updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), html_url=url)
+
+
+class DocsStaleness(unittest.TestCase):
+    """The API docs check: one alert after a day of failing, one recovery after the next success."""
+
+    HOUR = 60 * 60
+    START = 1_795_000_000
+
+    def tick(self, state, now, success, finished, sent):
+        return fleet_alert.docs_tick(state, now, lambda text: sent.append(text) or True,
+                                     fetch=lambda: (success, finished))
+
+    def test_alerts_once_after_a_day_and_recovers_once(self):
+        state, sent = {}, []
+        good = run("success", self.START)
+        for hours in range(1, 30):
+            self.tick(state, self.START + hours * self.HOUR, good, run("failure", self.START + hours * self.HOUR), sent)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("keeps failing", sent[0])
+        self.assertIn("last success 25h 00m ago", sent[0])
+        now = self.START + 31 * self.HOUR
+        self.tick(state, now, run("success", now), run("success", now), sent)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("succeeded again", sent[1])
+
+    def test_checks_at_most_hourly(self):
+        state, sent, calls = {}, [], []
+        def fetch():
+            calls.append(1)
+            return run("success", self.START), run("success", self.START)
+        for minutes in range(0, 120, 1):
+            fleet_alert.docs_tick(state, self.START + minutes * 60, sent.append, fetch=fetch)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sent, [])
+
+    def test_recent_success_or_unreadable_runs_are_no_incident(self):
+        now = self.START + 10 * self.HOUR
+        self.assertIsNone(fleet_alert.docs_verdict(run("success", self.START), run("failure", now), now))
+        self.assertIsNone(fleet_alert.docs_verdict(None, None, now))
+        self.assertEqual(fleet_alert.docs_verdict(None, run("failure", now), now)[0], "bad")
+        state, sent = {}, []
+        def broken():
+            raise fleet_alert.FleetError("GitHub request unavailable")
+        fleet_alert.docs_tick(state, now, sent.append, fetch=broken)
+        self.assertEqual(sent, [])
+
+    def test_docs_record_does_not_disturb_host_records(self):
+        state = {}
+        self.tick(state, self.START, run("success", self.START), run("success", self.START), [])
+        fleet_alert.tick({"tauchonki": ("m" * 32, report(["working"] * 4, now=self.START))}, state, self.START,
+                         lambda text: True)
+        self.assertIn(fleet_alert.DOCS_STATE, state)
+        self.assertIn("m" * 32, state)
+
+    def test_a_success_between_checks_closes_the_alert(self):
+        state, sent = {}, []
+        good = run("success", self.START)
+        for hours in range(1, 27):
+            self.tick(state, self.START + hours * self.HOUR, good, run("failure", self.START + hours * self.HOUR), sent)
+        self.assertEqual(len(sent), 1)
+        # Between two checks a run succeeds and the next one fails again.
+        now = self.START + 28 * self.HOUR
+        self.tick(state, now, run("success", now - 30 * 60), run("failure", now), sent)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("succeeded again", sent[1])
+        # A new day of failures opens a new incident.
+        for hours in range(29, 54):
+            self.tick(state, self.START + hours * self.HOUR, run("success", now - 30 * 60),
+                      run("failure", self.START + hours * self.HOUR), sent)
+        self.assertEqual(len(sent), 3)
+        self.assertIn("keeps failing", sent[2])
+
+    def test_unreadable_listings_are_rejected(self):
+        for listing in ({}, {"workflow_runs": None}, {"workflow_runs": [{}]},
+                        {"workflow_runs": [{"conclusion": "failure", "updated_at": "yesterday"}]},
+                        {"workflow_runs": [{"conclusion": "failure", "updated_at": "2026-11-20T00:00:61Z"}]}):
+            with self.subTest(listing=listing), self.assertRaises(ValueError):
+                fleet_alert.newest_run(listing)
+        for bad in ({"workflow_runs": [run("", self.START)]}, {"workflow_runs": [{"conclusion": None, "updated_at": "2026-11-24T00:00:00Z"}]}):
+            with self.subTest(listing=bad), self.assertRaises(ValueError):
+                fleet_alert.newest_run(bad)
+        with self.assertRaises(ValueError):
+            fleet_alert.newest_run({"workflow_runs": [run("failure", self.START)]}, "success")
+        with self.assertRaises(ValueError):
+            fleet_alert.newest_run({"total_count": 1, "workflow_runs": []})
+        self.assertIsNone(fleet_alert.newest_run({"total_count": 0, "workflow_runs": []}))
+        # A rerun of an older run finishes last although GitHub lists it second.
+        rerun = run("success", self.START + 50)
+        listing = {"workflow_runs": [run("success", self.START), rerun]}
+        self.assertIs(fleet_alert.newest_run(listing, "success"), rerun)
+        listing = {"workflow_runs": [run("failure", self.START)]}
+        self.assertEqual(fleet_alert.newest_run(listing)["conclusion"], "failure")
+        state, sent = {}, []
+        def unreadable():
+            return fleet_alert.newest_run({}), None
+        fleet_alert.docs_tick(state, self.START, sent.append, fetch=unreadable)
+        self.assertEqual(sent, [])
+        self.assertNotIn("alerted_at", state[fleet_alert.DOCS_STATE])
 
 
 if __name__ == "__main__":
