@@ -64,9 +64,21 @@ profile's agent CLI (`claude`, `codex`, or both for `auto`) in the account's PAT
 plus `bubble` and `incus` when the profile selects the bubble sandbox. Missing
 tools block worker activation with a remedy.
 
-An operator can run `python -m tauceti_fleet.ci_autoscale --host tauchonki
---machine-id MACHINE_ID --minimum 1 --maximum 4 --github-account kim-em` as a
-persistent user service on the SSH control host. It reads the host's existing
+On the SSH control host, install the CI autoscaler as a persistent user service with:
+
+```sh
+tauceti-fleet install-ci-autoscale chungus5 --machine-id MACHINE_ID --minimum 1 --maximum 15
+```
+
+The unit runs `tauceti-fleet ci-autoscale` from the installed Fleet release, so a restart after
+`update local` picks up new code; rerun the installer to change its bounds. It loads
+`github-app.json` and `github-private-key.pem` from `--github-app-dir` (default
+`~/.config/tauceti-queue`, the queue App, which has `actions: write` on TauCeti) with
+`LoadCredential=`. Its recovery writes (force-cancel, rerun) then use a TauCeti-only installation
+token; reads use tauceti-ai-for-science. The installer refuses to run while a drop-in exists for
+`tauceti-ci-autoscale.service`. The App path needs the `cryptography` package (the `app` extra,
+`pip install 'tauceti-fleet[app]'`, or a system Python that has it); without it the writes fail with
+that message rather than falling back. It reads the host's existing
 telemetry every 15 seconds, trims idle general capacity during RAM pressure, and
 adds at most one slot after three minutes with spare memory for both guest growth
 and compiler headroom. Build guest launches still obey the host's ten-second settling interval and
@@ -122,7 +134,9 @@ Override the default or add profiles in `~/.config/tauceti-fleet/profiles.json`:
 }
 ```
 
-Then deploy with `--profile personal`. Model credentials, GitHub identity, model,
+Then deploy with `--profile personal`. Repeating `add` on an active host applies a profile's
+worker definition settings (`max_open_prs`, `author_model`, `author_effort`, `github_state_url`)
+and credentials live, between rounds; other profile or resource changes need a drained host. Model credentials, GitHub identity, model,
 and effort are independent settings.
 Secret files must be private (`chmod 600`). A `github_token_file` may replace a
 stored gh credential; `ci_token_file` separately supplies runner administration
@@ -153,7 +167,7 @@ Claude or Codex subscriptions; each applies to every worker slot:
 With these keys alone a subscription profile carries no model credential. Sign
 in to `claude` or `codex` as the host account before enabling workers; each
 worker copies that login into its own home once and keeps following that
-location. Like a model change, changing any of these keys on an active host
+location. Unlike a model change, changing any of these keys on an active host
 requires a drain before repeating `add`. A key removed from the profile returns
 to its default.
 
@@ -366,11 +380,32 @@ The shared job ceiling and worker admissions stay enabled. Existing guests finis
 with their original classes, and the command reports slots awaiting replacement.
 Use `--slots 0` to remove the reservation as guests are replaced.
 
+To stop a mixed host with a staging reservation taking PR jobs, run
+`tauceti-fleet enable HOST --ci staging` live. A staging-only host with a reservation
+runs staging in its reserved slots only: they and any `ci_protected_slots` keep their
+guests, while each other slot retires its idle runner and lets a busy one finish its
+job, then stays empty. Nothing is cancelled.
+
+Reserved staging slots used to keep a persistent `warm.qcow2` disk for reusing a
+batch's build tree between attempts. TauCetiTools no longer uses it, so guests get no
+such disk, and a slot deletes its leftover `warm.qcow2` when it next starts a guest
+(before its free-space check). A leftover that cannot be opened (for example one a
+QEMU still holds) is left for the next start.
+
+Reserved staging guests otherwise see the aggregate CI RAM ceiling, so on a busy
+host they and the other CI guests together overcommit its RAM. `--memory-gib N`
+gives future reserved staging guests exactly N GiB of virtual RAM instead
+(`--memory-gib 0` restores the shared ceiling), for example
+`tauceti-fleet reserve-staging HOST --slots 1 --memory-gib 64`. Running guests
+keep their size and are reported as awaiting replacement. Unused guest RAM is
+shared anyway, so a smaller N only caps the staging build; leave it at the
+shared ceiling unless a specific constraint calls for less.
+
 Increase `--max-jobs` live when the guest shape and accepted job classes are
 unchanged: existing builds keep running and the controller starts the added
-slots independently. Enabling does not restart the controller. Changes to guest
-shape or job classes, and reductions in the slot count, still require retiring
-the current guests first. Each host chooses its runner count with local
+slots independently. Enabling does not restart the controller. Other changes to guest
+shape or job classes (apart from dropping PR from a reserved host, above), and
+reductions in the slot count, still require retiring the current guests first. Each host chooses its runner count with local
 `--max-jobs`; there is no separate broker or dispatcher ceiling for a machine.
 Enrollment authorizes job classes, and a host can select a subset of them.
 The slot format supports up to 4096 jobs per host. Each guest has its own
@@ -485,8 +520,7 @@ percentages. A separate user service samples the host ten times per second, insi
 the same ancestor memory limits as CI, and broadcasts a small JSON frame over
 dedicated virtio serial ports. Guests send only a bounded numeric request ID for
 the next compiler start. The host grants starts fairly across waiting guests,
-limiting ordinary CI bursts using current free RAM and a quarter-second startup allowance.
-Staging requests receive all their pending permits without that memory budget.
+limiting bursts using current free RAM and a quarter-second startup allowance.
 This is transient admission accounting, not a physical resource reservation.
 It accepts no guest commands and makes no network or GitHub API requests.
 A root guest service caches the frame under `/usr/local`,
@@ -494,16 +528,18 @@ readable through the existing offline sandbox's read-only `/usr` mount. Missing,
 invalid, or ten-second-old observations make new compilers wait; existing
 compilers continue. Guest file caches are released at most once per 30 seconds
 when the host needs RAM, allowing free-page reporting to return it to the host.
-Ordinary CI also requires enough guest-local absolute RAM for one measured
+Every guest also requires enough guest-local absolute RAM for one measured
 worst-case file; a guest's old 60% utilization threshold no longer applies.
 
-Staging compiler starts bypass CPU-utilization sleeps and all memory admission
-checks, both host pressure and the guest-local worst-file margin. Ordinary CI
-retains its existing CPU, host RAM and guest RAM checks. Physical VM memory and
-hard cgroup RAM caps still apply. The reserved staging guest can boot with
+Staging compiler starts bypass CPU-utilization sleeps and need one measured
+worst-file RAM margin before starting instead of two for ordinary CI. On a
+112 GiB shared ceiling this allows roughly 91% use (about 10 GiB free before
+admission), compared with 83% (about 19 GiB) for ordinary CI, so a staging build
+slows at the ceiling instead of having its VM OOM-killed there. Already-running
+compilers can still grow together past it. The reserved staging guest can boot with
 14 GiB of free RAM instead of 20 GiB, retaining room for guest preparation.
 Staging guests receive CPUWeight=10000 versus
-100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
+1000 for infra guests and 100 for PR guests; this is scheduling precedence, not a physical CPU reservation.
 
 The host serves staging compiler requests first and accounts for all grants in
 one shared ramp allowance. Reserved staging guests need no API classification;
@@ -562,9 +598,18 @@ sizes. No CPU pinning or memory preallocation is added. The physical parent and
 CI slice limits remain the shared emergency bounds. Existing guests retain
 their sizes and admission setup until they complete and are replaced.
 
-Workers and CI can use whatever RAM is currently free. Their parent
-`tauceti-fleet.slice` limits combined resident memory to host RAM minus the OS
-reserve and 1 GiB swap allowance. Worker hard limits no longer reserve CI's full
+Workers and CI can use whatever RAM is currently free. The parent
+`tauceti.slice` limits combined resident memory to host RAM minus the OS
+reserve and 1 GiB swap allowance. It holds `tauceti-fleet.slice` and, where
+TauCetiWorker's queue repair workers run, their `tauceti-repair.slice`, so the
+repairs share the ceiling with the VMs and yield to them: VM memory is never
+swapped, the repair builds' compiler wrapper measures the same ceiling, and every
+five seconds the controller sets the repair slice's `memory.high` to its pinned
+memory plus the free memory under the ceiling, less 21 GiB (the new-guest start
+requirement plus 1 GiB). The repair units run at `OOMScoreAdjust=1000`, so an OOM
+kill under the ceiling takes a repair process rather than a VM (with the
+host's swap counted in OOM scores, as on tauchonki2). `enable` and a live
+`update` both write the ceiling. Worker hard limits no longer reserve CI's full
 configured RAM in advance. CI defaults to the same shared ceiling; an explicit
 `ci_memory_budget_gib` still applies to its child slice. CPU priorities are
 unchanged. Concurrent compilers can still grow after passing
@@ -669,12 +714,13 @@ remains the boundary for candidate code inside a guest.
 
 ```sh
 tauceti-fleet budget server1 --grant 100
+tauceti-fleet budget server1 --set-grant 0
 tauceti-fleet budget server1 --grant-rate 10
 tauceti-fleet budget server2 --grant-rate 10
 tauceti-fleet budget
 ```
 
-These wrap the existing local grant ledger. New hosts start with zero credit
+These wrap the existing local grant ledger; `--set-grant` sets the balance (for example to 0, so only the rate funds new rounds) through a logged adjustment. New hosts start with zero credit
 and replenishment; existing budgets are retained. Grants require one explicit
 host and are never automatically retried after an ambiguous SSH response.
 Queries can aggregate hosts. API-billed workers on a host share its budget;
@@ -688,6 +734,7 @@ active sessions may settle into a deficit.
 ```sh
 tauceti-fleet status
 tauceti-fleet status server1
+tauceti-fleet status server1 server2
 tauceti-fleet status --json
 tauceti-fleet status --all-jobs
 tauceti-fleet status --workers
@@ -701,6 +748,13 @@ aliases never multiply costs or output. Offline hosts retain their last small
 status snapshot with an explicit age and unavailable-host error; new machines
 without a snapshot contribute no invented financial totals.
 
+Naming several hosts shows them together: the CI lines once, a worker total, one
+column per host (report freshness, workers alive/working/idle, admission limit,
+CPU idle, worker memory, rounds, PRs, spend and budget), then the fleet totals and
+merge queue. Hosts are queried in parallel; an unreachable host shows its cached
+snapshot or `unreachable` and does not delay the others. It combines with `-f`,
+`--json` and `--workers`. One named host keeps the full single-host view.
+
 The CI pool activity table uses the same public aggregate as `/ci`: running and
 waiting builds, latest completion and outcome, oldest running/waiting job ages,
 and finished totals for 1h/3h/24h with failure and cancellation counts. Builds are
@@ -709,6 +763,13 @@ both scopes, all completion outcomes, and exact job identities and URLs under
 `_ci.pool_activity`. Coverage and observation age are explicit. An unavailable
 public source retains the last cached summary with an error; missing observations
 under partial coverage are unknown. Host-specific status still shows every pool.
+
+Known GitHub zombies never enter the text: jobs queued for over 24 hours, and
+workflows queued with no jobs that long, are left out of Run/Wait, the oldest
+wait and the backlog line, and the text does not mention them. JSON keeps their
+`stale_waiting` counts. They hold no runner and block nothing. We never file
+GitHub support requests about them; TauCetiWorker
+`docs/queue/github-zombie-runs.md` records the policy and the known runs.
 
 The operator client fetches one public manifest and its jobs summary per status
 invocation, independently of host count. It does not fetch job-detail pages or
@@ -751,7 +812,7 @@ workflows, including small control jobs. Backlog reporting separates pending
 and queued workflows. A second line shows verified stuck records and records
 without confirmed active jobs; these are not added to waiting work. Verification
 requires a complete empty/terminal job inventory and a settled workflow, never
-age alone. An old pending job remains waiting. Counts come from retained shared
+age alone. An old pending workflow remains waiting. Counts come from retained shared
 observations before detail-page limits; incomplete observations remain explicit. Authoring pressure uses the workers' complete cached survey:
 non-draft roadmap PRs, with the same selected-area and exclusion scope. A focused
 worker can have spare authoring capacity even when the account's all-roadmap
@@ -1090,6 +1151,40 @@ admits nothing and is reported there; `--clear` or a new set of slots replaces
 it. `schedule.seconds_until_slot_ends(config)` gives other host-side code the
 admission time left in the current slot.
 
+## Worker progress alerts
+
+`tauceti-fleet install-fleet-alert` on the operator's control host installs a systemd timer
+that runs `tauceti-fleet fleet-alert` once a minute from the installed Fleet release, so
+`update local` takes effect at the next run. Each run reads every inventory host's status, as
+`status` does, and judges hosts whose workers are enabled and admitted. Such a host has a
+problem when at least 80% of its live workers (and at least three) are in backoff or blocked
+(`waiting-*` states other than the capacity, budget and quota admission waits), when no worker
+is alive, or when its workers have finished no round without failure (or with an unconfirmed
+outcome) in the last hour after an hour of admitted observation. A problem lasting 15 minutes sends one alert. Recovery
+needs 15 minutes of positive evidence (such a round in the last hour, or an explicit
+admission pause, or most workers waiting for capacity, budget or quota) and sends one message; disabling
+the host's workers closes the alert at once. Unreachable hosts, cached or stale controller
+reports, missing fields and stale round counts neither open nor close an incident, and five
+minutes without a fresh report restarts any pending period. State
+lives in `~/.local/state/tauceti-fleet/fleet-alert.json`.
+
+The same run checks TauCeti's API docs build at most once an hour, with two unauthenticated
+reads of the public `api-docs.yml` run list on `main` (the 20 newest successful and finished
+runs, taking whichever finished last, so a rerun of an older run counts). When the newest finished run did not succeed
+and the last success is more than 24 hours old, it sends one alert; the next successful run sends
+one recovery message. An unreadable run list neither opens nor closes the alert.
+
+Without `--zulip-config` the messages go only to the unit's journal
+(`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot. The file
+must be mode 0600 and names either a stream and topic or a user to message privately:
+
+```json
+{"site": "https://leanprover.zulipchat.com", "email": "BOT_EMAIL", "api_key": "BOT_API_KEY", "stream": "STREAM", "topic": "TOPIC"}
+```
+
+Use `"recipient_id": USER_ID` in place of `stream` and `topic` for a direct message; this is
+the format of the queue's `TAUCETI_QUEUE_ZULIP_CONFIG`. A failed post is retried on the next run.
+
 ## Public operations telemetry
 
 The existing Tau Ceti `/ci` page can display approved host observations alongside
@@ -1187,6 +1282,51 @@ worker source flags; remaining slots continue on GitHub. Set the count to `0` to
 them to GitHub. Lower-numbered GitHub slots retain admission priority under pressure.
 This does not change the admission ceiling, CI routing or active rounds.
 
+Keep some slots tending existing PRs on both forges with `tauceti-fleet workers HOST --maintenance-workers 10`.
+The lowest-numbered selected slots rebase, repair, fix and review existing PRs on GitHub and Forgejo
+(`rebase`, `bump`, `lint-repair`, `progress`, `fix-ci`, `fix` and `review`; no `roadmap` or overlap
+stages), so they author no new mathematics PRs (globally paced `progress` reports still open
+TauCetiRoadmap report PRs) and keep admission priority under pressure; they take precedence over
+`--forgejo-workers` for those slots. Set the count to `0` to return them to ordinary routing. Like the
+other worker policies this survives controller rewrites and does not change admissions or active rounds.
+
+Run ordinary workers on both forges with `tauceti-fleet workers HOST --both-forge-workers 40`.
+The slots right after the maintenance slots work existing PRs on GitHub and Forgejo like the maintenance
+slots, and when neither forge has claimable PR work they author roadmap PRs on Forgejo
+(`new_pr_forge = "forgejo"`); every stage runs, including `roadmap` and the overlap stages. They also
+take precedence over `--forgejo-workers` for those slots. The maintenance and both-forge counts together
+cannot exceed `--max`. Set it to `0` to return those slots to ordinary routing. To switch a host whose
+maintenance slots should all author, run `tauceti-fleet workers HOST --maintenance-workers 0
+--both-forge-workers N` in one command.
+
+Give the lowest-numbered maintenance or both-forge slots a GitHub-first preference with
+`tauceti-fleet workers HOST --github-first-workers 15`. Those slots walk GitHub's rebases,
+re-reviews, fixes and first reviews before any Forgejo work (automatic bumps still come first on
+either forge), and fall back to Forgejo when GitHub has nothing claimable; the other maintenance
+slots keep one closeness-to-landing order across both forges. The preference covers the maintenance
+slots first, then the both-forge slots, so the count cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`. Set it to `0` to remove the preference. It needs a Worker release and
+running manager that support `prefer_forge`; workers pick it up between rounds.
+
+Reserve a few maintenance or both-forge slots for reviews with `tauceti-fleet workers HOST --review-first-workers 5`.
+The slots right after the GitHub-first ones offer re-reviews, then first reviews, on either forge before
+any rebase or fix (automatic bumps still come first), and fall back to the normal landing order when no
+review is claimable, so approvals keep reaching the queue while long rebases hold the other slots. The
+GitHub-first and review-first counts together cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`. Set it to `0` to
+remove the reserve. It needs a Worker release and running manager that support `review_first`; workers
+pick it up between rounds.
+
+Give the maintenance or both-forge slots after the review-first ones a Forgejo-first preference with
+`tauceti-fleet workers HOST --forgejo-first-workers 20`. Those slots walk Forgejo's rebases,
+re-reviews, fixes and first reviews before any GitHub work (automatic bumps still come first on
+either forge), and fall back to GitHub when Forgejo has nothing claimable. Forgejo has no per-account
+posting limit, so these slots keep producing approvals while GitHub's limit holds GitHub reviews. The
+GitHub-first, review-first and Forgejo-first counts together cannot exceed `--maintenance-workers` plus
+`--both-forge-workers`, so the three never share a slot. Set it to `0` to remove the preference. It
+needs a Worker release and running manager that support `prefer_forge`; workers pick it up between
+rounds.
+
 Set an environment variable for every worker with `tauceti-fleet workers HOST --env NAME=VALUE`,
 and remove one with `--unset-env NAME`; both repeat. The host stores them as `worker_env` and
 writes them into each generated worker definition's `env` table, so they survive the controller
@@ -1196,6 +1336,10 @@ runtime directories, OOM score, grant ledger `TAUCETI_BUDGET_DIR`, GitHub state 
 `GH_TOKEN`, `GH_CONFIG_DIR`, `PATH`), the stores Fleet reads (`TAUCETI_ACTIVITY_DIR`,
 `TAUCETI_GITHUB_SHARED_DIR`, `XDG_STATE_HOME`) and the login locations `CLAUDE_CONFIG_DIR`,
 `CODEX_HOME` and `HOME` are refused; a worker keeps the login it was first seeded from.
+
+Set the swap the workers slice may use with `tauceti-fleet workers HOST --swap-gib N` (default 1).
+The host stores it as `workers_swap_gib`, rewrites only that line of its workers slice unit and
+reloads systemd, so the running slice takes it immediately; workers and admissions continue.
 The installed Worker and running manager must advertise source-selection support;
 changes take effect between rounds. Provision the existing private Forgejo worker
 credential before enabling native slots. Increase the count only after checking useful
@@ -1204,3 +1348,10 @@ Before downgrading to a Worker release without source-selection support, set the
 to `0` and wait for those workers to adopt their GitHub definitions. Keep at least one
 native worker elsewhere while native PRs still need maintenance. A routing rollback
 takes effect at safe idle windows; it is not an emergency stop for an active round.
+
+## Lapsed contributors
+
+`tauceti-fleet contributors` reports people whose sustained PR or review volume stopped or fell
+sharply, from GitHub (GraphQL), Forgejo and the merge queue ledger, with their open PRs and weekly
+series. It only reads. [docs/contributors.md](docs/contributors.md) gives the sources, measures and
+thresholds.

@@ -56,3 +56,21 @@ class StatusTLS(unittest.TestCase):
         self.assertIsInstance(build.call_args.args[0], ci_overview.NoRedirect)
         self.assertIs(build.call_args.args[1], handler.return_value)
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 3)
+
+
+class GitHubRequestTls(unittest.TestCase):
+    def test_github_requests_use_the_status_context(self):
+        # Standalone CLI Pythons lack NixOS's CA path; the fleet alert's API docs check failed with
+        # CERTIFICATE_VERIFY_FAILED until GitHub requests used the same fallback bundle.
+        from tauceti_fleet import github
+
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.status = 200
+        response.read.return_value = b'{"ok": true}'
+        context = Mock()
+        with patch.object(ci_overview, "status_ssl_context", return_value=context), \
+                patch.object(github.urllib.request, "urlopen", return_value=response) as urlopen:
+            self.assertEqual(github.request("repos/o/r"), {"ok": True})
+        self.assertIs(urlopen.call_args.kwargs["context"], context)

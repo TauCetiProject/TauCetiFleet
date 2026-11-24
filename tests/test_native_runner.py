@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -99,6 +100,23 @@ class NativeRunner(unittest.TestCase):
             self.assertEqual((value["_ci_backend"], value["ci_kinds"]), ("vm", intent["ci_kinds"]))
             self.assertEqual(store.read(vm.slot_file(config, "ci-registration.json")), intent)
 
+    def test_converted_infra_slot_stays_native_despite_a_pending_mixed_registration(self):
+        config = dict(self.config, ci_kinds=["infra"], ci_broker_url="https://broker.invalid")
+        store.atomic(vm.slot_file(config, "ci-registration.json"),
+                     dict(instance="0123456789abcdef", ci_kinds=["pr", "staging"]))
+        with patch.object(native, "ready", return_value=True):
+            self.assertTrue(native.choose(config, 80 * GIB))
+        self.assertEqual(store.read(store.state_dir() / "native-choice.json")["backend"], native.RUNTIME)
+
+    def test_infra_start_refuses_the_vm_backend(self):
+        (store.data_dir() / "images").mkdir(parents=True)
+        store.atomic(store.data_dir() / "images/prepared.json", {})
+        with patch.object(vm, "remove_warm_disk") as warm, patch.object(github, "jit_config") as jit:
+            with self.assertRaisesRegex(store.FleetError, "only on the native backend"):
+                vm._start(dict(self.config, ci_kinds=["infra"], _ci_backend="vm"))
+            warm.assert_not_called()
+            jit.assert_not_called()
+
     def test_unsuitable_host_mapping_limit_is_an_explicit_native_fault(self):
         with (patch.object(native, "ready", return_value=True), patch.object(native, "instances", return_value=[]),
               patch.object(native, "mapping_ok", return_value=False)):
@@ -136,6 +154,96 @@ class NativeRunner(unittest.TestCase):
                            dict(ci_kinds=["pr", "staging"], ci_staging_slots=2, ci_max_jobs=2)):
                 self.assertIsNone(native.prepare_for_ci(config))
         prepare.assert_not_called()
+        # Protected infra slots run native-disk on any host, so they need the image.
+        infra = dict(ci_kinds=["staging"], ci_max_jobs=3, ci_protected_slots={"2": dict(kind="infra", runner_group_id=8)})
+        with patch.object(native, "prepare", return_value="image") as prepare:
+            self.assertEqual(native.prepare_for_ci(infra), "image")
+        prepare.assert_called_once_with(infra, infra=True)
+        # A PR host with infra slots prepares both images.
+        both = dict(infra, ci_kinds=["pr"])
+        with patch.object(native, "prepare", side_effect=lambda config, infra=False: "infra" if infra else "pr") as prepare:
+            self.assertEqual(native.prepare_for_ci(both), "pr")
+        self.assertEqual([c.kwargs for c in prepare.call_args_list], [dict(infra=True), {}])
+
+    def test_infra_image_adds_packages_and_refuses_to_export_without_them(self):
+        commands = {}
+        def seed(directory, values, name):
+            commands[infra] = values
+            raise store.FleetError("stop after seeding")
+        base = dict(sha256="a" * 64, runner_version="v1")
+        store.state_dir().mkdir(parents=True, exist_ok=True)
+        (store.data_dir() / "images").mkdir(parents=True, exist_ok=True)
+        for infra in (False, True):
+            with (patch.object(native, "prerequisites"), patch.object(vm, "prepare_tools"),
+                  patch.object(native, "read", return_value=base), patch.object(vm, "digest", return_value="a" * 64),
+                  patch.object(native, "ready", return_value=False), patch.object(native, "run"),
+                  patch.object(vm, "cloud_seed", side_effect=seed), self.assertRaises(store.FleetError)):
+                native.prepare(dict(ci_kinds=["pr"]), infra=infra)
+        joined = {k: " ; ".join(v) for k, v in commands.items()}
+        for line in native.INFRA_PACKAGES:
+            self.assertIn(line, joined[True])
+            self.assertTrue(line == "apt-get update" or line not in joined[False])
+        self.assertIn("command -v node && git --version", joined[True])
+        self.assertNotIn("command -v node", joined[False])
+        # Both images carry the system C compiler Lake's buildO/compileO call, and
+        # neither exports without one.
+        for infra in (False, True):
+            self.assertIn("apt-get install -y bubblewrap " + native.C_COMPILER_PACKAGES, joined[infra])
+            self.assertIn("cc --version && ", joined[infra])
+
+    def test_manifests_are_keyed_by_revision_so_older_controllers_keep_theirs(self):
+        # A live update exports before handover; the serving controller still
+        # reads the revision-1 manifests under their original names.
+        images = store.data_dir() / "images"
+        store.atomic(images / "native.json", dict(revision=1, sha256="c" * 64))
+        store.atomic(images / "native-r2.json", dict(revision=2, sha256="d" * 64))
+        with patch.object(native, "IMAGE_REVISION", 2), patch.object(native, "INFRA_IMAGE_REVISION", 2):
+            self.assertEqual(native.manifest_name(), "native-r2.json")
+            self.assertEqual(native.manifest_name(True), "native-infra-r2.json")
+            self.assertEqual(native.image()["sha256"], "d" * 64)
+            self.assertEqual(native.image(True), {})
+        with patch.object(native, "IMAGE_REVISION", 1):
+            self.assertEqual(native.image()["sha256"], "c" * 64)
+
+    def test_export_publishes_under_the_revision_name_and_keeps_older_manifests(self):
+        images = store.data_dir() / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        store.state_dir().mkdir(parents=True, exist_ok=True)
+        old = dict(revision=1, sha256="c" * 64)
+        store.atomic(images / "native.json", old)
+        store.atomic(images / "native-infra.json", old)
+        base = dict(sha256="a" * 64, runner_version="v1")
+
+        def fake_run(argv, **kwargs):
+            argv = [str(a) for a in argv]
+            if argv[0].endswith("qemu-img"):
+                Path(argv[-2]).touch()
+            elif "-xpf" in argv:
+                target = Path(argv[argv.index("-C") + 1])
+                (target / "opt/actions-runner/bin").mkdir(parents=True)
+                (target / "opt/actions-runner/bin/Runner.Listener").touch()
+            elif "systemd-run" in " ".join(argv) or any("qemu-system" in a for a in argv):
+                for staging in store.state_dir().glob("native-image-*"):
+                    (staging / "console.log").write_text("FLEET_NATIVE_IMAGE_READY\n")
+                    (staging / "rootfs.tar.gz").write_bytes(b"x")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        for infra in (False, True):
+            with (patch.object(native, "prerequisites"), patch.object(vm, "prepare_tools"),
+                  patch.object(native, "read", side_effect=lambda path, default=None: base
+                               if Path(path).name == "prepared.json" else store.read(path, default)),
+                  patch.object(vm, "digest", side_effect=lambda path, infra=infra: "a" * 64
+                               if Path(path).name == "prepared.qcow2" else ("f" if infra else "e") * 64),
+                  patch.object(vm, "cloud_seed", return_value="seed.iso"),
+                  patch.object(vm, "qemu_args", return_value=["qemu-system-x86_64"]),
+                  patch.object(vm, "scope_args", side_effect=lambda unit, args, small: ["systemd-run", *args]),
+                  patch.object(native, "executable", side_effect=lambda name: name),
+                  patch.object(native, "run", side_effect=fake_run)):
+                value = native.prepare(dict(ci_kinds=["pr"]), infra=infra)
+            self.assertEqual(store.read(images / native.manifest_name(infra)), value)
+            self.assertNotIn(native.manifest_name(infra), ("native.json", "native-infra.json"))
+        self.assertEqual(store.read(images / "native.json"), old)
+        self.assertEqual(store.read(images / "native-infra.json"), old)
 
     def test_prepared_native_image_is_reused_without_booting_an_export_vm(self):
         config = dict(ci_kinds=["pr"])
@@ -234,6 +342,15 @@ class NativeRunner(unittest.TestCase):
             self.assertTrue(native.idle_expired(value, own))
             self.assertFalse(native.idle_expired(dict(value, busy=True), own))
             self.assertFalse(native.idle_expired(dict(value, run_id=42), own))
+            infra = dict(value, ci_kinds=["infra"], native_image_sha256="b" * 64)
+            with patch.object(native, "image", return_value=dict(sha256="b" * 64)):
+                self.assertFalse(native.idle_expired(infra, own))
+            # An idle infra runner on an older infra image retires at once to restart on the new one.
+            with patch.object(native, "image", return_value=dict(sha256="c" * 64)):
+                self.assertTrue(native.idle_expired(dict(infra, online_observed_at=400), own))
+                self.assertFalse(native.idle_expired(dict(infra, busy=True), own))
+            with patch.object(native, "image", return_value={}):
+                self.assertFalse(native.idle_expired(infra, own))
             self.assertFalse(native.idle_expired(value, dict(own, busy=True)))
             self.assertFalse(native.idle_expired(dict(value, online_observed_at=200), own))
 
@@ -296,6 +413,23 @@ class NativeRunner(unittest.TestCase):
         self.assertEqual(value["runtime"], native.RUNTIME)
         self.assertFalse((self.root / "rootfs").exists())
         self.assertEqual((self.root / "control/jit").stat().st_mode & 0o777, 0o600)
+
+    def test_infra_slots_omit_the_lean_gate_environment(self):
+        image = store.data_dir() / "images/native" / ("a" * 64) / "rootfs"
+        (image / "usr/local/bin").mkdir(parents=True)
+        (image / "opt").mkdir()
+        for infra in (False, True):
+            with self.subTest(infra=infra):
+                directory = self.root / ("infra" if infra else "lean")
+                directory.mkdir()
+                with patch.object(native, "image", return_value=dict(sha256="a" * 64)) as image:
+                    native.stage(directory, "jit", infra=infra)
+                image.assert_called_once_with(infra)
+                def copy(command, **_):
+                    shutil.copytree(command[-2], command[-1], symlinks=True)
+                with patch.object(native, "run", side_effect=copy):
+                    native.materialize(directory)
+                self.assertEqual((directory / "rootfs/opt/tauceti-lean-env").exists(), not infra)
 
     def test_shared_records_cannot_read_host_symlinks_or_block_on_fifo(self):
         target = self.root / "control/native-progress.json"
