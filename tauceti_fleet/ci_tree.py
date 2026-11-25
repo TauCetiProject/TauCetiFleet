@@ -35,6 +35,10 @@ from .process import run
 from .store import FleetError, atomic, data_dir, locked, read, state_dir
 
 SETTING = "ci_shared_tree"
+# Which PR slots are offered an entry: all, or only even- or odd-numbered ones, so the other half
+# runs today's path on the same PRs and drives at the same time (decision 216).
+SLOTS_SETTING = "ci_shared_tree_slots"
+SLOT_CHOICES = ("all", "even", "odd")
 GUEST_PATH = "/opt/tauceti-shared-tree"
 WORKSPACE = "/opt/actions-runner/_work/TauCeti/TauCeti"
 ENTRY = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}-[0-9a-f]{8}")
@@ -137,9 +141,31 @@ def enabled(config):
     return config.get(SETTING) == "on"
 
 
+def slots(config):
+    return config.get(SLOTS_SETTING, "all")
+
+
 def validate(config):
     if config.get(SETTING, "off") not in ("on", "off"):
         raise FleetError(f"{SETTING} must be on or off")
+    if slots(config) not in SLOT_CHOICES:
+        raise FleetError(f"{SLOTS_SETTING} must be one of " + ", ".join(SLOT_CHOICES))
+
+
+def offered(config):
+    """Whether a guest starting in this slot config should lease an entry.
+
+    Only PR-class slots: staging, infra and the protected special-purpose slots keep today's
+    path (the Tools consumer takes the tree only for ordinary PR builds anyway). The slot split
+    leaves the other half of the PR slots unbound, so they are a same-time control group.
+    """
+    if not enabled(config) or "pr" not in (config.get("ci_kinds") or []):
+        return False
+    choice = slots(config)
+    if choice == "all":
+        return True
+    slot = config.get("ci_slot", 0)
+    return isinstance(slot, int) and slot % 2 == (0 if choice == "even" else 1)
 
 
 def entries():

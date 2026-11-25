@@ -226,10 +226,20 @@ A host can keep one trusted, read-only copy of the `.lake` a TauCeti PR build re
 tauceti-fleet ci-tree HOST           # pool and builder state
 tauceti-fleet ci-tree HOST --on      # build entries and offer them to new PR guests
 tauceti-fleet ci-tree HOST --off     # stop building and offering; leased entries stay until released
+tauceti-fleet ci-tree HOST --slots even   # offer entries only to even-numbered PR slots (all, even or odd)
 ```
 
-No job uses the tree yet: a later Tools change mounts it as the lower layer of a private
-overlay at `pr/.lake`, with today's path on any key mismatch.
+Only PR-class slots are offered an entry; staging, infra and the protected special-purpose slots
+keep today's path. `--slots even` (or `odd`) leaves the other half of the PR slots unbound, so
+they build the same PRs on the same drives at the same time without the tree: a control group
+for measurement (TauCetiWorker decision 216). The default is `all`. A guest leases when it
+starts, so a change reaches each slot at its next guest.
+
+Tools' `pr-build.yml` mounts the leased entry as the lower layer of a private overlay at
+`pr/.lake` in ordinary PR builds (Tools `scripts/shared_tree.py`), with today's path on any key
+mismatch. It writes a trusted record of each job (`hit` or `miss:<reason>`, the upper layer's
+bytes and files, the verdict) to the control link's `telemetry/shared-tree.json`, which native
+cleanup keeps with the job's other evidence under `native-results/<instance>/telemetry/`.
 
 The pool lives in `ci-tree/v1` under Fleet's data directory. An entry is built only from
 CI's published `main` outputs, never from a job. The builder is a Fleet-owned native

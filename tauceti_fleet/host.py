@@ -1428,7 +1428,8 @@ def daemon():
                     try:
                         # The shared tree is an optimisation: its faults never stop the loop.
                         reason = ci_tree.tick(config)
-                        tree_state = dict(ci_tree.status(), enabled=ci_tree.enabled(config), waiting=reason)
+                        tree_state = dict(ci_tree.status(), enabled=ci_tree.enabled(config), slots=ci_tree.slots(config),
+                                          waiting=reason)
                     except Exception as exc:
                         tree_state = dict(enabled=ci_tree.enabled(config), error=f"{type(exc).__name__}: {exc}"[:200])
                 current = cpu_sample()
@@ -1707,10 +1708,16 @@ def rpc(payload):
             return native_runner.prepare()
         return native_runner.status()
     if action == "ci-tree":
+        changes = {}
         if payload.get("setting") is not None:
-            update_host(validate=ci_tree.validate, **{ci_tree.SETTING: payload["setting"]})
-            event("ci_shared_tree_setting", value=payload["setting"])
-        return dict(ci_tree.status(), enabled=ci_tree.enabled(host_config()))
+            changes[ci_tree.SETTING] = payload["setting"]
+        if payload.get("slots") is not None:
+            changes[ci_tree.SLOTS_SETTING] = payload["slots"]
+        if changes:
+            update_host(validate=ci_tree.validate, **changes)
+            event("ci_shared_tree_setting", value=payload.get("setting"), slots=payload.get("slots"))
+        config = host_config()
+        return dict(ci_tree.status(), enabled=ci_tree.enabled(config), slots=ci_tree.slots(config))
     if action == "configure":
         return configure(payload)
     if action == "enroll":

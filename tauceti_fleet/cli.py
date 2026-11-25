@@ -69,6 +69,8 @@ def parser():
     switch = tree.add_mutually_exclusive_group()
     switch.add_argument("--on", dest="setting", action="store_const", const="on")
     switch.add_argument("--off", dest="setting", action="store_const", const="off")
+    tree.add_argument("--slots", choices=("all", "even", "odd"),
+                      help="offer entries to all PR slots, or only even- or odd-numbered ones (a same-host control group)")
     tree.add_argument("--json", action="store_true")
     infra = sub.add_parser("infra-slots", help="run infrastructure-repository CI in slots above the PR slots")
     infra.add_argument("host")
@@ -444,7 +446,7 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         changes[variable] = None
                     payload["worker_env"] = changes
             if args.command == "ci-tree":
-                payload.update(setting=args.setting)
+                payload.update(setting=args.setting, slots=args.slots)
             if args.command == "infra-slots":
                 payload.update(count=args.count)
                 if args.pr_slots is not None:

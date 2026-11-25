@@ -340,7 +340,9 @@ def cleanup(value, *, asynchronous=False):
         (evidence / "telemetry").mkdir(exist_ok=True)
         telemetry = directory / "control/telemetry"
         if not telemetry.is_symlink():
-            for name in ("phases.tsv", "lake-build.log", "ci-host-resources.json", "runner-diagnostic.log", "artifact-mappings.json"):
+            for name in ("phases.tsv", "lake-build.log", "ci-host-resources.json", "runner-diagnostic.log", "artifact-mappings.json",
+                         # The Tools consumer's trusted record: shared-tree hit or miss, upper-layer size, verdict.
+                         "shared-tree.json"):
                 copy_diagnostic(telemetry / name, evidence / "telemetry" / name)
         atomic(evidence / "archived.json", dict(at=time.time()))
         # Bounded small evidence; live roots and their ownership are separate.

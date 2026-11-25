@@ -505,7 +505,7 @@ def _start(config):
         if native:
             infra = config.get("ci_kinds") == ["infra"]
             shared_tree = None
-            if not infra and ci_tree.enabled(config):
+            if not infra and ci_tree.offered(config):
                 try:
                     shared_tree = ci_tree.lease(instance)
                 except (FleetError, OSError) as exc:
