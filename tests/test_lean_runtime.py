@@ -6,8 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host, lean_pressure, lean_runtime
+from tauceti_fleet import host, hostos, lean_pressure, lean_runtime
 from tauceti_fleet.capabilities import GIB
+
+hostos.MACOS = False
 
 
 class LeanRuntime(unittest.TestCase):

@@ -10,8 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import host, remote, status_view, store
+from tauceti_fleet import host, hostos, remote, status_view, store
 from tauceti_fleet.cli import main
+
+hostos.MACOS = False
 
 
 class Export(unittest.TestCase):

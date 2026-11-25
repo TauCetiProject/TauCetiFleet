@@ -7,6 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tauceti_fleet import bors_history as history
+from tauceti_fleet import hostos
+
+hostos.MACOS = False
 
 
 class JobHistory(unittest.TestCase):

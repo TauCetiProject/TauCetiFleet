@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import cli, ci_overview, github, pool_activity as pools, remote, status_follow, store
+from tauceti_fleet import cli, ci_overview, github, hostos, pool_activity as pools, remote, status_follow, store
+
+hostos.MACOS = False
 
 
 class PoolActivity(unittest.TestCase):

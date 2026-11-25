@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import broker, capabilities, capacity, ci, github, host, store, vm
+from tauceti_fleet import broker, capabilities, capacity, ci, github, host, hostos, store, vm
+
+hostos.MACOS = False
 
 
 class Capacity(unittest.TestCase):

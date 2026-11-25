@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_fleet import github, host, store, vm
+from tauceti_fleet import github, host, hostos, store, vm
+
+hostos.MACOS = False
 
 
 class SlotBackoff(unittest.TestCase):
