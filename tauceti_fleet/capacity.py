@@ -194,6 +194,9 @@ def controller_config(config):
     if config.get("ci_memory_budget_gib") is not None:
         memory_budget_gib(config)
     staging_memory_gib(config)
+    from . import ci_tree
+
+    ci_tree.validate(config)
     if config["ci_enabled"]:
         protected_slots(config)
         if config.get("ci_broker_url"):

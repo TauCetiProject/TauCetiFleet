@@ -32,6 +32,7 @@ parser.add_argument("--cancel-phase", help="Cancel while this full-workflow phas
 parser.add_argument("--cancel-phase-delay", type=float, default=0)
 parser.add_argument("--cancel-after-mapping", help="Require this mature observer record before phase cancellation")
 parser.add_argument("--without-pressure", action="store_true", help="Test cancellation while the existing gate waits for host telemetry")
+parser.add_argument("--shared-tree", action="store_true", help="Lease the newest shared-tree entry, as a PR slot does when the tree is on")
 args = parser.parse_args()
 script = args.script.resolve().read_text()
 native.prerequisites()
@@ -48,7 +49,11 @@ if not args.without_pressure:
     bridge.symlink_to(directory, target_is_directory=True)
 started, terminal = time.time(), {}
 try:
-    native.stage(directory, "unregistered-offline-test")
+    from tauceti_fleet import ci_tree
+    lease = ci_tree.lease(identity) if args.shared_tree else None
+    if args.shared_tree and lease is None:
+        raise SystemExit("No shared-tree entry to lease")
+    native.stage(directory, "unregistered-offline-test", shared_tree=lease)
     if args.input:
         shutil.copytree(args.input, directory / "control/input", ignore=shutil.ignore_patterns("*.git"))
     (directory / "control/offline-job.sh").write_text(script)
@@ -57,6 +62,8 @@ try:
                     "-p", "MemorySwapMax=0", "-p", "KillMode=control-group", "-p", "RemainAfterExit=yes",
                     "-p", "RuntimeMaxSec=" + str(args.timeout), *native.properties(),
                     *(["-p", "MemoryMax=" + str(args.memory_max_mib) + "M"] if args.memory_max_mib else []),
+                    # An isolated data root (a test pool, say) reaches the unit too.
+                    *[f"--setenv={k}={v}" for k, v in sorted(os.environ.items()) if k == "TAUCETI_FLEET_DATA"],
                     *native.argv(directory, offline=not args.stock_runner)], check=True)
     print(json.dumps(dict(unit=unit, directory=str(directory), started_at=started)), flush=True)
     deadline = time.monotonic() + args.timeout
@@ -99,6 +106,9 @@ finally:
     if fields and (Path("/sys/fs/cgroup") / fields.lstrip("/") / "cgroup.events").exists():
         assert "populated 0" in (Path("/sys/fs/cgroup") / fields.lstrip("/") / "cgroup.events").read_text()
     native.cleanup(dict(directory=str(directory), unit=unit))
+    if args.shared_tree:
+        from tauceti_fleet import ci_tree
+        assert not any(identity in ci_tree.leases(entry) for entry, _ in ci_tree.entries()), "lease outlived cleanup"
     bridge.unlink(missing_ok=True)
     assert not directory.exists()
     print(json.dumps(dict(result=terminal, evidence=str(root / "native-results" / identity), released=True)), flush=True)

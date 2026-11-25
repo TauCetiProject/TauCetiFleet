@@ -11,7 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import github, lean_pressure, lean_runtime
+from . import ci_tree, github, lean_pressure, lean_runtime
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, event, host_config, locked, read, state_dir, try_lock
 
@@ -503,7 +503,15 @@ def _start(config):
         native = config.get("_ci_backend") == native_runner.RUNTIME
         runtime_fields = {}
         if native:
-            runtime_fields = native_runner.stage(directory, jit, infra=config.get("ci_kinds") == ["infra"])
+            infra = config.get("ci_kinds") == ["infra"]
+            shared_tree = None
+            if not infra and ci_tree.enabled(config):
+                try:
+                    shared_tree = ci_tree.lease(instance)
+                except (FleetError, OSError) as exc:
+                    # The shared tree is an optimisation: a job without one takes today's path.
+                    event("ci_shared_tree_unavailable", reason=str(exc)[:200])
+            runtime_fields = native_runner.stage(directory, jit, infra=infra, shared_tree=shared_tree)
         else:
             run(
                 [
@@ -605,6 +613,9 @@ def _start(config):
         if config.get("_ci_backend") == native_runner.RUNTIME and (directory / "rootfs").exists():
             native_runner.cleanup(dict(directory=str(directory), unit=unit + ".service"))
         shutil.rmtree(directory, ignore_errors=True)
+        if (config.get("_ci_backend") == native_runner.RUNTIME
+                and run(["systemctl", "--user", "is-active", unit + ".service"], check=False).returncode in (3, 4)):
+            ci_tree.release(instance)
         if read(slot_file(config, "vm.json"), {}).get("instance") == instance:
             slot_file(config, "vm.json").unlink(missing_ok=True)
         raise

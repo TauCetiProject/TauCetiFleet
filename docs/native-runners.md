@@ -216,3 +216,90 @@ a single-job benchmark.
 The [7 November production cutover](evidence/native-disk-cutover-20261107.md) records
 six successful real jobs, overlapping computation, four-slot turnover, exact
 revisions, resource measurements and cleanup.
+
+## Shared read-only build tree
+
+A host can keep one trusted, read-only copy of the `.lake` a TauCeti PR build restores
+(TauCetiWorker decision 211). It is off by default and switched per host:
+
+```sh
+tauceti-fleet ci-tree HOST           # pool and builder state
+tauceti-fleet ci-tree HOST --on      # build entries and offer them to new PR guests
+tauceti-fleet ci-tree HOST --off     # stop building and offering; leased entries stay until released
+```
+
+No job uses the tree yet: a later Tools change mounts it as the lower layer of a private
+overlay at `pr/.lake`, with today's path on any key mismatch.
+
+The pool lives in `ci-tree/v1` under Fleet's data directory. An entry is built only from
+CI's published `main` outputs, never from a job. The builder is a Fleet-owned native
+instance in offline mode at PR CPU priority, with no runner registration. It checks out
+the newest first-parent `main` commit whose Lake revision map is published, with Tools
+`main` materialized over the project's scripts. It runs `pr-build.yml`'s trusted steps at
+the same absolute paths and in the same environment: `lake exe cache get`,
+`lake-cache-get.sh` for that exact revision, and a restore-only
+`lake build --iofail --no-build`, which fails rather than compile anything. Its `.lake`
+is written directly into the pool's staging directory.
+
+The guest verifier (`ci_tree_guest.py`, installed in every native guest as
+`/usr/local/bin/tauceti_ci_tree.py`) then prunes job scratch, other revisions' maps, and
+mappings and artifacts nothing references. It fails closed unless all of the following
+hold:
+
+- every published module is in the tree, with a trace and mapping naming exactly the
+  published archive;
+- the checkout and every package are at their manifest revisions, with clean tracked files;
+- every output any root or package trace names exists, and no output-named file exists
+  that no trace or mapping accounts for;
+- every trace and mapping uses a Lake schema the verifier knows, with its three oleans and
+  ilean;
+- every retained artifact, every traced output and every `.hash` record in any `.lake`
+  matches its content hash, computed by the toolchain's own Lake hash.
+
+The host then checks structure as the mapped root. Only directories, regular files and
+in-tree relative symlinks are allowed; every file must belong to the guest runner, with
+no set-ID, sticky or world-writable modes. Every hard link must have all its names
+inside the entry. The tree walk fails on any unreadable directory, and a symlink must
+resolve, through its whole chain, inside the entry. The host records a stat inventory after the final permission state,
+then renames the entry into `entries/` under the collection lock. Modes stay as Lake
+left them: read-only comes from the bind, not from write bits.
+
+The entry's key (`ready.json`) names everything that decides whether a job's traces match:
+
+- the toolchain, and Lean's Git hash and binary;
+- the Lake version;
+- the manifest and package revisions;
+- the lakefile;
+- the architecture;
+- the content of the `tauceti-lean` wrapper and the watchdog toolchain.
+
+`tauceti_ci_tree.py key` computes the same key in a job.
+
+When a PR guest is staged, Fleet leases the newest entry under the collection lock and
+records it in `native.json`. The guest's namespace then binds that one entry read-only
+(`ro,nosuid,nodev`) at `/opt/tauceti-shared-tree`, never the whole pool. Native cleanup
+releases the lease only once the unit, and so every process that could hold a mount, has
+stopped. Collection keeps every leased entry and the newest two. It retires the rest by
+renaming them out of `entries/` under the lock, and removes them in a background unit.
+The guest's disk scan excludes the bind.
+
+Builds run at most once per host at a time. The controller checks every 30 minutes and
+skips an entry younger than 45 minutes. It also skips when the commit and the key are
+both unchanged; a new wrapper or watchdog alone does trigger a rebuild. It backs off two
+hours after a failure. It never builds with four entries present, or with less than
+164 GiB free. That covers the builder's 60 GiB peak (entry, rootfs, toolchain and
+download scratch), two guests' 48 GiB start checks and the 8 GiB margin. Each entry is
+about 38 GB and 1.3 million files. `status.json` reports `ci_shared_tree`, and
+`builds.jsonl` in the pool keeps recent build outcomes.
+
+Validate with:
+
+```sh
+python3 tests/integration/ci_tree_build.py [--keep]
+python3 tests/integration/native_runner.py tests/integration/native-shared-tree.sh --shared-tree
+```
+
+The first builds one entry in an isolated pool. The second needs `TAUCETI_FLEET_DATA`
+pointing at a pool with an entry. It checks that the leased bind is read-only even to
+the guest's root, that overlay writes and deletions stay in the job's upper layer, and
+that the lease is released after cleanup.

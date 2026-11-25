@@ -134,7 +134,10 @@ class DiskUsage:
                 self.started = now
                 try:
                     self.child = subprocess.Popen(
-                        ['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link', '/'],
+                        # The shared tree is a read-only bind of the host filesystem, so -x
+                        # alone would count the pool's bytes against this instance.
+                        ['/usr/bin/du', '-sx', '--block-size=1', '--exclude=/fleet-link',
+                         '--exclude=/opt/tauceti-shared-tree', '/'],
                         # A busy workspace can produce many disappearing-file
                         # diagnostics. Never leave an unread stderr pipe that
                         # can block du before it emits its one-line summary.

@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import capabilities, capacity, lean_guest, lean_pressure, lean_runtime, lean_statistics, native_inside
+from . import capabilities, capacity, ci_tree, ci_tree_guest, lean_guest, lean_pressure, lean_runtime, lean_statistics, native_inside
 from .process import executable, run
 from .store import FleetError, atomic, data_dir, host_config, locked, read, state_dir
 
@@ -260,7 +260,7 @@ def remove_root(root):
         raise FleetError("Native filesystem cleanup is incomplete; retain instance ownership")
 
 
-def stage(directory, jit, *, infra=False):
+def stage(directory, jit, *, infra=False, shared_tree=None):
     """Stage a small durable launch intent; allocate OS/workspace inside its unit.
 
     `infra=True` uses the infra image and omits the Lean pressure gate's job
@@ -272,7 +272,7 @@ def stage(directory, jit, *, infra=False):
     (directory / "control/jit").write_text(jit)
     (directory / "control/jit").chmod(0o600)
     atomic(directory / "native.json", dict(image=value, disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_gib=MEMORY_GIB,
-                                           lean_runtime=not infra))
+                                           lean_runtime=not infra, **({"shared_tree": shared_tree} if shared_tree else {})))
     return dict(runtime=RUNTIME, native_image_sha256=value["sha256"], workspace_storage="disk",
                 disk_budget_gib=native_inside.DISK_BUDGET_GIB, memory_max_gib=MEMORY_GIB,
                 vcpus=os.cpu_count(), memory_gib=MEMORY_GIB, memory_is_limit=True)
@@ -286,7 +286,8 @@ def materialize(directory):
     root = directory / "rootfs"
     run(["unshare", "--user", "--map-auto", "--map-root-user", "cp", "-a", "--reflink=auto", source, root], timeout=120)
     for name, module in (("tauceti_lean_guest.py", lean_guest), ("tauceti_lean_statistics.py", lean_statistics),
-                         ("tauceti-lean", lean_pressure), ("tauceti_native_inside.py", native_inside)):
+                         ("tauceti-lean", lean_pressure), ("tauceti_native_inside.py", native_inside),
+                         ("tauceti_ci_tree.py", ci_tree_guest)):
         target = root / "usr/local/bin" / name
         target.write_text(Path(module.__file__).read_text())
         target.chmod(0o755)
@@ -324,6 +325,8 @@ def cleanup(value, *, asynchronous=False):
         result = run(["systemctl", "--user", "is-active", value["unit"]], check=False)
         if result.returncode not in (3, 4):
             raise FleetError("Native unit has not stopped; retain instance ownership")
+    # The unit (KillMode=control-group) and so every process that could use the entry is gone.
+    ci_tree.release(directory.name)
     if not directory.exists():
         return True
     evidence = state_dir() / "native-results" / directory.name
@@ -553,6 +556,25 @@ def inside(directory):
     view.mkdir(parents=True, exist_ok=True)
     run([mount, "--bind", directory / "memory-view", view])
     run([mount, "-o", "remount,bind,ro", view])
+    native = read(directory / "native.json", {})
+    shared = ci_tree.guest_bind(native.get("shared_tree"))
+    if shared is not None:
+        # One leased entry, never the whole pool: an entry published later cannot be used
+        # unpinned. Read-only, no set-ID or devices; the lease outlives every process here.
+        target = root / ci_tree.GUEST_PATH.lstrip("/")
+        target.mkdir(parents=True, exist_ok=True)
+        run([mount, "--bind", shared, target])
+        run([mount, "-o", "remount,bind,ro,nosuid,nodev", target])
+    tree = ci_tree.builder_tree(native.get("ci_tree_builder"))
+    if tree is not None:
+        # The builder writes its .lake straight to the pool's staging tree, so removing the
+        # guest's rootfs leaves it in place and publication is a rename.
+        workspace = root / ci_tree.WORKSPACE.lstrip("/")
+        for path in (workspace.parent.parent, workspace.parent, workspace, workspace / "pr", workspace / "pr/.lake"):
+            path.mkdir(exist_ok=True)
+            os.chown(path, 1000, 1000)
+        run([mount, "--bind", tree, workspace / "pr/.lake"])
+        os.chown(tree, 1000, 1000)
     run([mount, "-t", "tmpfs", "-o", "mode=755,size=16M", "tmpfs", root / "dev"])
     for name in ("null", "zero", "full", "random", "urandom", "tty"):
         (root / "dev" / name).touch()
