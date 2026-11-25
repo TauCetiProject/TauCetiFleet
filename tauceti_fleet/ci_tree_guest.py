@@ -451,7 +451,10 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
 
     # `.hash` records Lake trusts in place of rehashing must name their file's real hash, wherever
     # Lake keeps state: the project's .lake and every package's.
-    for state in [lake] + [lake / "packages" / name / ".lake" for name in packages]:
+    # A package Lake never built (Cli, say) has no .lake and so no records.
+    states = [lake] + [lake / "packages" / name / ".lake" for name in packages
+                       if (lake / "packages" / name / ".lake").is_dir()]
+    for state in states:
         for directory, directories, files in os.walk(state, onerror=raise_error):
             if Path(directory) == lake:
                 directories[:] = [d for d in directories if d != "packages"]

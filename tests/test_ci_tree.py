@@ -484,6 +484,14 @@ class GuestVerify(unittest.TestCase):
         (lib / "runLinter.trace").write_text(json.dumps(dict(schemaVersion="2025-09-10", depHash="e" * 16, outputs=outputs)))
         self.expect_invalid("oleans")
 
+    def test_unbuilt_package_has_no_state(self):
+        manifest = json.loads((self.project / "lake-manifest.json").read_text())
+        manifest["packages"].append(dict(name="Cli", rev="q" * 40))
+        (self.project / "lake-manifest.json").write_text(json.dumps(manifest))
+        (self.lake / "packages/Cli").mkdir()
+        self.heads[str(self.lake / "packages/Cli")] = "q" * 40
+        self.assertTrue(self.verify()["ok"])
+
     def test_trace_removed_with_outputs_left_fails(self):
         (self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.trace").unlink()
         self.expect_invalid("output files no trace names")
