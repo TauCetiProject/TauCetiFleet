@@ -155,6 +155,16 @@ def parser():
     install_alert = sub.add_parser("install-fleet-alert",
                                    help="check worker progress every minute from this account's systemd timer")
     install_alert.add_argument("--zulip-config", help="mode-0600 Zulip bot configuration; omit to log only")
+    sub.add_parser("spend-alert", add_help=False,
+                   help="check yesterday's Cloudflare usage once and alert when it is unusually expensive")
+    install_spend = sub.add_parser("install-spend-alert",
+                                   help="check yesterday's Cloudflare usage from this account's hourly systemd timer")
+    install_spend.add_argument("--zulip-config", help="mode-0600 Zulip bot configuration; omit to log only")
+    install_spend.add_argument("--token-file", help="mode-0600 Cloudflare API token; omit to use wrangler's login")
+    install_spend.add_argument("--rows-written-threshold", type=int,
+                               help="Durable Object rows written per day (default 30 million)")
+    install_spend.add_argument("--class-a-threshold", type=int,
+                               help="R2 Class A operations per day (default 3 million)")
     for name in ("_host", "_watch-status", "host-daemon", "run-workers", "collect-status"):
         sub.add_parser(name, help=argparse.SUPPRESS)
     return p
@@ -305,6 +315,15 @@ def main(argv=None, *, _status_results=None, _standalone=False):
         from .fleet_alert import install as install_alert
         args = parser().parse_args(raw)
         print(json.dumps(install_alert(args.zulip_config)))
+        return 0
+    if raw[:1] == ["spend-alert"]:
+        from .spend_alert import main as spend_main
+        return spend_main(raw[1:])
+    if raw[:1] == ["install-spend-alert"]:
+        from .spend_alert import install as install_spend
+        args = parser().parse_args(raw)
+        print(json.dumps(install_spend(args.zulip_config, args.token_file, args.rows_written_threshold,
+                                       args.class_a_threshold)))
         return 0
     if raw[:1] == ["install-monitoring"]:
         from .monitoring import install_local

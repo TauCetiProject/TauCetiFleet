@@ -1134,6 +1134,27 @@ must be mode 0600 and names either a stream and topic or a user to message priva
 Use `"recipient_id": USER_ID` in place of `stream` and `topic` for a direct message; this is
 the format of the queue's `TAUCETI_QUEUE_ZULIP_CONFIG`. A failed post is retried on the next run.
 
+## Cloudflare spend alerts
+
+`tauceti-fleet install-spend-alert --zulip-config FILE` on the operator's control host installs
+an hourly systemd timer running `tauceti-fleet spend-alert` from the installed Fleet release. Once
+per UTC day, from 02:00 UTC, it reads the previous day's Durable Object SQLite rows (by namespace)
+and R2 operations (by bucket and action) for the TauCeti account from Cloudflare's GraphQL
+Analytics API. When Durable Object rows written exceed 30 million or R2 Class A operations exceed
+3 million (`--rows-written-threshold`, `--class-a-threshold`), it sends one message, in the
+fleet alert's Zulip format, naming the largest namespaces and buckets with their counts and an
+estimated cost at list prices before free allowances. A day is reported at most once; a failed
+read or post is retried the next hour. State lives in `~/.local/state/tauceti-fleet/spend-alert.json`
+and the daily totals go to `journalctl --user -u tauceti-spend-alert`.
+
+The credential is wrangler's OAuth login on the account (`~/.config/.wrangler`, whose
+`account:read` scope covers analytics), so `wrangler` must be on the `PATH` the installer
+records. The alert only reads that file: when the access token has expired, or Cloudflare rejects
+it, it runs `wrangler whoami` once to let wrangler refresh it. `--token-file` uses a mode-0600
+Cloudflare API token with Account Analytics read instead. `tauceti-fleet spend-alert --dry-run
+[--day YYYY-MM-DD]` prints the totals and the message that would be sent, sending and recording
+nothing.
+
 ## Public operations telemetry
 
 The existing Tau Ceti `/ci` page can display approved host observations alongside
