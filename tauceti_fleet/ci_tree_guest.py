@@ -50,6 +50,10 @@ IR_EXTENSIONS = ("c", "bc", "ltar")
 # Root traces with no row in the published map (the empty root module, say). Any more means the
 # tree is not main's publication.
 MAX_UNMAPPED_ROOT = 16
+# The Lake schemas this verifier understands; anything else fails until it is taught.
+TRACE_SCHEMAS = ("2025-09-10",)
+MAPPING_SCHEMAS = ("2026-02-25",)
+OUTPUT_SUFFIXES = tuple("." + e for e in EXTENSIONS)
 
 
 class Invalid(Exception):
@@ -152,6 +156,8 @@ def newest_published(repo, ref, limit, map_out, fetcher=fetch):
 
 def read_map(path):
     lines = Path(path).read_text().splitlines()
+    if not lines or not isinstance(json.loads(lines[0]), str):
+        raise Invalid("published map without its header")
     rows = {}
     for line in lines[1:]:
         value = json.loads(line)
@@ -170,6 +176,14 @@ def output_names(outputs):
     """[(extension, name)] for every output a trace or mapping names; malformed names fail."""
     if not isinstance(outputs, dict):
         raise Invalid("trace or mapping without outputs")
+    # Every module has its three oleans and its ilean; `m` is a flag.
+    if not isinstance(outputs.get("o"), list) or len(outputs["o"]) != 3 or "i" not in outputs:
+        raise Invalid("outputs without their oleans and ilean")
+    if "m" in outputs and not isinstance(outputs["m"], bool):
+        raise Invalid("malformed module flag")
+    for key, value in outputs.items():
+        if key not in ("o", "m") and not isinstance(value, str):
+            raise Invalid(f"malformed {key} output")
     names = []
     for key, extensions in DESCRIPTORS.items():
         if key not in outputs:
@@ -241,12 +255,18 @@ def remove(path):
         shutil.rmtree(path)
 
 
-def traces(build):
+def raise_error(error):
+    raise Invalid(f"cannot read the tree: {error}")
+
+
+def traces(build, required=False):
     """Yield (stem, trace path, parsed trace) under build/lib/lean."""
     lib = build / "lib/lean"
     if not lib.is_dir():
+        if required:
+            raise Invalid(f"{build} has no build")
         return
-    for directory, _, files in os.walk(lib):
+    for directory, _, files in os.walk(lib, onerror=raise_error):
         for file in files:
             if file.endswith(".trace"):
                 path = Path(directory) / file
@@ -254,9 +274,26 @@ def traces(build):
                     value = json.loads(path.read_text())
                 except ValueError:
                     raise Invalid(f"unreadable trace {path.relative_to(build)}") from None
-                if not isinstance(value, dict):
-                    raise Invalid(f"malformed trace {path.relative_to(build)}")
+                if not isinstance(value, dict) or value.get("schemaVersion") not in TRACE_SCHEMAS:
+                    raise Invalid(f"malformed or unknown trace {path.relative_to(build)}")
                 yield path.relative_to(lib).with_suffix(""), path, value
+
+
+def mapping_data(path):
+    value = json.loads(Path(path).read_text())
+    if not isinstance(value, dict) or value.get("schemaVersion") not in MAPPING_SCHEMAS:
+        raise Invalid(f"malformed or unknown mapping {Path(path).name}")
+    return value.get("data")
+
+
+def output_files(build):
+    """Every file under a build that has an output's name: each must be claimed by a trace."""
+    found = set()
+    for sub in ("lib/lean", "ir"):
+        if (build / sub).is_dir():
+            for directory, _, files in os.walk(build / sub, onerror=raise_error):
+                found.update(str(Path(directory) / f) for f in files if f.endswith(OUTPUT_SUFFIXES))
+    return found
 
 
 def build_path(build, stem, extension):
@@ -304,7 +341,7 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
     manifest = json.loads((project / "lake-manifest.json").read_text())
     packages = {package["name"]: package for package in manifest.get("packages", [])}
     root_traces = {}
-    for stem, path, value in traces(lake / "build"):
+    for stem, path, value in traces(lake / "build", required=True):
         dep = value.get("depHash")
         if not isinstance(dep, str) or not NAME.fullmatch(dep):
             raise Invalid(f"root trace without an input hash: {stem}")
@@ -328,12 +365,12 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
             os.unlink(path)  # Cache history the entry does not need.
             removed["root_mappings"] += 1
     checks = []  # (path, expected hash)
+    claimed = set()  # every output file some trace or mapping accounts for
     for dep, (stem, value) in root_traces.items():
         mapping = mappings / ROOT_PACKAGE / f"{dep}.json"
         if not regular(mapping):
             raise Invalid(f"root module {stem} has no mapping")
-        data = json.loads(mapping.read_text()).get("data")
-        mapped = output_names(data)
+        mapped = output_names(mapping_data(mapping))
         if dep in rows and dict(mapped).get("ltar") != rows[dep]:
             raise Invalid(f"root module {stem} maps to an archive the published map does not name")
         built = output_names(value.get("outputs"))
@@ -341,10 +378,15 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
             raise Invalid(f"root module {stem}'s trace and mapping disagree")
         for extension, name in mapped:
             referenced[name] = stem
+            if extension == "ltar" and regular(build_path(lake / "build", stem, "ltar")):
+                # The archive Lake keeps beside the module is the mapped one.
+                claimed.add(str(build_path(lake / "build", stem, "ltar")))
+                checks.append((build_path(lake / "build", stem, "ltar"), name.split(".", 1)[0]))
         for extension, name in built:
             path = build_path(lake / "build", stem, extension)
             if not regular(path):
                 raise Invalid(f"root module {stem} lacks its {extension}")
+            claimed.add(str(path))
             checks.append((path, name.split(".", 1)[0]))
 
     # Packages: the manifest's exact clean checkouts, with every traced output present and right.
@@ -363,6 +405,7 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
                 target = build_path(directory / ".lake/build", stem, extension)
                 if not regular(target):
                     raise Invalid(f"package {name} module {stem} lacks its {extension}")
+                claimed.add(str(target))
                 checks.append((target, output.split(".", 1)[0]))
                 package_outputs += 1
     for directory in sorted(mappings.iterdir()) if mappings.is_dir() else []:
@@ -374,7 +417,7 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
             stem = path.name[:-len(".json")] if path.name.endswith(".json") else None
             if not stem or not NAME.fullmatch(stem) or not regular(path):
                 raise Invalid(f"unexpected mapping file {directory.name}/{path.name}")
-            names = output_names(json.loads(path.read_text()).get("data"))
+            names = output_names(mapping_data(path))
             if all(regular(cache / "artifacts" / output) for _, output in names):
                 for _, output in names:
                     referenced.setdefault(output, directory.name)
@@ -399,9 +442,18 @@ def verify(project, commit, map_path, hasher, watchdog, *, hash_function=None, l
     if not archives <= set(referenced):
         raise Invalid("a published archive is not referenced by the tree")
 
-    # `.hash` records Lake trusts in place of rehashing must name their file's real hash.
-    for build in [lake / "build"] + [lake / "packages" / name / ".lake/build" for name in packages]:
-        for directory, _, files in os.walk(build):
+    # No output file that no trace accounts for: a stray olean is read by audits and imports.
+    builds = [lake / "build"] + [lake / "packages" / name / ".lake/build" for name in packages]
+    stray = set().union(*(output_files(build) for build in builds)) - claimed
+    if stray:
+        raise Invalid(f"{len(stray)} output files no trace names, first {Path(min(stray)).relative_to(lake)}")
+
+    # `.hash` records Lake trusts in place of rehashing must name their file's real hash, wherever
+    # Lake keeps state: the project's .lake and every package's.
+    for state in [lake] + [lake / "packages" / name / ".lake" for name in packages]:
+        for directory, directories, files in os.walk(state, onerror=raise_error):
+            if Path(directory) == lake:
+                directories[:] = [d for d in directories if d != "packages"]
             for file in files:
                 if file.endswith(".hash"):
                     record = Path(directory) / file

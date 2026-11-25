@@ -43,9 +43,11 @@ INSTANCE = re.compile(r"[a-f0-9]{16}")
 KEEP = 2
 # Never build while this many entries exist (leased ones included): a disk bound.
 MAX_ENTRIES = 4
-# A build needs room for its entry (about 45 GB) and must leave every guest start its own
-# 48 GiB start check plus the 8 GiB host margin, with room for a second start.
-BUILD_FREE_GIB = 48 + 64 + 8
+# A build's peak is its entry (38 GB measured) plus its rootfs, toolchain and Mathlib download
+# scratch: 60 GiB bounds it. After that, two guest starts must still pass their own 48 GiB
+# start checks, with the 8 GiB host margin on top.
+BUILD_PEAK_GIB = 60
+BUILD_FREE_GIB = BUILD_PEAK_GIB + 2 * 48 + 8
 CHECK_SECONDS = 30 * 60
 # Published main maps come about every 1.2 hours (phase 0): do not rebuild an entry younger.
 MIN_AGE_SECONDS = 45 * 60
@@ -55,6 +57,8 @@ BUILD_TIMEOUT_SECONDS = 2 * 3600
 MAX_ENTRY_BYTES = 120 * 1024**3
 MAX_ENTRY_FILES = 4_000_000
 RUNNER_UID = RUNNER_GID = 1000
+# Run as `python -m`, where __name__ would be __main__.
+MODULE = "tauceti_fleet.ci_tree"
 ISOLATION = ("TAUCETI_FLEET_STATE", "TAUCETI_FLEET_DATA", "TAUCETI_FLEET_CONFIG")
 
 BUILD_SCRIPT = r"""#!/bin/bash
@@ -75,10 +79,6 @@ git -C pr init -q
 git -C pr remote add origin https://github.com/TauCetiProject/TauCeti
 git -C pr fetch -q --filter=blob:none origin main
 commit=$(python3 "$TOOL" newest-published --repo pr --ref FETCH_HEAD --map-out "$RUNNER_TEMP/published-map.jsonl")
-if [ "$commit" = "$(cat /fleet-link/input/previous-commit 2>/dev/null || true)" ]; then
-  printf '{"ok": false, "unchanged": true, "commit": "%s"}\n' "$commit" > "$REPORT"
-  exit 0
-fi
 git -C pr checkout -q --detach "$commit"
 # pr-build.yml's gate: the project's .github, scripts and tauceti.toml at the trusted ref, with
 # Tools main materialized over its scripts.
@@ -94,6 +94,15 @@ echo "df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2  $RUNNER_
 tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP" elan-init
 "$RUNNER_TEMP/elan-init" -y --default-toolchain none
 (cd pr && elan toolchain install "$(cat lean-toolchain)")
+watchdog="$RUNNER_TEMP/lean-watchdog-toolchain"
+bash gate/scripts/perf/prepare-watchdog-toolchain.sh "$watchdog" "$(cd pr && elan which lean)"
+# Same commit and same key (toolchain, wrapper, watchdog, pins): the newest entry still serves.
+key=$(python3 "$TOOL" key --project pr --watchdog "$watchdog" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_digest"])')
+if [ "$commit" = "$(cat /fleet-link/input/previous-commit 2>/dev/null || true)" ] \
+   && [ "$key" = "$(cat /fleet-link/input/previous-key 2>/dev/null || true)" ]; then
+  printf '{"ok": false, "unchanged": true, "commit": "%s"}\n' "$commit" > "$REPORT"
+  exit 0
+fi
 phase mathlib
 if (( $(nproc) > 16 )); then export RAYON_NUM_THREADS=16; fi
 if ! (cd pr && lake exe cache get); then (cd pr && lake exe cache get!); fi
@@ -105,9 +114,8 @@ export LAKE_CACHE_DIR=$PWD/pr/.lake/cache LAKE_ARTIFACT_CACHE=true LAKE_RESTORE_
 GITHUB_ENV="$RUNNER_TEMP/github-env" LAKE_CACHE_MAX_REVS=1 LAKE_CACHE_BASE_REV="$commit" bash gate/scripts/lake-cache-get.sh pr
 # An unclean restore appends the cache-disable lines; that is not an entry.
 test ! -s "$RUNNER_TEMP/github-env"
-watchdog="$RUNNER_TEMP/lean-watchdog-toolchain"
-bash gate/scripts/perf/prepare-watchdog-toolchain.sh "$watchdog" "$(cd pr && elan which lean)"
 phase build
+
 # The sandboxed build's environment (sandbox-build.sh), restoring only: --no-build fails if any
 # module would need compiling.
 (cd pr && env -i PATH="$HOME/.elan/bin:/usr/bin:/bin" HOME="$HOME" CI=true LAKE_NO_CACHE=true \
@@ -333,8 +341,9 @@ def start():
     (instance / "control/input").chmod(0o755)
     previous = entries()
     if previous:
-        (instance / "control/input/previous-commit").write_text(previous[0][1]["commit"])
-        (instance / "control/input/previous-commit").chmod(0o644)
+        for name, value in (("previous-commit", previous[0][1]["commit"]), ("previous-key", previous[0][1]["key_digest"])):
+            (instance / "control/input" / name).write_text(value)
+            (instance / "control/input" / name).chmod(0o644)
     (instance / "control/offline-job.sh").write_text(BUILD_SCRIPT)
     # The guest bootstrap consumes a JIT input; the offline runner never registers.
     (instance / "control/jit").write_text("unregistered-ci-tree-builder")
@@ -359,11 +368,14 @@ def start():
              *native_runner.properties(),
              # An isolated test root (tests/integration/ci_tree_build.py) reaches the unit too.
              *[f"--setenv={k}={v}" for k, v in sorted(os.environ.items()) if k in ISOLATION],
-             sys.executable, "-m", __name__, "build", instance, directory], timeout=30)
+             sys.executable, "-m", MODULE, "build", instance, directory], timeout=30)
     except FleetError:
-        state.update(unit=None, last_outcome="failed", last_error="builder unit did not start")
-        atomic(root() / "builder.json", state)
-        bridge.unlink(missing_ok=True)
+        # A timeout can come after systemd created the unit: keep ownership (and the pressure
+        # bridge) for finish() unless the unit is positively stopped.
+        if not unit_active(unit):
+            state.update(unit=None, last_outcome="failed", last_error="builder unit did not start")
+            atomic(root() / "builder.json", state)
+            bridge.unlink(missing_ok=True)
         raise
     return unit
 
@@ -459,7 +471,7 @@ def publish(directory, report):
     run(["unshare", "--user", "--map-auto", "--map-root-user", "mv", "-T", "--", directory / "tree", entry / "lake"],
         timeout=60)
     inventory = entry / "inventory.jsonl.gz"
-    checked = run(["unshare", "--user", "--map-auto", "--map-root-user", sys.executable, "-m", __name__,
+    checked = run(["unshare", "--user", "--map-auto", "--map-root-user", sys.executable, "-m", MODULE,
                    "inventory", entry / "lake", inventory], timeout=3600, check=False)
     if checked.returncode != 0:
         detail = (checked.stdout.strip().splitlines() or checked.stderr.strip().splitlines() or ["no detail"])[-1]
@@ -488,11 +500,16 @@ def inventory(tree, output):
     """
     import hashlib
     tree = Path(tree)
+    if not tree.is_dir() or tree.is_symlink():
+        raise FleetError("entry tree is missing")
+    real_tree = os.path.realpath(tree)
     links = {}
     count = total = 0
     digest = hashlib.sha256()
     with gzip.open(output, "wt") as stream:
-        for directory, directories, files in os.walk(tree):
+        def fail(error):
+            raise FleetError(f"cannot read the entry tree: {error}")
+        for directory, directories, files in os.walk(tree, onerror=fail):
             directories.sort()
             for name in sorted(directories) + sorted(files):
                 path = Path(directory) / name
@@ -506,8 +523,12 @@ def inventory(tree, output):
                 target = None
                 if stat.S_ISLNK(mode):
                     target = os.readlink(path)
-                    resolved = os.path.normpath(os.path.join(os.path.dirname(relative), target))
-                    if os.path.isabs(target) or resolved == ".." or resolved.startswith("../"):
+                    try:
+                        # The whole chain, not the text: `b -> a/..` with `a -> .` escapes.
+                        resolved = os.path.realpath(path, strict=True)
+                    except (OSError, RuntimeError):
+                        raise FleetError(f"{relative} is a dangling or looping link") from None
+                    if os.path.isabs(target) or os.path.commonpath([real_tree, resolved]) != real_tree:
                         raise FleetError(f"{relative} links outside the entry")
                 elif stat.S_ISREG(mode):
                     if info.st_nlink > 1:

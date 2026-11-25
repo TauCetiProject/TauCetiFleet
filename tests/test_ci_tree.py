@@ -3,6 +3,7 @@
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -234,11 +235,16 @@ class Inventory(unittest.TestCase):
             (self.tree / "build/lib/escape").symlink_to("../../../etc/passwd")
         def absolute_link():
             (self.tree / "build/lib/absolute").symlink_to("/etc/passwd")
+        def chained_escape():
+            (self.tree / "a").symlink_to(".")
+            (self.tree / "b").symlink_to("a/..")
+        def dangling():
+            (self.tree / "build/lib/dangling").symlink_to("missing")
         def fifo():
             os.mkfifo(self.tree / "build/lib/pipe")
         def shared_inode():
             os.link(self.tree / "build/lib/A.trace", self.root / "outside")
-        cases = [world_writable, setuid, escaping_link, absolute_link, fifo, shared_inode]
+        cases = [world_writable, setuid, escaping_link, absolute_link, chained_escape, dangling, fifo, shared_inode]
         for case in cases:
             with self.subTest(case.__name__):
                 self.setUp()
@@ -343,6 +349,18 @@ def fake_hash(paths):
 class GuestVerify(unittest.TestCase):
     """A miniature restored tree: two published root modules, one package module."""
 
+    def module(self, build, stem, seed):
+        """Write one module's traced outputs under `build`; return (trace outputs, names)."""
+        names = [f"{seed + k:016x}" for k in range(4)]
+        outputs = dict(o=[names[0] + ".olean", names[1] + ".olean.server", names[2] + ".olean.private"],
+                       i=names[3] + ".ilean", m=True)
+        lib = build / "lib/lean"
+        lib.mkdir(parents=True, exist_ok=True)
+        for name, extension in zip(names, ("olean", "olean.server", "olean.private", "ilean")):
+            (lib / f"{stem}.{extension}").write_text(name)
+        (lib / f"{stem}.olean.hash").write_text(names[0])
+        return outputs, names
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -352,22 +370,20 @@ class GuestVerify(unittest.TestCase):
         self.rows = {}
         artifacts = lake / "cache/artifacts"
         artifacts.mkdir(parents=True)
+        mapping = lake / "cache/outputs/TauCeti"
+        mapping.mkdir(parents=True)
         for index, module in enumerate(("A", "B")):
             dep = f"{index + 1:016x}"
-            olean, ilean, archive = f"{index + 10:016x}", f"{index + 20:016x}", f"{index + 30:016x}"
+            outputs, names = self.module(lake / "build", module, 0x100 * (index + 1))
+            archive = f"{index + 0x30:016x}"
             self.rows[dep] = archive + ".ltar"
-            for name in (olean + ".olean", ilean + ".ilean", archive + ".ltar"):
-                (artifacts / name).write_text(name.split(".")[0])
-            build = lake / "build/lib/lean"
-            build.mkdir(parents=True, exist_ok=True)
-            (build / f"{module}.olean").write_text(olean)
-            (build / f"{module}.olean.hash").write_text(olean)
-            (build / f"{module}.ilean").write_text(ilean)
-            (build / f"{module}.trace").write_text(json.dumps(dict(depHash=dep, outputs=dict(o=[olean + ".olean"], i=ilean + ".ilean", m=True))))
-            mapping = lake / "cache/outputs/TauCeti"
-            mapping.mkdir(parents=True, exist_ok=True)
-            (mapping / f"{dep}.json").write_text(json.dumps(dict(data=dict(o=[olean + ".olean"], i=ilean + ".ilean", l=archive + ".ltar", m=True))))
-        (lake / "cache/outputs/TauCeti" / ("9" * 16 + ".json")).write_text(json.dumps(dict(data={})))
+            for name, extension in zip(names + [archive], ("olean", "olean.server", "olean.private", "ilean", "ltar")):
+                (artifacts / f"{name}.{extension}").write_text(name)
+            (lake / "build/lib/lean" / f"{module}.trace").write_text(
+                json.dumps(dict(schemaVersion="2025-09-10", depHash=dep, outputs=outputs)))
+            (mapping / f"{dep}.json").write_text(
+                json.dumps(dict(schemaVersion="2026-02-25", data=dict(outputs, l=archive + ".ltar"))))
+        (mapping / ("9" * 16 + ".json")).write_text(json.dumps(dict(schemaVersion="2026-02-25", data={})))
         (artifacts / ("8" * 16 + ".olean")).write_text("8" * 16)  # unreferenced history
         revisions = lake / "cache/revisions/TauCeti"
         revisions.mkdir(parents=True)
@@ -376,10 +392,10 @@ class GuestVerify(unittest.TestCase):
         (revisions / ("d" * 40 + ".jsonl")).write_text(map_text)
         self.map = Path(temporary.name) / "map.jsonl"
         self.map.write_text(map_text)
-        package = lake / "packages/batteries/.lake/build/lib/lean"
-        package.mkdir(parents=True)
-        (package / "Batteries.olean").write_text("a" * 16)
-        (package / "Batteries.trace").write_text(json.dumps(dict(depHash="b" * 16, outputs=dict(o=["a" * 16 + ".olean"]))))
+        package = lake / "packages/batteries/.lake/build"
+        outputs, _ = self.module(package, "Batteries", 0xa00)
+        (package / "lib/lean/Batteries.trace").write_text(
+            json.dumps(dict(schemaVersion="2025-09-10", depHash="b" * 16, outputs=outputs)))
         (self.project / "lake-manifest.json").write_text(json.dumps(dict(packages=[dict(name="batteries", rev="r" * 40)])))
         (lake / "tmp").mkdir()
         (lake / "tmp/junk").write_text("x")
@@ -398,7 +414,7 @@ class GuestVerify(unittest.TestCase):
         report = self.verify()
         self.assertTrue(report["ok"])
         self.assertEqual(report["modules"], 2)
-        self.assertEqual(report["package_outputs"], 1)
+        self.assertEqual(report["package_outputs"], 4)
         self.assertEqual(report["removed"]["artifacts"], 1)
         self.assertEqual(report["removed"]["root_mappings"], 1)
         self.assertEqual(report["removed"]["revisions"], 1)
@@ -416,7 +432,7 @@ class GuestVerify(unittest.TestCase):
         self.expect_invalid("differ from their recorded hashes")
 
     def test_tampered_artifact_fails(self):
-        (self.lake / "cache/artifacts" / (f"{10:016x}.olean")).write_text("f" * 16)
+        (self.lake / "cache/artifacts" / (f"{0x100:016x}.olean")).write_text("f" * 16)
         self.expect_invalid("differ from their recorded hashes")
 
     def test_wrong_hash_record_fails(self):
@@ -430,7 +446,7 @@ class GuestVerify(unittest.TestCase):
     def test_locally_built_module_outside_map_is_bounded(self):
         with patch.object(ci_tree_guest, "MAX_UNMAPPED_ROOT", 0):
             trace = self.lake / "build/lib/lean/C.trace"
-            trace.write_text(json.dumps(dict(depHash="c" * 16, outputs={})))
+            trace.write_text(json.dumps(dict(schemaVersion="2025-09-10", depHash="c" * 16, outputs={})))
             self.expect_invalid("not in the published map")
 
     def test_mapping_naming_another_archive_fails(self):
@@ -452,6 +468,39 @@ class GuestVerify(unittest.TestCase):
     def test_unexpected_artifact_name_fails(self):
         (self.lake / "cache/artifacts/evil.sh").write_text("x")
         self.expect_invalid("unexpected artifact")
+
+    def test_stray_package_output_fails(self):
+        (self.lake / "packages/batteries/.lake/build/lib/lean/Untraced.olean").write_text("x" * 16)
+        self.expect_invalid("output files no trace names")
+
+    def test_trace_removed_with_outputs_left_fails(self):
+        (self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.trace").unlink()
+        self.expect_invalid("output files no trace names")
+
+    def test_malformed_descriptors_fail(self):
+        trace = self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.trace"
+        for outputs in ({}, dict(o=[]), dict(o=["a" * 16 + ".olean"] * 3, i="b" * 16 + ".ilean", m="yes")):
+            with self.subTest(outputs=outputs):
+                trace.write_text(json.dumps(dict(schemaVersion="2025-09-10", depHash="b" * 16, outputs=outputs)))
+                with self.assertRaises(ci_tree_guest.Invalid):
+                    self.verify()
+        trace.write_text(json.dumps(dict(schemaVersion="1999-01-01", depHash="b" * 16, outputs={})))
+        self.expect_invalid("unknown trace")
+
+    def test_hash_record_in_a_package_or_cache_is_checked(self):
+        (self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.ilean.hash").write_text("f" * 16)
+        self.expect_invalid("differ from their recorded hashes")
+        (self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.ilean.hash").unlink()
+        (self.lake / "cache/artifacts" / (f"{0x100:016x}.olean.hash")).write_text("f" * 16)
+        self.expect_invalid("unexpected artifact")
+
+    def test_missing_root_build_fails(self):
+        shutil.rmtree(self.lake / "build")
+        self.expect_invalid("has no build")
+
+    def test_map_without_header_fails(self):
+        self.map.write_text(self.map.read_text().split("\n", 1)[1])
+        self.expect_invalid("header")
 
     def test_wrong_commit_fails(self):
         self.heads[str(self.project)] = "d" * 40

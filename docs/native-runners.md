@@ -249,14 +249,18 @@ hold:
 - every published module is in the tree, with a trace and mapping naming exactly the
   published archive;
 - the checkout and every package are at their manifest revisions, with clean tracked files;
-- every output any root or package trace names exists;
-- every retained artifact, every traced output and every `.hash` record matches its
-  content hash, computed by the toolchain's own Lake hash.
+- every output any root or package trace names exists, and no output-named file exists
+  that no trace or mapping accounts for;
+- every trace and mapping uses a Lake schema the verifier knows, with its three oleans and
+  ilean;
+- every retained artifact, every traced output and every `.hash` record in any `.lake`
+  matches its content hash, computed by the toolchain's own Lake hash.
 
 The host then checks structure as the mapped root. Only directories, regular files and
 in-tree relative symlinks are allowed; every file must belong to the guest runner, with
 no set-ID, sticky or world-writable modes. Every hard link must have all its names
-inside the entry. The host records a stat inventory after the final permission state,
+inside the entry. The tree walk fails on any unreadable directory, and a symlink must
+resolve, through its whole chain, inside the entry. The host records a stat inventory after the final permission state,
 then renames the entry into `entries/` under the collection lock. Modes stay as Lake
 left them: read-only comes from the bind, not from write bits.
 
@@ -279,10 +283,12 @@ stopped. Collection keeps every leased entry and the newest two. It retires the 
 renaming them out of `entries/` under the lock, and removes them in a background unit.
 The guest's disk scan excludes the bind.
 
-Builds run at most once per host at a time. The controller checks every 30 minutes, skips
-an entry younger than 45 minutes or an unchanged commit, and backs off two hours after a
-failure. It never builds with four entries present, or with less than 120 GiB free: a
-45 GB entry plus two guests' 48 GiB start checks and the 8 GiB margin. Each entry is
+Builds run at most once per host at a time. The controller checks every 30 minutes and
+skips an entry younger than 45 minutes. It also skips when the commit and the key are
+both unchanged; a new wrapper or watchdog alone does trigger a rebuild. It backs off two
+hours after a failure. It never builds with four entries present, or with less than
+164 GiB free. That covers the builder's 60 GiB peak (entry, rootfs, toolchain and
+download scratch), two guests' 48 GiB start checks and the 8 GiB margin. Each entry is
 about 38 GB and 1.3 million files. `status.json` reports `ci_shared_tree`, and
 `builds.jsonl` in the pool keeps recent build outcomes.
 
