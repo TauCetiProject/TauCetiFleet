@@ -207,7 +207,7 @@ class Episodes(unittest.TestCase):
 
 
 class Delivery(unittest.TestCase):
-    def post(self, config):
+    def post(self, config, text="hello"):
         requests = []
 
         class Response:
@@ -226,7 +226,7 @@ class Delivery(unittest.TestCase):
                 return Response()
 
         with patch.object(fleet_alert.urllib.request, "build_opener", return_value=Opener()):
-            fleet_alert.zulip(config, "hello")
+            fleet_alert.zulip(config, text)
         return requests[0]
 
     def test_stream_topic_and_private_targets(self):
@@ -238,6 +238,9 @@ class Delivery(unittest.TestCase):
                               content=[":robot: Claude says: hello"]))
         request = self.post(dict(base, recipient_id=7))
         self.assertEqual(urllib.parse.parse_qs(request.data.decode())["to"], ["[7]"])
+        self.assertEqual(urllib.parse.parse_qs(request.data.decode())["content"], [":robot: Claude says: hello"])
+        request = self.post(dict(base, recipient_id=7), fleet_alert.PREFIX + "hello")
+        self.assertEqual(urllib.parse.parse_qs(request.data.decode())["content"], [":robot: Claude says: hello"])
         for bad in (dict(base, site="http://example.zulipchat.com", stream="ops", topic="t"), base):
             with self.assertRaises(ValueError):
                 fleet_alert.zulip(bad, "hello")
