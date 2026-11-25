@@ -526,6 +526,72 @@ class NativeRunner(unittest.TestCase):
             self.assertNotIn("__main__", spawn.call_args.args[0])
         self.assertEqual(store.read(self.root / "native-result.json")["exit_code"], 0)
 
+    def test_job_io_reports_the_filesystem_device_once(self):
+        group = self.root / "cgroup"
+        group.mkdir()
+        device = os.stat(self.root).st_dev
+        name = f"{os.major(device)}:{os.minor(device)}"
+        (group / "io.stat").write_text(f"259:0 rbytes=1 wbytes=2 rios=3 wios=4 dbytes=0 dios=0\n"
+                                       f"{name} rbytes=10 wbytes=20 rios=30 wios=40 dbytes=0 dios=0\n")
+        value = native.job_io(group, self.root)
+        self.assertEqual(value["device"], name)
+        self.assertEqual(value["filesystem"]["wbytes"], 20)
+        self.assertEqual(value["filesystem"]["wios"], 40)
+        self.assertEqual(value["devices"]["259:0"]["wbytes"], 2)
+        self.assertIsNone(native.job_io(None, self.root))
+        self.assertIsNone(native.job_io(self.root / "missing", self.root))
+
+    def test_file_count_accepts_partial_du_totals_and_bounds_failures(self):
+        answers = [subprocess.CompletedProcess([], 0, "1234\t/x\n", ""), subprocess.CompletedProcess([], 1, "99\t/x\n", ""),
+                   subprocess.CompletedProcess([], 2, "", ""), native.FleetError("du timed out")]
+        def fake(args, **kwargs):
+            self.assertEqual(args[-3:], ["-sx", "--inodes", self.root])
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with patch.object(native, "run", side_effect=fake):
+            self.assertEqual(native.count_files(self.root)["inodes"], 1234)
+            self.assertEqual(native.count_files(self.root)["inodes"], 99)
+            self.assertTrue(native.count_files(self.root)["partial"] is False)
+            self.assertIsNone(native.count_files(self.root)["inodes"])
+
+    def test_result_records_io_files_and_removal(self):
+        (self.root / "control/events.jsonl").write_text('{"kind":"ci_completed","run_id":"42"}\n')
+        (self.root / "rootfs").mkdir()
+        child = Mock()
+        child.poll.return_value = 0
+        child.wait.return_value = 0
+        ios = iter([dict(filesystem=dict(wbytes=5)), dict(filesystem=dict(wbytes=7))])
+        def removed(root):
+            Path(root).rmdir()
+        with patch.object(native, "materialize"), patch.object(native, "publish_memory"), \
+                patch.object(subprocess, "Popen", return_value=child), \
+                patch.object(native, "job_io", side_effect=lambda *_: next(ios)), \
+                patch.object(native, "count_files", return_value=dict(inodes=1200000, partial=False, seconds=4.0)), \
+                patch.object(native, "remove_root", side_effect=removed):
+            self.assertEqual(native.serve(self.root), 0)
+        result = store.read(self.root / "native-result.json")
+        self.assertEqual(result["io"]["filesystem"]["wbytes"], 5)
+        self.assertEqual(result["io_after_removal"]["filesystem"]["wbytes"], 7)
+        self.assertEqual(result["files"]["inodes"], 1200000)
+        self.assertIn("removal_seconds", result)
+
+    def test_requested_stop_skips_the_file_count(self):
+        (self.root / "rootfs").mkdir()
+        child = Mock()
+        child.poll.return_value = None
+        def stop(*_args, **_kwargs):
+            os.kill(os.getpid(), __import__("signal").SIGTERM)
+            return child
+        with patch.object(native, "materialize"), patch.object(native, "publish_memory"), \
+                patch.object(subprocess, "Popen", side_effect=stop), \
+                patch.object(native, "count_files") as count, patch.object(native, "remove_root") as remove:
+            self.assertEqual(native.serve(self.root), 143)
+        count.assert_not_called()
+        remove.assert_not_called()
+        self.assertNotIn("files", store.read(self.root / "native-result.json"))
+
     def test_malformed_hook_does_not_kill_useful_work(self):
         (self.root / "control/events.jsonl").write_text('invalid\n{"kind":"ci_started","run_id":"42"}\n')
         child = Mock()

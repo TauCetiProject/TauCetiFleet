@@ -155,7 +155,19 @@ measurement timestamp/age, scan state/errors and phases. Shared filesystem free
 space is not labelled as a per-job workspace quota.
 
 The instance directory holds `native.json`, `native-progress.json`,
-`native-samples.jsonl`, `native-result.json`, hooks and runner output. Completion
+`native-samples.jsonl`, `native-result.json`, hooks and runner output.
+`native-result.json` records the job unit's cumulative block I/O at job end (`io`:
+the unit's `io.stat` row for the instance filesystem's device, so an md array's writes
+are counted once, plus every row for the record), the inodes in the instance root
+just before it is removed (`files`, one bounded `du --inodes`), and the removal's
+duration and I/O (`removal_seconds`, `io_after_removal`). A requested stop skips the
+count and removal. Unit-level `io.stat` includes the writeback the kernel attributes
+to the job, but not XFS log writes or the asynchronous cleanup unit's unlinks.
+
+The controller samples `/proc/diskstats` once a minute and publishes each whole drive's
+and array's read and write rates, mean write latency (write milliseconds over writes
+completed) and utilization as `drive_io` in `status.json` and the monitoring stream. It
+keeps about a week of those minutes in `drive-io.jsonl` in the state directory. Completion
 is durable before optional diagnostics are copied. Controller restart recovers
 job ownership from hook history. The pressure receiver can restart without
 reusing compiler permits; a failed receiver supervisor fails the instance.

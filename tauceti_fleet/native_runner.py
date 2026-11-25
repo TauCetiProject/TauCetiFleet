@@ -582,6 +582,48 @@ def inside(directory):
                    TAUCETI_NATIVE_PRESSURE_FD=os.environ["TAUCETI_NATIVE_PRESSURE_FD"]))
 
 
+def job_io(group, directory):
+    """The job unit's cumulative block I/O on the instance filesystem's device.
+
+    The unit's `io.stat` lists the filesystem device (an md array, say) and the member
+    drives under it, so summing every row would count writes twice. Report the
+    filesystem's own row and keep the rest for the record. Writeback the kernel
+    attributes to the unit is included; XFS log writes and unlinks done by the
+    asynchronous cleanup unit are not.
+    """
+    if group is None:
+        return None
+    try:
+        devices = {}
+        for line in (group / "io.stat").read_text().splitlines():
+            name, *fields = line.split()
+            devices[name] = {key: int(value) for key, value in (field.split("=", 1) for field in fields)}
+        device = os.stat(directory).st_dev
+        name = f"{os.major(device)}:{os.minor(device)}"
+        own = devices.get(name)
+        if own is None:
+            # A partition's writes are accounted to its whole disk.
+            parent = Path(f"/sys/dev/block/{name}/..").resolve() / "dev"
+            if parent.is_file():
+                own = devices.get(parent.read_text().strip())
+        return dict(device=name, at=time.time(), filesystem=own, devices=devices)
+    except (OSError, ValueError):
+        return None
+
+
+def count_files(root, timeout=180):
+    """Inodes in the instance root at job end: what cleanup is about to unlink."""
+    started = time.monotonic()
+    try:
+        output = run(["unshare", "--user", "--map-auto", "--map-root-user", "du", "-sx", "--inodes", root],
+                     timeout=timeout, check=False)
+        # du exits 1 after unreadable or vanished entries but still prints its total.
+        total = int(output.stdout.split()[0]) if output.returncode in (0, 1) and output.stdout.strip() else None
+        return dict(inodes=total, partial=output.returncode == 1, seconds=round(time.monotonic() - started, 1))
+    except (FleetError, ValueError, IndexError):
+        return dict(inodes=None, partial=False, seconds=round(time.monotonic() - started, 1))
+
+
 def serve(directory, *, offline=False):
     directory = Path(directory)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -692,6 +734,7 @@ def serve(directory, *, offline=False):
         if not offline and not requested_stop and not failed and code == 0 and not any(
                 str(json.loads(line).get("run_id", "")).isdigit() for line in history):
             failed = dict(reason="native runner exited without a job")
+        group = None
         try:
             relative = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::"))
             group = Path("/sys/fs/cgroup") / relative.lstrip("/")
@@ -699,12 +742,22 @@ def serve(directory, *, offline=False):
             memory_events = (group / "memory.events").read_text()
         except (OSError, ValueError, StopIteration):
             peak, memory_events = None, None
-        atomic(directory / "native-result.json", dict(started_at=started, ended_at=time.time(), exit_code=code,
-                                                     infrastructure_error=failed, requested_stop=requested_stop,
-                                                     memory_peak_bytes=peak, memory_events=memory_events))
-        if (directory / "rootfs").exists() and not requested_stop:
+        result = dict(started_at=started, ended_at=time.time(), exit_code=code,
+                      infrastructure_error=failed, requested_stop=requested_stop,
+                      memory_peak_bytes=peak, memory_events=memory_events,
+                      io=job_io(group, directory))
+        # A requested stop has only TimeoutStopSec to exit: count nothing then.
+        removable = (directory / "rootfs").exists() and not requested_stop
+        if removable:
+            result["files"] = count_files(directory / "rootfs")
+        atomic(directory / "native-result.json", result)
+        if removable:
+            removal = time.monotonic()
             try:
                 remove_root(directory / "rootfs")
+                result["removal_seconds"] = round(time.monotonic() - removal, 1)
+                result["io_after_removal"] = job_io(group, directory)
+                atomic(directory / "native-result.json", result)
             except FleetError:
                 pass  # Ordinary recovery retains ownership and retries cleanup.
         for client in clients:
