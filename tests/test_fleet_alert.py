@@ -234,7 +234,8 @@ class Delivery(unittest.TestCase):
         request = self.post(dict(base, stream="ops", topic="fleet health"))
         self.assertEqual(request.full_url, "https://example.zulipchat.com/api/v1/messages")
         self.assertEqual(urllib.parse.parse_qs(request.data.decode()),
-                         dict(type=["stream"], to=["ops"], topic=["fleet health"], content=["hello"]))
+                         dict(type=["stream"], to=["ops"], topic=["fleet health"],
+                              content=[":robot: Claude says: hello"]))
         request = self.post(dict(base, recipient_id=7))
         self.assertEqual(urllib.parse.parse_qs(request.data.decode())["to"], ["[7]"])
         for bad in (dict(base, site="http://example.zulipchat.com", stream="ops", topic="t"), base):
