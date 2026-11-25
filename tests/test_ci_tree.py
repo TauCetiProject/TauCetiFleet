@@ -168,6 +168,72 @@ class Pool(unittest.TestCase):
         ci_tree.validate({ci_tree.SETTING: "off"})
         with self.assertRaises(FleetError):
             ci_tree.validate({ci_tree.SETTING: True})
+        for choice in ("all", "even", "odd"):
+            ci_tree.validate({ci_tree.SLOTS_SETTING: choice})
+        with self.assertRaises(FleetError):
+            ci_tree.validate({ci_tree.SLOTS_SETTING: "half"})
+
+    def test_offered_follows_the_setting_the_slot_class_and_the_split(self):
+        on = {ci_tree.SETTING: "on", "ci_kinds": ["pr"]}
+        self.assertFalse(ci_tree.offered(dict(on, **{ci_tree.SETTING: "off"}, ci_slot=0)))
+        self.assertEqual([ci_tree.offered(dict(on, ci_slot=i)) for i in range(4)], [True] * 4)
+        even = dict(on, **{ci_tree.SLOTS_SETTING: "even"})
+        self.assertEqual([ci_tree.offered(dict(even, ci_slot=i)) for i in range(4)], [True, False, True, False])
+        odd = dict(on, **{ci_tree.SLOTS_SETTING: "odd"})
+        self.assertEqual([ci_tree.offered(dict(odd, ci_slot=i)) for i in range(4)], [False, True, False, True])
+        self.assertTrue(ci_tree.offered(dict(on, ci_kinds=["pr", "staging"], ci_slot=0)))
+        for kinds in (["staging"], ["infra"], ["docs"], ["roadmap"], None):
+            self.assertFalse(ci_tree.offered(dict(on, ci_kinds=kinds, ci_slot=0)))
+
+    def test_rpc_sets_the_split_without_touching_the_switch(self):
+        from tauceti_fleet import host
+        store.config_dir().mkdir(parents=True, exist_ok=True)
+        store.atomic(store.config_dir() / "host.json", {ci_tree.SETTING: "on"})
+        with patch.object(host, "event"):
+            result = host.rpc(dict(action="ci-tree", setting=None, slots="even"))
+            self.assertEqual(result["slots"], "even")
+            self.assertTrue(result["enabled"])
+            with self.assertRaises(FleetError):
+                host.rpc(dict(action="ci-tree", setting=None, slots="half"))
+        self.assertEqual(store.read(store.config_dir() / "host.json")[ci_tree.SLOTS_SETTING], "even")
+
+    def test_cli_refuses_to_switch_on_when_the_host_ignores_the_split(self):
+        import io
+        from tauceti_fleet import remote
+        from tauceti_fleet.cli import main
+        entry = dict(target="c5", machine_id="m")
+        calls = []
+
+        def old_host(target, payload, **kwargs):
+            calls.append(payload)
+            return dict(enabled=payload.get("setting") == "on")  # no `slots`: an older revision
+
+        with (patch.object(remote, "inventory", return_value={"c5": entry}), patch.object(remote, "resolve", return_value=entry),
+              patch.object(remote, "call", side_effect=old_host), patch("sys.stdout", new=io.StringIO()),
+              patch("sys.stderr", new=io.StringIO())):
+            main(["ci-tree", "c5", "--on", "--slots", "even", "--json"])
+        self.assertEqual(calls, [dict(action="ci-tree", setting=None, slots="even")])
+
+        calls.clear()
+
+        def new_host(target, payload, **kwargs):
+            calls.append(payload)
+            return dict(enabled=payload.get("setting") == "on", slots="even")
+
+        with (patch.object(remote, "inventory", return_value={"c5": entry}), patch.object(remote, "resolve", return_value=entry),
+              patch.object(remote, "call", side_effect=new_host), patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["ci-tree", "c5", "--on", "--slots", "even", "--json"]), 0)
+        self.assertEqual(calls, [dict(action="ci-tree", setting=None, slots="even"),
+                                 dict(action="ci-tree", setting="on", slots=None)])
+
+    def test_native_cleanup_keeps_the_shared_tree_record(self):
+        directory = store.state_dir() / "vms" / INSTANCE
+        (directory / "control/telemetry").mkdir(parents=True)
+        (directory / "control/telemetry/shared-tree.json").write_text('{"shared_tree": "hit"}\n')
+        with patch.object(native_runner, "run", side_effect=stopped), patch.object(native_runner, "remove_root"):
+            native_runner.cleanup(dict(directory=str(directory), unit="tauceti-fleet-vm-x.service"))
+        kept = store.state_dir() / "native-results" / INSTANCE / "telemetry/shared-tree.json"
+        self.assertEqual(json.loads(kept.read_text())["shared_tree"], "hit")
 
     def test_native_cleanup_releases_the_lease_after_the_unit_stops(self):
         self.entry("20261125T010000Z")
