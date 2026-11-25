@@ -68,16 +68,23 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def tree_digest(root):
-    """Content digest of a small directory: names, types, modes, link targets and file bytes."""
+def tree_digest(root, watchdog=False):
+    """Content digest of a small directory: names, types, modes, link targets and file bytes.
+
+    With `watchdog`, an installed watchdog digests as prepared (see watchdog_digest).
+    """
     root = Path(root)
     digest = hashlib.sha256()
     for directory, directories, files in os.walk(root):
         directories.sort()
         for name in sorted(directories + files):
             path = Path(directory) / name
-            info = path.lstat()
             relative = str(path.relative_to(root))
+            if watchdog and (relative in WATCHDOG_STATE or relative == "bin/lean-watchdog"):
+                continue
+            if watchdog and relative == "bin/lean":
+                path = root / "bin/lean-watchdog"
+            info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
                 digest.update(f"l {relative} {os.readlink(path)}\n".encode())
             elif stat.S_ISREG(info.st_mode):
@@ -87,6 +94,32 @@ def tree_digest(root):
             else:
                 raise Invalid(f"unexpected file type in {relative}")
     return digest.hexdigest()
+
+
+# What Fleet's Lean pressure wrapper (`tauceti-lean --install-watchdog`, lean_pressure.py) adds to
+# a watchdog toolchain the first time a guest step runs with WATCHDOG_TOOLCHAIN set: it moves
+# bin/lean to bin/lean-watchdog, puts itself at bin/lean, and leaves these state files.
+WATCHDOG_STATE = (".tauceti-lean.json", ".tauceti-lean.lock", ".tauceti-lean-ready")
+
+
+def watchdog_digest(root, wrapper):
+    """The watchdog's digest as prepared, whether or not the pressure wrapper has installed itself.
+
+    A job computes its key after that install (the guest's BASH_ENV hook runs it at the first step
+    that sees WATCHDOG_TOOLCHAIN) and the builder before it. The install is a fixed function of the
+    prepared tree and the wrapper, which the key names separately (wrapper_sha256), so the
+    installed form digests as the prepared one: bin/lean-watchdog is read as bin/lean, and the
+    state files are left out. An installed bin/lean that is not exactly the wrapper fails.
+    """
+    root = Path(root)
+    installed = (root / "bin/lean-watchdog").is_file() and not (root / "bin/lean-watchdog").is_symlink()
+    if installed:
+        lean = root / "bin/lean"
+        if lean.is_symlink() or not lean.is_file() or sha256_file(lean) != sha256_file(wrapper):
+            raise Invalid("the watchdog's bin/lean is neither the watchdog nor the pressure wrapper")
+    elif any((root / name).exists() or (root / name).is_symlink() for name in WATCHDOG_STATE):
+        raise Invalid("watchdog wrapper state without an installed wrapper")
+    return tree_digest(root, watchdog=installed)
 
 
 def run(args, cwd=None):
@@ -119,7 +152,7 @@ def key(project, watchdog, wrapper="/usr/local/bin/tauceti-lean"):
         architecture=platform.machine(),
         lake_override_lean="true",
         wrapper_sha256=sha256_file(wrapper),
-        watchdog_digest=tree_digest(watchdog),
+        watchdog_digest=watchdog_digest(watchdog, wrapper),
     )
     return value, hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
