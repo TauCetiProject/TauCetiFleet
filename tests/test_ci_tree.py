@@ -634,5 +634,50 @@ class GuestVerify(unittest.TestCase):
         self.assertNotEqual(first, ci_tree_guest.tree_digest(directory))
 
 
+    def test_an_installed_pressure_wrapper_digests_as_the_prepared_watchdog(self):
+        from tauceti_fleet import lean_pressure
+        wrapper = Path(lean_pressure.__file__)
+        directory = Path(self.project.parent) / "watchdog"
+        (directory / "bin").mkdir(parents=True)
+        (directory / "bin/lean").write_text("#!/bin/sh\nexec lean-real \"$@\"\n")
+        (directory / "bin/lean").chmod(0o755)
+        (directory / "bin/lean-real").symlink_to("/real/lean")
+        (directory / "lib").symlink_to("/real/lib")
+        prepared = ci_tree_guest.watchdog_digest(directory, wrapper)
+        # The phase 1 digest of a prepared watchdog is unchanged, so published entries still match.
+        self.assertEqual(prepared, ci_tree_guest.tree_digest(directory))
+        lean_pressure.install_watchdog(directory / "bin/lean-real")
+        self.assertTrue((directory / ".tauceti-lean-ready").exists())
+        self.assertNotEqual(ci_tree_guest.tree_digest(directory), prepared)
+        self.assertEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)
+        # The marker selects the executable the wrapper runs: anything but this watchdog fails.
+        marker = (directory / ".tauceti-lean.json").read_text()
+        for bad in ('{"lean": "/attacker/lean"}', "not json", '{"lean": "%s", "x": 1}' % (directory / "bin/lean-watchdog")):
+            (directory / ".tauceti-lean.json").write_text(bad)
+            with self.assertRaises(ci_tree_guest.Invalid):
+                ci_tree_guest.watchdog_digest(directory, wrapper)
+        (directory / ".tauceti-lean.json").unlink()
+        with self.assertRaises(ci_tree_guest.Invalid):
+            ci_tree_guest.watchdog_digest(directory, wrapper)
+        (directory / ".tauceti-lean.json").write_text(marker)
+        self.assertEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)
+        # A different prepared watchdog still differs once installed.
+        (directory / "bin/lean-watchdog").write_text("#!/bin/sh\nother\n")
+        self.assertNotEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)
+        # Something other than the wrapper at bin/lean fails rather than digesting.
+        (directory / "bin/lean").write_text("#!/bin/sh\nnot the wrapper\n")
+        with self.assertRaises(ci_tree_guest.Invalid):
+            ci_tree_guest.watchdog_digest(directory, wrapper)
+
+    def test_wrapper_state_without_an_installed_wrapper_fails(self):
+        from tauceti_fleet import lean_pressure
+        directory = Path(self.project.parent) / "watchdog"
+        (directory / "bin").mkdir(parents=True)
+        (directory / "bin/lean").write_text("#!/bin/sh\n")
+        (directory / ".tauceti-lean-ready").touch()
+        with self.assertRaises(ci_tree_guest.Invalid):
+            ci_tree_guest.watchdog_digest(directory, Path(lean_pressure.__file__))
+
+
 if __name__ == "__main__":
     unittest.main()
