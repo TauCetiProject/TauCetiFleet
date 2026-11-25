@@ -64,6 +64,12 @@ def parser():
     native.add_argument("host")
     native.add_argument("--prepare", action="store_true")
     native.add_argument("--json", action="store_true")
+    tree = sub.add_parser("ci-tree", help="inspect or switch the host's shared read-only CI build tree")
+    tree.add_argument("host")
+    switch = tree.add_mutually_exclusive_group()
+    switch.add_argument("--on", dest="setting", action="store_const", const="on")
+    switch.add_argument("--off", dest="setting", action="store_const", const="off")
+    tree.add_argument("--json", action="store_true")
     infra = sub.add_parser("infra-slots", help="run infrastructure-repository CI in slots above the PR slots")
     infra.add_argument("host")
     infra.add_argument("--slots", dest="count", type=int, required=True)
@@ -437,6 +443,8 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                     for variable in args.unset_env or []:
                         changes[variable] = None
                     payload["worker_env"] = changes
+            if args.command == "ci-tree":
+                payload.update(setting=args.setting)
             if args.command == "infra-slots":
                 payload.update(count=args.count)
                 if args.pr_slots is not None:

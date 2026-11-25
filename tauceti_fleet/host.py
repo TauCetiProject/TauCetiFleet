@@ -16,6 +16,7 @@ from . import (
     ci_overview,
     ci_pool,
     ci_priority,
+    ci_tree,
     drive_io,
     focus,
     github,
@@ -1408,6 +1409,8 @@ def daemon():
         memory_paused = False
         export = StatusExport()
         drives = drive_io.DriveIO()
+        last_tree = 0
+        tree_state = None
         previous_tasks = None
         published = None
         while not stopping:
@@ -1420,6 +1423,14 @@ def daemon():
                 if time.time() - last_results >= 60:
                     collect_ci_results(config)
                     last_results = time.time()
+                if time.time() - last_tree >= 60:
+                    last_tree = time.time()
+                    try:
+                        # The shared tree is an optimisation: its faults never stop the loop.
+                        reason = ci_tree.tick(config)
+                        tree_state = dict(ci_tree.status(), enabled=ci_tree.enabled(config), waiting=reason)
+                    except Exception as exc:
+                        tree_state = dict(enabled=ci_tree.enabled(config), error=f"{type(exc).__name__}: {exc}"[:200])
                 current = cpu_sample()
                 idle = (current[1] - previous[1]) / max(1, current[0] - previous[0])
                 previous = current
@@ -1538,6 +1549,7 @@ def daemon():
                         memory_pressure=pressure,
                         resources=caps,
                         drive_io=drives.poll(),
+                        ci_shared_tree=tree_state,
                         cpu_idle_fraction=idle,
                         workers=worker_view.rows(worker_statuses()),
                         worker_events=worker_view.events(state_dir() / "worker-events.jsonl"),
@@ -1694,6 +1706,11 @@ def rpc(payload):
         if payload.get("prepare"):
             return native_runner.prepare()
         return native_runner.status()
+    if action == "ci-tree":
+        if payload.get("setting") is not None:
+            update_host(validate=ci_tree.validate, **{ci_tree.SETTING: payload["setting"]})
+            event("ci_shared_tree_setting", value=payload["setting"])
+        return dict(ci_tree.status(), enabled=ci_tree.enabled(host_config()))
     if action == "configure":
         return configure(payload)
     if action == "enroll":
