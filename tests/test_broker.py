@@ -248,6 +248,34 @@ class Enrollment(unittest.TestCase):
         self.assertEqual(value["runner_name"], names[0])
         self.assertFalse((store.state_dir() / "ci-registration.json").exists())
 
+    def test_priority_only_registration_keeps_its_choice_across_a_lost_reply(self):
+        config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL, ci_kinds=["pr"])
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        requests = []
+
+        def register(config, name):
+            requests.append((name, config.get("ci_priority_only")))
+            if len(requests) == 1:
+                raise store.FleetError("response lost after remote registration")
+            return 7, "single-job-config"
+
+        from tauceti_fleet import native_runner
+
+        with patch.object(native_runner, "choose", return_value=False), patch.object(vm.time, "monotonic", return_value=100) as clock, patch.object(github, "jit_config", side_effect=register), patch.object(vm, "run", return_value=subprocess.CompletedProcess([], 0)), patch.object(vm, "executable", side_effect=lambda name: name), patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"):
+            with self.assertRaisesRegex(store.FleetError, "response lost"):
+                vm.start(dict(config, ci_priority_only=True))
+            clock.return_value = 160
+            # The priority builds have gone meanwhile; the pending registration is still replayed.
+            value = vm.start(config)
+        self.assertEqual(requests[0], requests[1])
+        self.assertTrue(requests[1][1])
+        self.assertTrue(value["ci_priority_only"])
+        with patch.object(broker, "request", return_value={"runner_id": 7, "encoded_jit_config": "jit"}) as call:
+            github.jit_config(dict(config, ci_priority_only=True), "name")
+            self.assertTrue(call.call_args.kwargs["data"]["priority_only"])
+            github.jit_config(config, "name")
+            self.assertNotIn("priority_only", call.call_args.kwargs["data"])
+
     def test_failed_broker_retirement_preserves_local_ownership_for_retry(self):
         config = dict(store.host_config(), ci_broker_url=broker.DEFAULT_URL)
         value = dict(instance="a" * 16, unit="guest.service", runner_id=7,

@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub,PolicyError} from '../src/github.mjs';
-import {DOCS_GROUP,INFRA_GROUP,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
+import {DOCS_GROUP,INFRA_GROUP,PRIORITY_CLASS,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
 import {INFRA_REPOSITORIES} from '../src/github.mjs';
 import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
 
@@ -138,4 +138,17 @@ test('recovery rechecks the group recorded with the reservation, or group 3 for 
     assert.deepEqual(await new RegistrationRecovery(storage,github).reconcile(host,0),{reconciled:true,removed:[expected]});
     assert.deepEqual(groups,[expected]);assert.deepEqual(deleted,[expected]);
   }
+});
+
+test('every PR runner offers the priority class; a priority-only runner offers nothing else',()=>{
+  const id='a'.repeat(32),name='fleet-x-'+'b'.repeat(16),base=['self-hosted','linux','x64','fleet-'+id,'fleet-instance-'+'b'.repeat(16),'fleet-host-c5'];
+  assert.equal(PRIORITY_CLASS,'tauceti-fleet-pr-priority');
+  assert.deepEqual(labels(id,name,['pr'],'C5'),[...base,'tauceti-fleet-pr',PRIORITY_CLASS]);
+  assert.deepEqual(labels(id,name,['pr','staging'],'C5'),
+    [...base.slice(0,5),'tauceti-fleet','fleet-host-c5','tauceti-fleet-pr','tauceti-fleet-staging',PRIORITY_CLASS]);
+  // Staging and special runners never take priority PR builds.
+  assert.deepEqual(labels(id,name,['staging'],'C5'),[...base.slice(0,5),'tauceti-fleet','fleet-host-c5','tauceti-fleet-staging']);
+  assert.ok(!labels(id,name,['queue-control'],'C5').includes(PRIORITY_CLASS));
+  for (const kinds of [['pr'],['pr','staging']])
+    assert.deepEqual(labels(id,name,kinds,'C5',true),[...base,PRIORITY_CLASS]);
 });

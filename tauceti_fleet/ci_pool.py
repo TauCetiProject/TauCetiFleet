@@ -122,3 +122,50 @@ def recovery_slots(config, values, inventory, observation, records):
         if candidates:
             result[candidates[0]] = record
     return result
+
+
+# Priority PR builds (TauCetiTools' picker, while the project names a priority PR label) target
+# this class. The broker gives it to every PR runner and, for a priority-only registration, to
+# nothing else, so only priority builds can take such a runner. GitHub otherwise gives a free
+# runner to the oldest matching job, so this is how a priority build passes queued PR builds.
+PRIORITY_CLASS = "tauceti-fleet-pr-priority"
+# An unassigned priority-only guest this long after coming online has no priority build left
+# to take (GitHub assigns a waiting job within seconds); it is retired for an ordinary one.
+PRIORITY_IDLE_SECONDS = 90
+# A slot that has just retired an unneeded priority-only guest registers an ordinary one next,
+# so a stale observation of waiting priority builds cannot keep a slot cycling.
+PRIORITY_RETRY_SECONDS = 180
+
+
+def priority_observation(config):
+    """Queued fleet targets for priority registration, or None when unknown or not needed."""
+    if not config.get("github_state_token_file") or "pr" not in capacity.kinds(config):
+        return None
+    return reservations(config)
+
+
+def priority_waiting(observation):
+    """Queued priority PR builds; ordinary builds never name the priority class."""
+    if not observation:
+        return 0
+    return sum(PRIORITY_CLASS in {label.lower() for label in queued} for queued in observation["queued"])
+
+
+def priority_wanted(values, observation):
+    """Priority-only registrations to add: waiting priority builds that this host's unassigned
+    priority-only guests (booting or idle) do not already cover. Unknown means none."""
+    spare = sum(1 for value in values if value and value.get("ci_priority_only") and not value.get("busy"))
+    return max(0, priority_waiting(observation) - spare)
+
+
+def priority_slot(config, index):
+    """Only general PR slots register priority-only runners, never reserved or protected ones."""
+    value = capacity.for_slot(config, index)
+    return ("pr" in value["ci_kinds"] and value.get("ci_slot_runner_group_id") is None
+            and not value.get("ci_staging_reserved"))
+
+
+def priority_surplus(value, own, now):
+    return (bool(value.get("ci_priority_only")) and not value.get("busy") and not own.get("busy")
+            and own.get("status") == "online" and bool(value.get("online_observed_at"))
+            and now - value["online_observed_at"] >= PRIORITY_IDLE_SECONDS)

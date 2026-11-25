@@ -48,9 +48,15 @@ export function slots(host) {
   }
   return host.slots;
 }
-export function labels(id,name,kinds,hostName) {
+// Priority PR builds (TauCetiTools' picker, while the project names a priority label) target
+// this class. Every PR runner offers it, so they can use any PR runner; a priority-only runner,
+// which a host registers while priority builds wait, offers nothing else, so no other build
+// can take it. GitHub otherwise gives a free runner to the oldest matching job.
+export const PRIORITY_CLASS='tauceti-fleet-pr-priority';
+export function labels(id,name,kinds,hostName,priorityOnly=false) {
   const result=['self-hosted','linux','x64','fleet-'+id,'fleet-instance-'+name.split('-').at(-1)];
-  if (kinds.includes('staging')) result.push('tauceti-fleet');
   if (hostName) result.push('fleet-host-'+hostName.toLowerCase());
-  return result.concat(kinds.map(k=>'tauceti-fleet-'+k));
+  if (priorityOnly) return result.concat([PRIORITY_CLASS]);
+  if (kinds.includes('staging')) result.splice(5,0,'tauceti-fleet');
+  return result.concat(kinds.map(k=>'tauceti-fleet-'+k),kinds.includes('pr')?[PRIORITY_CLASS]:[]);
 }

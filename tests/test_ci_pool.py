@@ -116,3 +116,78 @@ class Pool(unittest.TestCase):
 
     def test_no_observation_never_retires(self):
         self.assertFalse(ci_pool.idle_ready({}, {}, None))
+
+
+class PriorityRegistration(unittest.TestCase):
+    """While priority PR builds wait, freed general PR slots register runners only they can take."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        env = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": str(self.root)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.config = dict(ci_enabled=True, ci_max_jobs=8, ci_staging_slots=1, ci_kinds=["pr", "staging"],
+                           ci_protected_slots={"7": dict(kind="queue-control", runner_group_id=6)})
+
+    priority = {"self-hosted", "linux", "x64", "tauceti-fleet-pr-priority"}
+    ordinary = {"self-hosted", "linux", "x64", "tauceti-fleet-pr"}
+
+    def test_waiting_priority_builds_not_covered_by_spare_priority_guests(self):
+        observation = dict(queued=[self.priority, self.priority, self.ordinary, {"TAUCETI-FLEET-PR-PRIORITY"}])
+        self.assertEqual(ci_pool.priority_waiting(observation), 3)
+        self.assertEqual(ci_pool.priority_waiting(None), 0)
+        values = [dict(ci_priority_only=True), dict(ci_priority_only=True, busy=True), dict(), {}]
+        self.assertEqual(ci_pool.priority_wanted(values, observation), 2)
+        self.assertEqual(ci_pool.priority_wanted(values, dict(queued=[self.ordinary])), 0)
+        self.assertEqual(ci_pool.priority_wanted([], None), 0)
+
+    def test_only_general_pr_slots_register_priority_only_runners(self):
+        self.assertEqual([i for i in range(8) if ci_pool.priority_slot(self.config, i)], list(range(1, 7)))
+        self.assertFalse(any(ci_pool.priority_slot(dict(self.config, ci_kinds=["staging"]), i) for i in range(8)))
+
+    def test_observation_needs_a_pr_host_with_a_shared_state_credential(self):
+        with patch.object(ci_pool, "reservations", return_value=dict(queued=[])) as read:
+            self.assertIsNone(ci_pool.priority_observation(dict(self.config)))
+            self.assertIsNone(ci_pool.priority_observation(dict(self.config, ci_kinds=["staging"], github_state_token_file="t")))
+            self.assertEqual(ci_pool.priority_observation(dict(self.config, github_state_token_file="t")), dict(queued=[]))
+        read.assert_called_once()
+
+    def test_idle_priority_only_guest_is_surplus_after_its_grace(self):
+        now = 1000.0
+        value = dict(ci_priority_only=True, online_observed_at=now - ci_pool.PRIORITY_IDLE_SECONDS)
+        online = dict(status="online", busy=False)
+        self.assertTrue(ci_pool.priority_surplus(value, online, now))
+        self.assertFalse(ci_pool.priority_surplus(value, online, now - 1))
+        self.assertFalse(ci_pool.priority_surplus(dict(value, busy=True), online, now))
+        self.assertFalse(ci_pool.priority_surplus(value, dict(online, busy=True), now))
+        self.assertFalse(ci_pool.priority_surplus(value, dict(online, status="offline"), now))
+        self.assertFalse(ci_pool.priority_surplus(dict(value, ci_priority_only=False), online, now))
+        self.assertFalse(ci_pool.priority_surplus(dict(ci_priority_only=True), online, now))
+
+    def test_slot_start_requests_priority_only_unless_recovering_or_recently_retired(self):
+        config = dict(self.config, ci_vcpus=16, ci_memory_gib=32)
+        with patch.object(vm, "start", return_value={}) as start:
+            slot = host.CISlot(2)
+            slot.step(config, inventory=[], refresh=False, cooling=False, admitted=True, priority_only=True)
+            self.assertTrue(start.call_args.args[0]["ci_priority_only"])
+            slot.next_vm = 0
+            slot.step(config, inventory=[], refresh=False, cooling=False, admitted=True)
+            self.assertNotIn("ci_priority_only", start.call_args.args[0])
+            slot.next_vm, slot.priority_retired_at = 0, time.time()
+            slot.step(config, inventory=[], refresh=False, cooling=False, admitted=True, priority_only=True)
+            self.assertNotIn("ci_priority_only", start.call_args.args[0])
+            recovery = dict(instance="a" * 16, ci_kinds=["pr"])
+            host.CISlot(3).step(config, inventory=[], refresh=False, cooling=False, admitted=True,
+                                recovery=recovery, priority_only=True)
+            self.assertNotIn("ci_priority_only", start.call_args.args[0])
+
+    def test_local_labels_match_the_broker(self):
+        config = dict(machine_id="a" * 32, ci_kinds=["pr"])
+        name = "fleet-aaaaaaaaaaaa-" + "b" * 16
+        self.assertEqual(github.runner_labels(config, name)[-2:], ["tauceti-fleet-pr", "tauceti-fleet-pr-priority"])
+        self.assertEqual(github.runner_labels(dict(config, ci_priority_only=True), name)[-1:], ["tauceti-fleet-pr-priority"])
+        self.assertNotIn("tauceti-fleet-pr", github.runner_labels(dict(config, ci_priority_only=True), name))
+        self.assertNotIn("tauceti-fleet-pr-priority", github.runner_labels(dict(config, ci_kinds=["staging"]), name))
+

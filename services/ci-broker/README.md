@@ -174,6 +174,23 @@ Keeping Fleet administration credentials on the broker does not remove that
 existing trust in the build server. Invitations should be issued only for hosts
 whose operators are trusted with the CI workflow's credentials and results.
 
+## Priority PR builds
+
+GitHub gives a free runner to the oldest queued job its labels match, so Fleet PR builds start
+in queue order. While TauCeti's `FLEET_PRIORITY_LABEL` Actions variable names a PR label (empty
+is off), TauCetiTools' picker sends the PR builds of PRs carrying it to the
+`tauceti-fleet-pr-priority` class instead of `tauceti-fleet-pr`. Every PR runner the broker
+registers offers both classes, so a priority build can use any of them.
+
+A host may ask for a priority-only runner (`priority_only` on `POST /v1/runners`, PR runners
+only). It offers `tauceti-fleet-pr-priority` and none of the build classes, so only a priority
+build can take it, however many ordinary PR builds queued first. Updated hosts with a
+github-state credential ask for one when a general PR slot frees while more priority builds
+wait than their unassigned priority-only guests cover, and retire a priority-only guest that is
+still unassigned 90 seconds after coming online. A lost reply is replayed with the same choice;
+the other choice cannot reuse the slot's registration. Staging, reserved and special slots
+never register priority-only runners.
+
 ## Special runner classes
 
 Operator hosts can be authorized for `queue-control` and `pr-status` as well as

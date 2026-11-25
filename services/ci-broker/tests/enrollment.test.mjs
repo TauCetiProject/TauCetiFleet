@@ -574,3 +574,26 @@ test('a special group outage leaves build-only hosts inventory working',async()=
   } finally { failGroupListing=null; }
   assert.equal((await hostRequest(special,ts,'/v1/runners')).status,200);
 });
+
+test('a host registers a priority-only PR runner, replayed only with the same choice',async()=>{
+  const id='d1'.repeat(16),token='z'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
+  await enroll(id,token,'priority-host',{kinds:['pr','staging']});
+  const register=(slot,data)=>hostRequest(id,token,'/v1/runners','POST',{slot,kinds:['pr'],...data});
+  for (const data of [{priority_only:'yes'},{priority_only:1},{kinds:['staging'],priority_only:true}])
+    assert.equal((await register(0,{name:prefix+'1'.repeat(16),...data})).status,400);
+  const ordinary=await (await register(0,{name:prefix+'2'.repeat(16)})).json();
+  assert.ok(runners.get(ordinary.runner_id).labels.some(l=>l.name==='tauceti-fleet-pr-priority'));
+  const name=prefix+'3'.repeat(16);
+  const response=await register(1,{name,priority_only:true});
+  assert.equal(response.status,200);
+  const value=await response.json();
+  const labels=runners.get(value.runner_id).labels.map(l=>l.name);
+  assert.ok(labels.includes('tauceti-fleet-pr-priority'));
+  for (const label of ['tauceti-fleet-pr','tauceti-fleet-staging','tauceti-fleet']) assert.ok(!labels.includes(label));
+  assert.equal(runners.get(value.runner_id).runner_group_id,3);
+  // A lost reply replays the same registration; the other choice cannot reuse the slot.
+  assert.equal((await (await register(1,{name,priority_only:true})).json()).runner_id,value.runner_id);
+  assert.equal((await register(1,{name})).status,409);
+  assert.equal((await register(0,{name:prefix+'2'.repeat(16),priority_only:true})).status,409);
+  assert.equal((await (await register(0,{name:prefix+'2'.repeat(16)})).json()).runner_id,ordinary.runner_id);
+});

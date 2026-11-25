@@ -162,8 +162,10 @@ def jit_config(config, name):
 
             broker_slot_group(config.get("ci_slot", 0), dict(kind=config["ci_kinds"][0],
                               runner_group_id=config["ci_slot_runner_group_id"]), broker_request(config, "/v1/groups"))
-        value = broker_request(config, "/v1/runners", method="POST",
-                               data=dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config)))
+        data = dict(name=name, slot=config.get("ci_slot", 0), kinds=kinds(config))
+        if config.get("ci_priority_only"):
+            data["priority_only"] = True
+        value = broker_request(config, "/v1/runners", method="POST", data=data)
         return value["runner_id"], value["encoded_jit_config"]
     group = runner_policy(config)
     data = request(
@@ -186,10 +188,14 @@ def runner_labels(config, name):
     labels = ["self-hosted", "linux", "x64", "fleet-" + config["machine_id"],
               "fleet-instance-" + name.rsplit("-", 1)[-1]]
     allowed = kinds(config)
+    # The broker's labels: every PR runner also offers the priority class, a priority-only
+    # runner nothing else (ci_pool.PRIORITY_CLASS).
+    if config.get("ci_priority_only"):
+        return labels + ["tauceti-fleet-pr-priority"]
     # Legacy staging workflows match this label. PR-only runners never carry it.
     if "staging" in allowed:
         labels.append("tauceti-fleet")
-    return labels + ["tauceti-fleet-" + kind for kind in allowed]
+    return labels + ["tauceti-fleet-" + kind for kind in allowed] + (["tauceti-fleet-pr-priority"] if "pr" in allowed else [])
 
 
 def capacity_policy(config):
