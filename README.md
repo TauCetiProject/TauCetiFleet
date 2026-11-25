@@ -1143,17 +1143,22 @@ and R2 operations (by bucket and action) for the TauCeti account from Cloudflare
 Analytics API. When Durable Object rows written exceed 30 million or R2 Class A operations exceed
 3 million (`--rows-written-threshold`, `--class-a-threshold`), it sends one message, in the
 fleet alert's Zulip format, naming the largest namespaces and buckets with their counts and an
-estimated cost at list prices before free allowances. A day is reported at most once; a failed
-read or post is retried the next hour. State lives in `~/.local/state/tauceti-fleet/spend-alert.json`
-and the daily totals go to `journalctl --user -u tauceti-spend-alert`.
+estimated cost at list prices before free allowances. A day is reported once; a failed read or
+post is retried every hour for up to three days, and a reply lost after delivery repeats the
+message rather than dropping it. A result that fills a whole page counts as a failed read, never
+as complete totals. Without `--zulip-config` the totals and messages go only to
+`journalctl --user -u tauceti-spend-alert`, recorded apart from delivered days, so configuring
+delivery later still sends that day's message. State lives in
+`~/.local/state/tauceti-fleet/spend-alert.json`.
 
 The credential is wrangler's OAuth login on the account (`~/.config/.wrangler`, whose
 `account:read` scope covers analytics), so `wrangler` must be on the `PATH` the installer
 records. The alert only reads that file: when the access token has expired, or Cloudflare rejects
-it, it runs `wrangler whoami` once to let wrangler refresh it. `--token-file` uses a mode-0600
+it, it runs `wrangler whoami` once to let wrangler refresh it. Redirects are refused, so the
+token goes only to `api.cloudflare.com`. `--token-file` uses a mode-0600
 Cloudflare API token with Account Analytics read instead. `tauceti-fleet spend-alert --dry-run
 [--day YYYY-MM-DD]` prints the totals and the message that would be sent, sending and recording
-nothing.
+nothing; `--day` is accepted only with `--dry-run`.
 
 ## Public operations telemetry
 

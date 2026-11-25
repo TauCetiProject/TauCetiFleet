@@ -32,7 +32,8 @@ API = "https://api.cloudflare.com/client/v4"
 ROWS_WRITTEN = 30_000_000
 CLASS_A = 3_000_000
 SETTLE = 2 * 60 * 60  # analytics for a day are complete a few minutes after it ends
-KEEP_DAYS = 60
+KEEP_DAYS = 60  # days whose totals are kept
+CATCH_UP = 3  # a day still unread or undelivered is retried this many days later
 TOP = 5
 UNIT = "tauceti-spend-alert"
 WRANGLER_CONFIG = Path.home() / ".config/.wrangler/config/default.toml"
@@ -52,6 +53,7 @@ CLASS_A_ACTIONS = {
 }
 FREE_ACTIONS = {"DeleteObject", "DeleteObjects", "DeleteBucket", "AbortMultipartUpload"}
 
+LIMIT = 10000
 QUERY = """query($a:String!,$d:Date!){viewer{accounts(filter:{accountTag:$a}){
  durableObjectsPeriodicGroups(limit:10000,filter:{date_geq:$d,date_leq:$d}){sum{rowsRead rowsWritten} dimensions{namespaceId}}
  r2OperationsAdaptiveGroups(limit:10000,filter:{date_geq:$d,date_leq:$d}){sum{requests} dimensions{bucketName actionType}}
@@ -100,6 +102,13 @@ class Credential:
         self.refreshed = False
 
     def token(self):
+        token = self.read_token()
+        # A token is sent in a header: never let a malformed one reach an error message.
+        if not token.isascii() or not token.isprintable() or any(c.isspace() for c in token):
+            raise AuthError("The Cloudflare token is malformed")
+        return token
+
+    def read_token(self):
         if self.token_file is not None:
             token = Path(self.token_file).read_text().strip()
             if not token:
@@ -127,7 +136,11 @@ def call(credential, url, body=None, opener=None):
     """One Cloudflare API request; a rejected credential is refreshed once and the request repeated."""
     from .ci_overview import status_ssl_context
 
-    opener = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(context=status_ssl_context()))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None  # never carry the bearer token to another location
+
+    opener = opener or urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=status_ssl_context()))
     while True:
         request = urllib.request.Request(
             url, data=None if body is None else json.dumps(body).encode(), method="GET" if body is None else "POST",
@@ -156,6 +169,8 @@ def fetch(credential, day, account=ACCOUNT, opener=None):
     accounts = value["data"]["viewer"]["accounts"]
     if len(accounts) != 1:
         raise FleetError("Cloudflare analytics returned no data for the account")
+    if any(len(accounts[0][key]) >= LIMIT for key in ("durableObjectsPeriodicGroups", "r2OperationsAdaptiveGroups")):
+        raise FleetError("Cloudflare analytics returned a full page; the totals would be incomplete")
     names = {}
     try:
         listing = call(credential, f"{API}/accounts/{account}/workers/durable_objects/namespaces?per_page=1000",
@@ -234,20 +249,30 @@ def due_day(now):
     return (settled - datetime.timedelta(days=1)).isoformat()
 
 
-def check(state, day, now, load, send, rows_written=ROWS_WRITTEN, class_a=CLASS_A):
+def pending_days(state, now, key="days"):
+    """Settled days not yet checked, oldest first: the last `CATCH_UP` days, never before the first run."""
+    due = datetime.date.fromisoformat(due_day(now))
+    first = state.setdefault("since", due.isoformat())
+    days = state.get(key) or {}
+    candidates = (due - datetime.timedelta(days=back) for back in range(CATCH_UP - 1, -1, -1))
+    return [d.isoformat() for d in candidates if d.isoformat() >= first and d.isoformat() not in days]
+
+
+def check(state, day, now, load, send, rows_written=ROWS_WRITTEN, class_a=CLASS_A, key="days"):
     """Check `day` once: returns True when the day is settled (reported, or below the thresholds).
-    `load()` returns the day's summary and may raise; `send(text)` returns whether it was delivered."""
-    days = state.setdefault("days", {})
+    `load(day)` returns the day's summary and may raise; `send(text)` returns whether it was delivered.
+    A reply lost after delivery repeats the message next run: a message is never dropped."""
+    days = state.setdefault(key, {})
     if day in days:
         return True
-    summary = load()
+    summary = load(day)
     print(line(day, summary), flush=True)
     alerted = over(summary, rows_written, class_a)
     if alerted and not send(message(day, summary, rows_written, class_a)):
         return False
     days[day] = dict(checked_at=now, alerted=alerted, **summary["totals"])
     for old in sorted(days)[:-KEEP_DAYS]:
-        del days[old]
+        days[old] = dict(alerted=days[old].get("alerted"))  # keep the record that the day was checked
     return True
 
 
@@ -263,7 +288,7 @@ def main(argv=None):
     parser.add_argument("--account", default=ACCOUNT)
     parser.add_argument("--rows-written-threshold", type=int, default=ROWS_WRITTEN)
     parser.add_argument("--class-a-threshold", type=int, default=CLASS_A)
-    parser.add_argument("--day", help="check this UTC day (YYYY-MM-DD) instead of the last settled one")
+    parser.add_argument("--day", help="with --dry-run, check this UTC day (YYYY-MM-DD) instead of the last settled one")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the totals and any message; send nothing and record nothing")
     args = parser.parse_args(argv)
@@ -271,20 +296,24 @@ def main(argv=None):
         if path is not None and path.stat().st_mode & 0o077:
             parser.error(f"{path} must be private (chmod 600)")
     if args.day is not None:
+        if not args.dry_run:
+            parser.error("--day needs --dry-run: only settled days are recorded")
         try:
             datetime.date.fromisoformat(args.day)
         except ValueError:
             parser.error("--day must be YYYY-MM-DD")
     config = None if args.zulip_config is None or args.dry_run else read(args.zulip_config)
+    if args.zulip_config is not None and not args.dry_run and not isinstance(config, dict):
+        parser.error("the Zulip configuration must be a JSON object")
     credential = Credential(args.token_file)
     now = time.time()
-    day = args.day or due_day(now)
 
-    def load():
+    def load(day):
         return summarize(*fetch(credential, day, args.account))
 
     if args.dry_run:
-        summary = load()
+        day = args.day or due_day(now)
+        summary = load(day)
         print(line(day, summary))
         if over(summary, args.rows_written_threshold, args.class_a_threshold):
             print(message(day, summary, args.rows_written_threshold, args.class_a_threshold))
@@ -295,7 +324,7 @@ def main(argv=None):
     def send(text):
         print(text, flush=True)
         if config is None:
-            return True
+            return True  # recorded under `logged`, so a later configured run still sends the day's message
         try:
             zulip(config, text)
             return True
@@ -305,9 +334,19 @@ def main(argv=None):
             return False
 
     path = state_dir() / "spend-alert.json"
+    settled = True
     with locked(path.with_suffix(".lock")):
         state = read(path, {})
-        settled = check(state, day, now, load, send, args.rows_written_threshold, args.class_a_threshold)
+        # Days checked without a delivery target are kept apart from delivered ones.
+        key = "days" if config is not None else "logged"
+        for day in pending_days(state, now, key):
+            try:
+                settled &= check(state, day, now, load, send, args.rows_written_threshold, args.class_a_threshold,
+                                 key)
+            except FleetError as error:
+                print(f"spend alert: {day}: {error}; retrying next run", file=sys.stderr, flush=True)
+                settled = False
+            atomic(path, state)
         atomic(path, state)
     return 0 if settled else 1
 
