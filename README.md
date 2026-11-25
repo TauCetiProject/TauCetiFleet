@@ -229,11 +229,17 @@ TauCeti's API docs build can reserve `ci_protected_slots` with `kind = "docs"` i
 `api-docs.yml` and TauCetiTools' `api-docs.yml`, both at `refs/heads/main`. Its runners carry
 the label `tauceti-fleet-docs`, which only docs slots offer, so docs builds land only on hosts
 the operator grants the class to and never on contributor hosts. The guest is a VM of fixed
-shape, 32 vCPUs and 56 GiB, with the host's `ci_disk_gib` of disk; the VM size is a hard memory
-ceiling for the build. The guest does not reserve that RAM, so with other CI on the host the
-shared CI ceiling can still be reached first. The docs guest is then the first OOM victim
+shape, 32 vCPUs and 24 GiB, with the host's `ci_disk_gib` of disk; the VM size is a hard memory
+ceiling for the build, which peaks at about 5.6 GB. The guest does not reserve that RAM, but
+free-page reporting returns only freed pages, not the guest's page cache, so a long docs build
+comes to hold most of the guest's size on the host. With other CI on the host the shared CI
+ceiling can still be reached first. The docs QEMU then has the highest kernel OOM score
 (`OOMScoreAdjust=1000`), ahead of staging and control guests, and its next run resumes from the
-last saved docs state. doc-gen4 runs its own executable, not `lean`, so the Lean pressure gate
+last saved docs state. systemd-oomd ignores OOM scores and has no `prefer` setting, and a
+pressure kill only chooses among the pressured slice's own descendants, so pressure in
+TauCetiWorker's repair slice kills repair workers, never the docs guest. A small docs guest
+reduces that pressure; it cannot rule it out while a large staging guest shares the host.
+doc-gen4 runs its own executable, not `lean`, so the Lean pressure gate
 does not admit its processes; the guest's CPU weight is the PR builds' 100, below staging and
 infra. The slot stays warm and PR recovery cannot borrow it.
 
