@@ -1314,7 +1314,13 @@ class CISlot:
                              and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
                 surplus = ci_pool.priority_surplus(value, own, time.time())
-                if config.get("ci_idle_pool"):
+                if surplus:
+                    # Native retirement may finish its cleanup later; the slot's next guest
+                    # is ordinary either way.
+                    self.priority_retired_at = time.time()
+                    value["routing_labels"] = ci_pool.labels(value, own)
+                    retired = vm.retire_idle(config, value)
+                elif config.get("ci_idle_pool"):
                     value["routing_labels"] = ci_pool.labels(value, own)
                     retired = (ci_pool.idle_ready(value, own, reservations)
                                and vm.retire_idle(config, value))
@@ -1326,8 +1332,6 @@ class CISlot:
                     vm.retire(config, value)
                     retired = True
                 if retired:
-                    if surplus:
-                        self.priority_retired_at = time.time()
                     value = {}
                     self.close()
                     self.next_vm = time.time() + 5

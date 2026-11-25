@@ -184,12 +184,14 @@ registers offers both classes, so a priority build can use any of them.
 
 A host may ask for a priority-only runner (`priority_only` on `POST /v1/runners`, PR runners
 only). It offers `tauceti-fleet-pr-priority` and none of the build classes, so only a priority
-build can take it, however many ordinary PR builds queued first. Updated hosts with a
+build can take it, however many ordinary PR builds queued first. Updated PR-only hosts with a
 github-state credential ask for one when a general PR slot frees while more priority builds
-wait than their unassigned priority-only guests cover, and retire a priority-only guest that is
-still unassigned 90 seconds after coming online. A lost reply is replayed with the same choice;
-the other choice cannot reuse the slot's registration. Staging, reserved and special slots
-never register priority-only runners.
+wait than their unassigned priority-only guests cover. They read the queue by asking
+github-state for a refresh (at most one scan per two and a half minutes) and fall back to its
+cache. A priority-only guest still unassigned 90 seconds after coming online is retired, and its
+slot registers an ordinary guest next. A lost reply is replayed with the same choice; the other
+choice cannot reuse the slot's registration. Staging, mixed PR and staging, reserved and special
+slots never register priority-only runners, so staging capacity is unchanged.
 
 ## Special runner classes
 

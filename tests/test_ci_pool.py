@@ -143,16 +143,30 @@ class PriorityRegistration(unittest.TestCase):
         self.assertEqual(ci_pool.priority_wanted(values, dict(queued=[self.ordinary])), 0)
         self.assertEqual(ci_pool.priority_wanted([], None), 0)
 
-    def test_only_general_pr_slots_register_priority_only_runners(self):
-        self.assertEqual([i for i in range(8) if ci_pool.priority_slot(self.config, i)], list(range(1, 7)))
-        self.assertFalse(any(ci_pool.priority_slot(dict(self.config, ci_kinds=["staging"]), i) for i in range(8)))
+    def test_only_general_pr_only_slots_register_priority_only_runners(self):
+        pr = dict(self.config, ci_kinds=["pr"], ci_staging_slots=0)
+        self.assertEqual([i for i in range(8) if ci_pool.priority_slot(pr, i)], list(range(7)))
+        # Mixed PR and staging slots keep their staging capacity.
+        for kinds in (["pr", "staging"], ["staging"]):
+            self.assertFalse(any(ci_pool.priority_slot(dict(self.config, ci_kinds=kinds), i) for i in range(8)))
 
-    def test_observation_needs_a_pr_host_with_a_shared_state_credential(self):
-        with patch.object(ci_pool, "reservations", return_value=dict(queued=[])) as read:
-            self.assertIsNone(ci_pool.priority_observation(dict(self.config)))
-            self.assertIsNone(ci_pool.priority_observation(dict(self.config, ci_kinds=["staging"], github_state_token_file="t")))
-            self.assertEqual(ci_pool.priority_observation(dict(self.config, github_state_token_file="t")), dict(queued=[]))
-        read.assert_called_once()
+    def test_observation_refreshes_first_and_falls_back_to_the_cache(self):
+        config = dict(self.config, ci_kinds=["pr"], ci_staging_slots=0, github_state_token_file="t")
+        fresh = dict(complete=True, fleet_queue_version=1, observed_at=time.time() * 1000,
+                     queued_fleet=[sorted(self.priority)])
+        with patch.object(ci_pool, "reservations", return_value=dict(queued=[])) as cached, \
+                patch.object(ci_pool.ci_overview, "fetch", return_value=fresh) as refresh:
+            self.assertIsNone(ci_pool.priority_observation(dict(config, github_state_token_file=None)))
+            self.assertIsNone(ci_pool.priority_observation(dict(config, ci_kinds=["pr", "staging"])))
+            refresh.assert_not_called()
+            self.assertEqual(ci_pool.priority_observation(config)["queued"], [self.priority])
+            self.assertIn("/v1/runner-capacity?", refresh.call_args.args[0])
+            cached.assert_not_called()
+            for answer in (TimeoutError(), dict(fresh, complete=False), dict(fresh, observed_at=0), dict(fresh, fleet_queue_version=None)):
+                refresh.side_effect = answer if isinstance(answer, Exception) else None
+                refresh.return_value = answer
+                self.assertEqual(ci_pool.priority_observation(config), dict(queued=[]))
+        self.assertEqual(cached.call_count, 4)
 
     def test_idle_priority_only_guest_is_surplus_after_its_grace(self):
         now = 1000.0
@@ -166,8 +180,24 @@ class PriorityRegistration(unittest.TestCase):
         self.assertFalse(ci_pool.priority_surplus(dict(value, ci_priority_only=False), online, now))
         self.assertFalse(ci_pool.priority_surplus(dict(ci_priority_only=True), online, now))
 
+    def test_surplus_priority_guest_is_retired_even_without_a_pool_observation(self):
+        now = time.time()
+        value = dict(slot=2, instance="a" * 16, runner_id=100, unit="guest.service", ci_kinds=["pr"], ci_priority_only=True,
+                     started_at=now - 300, online_observed_at=now - 200, phase="ready")
+        store.atomic(vm.slot_file(dict(ci_slot=2), "vm.json"), value)
+        config = dict(self.config, ci_kinds=["pr"], ci_staging_slots=0, ci_idle_pool=True, ci_vcpus=16, ci_memory_gib=32)
+        slot = host.CISlot(2)
+        with patch.object(host, "ci_service_state", return_value=(True, "healthy")), \
+                patch.object(host.socket, "socket", side_effect=OSError()), \
+                patch.object(vm, "retire_idle", return_value=False) as retire, patch.object(vm, "start", return_value={}):
+            slot.step(config, inventory=[dict(id=100, status="online", busy=False, labels=[])], refresh=True,
+                      cooling=False, admitted=True, reservations=None, priority_only=True)
+        retire.assert_called_once()
+        # Cleanup still in progress counts as a retirement for the ordinary next guest.
+        self.assertGreater(slot.priority_retired_at, now - 1)
+
     def test_slot_start_requests_priority_only_unless_recovering_or_recently_retired(self):
-        config = dict(self.config, ci_vcpus=16, ci_memory_gib=32)
+        config = dict(self.config, ci_kinds=["pr"], ci_staging_slots=0, ci_vcpus=16, ci_memory_gib=32)
         with patch.object(vm, "start", return_value={}) as start:
             slot = host.CISlot(2)
             slot.step(config, inventory=[], refresh=False, cooling=False, admitted=True, priority_only=True)

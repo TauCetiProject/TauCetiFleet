@@ -138,9 +138,30 @@ PRIORITY_RETRY_SECONDS = 180
 
 
 def priority_observation(config):
-    """Queued fleet targets for priority registration, or None when unknown or not needed."""
-    if not config.get("github_state_token_file") or "pr" not in capacity.kinds(config):
+    """Queued fleet targets for priority registration, or None when unknown or not needed.
+
+    The cached read never starts discovery, and a priority build queues after its own picker's
+    read, so ask the shared service for a refresh first. It refreshes at most every two and a
+    half minutes, coalesces callers and keeps scanning after a caller stops waiting, so a short
+    timeout only falls back to the cache.
+    """
+    if not config.get("github_state_token_file") or capacity.kinds(config) != ["pr"]:
         return None
+    base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
+    if urllib.parse.urlsplit(base).scheme != "https":
+        raise FleetError("CI pool observation requires HTTPS")
+    try:
+        value = ci_overview.fetch(base + "/v1/runner-capacity?repository=TauCetiProject%2FTauCeti&namespace_cap=1",
+                                  token_file=config.get("github_state_token_file"), timeout=3)
+        observed, queued = value.get("observed_at"), value.get("queued_fleet")
+        if (value.get("complete") is True and value.get("fleet_queue_version") == 1
+                and type(observed) in (int, float) and -5 <= time.time() - observed / 1000 <= 150
+                and isinstance(queued, list) and len(queued) <= 10000
+                and all(isinstance(labels, list) and len(labels) <= 100 and all(isinstance(v, str) for v in labels)
+                        for labels in queued)):
+            return dict(observed_at=observed / 1000, queued=[set(v) for v in queued])
+    except Exception:
+        pass
     return reservations(config)
 
 
@@ -159,9 +180,10 @@ def priority_wanted(values, observation):
 
 
 def priority_slot(config, index):
-    """Only general PR slots register priority-only runners, never reserved or protected ones."""
+    """Only PR-only slots register priority-only runners: never reserved, protected or mixed
+    PR and staging slots, so no staging capacity is taken."""
     value = capacity.for_slot(config, index)
-    return ("pr" in value["ci_kinds"] and value.get("ci_slot_runner_group_id") is None
+    return (value["ci_kinds"] == ["pr"] and value.get("ci_slot_runner_group_id") is None
             and not value.get("ci_staging_reserved"))
 
 
