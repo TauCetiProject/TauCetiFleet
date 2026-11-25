@@ -582,6 +582,9 @@ def inside(directory):
                    TAUCETI_NATIVE_PRESSURE_FD=os.environ["TAUCETI_NATIVE_PRESSURE_FD"]))
 
 
+IO_COUNTERS = ("rbytes", "wbytes", "rios", "wios", "dbytes", "dios")
+
+
 def job_io(group, directory):
     """The job unit's cumulative block I/O on the instance filesystem's device.
 
@@ -597,7 +600,9 @@ def job_io(group, directory):
         devices = {}
         for line in (group / "io.stat").read_text().splitlines():
             name, *fields = line.split()
-            devices[name] = {key: int(value) for key, value in (field.split("=", 1) for field in fields)}
+            # Only the standard counters; optional fields such as `depth=max` are not numbers.
+            values = dict(field.split("=", 1) for field in fields if "=" in field)
+            devices[name] = {key: int(values[key]) for key in IO_COUNTERS if values.get(key, "").isdigit()}
         device = os.stat(directory).st_dev
         name = f"{os.major(device)}:{os.minor(device)}"
         own = devices.get(name)
@@ -611,7 +616,7 @@ def job_io(group, directory):
         return None
 
 
-def count_files(root, timeout=180):
+def count_files(root, timeout=60):
     """Inodes in the instance root at job end: what cleanup is about to unlink."""
     started = time.monotonic()
     try:
@@ -746,12 +751,13 @@ def serve(directory, *, offline=False):
                       infrastructure_error=failed, requested_stop=requested_stop,
                       memory_peak_bytes=peak, memory_events=memory_events,
                       io=job_io(group, directory))
-        # A requested stop has only TimeoutStopSec to exit: count nothing then.
-        removable = (directory / "rootfs").exists() and not requested_stop
-        if removable:
-            result["files"] = count_files(directory / "rootfs")
+        # The terminal result is durable before any optional measurement.
         atomic(directory / "native-result.json", result)
-        if removable:
+        # A requested stop has only TimeoutStopSec to exit: measure nothing then.
+        if (directory / "rootfs").exists() and not requested_stop:
+            result["files"] = count_files(directory / "rootfs")
+            result["io_before_removal"] = job_io(group, directory)
+            atomic(directory / "native-result.json", result)
             removal = time.monotonic()
             try:
                 remove_root(directory / "rootfs")

@@ -14,7 +14,8 @@ from pathlib import Path
 from .store import state_dir
 
 INTERVAL = 60
-HISTORY_BYTES = 4 * 1024**2
+# About 0.7 kB a minute for three devices: halving at 16 MiB keeps at least a week.
+HISTORY_BYTES = 16 * 1024**2
 # Whole drives and arrays; partitions, loop, ram and zram devices are omitted.
 DEVICE = re.compile(r"(nvme\d+n\d+|sd[a-z]+|vd[a-z]+|xvd[a-z]+|md\d+|dm-\d+)")
 
@@ -84,7 +85,7 @@ class DriveIO:
         try:
             self.history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if self.history.exists() and self.history.stat().st_size > HISTORY_BYTES:
-                # Keep the newer half: about a week at one line a minute.
+                # Keep the newer half.
                 lines = self.history.read_bytes().splitlines(keepends=True)
                 temporary = self.history.with_suffix(".next")
                 temporary.write_bytes(b"".join(lines[len(lines) // 2:]))

@@ -85,15 +85,24 @@ def published(directory, cache, rows):
     return found
 
 
-def compare(older, newer):
-    """What a job based on `newer` still lacks on top of a shared tree made from `older`."""
+def compare(older, newer, sizes=None):
+    """What a job based on `newer` still lacks on top of a shared tree made from `older`.
+
+    Counts are of map rows (one per module). With `sizes` (archive name to compressed
+    bytes), also the compressed bytes of the archives each set names.
+    """
     if older[2] != newer[2]:
         # A toolchain bump between the two: the job takes today's path (key miss).
         return dict(key_miss=True)
     changed = newer[3] - older[3]
     outputs = {output for _, output in older[3]}
-    return dict(key_miss=False, modules=len(newer[3]), input_changed=len(changed),
-                new_outputs=len({output for _, output in changed if output not in outputs}),
+    new = {output for _, output in changed if output not in outputs}
+    extra = {}
+    if sizes:
+        extra = dict(input_changed_archive_bytes=sum(sizes.get(output, 0) for _, output in changed),
+                     new_output_archive_bytes=sum(sizes.get(output, 0) for output in new),
+                     unsized=sum(output not in sizes for _, output in changed))
+    return dict(key_miss=False, modules=len(newer[3]), input_changed=len(changed), new_outputs=len(new), **extra,
                 stale_inputs=len({i for i, _ in older[3]} - {i for i, _ in newer[3]}),
                 age_hours=(newer[0] - older[0]) / 3600)
 
@@ -105,14 +114,22 @@ def main():
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--lags", default="1,2,3,4", help="publication lags to compare")
     parser.add_argument("--cache", default="/tmp/tauceti-revision-maps")
+    parser.add_argument("--artifact-sizes", help="file of `NAME BYTES` lines for .ltar archives, for byte estimates")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    sizes = None
+    if args.artifact_sizes:
+        sizes = {}
+        for line in Path(args.artifact_sizes).read_text().splitlines():
+            name, size = line.split()
+            if name.endswith(".ltar"):
+                sizes[name] = int(size)
     lags = [int(value) for value in args.lags.split(",")]
     rows = history(args.git_dir, args.ref, args.hours)
     maps = published(args.git_dir, Path(args.cache), rows)
     if len(maps) < 2:
         raise SystemExit("fewer than two published maps in the window")
-    results = {lag: [dict(at=maps[i][0], newer=maps[i][1], older=maps[i - lag][1], **compare(maps[i - lag], maps[i]))
+    results = {lag: [dict(at=maps[i][0], newer=maps[i][1], older=maps[i - lag][1], **compare(maps[i - lag], maps[i], sizes))
                      for i in range(lag, len(maps))] for lag in lags}
     if args.json:
         json.dump(dict(commits=len(rows), published=[(stamp, sha) for stamp, sha, _, _ in maps],
@@ -121,7 +138,7 @@ def main():
         return
     span = (maps[-1][0] - maps[0][0]) / 3600
     print(f"{len(rows)} first-parent commits, {len(maps)} published maps over {span:.1f} h "
-          f"(one every {span / (len(maps) - 1):.1f} h), latest {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(maps[-1][0]))}")
+          f"(one every {span / (len(maps) - 1):.1f} h of commit time), latest {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(maps[-1][0]))}")
     for lag, values in results.items():
         hits = [v for v in values if not v["key_miss"]]
         if not hits:
@@ -133,6 +150,12 @@ def main():
         print(f"lag {lag} publication(s), median age {statistics.median(v['age_hours'] for v in hits):.1f} h, "
               f"{len(hits)} pairs, {len(values) - len(hits)} key misses: input hash changed {summary('input_changed')}; "
               f"output archive not in the older tree {summary('new_outputs')}; of about {hits[-1]['modules']} modules")
+        if sizes:
+            def gigabytes(key):
+                return statistics.median(v[key] for v in hits) / 1e9
+            print(f"  compressed archive bytes (median): input changed {gigabytes('input_changed_archive_bytes'):.2f} GB, "
+                  f"new outputs {gigabytes('new_output_archive_bytes'):.3f} GB; "
+                  f"{max(v['unsized'] for v in hits)} archives at most were unsized")
 
 
 if __name__ == "__main__":

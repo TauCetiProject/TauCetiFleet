@@ -531,8 +531,8 @@ class NativeRunner(unittest.TestCase):
         group.mkdir()
         device = os.stat(self.root).st_dev
         name = f"{os.major(device)}:{os.minor(device)}"
-        (group / "io.stat").write_text(f"259:0 rbytes=1 wbytes=2 rios=3 wios=4 dbytes=0 dios=0\n"
-                                       f"{name} rbytes=10 wbytes=20 rios=30 wios=40 dbytes=0 dios=0\n")
+        (group / "io.stat").write_text(f"259:0 rbytes=1 wbytes=2 rios=3 wios=4 dbytes=0 dios=0 depth=max\n"
+                                       f"{name} rbytes=10 wbytes=20 rios=30 wios=40 dbytes=0 dios=0 cost.usage=7\n")
         value = native.job_io(group, self.root)
         self.assertEqual(value["device"], name)
         self.assertEqual(value["filesystem"]["wbytes"], 20)
@@ -562,17 +562,22 @@ class NativeRunner(unittest.TestCase):
         child = Mock()
         child.poll.return_value = 0
         child.wait.return_value = 0
-        ios = iter([dict(filesystem=dict(wbytes=5)), dict(filesystem=dict(wbytes=7))])
+        ios = iter([dict(filesystem=dict(wbytes=5)), dict(filesystem=dict(wbytes=6)), dict(filesystem=dict(wbytes=7))])
+        def counted(root):
+            # The core result is already durable when the optional count starts.
+            self.assertEqual(store.read(self.root / "native-result.json")["exit_code"], 0)
+            return dict(inodes=1200000, partial=False, seconds=4.0)
         def removed(root):
             Path(root).rmdir()
         with patch.object(native, "materialize"), patch.object(native, "publish_memory"), \
                 patch.object(subprocess, "Popen", return_value=child), \
                 patch.object(native, "job_io", side_effect=lambda *_: next(ios)), \
-                patch.object(native, "count_files", return_value=dict(inodes=1200000, partial=False, seconds=4.0)), \
+                patch.object(native, "count_files", side_effect=counted), \
                 patch.object(native, "remove_root", side_effect=removed):
             self.assertEqual(native.serve(self.root), 0)
         result = store.read(self.root / "native-result.json")
         self.assertEqual(result["io"]["filesystem"]["wbytes"], 5)
+        self.assertEqual(result["io_before_removal"]["filesystem"]["wbytes"], 6)
         self.assertEqual(result["io_after_removal"]["filesystem"]["wbytes"], 7)
         self.assertEqual(result["files"]["inodes"], 1200000)
         self.assertIn("removal_seconds", result)
