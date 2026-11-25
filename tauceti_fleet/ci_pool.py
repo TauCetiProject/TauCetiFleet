@@ -122,3 +122,72 @@ def recovery_slots(config, values, inventory, observation, records):
         if candidates:
             result[candidates[0]] = record
     return result
+
+
+# Priority PR builds (TauCetiTools' picker, while the project names a priority PR label) target
+# this class. The broker gives it to every PR runner and, for a priority-only registration, to
+# nothing else, so only priority builds can take such a runner. GitHub otherwise gives a free
+# runner to the oldest matching job, so this is how a priority build passes queued PR builds.
+PRIORITY_CLASS = "tauceti-fleet-pr-priority"
+# An unassigned priority-only guest this long after coming online has no priority build left
+# to take (GitHub assigns a waiting job within seconds); it is retired for an ordinary one.
+PRIORITY_IDLE_SECONDS = 90
+# A slot that has just retired an unneeded priority-only guest registers an ordinary one next,
+# so a stale observation of waiting priority builds cannot keep a slot cycling.
+PRIORITY_RETRY_SECONDS = 180
+
+
+def priority_observation(config):
+    """Queued fleet targets for priority registration, or None when unknown or not needed.
+
+    The cached read never starts discovery, and a priority build queues after its own picker's
+    read, so ask the shared service for a refresh first. It refreshes at most every two and a
+    half minutes, coalesces callers and keeps scanning after a caller stops waiting, so a short
+    timeout only falls back to the cache.
+    """
+    if not config.get("github_state_token_file") or capacity.kinds(config) != ["pr"]:
+        return None
+    base = config.get("github_state_url", "https://github-state.taucetiproject.org").rstrip("/")
+    if urllib.parse.urlsplit(base).scheme != "https":
+        raise FleetError("CI pool observation requires HTTPS")
+    try:
+        value = ci_overview.fetch(base + "/v1/runner-capacity?repository=TauCetiProject%2FTauCeti&namespace_cap=1",
+                                  token_file=config.get("github_state_token_file"), timeout=3)
+        observed, queued = value.get("observed_at"), value.get("queued_fleet")
+        if (value.get("complete") is True and value.get("fleet_queue_version") == 1
+                and type(observed) in (int, float) and -5 <= time.time() - observed / 1000 <= 150
+                and isinstance(queued, list) and len(queued) <= 10000
+                and all(isinstance(labels, list) and len(labels) <= 100 and all(isinstance(v, str) for v in labels)
+                        for labels in queued)):
+            return dict(observed_at=observed / 1000, queued=[set(v) for v in queued])
+    except Exception:
+        pass
+    return reservations(config)
+
+
+def priority_waiting(observation):
+    """Queued priority PR builds; ordinary builds never name the priority class."""
+    if not observation:
+        return 0
+    return sum(PRIORITY_CLASS in {label.lower() for label in queued} for queued in observation["queued"])
+
+
+def priority_wanted(values, observation):
+    """Priority-only registrations to add: waiting priority builds that this host's unassigned
+    priority-only guests (booting or idle) do not already cover. Unknown means none."""
+    spare = sum(1 for value in values if value and value.get("ci_priority_only") and not value.get("busy"))
+    return max(0, priority_waiting(observation) - spare)
+
+
+def priority_slot(config, index):
+    """Only PR-only slots register priority-only runners: never reserved, protected or mixed
+    PR and staging slots, so no staging capacity is taken."""
+    value = capacity.for_slot(config, index)
+    return (value["ci_kinds"] == ["pr"] and value.get("ci_slot_runner_group_id") is None
+            and not value.get("ci_staging_reserved"))
+
+
+def priority_surplus(value, own, now):
+    return (bool(value.get("ci_priority_only")) and not value.get("busy") and not own.get("busy")
+            and own.get("status") == "online" and bool(value.get("online_observed_at"))
+            and now - value["online_observed_at"] >= PRIORITY_IDLE_SECONDS)

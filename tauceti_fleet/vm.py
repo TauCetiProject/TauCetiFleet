@@ -489,10 +489,15 @@ def _start(config):
     instance = intent.get("instance") or config.get("ci_recover_instance") or secrets.token_hex(8)
     if not re.fullmatch(r"[a-f0-9]{16}", instance):
         raise FleetError("Invalid CI instance identity")
+    # A runner only priority PR builds can take (ci_pool.PRIORITY_CLASS). A pending
+    # registration keeps the choice it was requested with, so the broker can replay it.
+    priority_only = (bool(intent.get("priority_only")) if intent else bool(config.get("ci_priority_only"))) and (
+        "pr" in config["ci_kinds"] and config.get("ci_slot_runner_group_id") is None)
+    config = dict(config, ci_priority_only=priority_only)
     if config.get("ci_broker_url"):
         # Keep the request identity across lost replies and controller restarts.
         # The broker can replay the existing JIT config without registering twice.
-        atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"]))
+        atomic(registration, dict(instance=instance, ci_kinds=config["ci_kinds"], **({"priority_only": True} if priority_only else {})))
     name = "fleet-" + config["machine_id"][:12] + "-" + instance
     runner_id, jit = github.jit_config(config, name)
     directory = state_dir() / "vms" / instance
@@ -553,6 +558,7 @@ def _start(config):
         value = dict(
             slot=config.get("ci_slot", 0),
             ci_kinds=config.get("ci_kinds", ["staging"]),
+            **({"ci_priority_only": True} if priority_only else {}),
             repository="TauCetiProject/TauCetiRoadmap" if config.get("ci_kinds") in (["roadmap"], ["control"]) else "TauCetiProject/TauCeti",
             instance=instance,
             unit=unit + ".service",

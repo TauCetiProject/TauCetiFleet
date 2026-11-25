@@ -1211,6 +1211,7 @@ class CISlot:
         self.buffer = b""
         self.next_vm = 0
         self.next_cleanup = 0
+        self.priority_retired_at = 0
 
     def close(self):
         if self.client:
@@ -1218,7 +1219,8 @@ class CISlot:
         self.client = None
         self.buffer = b""
 
-    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False):
+    def step(self, config, *, inventory, refresh, cooling, admitted=None, reservations=None, recovery=None, priority=False,
+             priority_only=False):
         config = dict(capacity.for_slot(config, self.index),
                       # An unused slot still recreates a retired identity a queued job targets.
                       ci_enabled=config["ci_enabled"] and (recovery is not None or not capacity.unused(config, self.index))
@@ -1304,17 +1306,25 @@ class CISlot:
             if (value and value.get("phase") != "cleanup" and not value.get("busy")
                     and (not config["ci_enabled"] or cooling or value.get("withdrawing_at")
                          or native_runner.idle_expired(value, own)
+                         or ci_pool.priority_surplus(value, own, time.time())
                          # infra-slots --pr-slots moves slots between PR and infra.
                          or (value.get("ci_kinds") == ["infra"]) != (config["ci_kinds"] == ["infra"])
                          or (not value.get("ci_bootstrap_waiting")
                              and time.time() - max(value["started_at"], value.get("ci_bootstrap_ready_at", 0)) > 180
                              and own.get("status") != "online"))
                     and (config.get("ci_idle_pool") or time.time() - value["started_at"] >= 60)):
-                if config.get("ci_idle_pool"):
+                surplus = ci_pool.priority_surplus(value, own, time.time())
+                if surplus:
+                    # Native retirement may finish its cleanup later; the slot's next guest
+                    # is ordinary either way.
+                    self.priority_retired_at = time.time()
+                    value["routing_labels"] = ci_pool.labels(value, own)
+                    retired = vm.retire_idle(config, value)
+                elif config.get("ci_idle_pool"):
                     value["routing_labels"] = ci_pool.labels(value, own)
                     retired = (ci_pool.idle_ready(value, own, reservations)
                                and vm.retire_idle(config, value))
-                elif native_runner.is_native(value):
+                elif native_runner.is_native(value) or value.get("ci_priority_only"):
                     # GitHub rejects deregistration if a job won the idle race.
                     value["routing_labels"] = ci_pool.labels(value, own)
                     retired = vm.retire_idle(config, value)
@@ -1326,6 +1336,8 @@ class CISlot:
                     self.close()
                     self.next_vm = time.time() + 5
         if config["ci_enabled"] and not cooling and not value and time.time() >= self.next_vm:
+            if not recovery and priority_only and time.time() - self.priority_retired_at >= ci_pool.PRIORITY_RETRY_SECONDS:
+                config = dict(config, ci_priority_only=True)
             value = vm.start(dict(config, ci_recover_instance=recovery["instance"],
                                   ci_kinds=recovery["ci_kinds"]) if recovery else config)
             self.next_vm = time.time() + (60 if value else 5)
@@ -1401,6 +1413,7 @@ def daemon():
         last_github = 0
         inventory = []
         reservations = None
+        priority_reservations = None
         pool_error = None
         error = None
         ids = []
@@ -1448,10 +1461,21 @@ def daemon():
                             reservations = None
                             pool_error = str(exc)[:200]
                             event("ci_pool_observation_unavailable", reason=str(exc)[:200])
+                        priority_reservations = reservations
+                    else:
+                        # Waiting priority PR builds, so a freed general PR slot can register a
+                        # runner only they can take. Unknown means ordinary registrations.
+                        try:
+                            priority_reservations = ci_pool.priority_observation(config)
+                        except Exception as exc:
+                            priority_reservations = None
+                            event("ci_priority_observation_unavailable", reason=str(exc)[:200])
                 existing = [read(vm.slot_file({"ci_slot": index}, "vm.json"), {}) for index in indexes]
                 recovery_records = ci_pool.recoveries(existing, reservations) if config.get("ci_idle_pool") else []
                 recovery_slots = ci_pool.recovery_slots(config, existing, inventory, reservations, recovery_records)
                 admitted = ci_pool.plan(config, existing, inventory, reservations, recovery_slots, bool(recovery_records))
+                priority_wanted = ci_pool.priority_wanted(existing, priority_reservations)
+                live_instances = {value.get("instance") for value in existing if value}
                 circuit = read(state_dir() / "ci-backoff.json", {})
                 cooling = circuit.get("until", 0) > time.time()
                 values = []
@@ -1460,7 +1484,10 @@ def daemon():
                     slot = slots.setdefault(index, CISlot(index))
                     try:
                         value = slot.step(config, inventory=inventory, refresh=refresh, cooling=cooling,
-                                          admitted=index in admitted, reservations=reservations, recovery=recovery_slots.get(index), priority=True)
+                                          admitted=index in admitted, reservations=reservations, recovery=recovery_slots.get(index), priority=True,
+                                          priority_only=priority_wanted > 0 and ci_pool.priority_slot(config, index))
+                        if value.get("ci_priority_only") and value.get("instance") not in live_instances:
+                            priority_wanted -= 1
                     except (FleetError, OSError, ValueError, KeyError) as exc:
                         slot_errors[str(index)] = str(exc)
                         slot.next_vm = max(slot.next_vm, time.time() + 60)

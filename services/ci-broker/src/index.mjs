@@ -286,12 +286,14 @@ export class FleetRegistry extends DurableObject {
         const input=await req.json();
         if (!new RegExp('^fleet-'+id.slice(0,12)+'-[a-f0-9]{16}$').test(input.name || ''))
           return json({error:'invalid runner name'},400);
-        const index=input.slot ?? 0, kinds=input.kinds ?? ['staging'];
+        const index=input.slot ?? 0, kinds=input.kinds ?? ['staging'], priorityOnly=input.priority_only ?? false;
         const allowed=capacity(host);
         if (!Number.isInteger(index) || index<0 || index>=MAX_JOBS)
           return json({error:'slot must be an integer between 0 and '+(MAX_JOBS-1)},400);
         if (!runnerKinds(kinds) || kinds.some(k=>!allowed.kinds.includes(k)))
           return json({error:'job class exceeds this machine policy'},403);
+        if (typeof priorityOnly!=='boolean' || priorityOnly && !kinds.includes('pr'))
+          return json({error:'only a PR runner can be priority-only'},400);
         const registrations=slots(host);
         const slot=registrations[String(index)] ||= {};
         if (Object.entries(registrations).some(([i,s])=>i!==String(index) &&
@@ -302,7 +304,8 @@ export class FleetRegistry extends DurableObject {
           return json({error:'registration recovery pending; retry automatically',code:'registration_recovery_pending'},409);
         }
         if (slot.runner_id) {
-          if (slot.runner_name===input.name && slot.jit && JSON.stringify(slot.kinds || ['staging'])===JSON.stringify(kinds))
+          if (slot.runner_name===input.name && slot.jit && JSON.stringify(slot.kinds || ['staging'])===JSON.stringify(kinds)
+              && !!slot.priority_only===priorityOnly)
             return json({runner_id:slot.runner_id,encoded_jit_config:slot.jit});
           return json({error:'host already has registered capacity'},409);
         }
@@ -316,7 +319,7 @@ export class FleetRegistry extends DurableObject {
         let value;
         try {
           value=await this.github.request(`orgs/${ORG}/actions/runners/generate-jitconfig`,{kind:'runners',method:'POST',
-            data:{name:input.name,runner_group_id:group,labels:labels(id,input.name,kinds,host.name),work_folder:'_work'}});
+            data:{name:input.name,runner_group_id:group,labels:labels(id,input.name,kinds,host.name,priorityOnly),work_folder:'_work'}});
         } catch (e) {
           if (e instanceof UpstreamError && [400,401,403,404,409,422,429].includes(e.status)) {
             // These are definite rejections, so no runner was created. Only
@@ -330,6 +333,7 @@ export class FleetRegistry extends DurableObject {
           throw e;
         }
         slot.runner_id=value.runner.id; slot.runner_name=input.name; slot.jit=value.encoded_jit_config; slot.kinds=kinds;
+        if (priorityOnly) slot.priority_only=true; else delete slot.priority_only;
         host.issued=[...host.issued,value.runner.id].slice(-4096);
         delete slot.pending;
         await save();
