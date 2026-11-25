@@ -340,12 +340,12 @@ class DocsGuestLaunch(unittest.TestCase):
     def test_docs_guest_is_a_fixed_vm_and_the_first_oom_victim(self):
         self.config = store.update_host(ci_max_jobs=3, ci_protected_slots={"2": dict(kind="docs", runner_group_id=9)})
         value, launch = self.launch(2, "d" * 16)
-        self.assertEqual((value["ci_kinds"], value["vcpus"], value["memory_gib"]), (["docs"], 32, 56))
+        self.assertEqual((value["ci_kinds"], value["vcpus"], value["memory_gib"]), (["docs"], 32, 16))
         self.assertNotIn("runtime", value)
         self.assertIn("OOMScoreAdjust=1000", launch)
         self.assertNotIn("ManagedOOMPreference=avoid", launch)
         self.assertIn("CPUWeight=100", launch)
-        self.assertEqual(launch[launch.index("-m") + 1], str(56 * 1024))
+        self.assertEqual(launch[launch.index("-m") + 1], str(16 * 1024))
         # Other guests keep their OOM protection.
         _, launch = self.launch(0, "e" * 16)
         self.assertIn("ManagedOOMPreference=avoid", launch)
