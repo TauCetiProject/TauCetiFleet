@@ -227,7 +227,7 @@ class DocsCI(unittest.TestCase):
         self.assertTrue(capacity.unused(self.config, 1))
         # Its VM size is fixed, not the host's overcommitted general shape.
         self.assertEqual(capacity.guest_shape(docs, dict(cpus=96, memory_total=125 * 1024**3)),
-                         dict(vcpus=32, memory_gib=16))
+                         dict(vcpus=32, memory_gib=24))
         self.assertFalse(native_runner.selected(docs))
         labels = github.runner_labels(dict(docs, machine_id="a" * 32), "fleet-" + "b" * 16)
         self.assertIn("tauceti-fleet-docs", labels)

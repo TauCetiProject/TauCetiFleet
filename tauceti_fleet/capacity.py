@@ -15,14 +15,16 @@ INFRA_CPU_WEIGHT = 1000
 # The docs guest's fixed shape. A docs build re-analyses every changed TauCeti
 # module with doc-gen4 for hours, with LEAN_NUM_THREADS=8 (TauCetiTools'
 # api-docs.yml), and peaked at about 5.6 GB (25 Nov 2026); it also ran on 16 GB
-# hosted runners. Its VM size is a hard ceiling: the guest kernel sees only
-# this RAM, so an overrun fails inside the guest rather than pressing on the host.
-# The guest never returns its page cache, so within a few hours of build the host
-# holds most of the VM's RAM until the job ends. At 56 GiB that pushed tauchonki2, the queue
-# host, 25 GiB into swap and systemd-oomd killed repair workers (25 Nov 2026).
-# 16 GiB is about three times the build's peak. A fixed shape also keeps it from
-# inheriting the overcommitted size of general guests.
-DOCS_SHAPE = dict(vcpus=32, memory_gib=16)
+# hosted runners. Its VM size is a hard ceiling: the guest kernel sees only this
+# RAM, so an overrun fails inside the guest rather than pressing on the host.
+# Free-page reporting returns only freed guest pages, not the guest's page cache,
+# so over a long build the host comes to hold most of the VM's RAM until the job
+# ends. At 56 GiB that pushed tauchonki2, the queue host, 25 GiB into swap and
+# systemd-oomd killed repair workers (25 Nov 2026). 24 GiB is about four times
+# the observed peak, leaving room for the 32-vCPU steps that LEAN_NUM_THREADS does
+# not cover. A fixed shape also keeps it from inheriting the overcommitted size of
+# general guests.
+DOCS_SHAPE = dict(vcpus=32, memory_gib=24)
 MAX_JOBS = 4096
 
 
