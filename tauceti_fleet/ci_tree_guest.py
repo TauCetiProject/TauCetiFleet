@@ -176,11 +176,12 @@ def output_names(outputs):
     """[(extension, name)] for every output a trace or mapping names; malformed names fail."""
     if not isinstance(outputs, dict):
         raise Invalid("trace or mapping without outputs")
-    # Every module has its three oleans and its ilean; `m` is a flag.
-    if not isinstance(outputs.get("o"), list) or len(outputs["o"]) != 3 or "i" not in outputs:
-        raise Invalid("outputs without their oleans and ilean")
+    # Every module has its ilean, and three oleans in the module system (`m`), one outside it.
     if "m" in outputs and not isinstance(outputs["m"], bool):
         raise Invalid("malformed module flag")
+    oleans = 3 if outputs.get("m", True) else 1
+    if not isinstance(outputs.get("o"), list) or len(outputs["o"]) != oleans or "i" not in outputs:
+        raise Invalid("outputs without their oleans and ilean")
     for key, value in outputs.items():
         if key not in ("o", "m") and not isinstance(value, str):
             raise Invalid(f"malformed {key} output")

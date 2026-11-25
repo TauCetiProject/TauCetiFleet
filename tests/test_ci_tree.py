@@ -473,6 +473,17 @@ class GuestVerify(unittest.TestCase):
         (self.lake / "packages/batteries/.lake/build/lib/lean/Untraced.olean").write_text("x" * 16)
         self.expect_invalid("output files no trace names")
 
+    def test_module_outside_the_module_system_has_one_olean(self):
+        lib = self.lake / "packages/batteries/.lake/build/lib/lean"
+        (lib / "runLinter.olean").write_text("c" * 16)
+        (lib / "runLinter.ilean").write_text("d" * 16)
+        outputs = dict(o=["c" * 16 + ".olean"], i="d" * 16 + ".ilean", m=False)
+        (lib / "runLinter.trace").write_text(json.dumps(dict(schemaVersion="2025-09-10", depHash="e" * 16, outputs=outputs)))
+        self.assertTrue(self.verify()["ok"])
+        outputs["o"] = ["c" * 16 + ".olean"] * 3
+        (lib / "runLinter.trace").write_text(json.dumps(dict(schemaVersion="2025-09-10", depHash="e" * 16, outputs=outputs)))
+        self.expect_invalid("oleans")
+
     def test_trace_removed_with_outputs_left_fails(self):
         (self.lake / "packages/batteries/.lake/build/lib/lean/Batteries.trace").unlink()
         self.expect_invalid("output files no trace names")
