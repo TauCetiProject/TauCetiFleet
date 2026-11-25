@@ -199,10 +199,16 @@ group 3. Runner inventory lists the groups of a host's classes and registered
 slots (group 3 alone for build-only hosts), so special runners can be observed,
 retired, suspended and recovered like any other, a special group's outage does not
 affect build-only hosts, and runners in other groups are never touched. `/v1/policy` keeps `runner_group_id: 3` and adds
-`groups: {"queue-control": 6, "pr-status": 7}`, which hosts compare with their
+`groups: {"queue-control": 6, "pr-status": 7, "infra": 8, "docs": 9}`, which hosts compare with their
 local `ci_protected_slots`. `/v1/groups` returns that mapping and the host's
 classes without the group 3 check, so group 3 drift does not stop special slots. The `control` and `roadmap` classes (TauCetiRoadmap)
 are outside the App installation and stay unsupported.
+
+The `docs` class runs TauCeti's API docs build in group 9 (`TauCetiDocs`). The broker
+requires selected-repository visibility with exactly `TauCetiProject/TauCeti`, and exactly two
+selected workflows: TauCeti's `api-docs.yml` and the shared harness's `api-docs.yml`, both at
+main. Runners carry `tauceti-fleet-docs`; hosts run them in protected slots
+(`ci_protected_slots` kind `docs`), in a fixed-size VM.
 
 The `infra` class runs CI for our own infrastructure repositories (TauCetiCI,
 TauCetiFleet, TauCetiTools and TauCetiWorker) in group 8 (`TauCetiInfra`). Those
