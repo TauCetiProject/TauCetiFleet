@@ -230,9 +230,12 @@ TauCeti's API docs build can reserve `ci_protected_slots` with `kind = "docs"` i
 the label `tauceti-fleet-docs`, which only docs slots offer, so docs builds land only on hosts
 the operator grants the class to and never on contributor hosts. The guest is a VM of fixed
 shape, 32 vCPUs and 56 GiB, with the host's `ci_disk_gib` of disk; the VM size is a hard memory
-ceiling, so an oversized build fails inside the guest instead of pressing on the host's other
-services. The slot stays warm, PR recovery cannot borrow it, and its jobs keep normal Lean and
-CPU priority, below staging and infra.
+ceiling for the build. The guest does not reserve that RAM, so with other CI on the host the
+shared CI ceiling can still be reached first. The docs guest is then the first OOM victim
+(`OOMScoreAdjust=1000`), ahead of staging and control guests, and its next run resumes from the
+last saved docs state. doc-gen4 runs its own executable, not `lean`, so the Lean pressure gate
+does not admit its processes; the guest's CPU weight is the PR builds' 100, below staging and
+infra. The slot stays warm and PR recovery cannot borrow it.
 
 PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
 in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
