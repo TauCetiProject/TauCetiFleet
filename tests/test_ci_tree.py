@@ -650,6 +650,17 @@ class GuestVerify(unittest.TestCase):
         self.assertTrue((directory / ".tauceti-lean-ready").exists())
         self.assertNotEqual(ci_tree_guest.tree_digest(directory), prepared)
         self.assertEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)
+        # The marker selects the executable the wrapper runs: anything but this watchdog fails.
+        marker = (directory / ".tauceti-lean.json").read_text()
+        for bad in ('{"lean": "/attacker/lean"}', "not json", '{"lean": "%s", "x": 1}' % (directory / "bin/lean-watchdog")):
+            (directory / ".tauceti-lean.json").write_text(bad)
+            with self.assertRaises(ci_tree_guest.Invalid):
+                ci_tree_guest.watchdog_digest(directory, wrapper)
+        (directory / ".tauceti-lean.json").unlink()
+        with self.assertRaises(ci_tree_guest.Invalid):
+            ci_tree_guest.watchdog_digest(directory, wrapper)
+        (directory / ".tauceti-lean.json").write_text(marker)
+        self.assertEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)
         # A different prepared watchdog still differs once installed.
         (directory / "bin/lean-watchdog").write_text("#!/bin/sh\nother\n")
         self.assertNotEqual(ci_tree_guest.watchdog_digest(directory, wrapper), prepared)

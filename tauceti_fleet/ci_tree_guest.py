@@ -117,6 +117,14 @@ def watchdog_digest(root, wrapper):
         lean = root / "bin/lean"
         if lean.is_symlink() or not lean.is_file() or sha256_file(lean) != sha256_file(wrapper):
             raise Invalid("the watchdog's bin/lean is neither the watchdog nor the pressure wrapper")
+        # The marker chooses the executable the wrapper runs: it must be this tree's watchdog.
+        marker = root / ".tauceti-lean.json"
+        try:
+            selected = json.loads(marker.read_text()) if regular(marker) else None
+        except (OSError, ValueError):
+            selected = None
+        if selected != {"lean": str(root.absolute() / "bin/lean-watchdog")}:
+            raise Invalid("the pressure wrapper's marker does not select this watchdog")
     elif any((root / name).exists() or (root / name).is_symlink() for name in WATCHDOG_STATE):
         raise Invalid("watchdog wrapper state without an installed wrapper")
     return tree_digest(root, watchdog=installed)
