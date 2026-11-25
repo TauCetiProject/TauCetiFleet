@@ -1117,7 +1117,8 @@ and the last success is more than 24 hours old, it sends one alert; the next suc
 one recovery message. An unreadable run list neither opens nor closes the alert.
 
 Without `--zulip-config` the messages go only to the unit's journal
-(`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot. The file
+(`journalctl --user -u tauceti-fleet-alert`). With it, they are posted as a Zulip bot,
+each opening with ":robot: Claude says:". The file
 must be mode 0600 and names either a stream and topic or a user to message privately:
 
 ```json

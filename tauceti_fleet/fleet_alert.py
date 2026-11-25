@@ -172,8 +172,14 @@ def recovery_text(name, health, opened_for):
     return f":check: **{name}** recovered after {duration(opened_for)}. Now {snapshot(health)}."
 
 
+# Every posted message opens with this, so an automated alert is never mistaken for a person.
+PREFIX = ":robot: Claude says: "
+
+
 def zulip(config, text):
-    """Post one message as the configured bot: to a stream topic, or privately to one user."""
+    """Post one message as the configured bot: to a stream topic, or privately to one user.
+    The posted text opens with `PREFIX`; the journal keeps the bare text."""
+    text = text if text.startswith(PREFIX) else PREFIX + text
     from .ci_overview import status_ssl_context
 
     site = urllib.parse.urlsplit(config["site"])
