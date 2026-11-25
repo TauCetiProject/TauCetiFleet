@@ -16,6 +16,7 @@ from . import (
     ci_overview,
     ci_pool,
     ci_priority,
+    drive_io,
     focus,
     github,
     lean_pressure,
@@ -1406,6 +1407,7 @@ def daemon():
         last_results = 0
         memory_paused = False
         export = StatusExport()
+        drives = drive_io.DriveIO()
         previous_tasks = None
         published = None
         while not stopping:
@@ -1535,6 +1537,7 @@ def daemon():
                         repair_memory=repair_memory,
                         memory_pressure=pressure,
                         resources=caps,
+                        drive_io=drives.poll(),
                         cpu_idle_fraction=idle,
                         workers=worker_view.rows(worker_statuses()),
                         worker_events=worker_view.events(state_dir() / "worker-events.jsonl"),

@@ -42,6 +42,23 @@ def identity(value, pattern):
     return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
 
 
+def drives(value):
+    """The controller's last minute of per-drive write rate and latency."""
+    if not isinstance(value, dict) or not isinstance(value.get("drives"), list):
+        return None
+    keys = ("writes_per_second", "write_mib_per_second", "write_latency_ms", "reads_per_second",
+            "read_mib_per_second", "read_latency_ms", "utilization", "in_flight")
+    return {
+        "observed_at": stamp(value.get("at")),
+        "interval_seconds": number(value.get("interval_seconds")),
+        "drives": [
+            {"device": identity(row.get("device"), r"[a-z0-9-]{1,16}"), **{k: number(row.get(k)) for k in keys}}
+            for row in value["drives"][:32]
+            if isinstance(row, dict)
+        ],
+    }
+
+
 def project(entry, value, transport_at=None, connected=False):
     if value.get("machine_id") not in (None, entry["machine_id"]):
         raise ValueError("permanent host identity mismatch")
@@ -144,6 +161,7 @@ def project(entry, value, transport_at=None, connected=False):
             "unknown_rounds": round_count("unknown"),
         },
         "resources": {k: number(resources.get(k)) for k in ("cpus", "memory_total", "memory_available")},
+        "drive_io": drives(state.get("drive_io")),
         "cpu_idle_fraction": number(state.get("cpu_idle_fraction")),
         "memory_pressure": bool(state.get("memory_pressure")) if "memory_pressure" in state else None,
         "compiler": {
