@@ -204,6 +204,58 @@ class InfraSlotsCommand(unittest.TestCase):
         self.assertEqual(store.host_config()["ci_protected_slots"]["14"]["kind"], "pr-status")
 
 
+class DocsCI(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        env = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": temporary.name})
+        env.start()
+        self.addCleanup(env.stop)
+        # A staging host's reserved slot, one docs slot, and infra slots above it.
+        self.config = dict(ci_enabled=True, ci_max_jobs=5, ci_staging_slots=1, ci_idle_pool=True,
+                           ci_kinds=["staging"], runner_group_id=3, ci_memory_gib=32, ci_vcpus=16,
+                           ci_protected_slots={"2": dict(kind="docs", runner_group_id=9),
+                                               "3": dict(kind="infra", runner_group_id=8),
+                                               "4": dict(kind="infra", runner_group_id=8)})
+
+    def test_docs_slot_is_a_fixed_size_vm_that_builds_cannot_borrow(self):
+        docs = capacity.for_slot(self.config, 2)
+        docs["unit"] = "docs-guest"
+        self.assertEqual(capacity.kinds(docs), ["docs"])
+        self.assertEqual(docs["ci_slot_runner_group_id"], 9)
+        self.assertFalse(capacity.unused(self.config, 2))
+        self.assertTrue(capacity.unused(self.config, 1))
+        # Its VM size is fixed, not the host's overcommitted general shape.
+        self.assertEqual(capacity.guest_shape(docs, dict(cpus=96, memory_total=125 * 1024**3)),
+                         dict(vcpus=32, memory_gib=56))
+        self.assertFalse(native_runner.selected(docs))
+        labels = github.runner_labels(dict(docs, machine_id="a" * 32), "fleet-" + "b" * 16)
+        self.assertIn("tauceti-fleet-docs", labels)
+        for label in ("tauceti-fleet", "tauceti-fleet-pr", "tauceti-fleet-staging", "tauceti-fleet-infra"):
+            self.assertNotIn(label, labels)
+        # A PR or staging backlog cannot take the docs slot.
+        busy = [dict(slot=i, runner_id=i + 100, busy=True) for i in (0, 3, 4)]
+        self.assertEqual(ci_pool.recovery_slots(self.config, busy, [], dict(queued=[["tauceti-fleet-pr"]]),
+                         [dict(instance="a" * 16, ci_kinds=["docs"], labels=["tauceti-fleet-docs"])]), {})
+        with patch.object(ci_priority, "run") as run, patch.object(github, "ci_read") as metadata:
+            ci_priority.classify(self.config, docs, 100)
+        metadata.assert_not_called()
+        # Normal Lean and CPU priority: staging and infra go first.
+        self.assertEqual(docs["ci_job_kind"], "docs")
+        self.assertFalse(ci_priority.staging(docs))
+        self.assertEqual(docs["cpu_weight"], 100)
+        run.assert_called_once_with(["systemctl", "--user", "set-property", "--runtime", "docs-guest", "CPUWeight=100"])
+
+    def test_docs_runners_register_only_through_the_broker(self):
+        with self.assertRaises(store.FleetError):
+            github.protected_policy(dict(ci_kinds=["docs"], ci_slot_runner_group_id=9), {})
+        self.assertEqual(capacity.broker_slot_group(2, dict(kind="docs", runner_group_id=9),
+                                                    dict(kinds=["staging", "docs"], groups={"docs": 9})), 9)
+        for policy in (dict(kinds=["staging"], groups={"docs": 9}), dict(kinds=["staging", "docs"], groups={})):
+            with self.assertRaises(store.FleetError):
+                capacity.broker_slot_group(2, dict(kind="docs", runner_group_id=9), policy)
+
+
 class PRStatusCI(unittest.TestCase):
     def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
         config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,

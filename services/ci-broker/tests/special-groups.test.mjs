@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub,PolicyError} from '../src/github.mjs';
-import {INFRA_GROUP,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
+import {DOCS_GROUP,INFRA_GROUP,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
 import {INFRA_REPOSITORIES} from '../src/github.mjs';
 import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
 
@@ -9,7 +9,8 @@ const workflow=(repo,name)=>'TauCetiProject/'+repo+'/.github/workflows/'+name+'@
 const queue=[workflow('TauCeti','pick-runner.yml'),workflow('TauCeti','pr-build.yml'),workflow('TauCeti','publish-lake-cache.yml')];
 const harness=[workflow('TauCetiTools','pr-build.yml'),workflow('TauCetiTools','publish-lake-cache.yml')];
 const status=[workflow('TauCeti','pr-status.yml'),workflow('TauCeti','pr-labels.yml')];
-const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus',[INFRA_GROUP]:'TauCetiInfra'};
+const docs=[workflow('TauCeti','api-docs.yml'),workflow('TauCetiTools','api-docs.yml')];
+const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus',[INFRA_GROUP]:'TauCetiInfra',[DOCS_GROUP]:'TauCetiDocs'};
 function client(group,{workflows,visibility='selected',restricted=true,repositories=['TauCetiProject/TauCeti'],name=names[group]},calls=[]) {
   const github=new GitHub({});
   github.request=async path=>{
@@ -53,6 +54,22 @@ test('pr-status requires exactly its two main workflows on TauCeti',async()=>{
     {workflows:status,visibility:'all'},{workflows:status,restricted:false},
     {workflows:status,repositories:['TauCetiProject/TauCeti','someone/Other']}])
     await assert.rejects(client(7,settings).policy({group:7,fresh:true}),PolicyError);
+});
+test('docs requires exactly the API docs caller and its harness job at main, on TauCeti only',async()=>{
+  assert.equal(groupFor(['docs']),DOCS_GROUP);
+  assert.ok(runnerKinds(['docs']));
+  assert.ok(hostKinds(['pr','staging','docs']));
+  for (const kinds of [['pr','docs'],['docs','pr-status'],['staging','docs']]) assert.ok(!runnerKinds(kinds));
+  assert.deepEqual(labels('a'.repeat(32),'fleet-x-'+'b'.repeat(16),['docs'],'Tauchonki2').at(-1),'tauceti-fleet-docs');
+  assert.deepEqual(await client(DOCS_GROUP,{workflows:docs}).policy({group:DOCS_GROUP,fresh:true}),{runner_group_id:DOCS_GROUP});
+  assert.deepEqual(await client(DOCS_GROUP,{workflows:[...docs].reverse()}).policy({group:DOCS_GROUP,fresh:true}),{runner_group_id:DOCS_GROUP});
+  for (const settings of [{workflows:docs.slice(1)},{workflows:docs.slice(0,1)},{workflows:[...docs,queue[1]]},
+    {workflows:[...docs,workflow('TauCetiTools','pr-build.yml')]},
+    {workflows:docs.map(w=>w.replace('refs/heads/main','refs/heads/other'))},
+    {workflows:docs,visibility:'all'},{workflows:docs,restricted:false},{workflows:docs,name:'TauCetiFleet'},
+    {workflows:docs,repositories:['TauCetiProject/TauCeti','TauCetiProject/TauCetiTools']},
+    {workflows:docs,repositories:['TauCetiProject/TauCetiTools']},{workflows:docs,repositories:[]}])
+    await assert.rejects(client(DOCS_GROUP,settings).policy({group:DOCS_GROUP,fresh:true}),PolicyError);
 });
 test('infra admits any workflow of exactly the four infrastructure repositories',async()=>{
   const infra=INFRA_REPOSITORIES;

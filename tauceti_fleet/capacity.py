@@ -8,9 +8,18 @@ KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 # Classes of protected slots, each in its own runner group. `infra` runs our own
 # infrastructure repositories' CI on native-disk slots, above PR builds' CPU
 # weight and below staging's: someone is usually waiting on an infra job.
-PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra")
+# `docs` runs TauCeti's API documentation build in a VM of its own (DOCS_SHAPE).
+PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra", "docs")
 # CPU weight of infra jobs; PR builds have 100 and staging 10000.
 INFRA_CPU_WEIGHT = 1000
+# The docs guest's fixed shape. A docs build re-analyses every changed TauCeti
+# module with doc-gen4 for hours and has needed up to about 54 GiB, the cap of
+# the native PR jobs it ran in before. Its VM size is a hard ceiling: the guest
+# kernel sees only this RAM, so an overrun fails inside the guest rather than
+# pressing on the host, and on the operator host the queue controller, repair
+# workers and staging keep the rest. A fixed shape also keeps it from inheriting
+# the overcommitted size of general guests.
+DOCS_SHAPE = dict(vcpus=32, memory_gib=56)
 MAX_JOBS = 4096
 
 
@@ -22,6 +31,8 @@ def guest_shape(config, caps=None):
         return dict(vcpus=2, memory_gib=4)
     if config.get("ci_kinds") == ["roadmap"]:
         return dict(vcpus=16, memory_gib=32)
+    if config.get("ci_kinds") == ["docs"]:
+        return dict(DOCS_SHAPE)
     if caps is None:
         from .capabilities import resources
 

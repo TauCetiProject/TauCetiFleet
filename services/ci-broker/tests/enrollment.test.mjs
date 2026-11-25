@@ -143,7 +143,7 @@ test('one-time enrollment binds a durable credential to one machine',async()=>{
   assert.equal((await hostRequest(id1,token2,'/v1/policy')).status,401);
   assert.equal((await hostRequest(id2,token1,'/v1/policy')).status,401);
   assert.deepEqual(await (await hostRequest(id1,token1,'/v1/policy')).json(),
-    {runner_group_id:3,groups:{'queue-control':6,'pr-status':7,infra:8},max_jobs:4096,kinds:['staging']});
+    {runner_group_id:3,groups:{'queue-control':6,'pr-status':7,infra:8,docs:9},max_jobs:4096,kinds:['staging']});
 });
 test('concurrent registration creates one runner and cannot change its group, labels, or machine',async()=>{
   const name='fleet-'+id1.slice(0,12)+'-'+'a'.repeat(16);
@@ -443,7 +443,7 @@ test('special classes register in their own groups, appear in inventory and can 
   const id='4a'.repeat(16),token='q'.repeat(64),prefix='fleet-'+id.slice(0,12)+'-';
   await enroll(id,token,'special-host',{kinds:specialKinds});
   const policy=await (await hostRequest(id,token,'/v1/policy')).json();
-  assert.deepEqual(policy,{runner_group_id:3,groups:{'queue-control':6,'pr-status':7,infra:8},max_jobs:4096,kinds:specialKinds});
+  assert.deepEqual(policy,{runner_group_id:3,groups:{'queue-control':6,'pr-status':7,infra:8,docs:9},max_jobs:4096,kinds:specialKinds});
   const register=(slot,kinds,n)=>hostRequest(id,token,'/v1/runners','POST',{slot,kinds,name:prefix+String(n).repeat(16)});
   for (const kinds of [['pr','pr-status'],['queue-control','pr-status'],['staging','queue-control'],['control']])
     assert.equal((await register(9,kinds,1)).status,403);
@@ -553,7 +553,7 @@ test('group 3 drift blocks build registrations but not the special-group mapping
   await enroll(id,token,'group3-drift',{kinds:specialKinds});
   trustedPolicy=false;
   try {
-    assert.deepEqual(await (await hostRequest(id,token,'/v1/groups')).json(),{groups:{'queue-control':6,'pr-status':7,infra:8},kinds:specialKinds});
+    assert.deepEqual(await (await hostRequest(id,token,'/v1/groups')).json(),{groups:{'queue-control':6,'pr-status':7,infra:8,docs:9},kinds:specialKinds});
     assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'1'.repeat(16),slot:2,kinds:['pr']})).status,503);
     assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'2'.repeat(16),slot:7,kinds:['queue-control']})).status,200);
     assert.equal((await hostRequest(id,token,'/v1/runners','POST',{name:prefix+'3'.repeat(16),slot:11,kinds:['pr-status']})).status,200);

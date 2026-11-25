@@ -223,6 +223,20 @@ need it. Replacing the base image remains a separate `prepare` operation. `prepa
 Existing releases and worker runtimes
 are retained while processes may still reference them.
 
+TauCeti's API docs build can reserve `ci_protected_slots` with `kind = "docs"` in the
+`TauCetiDocs` runner group (group 9), on a broker-enrolled host whose enrollment allows
+`docs`. The group must select only `TauCetiProject/TauCeti` and exactly TauCeti's
+`api-docs.yml` and TauCetiTools' `api-docs.yml`, both at `refs/heads/main`. Its runners carry
+the label `tauceti-fleet-docs`, which only docs slots offer, so docs builds land only on hosts
+the operator grants the class to and never on contributor hosts. The guest is a VM of fixed
+shape, 32 vCPUs and 56 GiB, with the host's `ci_disk_gib` of disk; the VM size is a hard memory
+ceiling for the build. The guest does not reserve that RAM, so with other CI on the host the
+shared CI ceiling can still be reached first. The docs guest is then the first OOM victim
+(`OOMScoreAdjust=1000`), ahead of staging and control guests, and its next run resumes from the
+last saved docs state. doc-gen4 runs its own executable, not `lean`, so the Lean pressure gate
+does not admit its processes; the guest's CPU weight is the PR builds' 100, below staging and
+infra. The slot stays warm and PR recovery cannot borrow it.
+
 PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
 in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
 and 4 GiB RAM, stay warm independently of the build backlog, and cannot be borrowed

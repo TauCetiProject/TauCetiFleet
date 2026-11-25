@@ -573,8 +573,12 @@ def _start(config):
                 "-p",
                 "CPUWeight=" + ("10000" if config.get("ci_kinds") in (["staging"], ["queue-control"], ["pr-status"])
                                 else str(INFRA_CPU_WEIGHT) if config.get("ci_kinds") == ["infra"] else "100"),
-                "-p",
-                "ManagedOOMPreference=avoid",
+                # If the shared ceiling is reached, the docs guest goes first: its
+                # QEMU is one large process at the highest OOM score, so the kernel
+                # picks it before staging and control guests or single build
+                # processes. Its next run resumes from the last saved docs state.
+                *(["-p", "OOMScoreAdjust=1000"] if config.get("ci_kinds") == ["docs"]
+                  else ["-p", "ManagedOOMPreference=avoid"]),
                 "-p",
                 "MemorySwapMax=0",
                 "-p",

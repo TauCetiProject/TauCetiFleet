@@ -319,3 +319,34 @@ class WarmStagingDisk(unittest.TestCase):
             self.assertIsNone(vm.remove_warm_disk(config))  # never stops the slot
         run.assert_called_once()
         self.assertTrue(path.exists())
+
+
+class DocsGuestLaunch(unittest.TestCase):
+    setUp = WarmStagingDisk.setUp
+
+    def launch(self, index, instance):
+        def run(args, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with (patch.object(vm, "CI_START_GAP_SECONDS", 0),
+              patch.object(github, "jit_config", return_value=(100 + index, "jit")),
+              patch.object(vm, "run", side_effect=run) as calls,
+              patch.object(vm, "executable", side_effect=lambda name: name),
+              patch.object(vm, "cloud_seed", return_value=self.root / "seed.iso"),
+              patch.object(vm.secrets, "token_hex", return_value=instance)):
+            value = vm.start(dict(self.config, ci_slot=index))
+        return value, next(c.args[0] for c in calls.call_args_list if c.args[0][0] == "systemd-run")
+
+    def test_docs_guest_is_a_fixed_vm_and_the_first_oom_victim(self):
+        self.config = store.update_host(ci_max_jobs=3, ci_protected_slots={"2": dict(kind="docs", runner_group_id=9)})
+        value, launch = self.launch(2, "d" * 16)
+        self.assertEqual((value["ci_kinds"], value["vcpus"], value["memory_gib"]), (["docs"], 32, 56))
+        self.assertNotIn("runtime", value)
+        self.assertIn("OOMScoreAdjust=1000", launch)
+        self.assertNotIn("ManagedOOMPreference=avoid", launch)
+        self.assertIn("CPUWeight=100", launch)
+        self.assertEqual(launch[launch.index("-m") + 1], str(56 * 1024))
+        # Other guests keep their OOM protection.
+        _, launch = self.launch(0, "e" * 16)
+        self.assertIn("ManagedOOMPreference=avoid", launch)
+        self.assertNotIn("OOMScoreAdjust=1000", launch)
