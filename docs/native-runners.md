@@ -235,6 +235,12 @@ they build the same PRs on the same drives at the same time without the tree: a 
 for measurement (TauCetiWorker decision 216). The default is `all`. A guest leases when it
 starts, so a change reaches each slot at its next guest.
 
+The split needs this revision on both ends. `--slots` sets the split on its own first and
+refuses to go on unless the host echoes it back. The controller reports the split it applies
+as `ci_shared_tree.slots` in `status.json`, so check that field after an update before relying
+on the control group. An older controller ignores the setting and offers the tree to every PR
+slot, so switch the tree off before rolling a host back past this revision.
+
 Tools' `pr-build.yml` mounts the leased entry as the lower layer of a private overlay at
 `pr/.lake` in ordinary PR builds (Tools `scripts/shared_tree.py`), with today's path on any key
 mismatch. It writes a trusted record of each job (`hit` or `miss:<reason>`, the upper layer's

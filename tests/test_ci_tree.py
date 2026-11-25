@@ -197,6 +197,35 @@ class Pool(unittest.TestCase):
                 host.rpc(dict(action="ci-tree", setting=None, slots="half"))
         self.assertEqual(store.read(store.config_dir() / "host.json")[ci_tree.SLOTS_SETTING], "even")
 
+    def test_cli_refuses_to_switch_on_when_the_host_ignores_the_split(self):
+        import io
+        from tauceti_fleet import remote
+        from tauceti_fleet.cli import main
+        entry = dict(target="c5", machine_id="m")
+        calls = []
+
+        def old_host(target, payload, **kwargs):
+            calls.append(payload)
+            return dict(enabled=payload.get("setting") == "on")  # no `slots`: an older revision
+
+        with (patch.object(remote, "inventory", return_value={"c5": entry}), patch.object(remote, "resolve", return_value=entry),
+              patch.object(remote, "call", side_effect=old_host), patch("sys.stdout", new=io.StringIO()),
+              patch("sys.stderr", new=io.StringIO())):
+            main(["ci-tree", "c5", "--on", "--slots", "even", "--json"])
+        self.assertEqual(calls, [dict(action="ci-tree", setting=None, slots="even")])
+
+        calls.clear()
+
+        def new_host(target, payload, **kwargs):
+            calls.append(payload)
+            return dict(enabled=payload.get("setting") == "on", slots="even")
+
+        with (patch.object(remote, "inventory", return_value={"c5": entry}), patch.object(remote, "resolve", return_value=entry),
+              patch.object(remote, "call", side_effect=new_host), patch("sys.stdout", new=io.StringIO())):
+            self.assertEqual(main(["ci-tree", "c5", "--on", "--slots", "even", "--json"]), 0)
+        self.assertEqual(calls, [dict(action="ci-tree", setting=None, slots="even"),
+                                 dict(action="ci-tree", setting="on", slots=None)])
+
     def test_native_cleanup_keeps_the_shared_tree_record(self):
         directory = store.state_dir() / "vms" / INSTANCE
         (directory / "control/telemetry").mkdir(parents=True)

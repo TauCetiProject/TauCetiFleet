@@ -490,6 +490,18 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                 results[name] = remote.deploy(entry["target"], **options)
                 continue
             try:
+                if action == "ci-tree" and args.slots is not None:
+                    # A host revision without the split ignores `slots` and would then offer the
+                    # tree to every slot. Set the split alone first and require the host to echo
+                    # it before any switch is applied.
+                    split = remote.call(entry["target"], dict(action=action, setting=None, slots=args.slots),
+                                        timeout=90, expected_machine_id=entry["machine_id"])
+                    if split.get("slots") != args.slots:
+                        raise FleetError("this host's revision does not support --slots; update it first")
+                    if args.setting is None:
+                        results[name] = split
+                        continue
+                    payload = dict(payload, slots=None)
                 results[name] = remote.call(
                     entry["target"],
                     payload,
