@@ -99,8 +99,9 @@ def _enroll(url, *, token_file, code):
 
     url = validate_url(url)
     config = host_config()
-    if config["ci_enabled"] or config["workers_enabled"]:
-        raise FleetError("Drain this host before enrolling it for CI")
+    # Workers may keep running: enrollment changes only CI settings.
+    if config["ci_enabled"]:
+        raise FleetError("Drain this host's CI before enrolling it for CI")
     from .vm import outstanding
 
     if outstanding():

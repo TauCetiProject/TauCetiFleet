@@ -88,7 +88,11 @@ does not enable CI, enable workers, grant a budget, or authenticate any AI agent
 It preserves an existing worker profile and identity. Software updates retain
 the enrolled server's credentials without copying the operator machine's profile.
 `prepare` currently installs the worker package alongside the CI image, but does
-not run workers. Existing hosts must drain before enrollment or reconfiguration.
+not run workers. A host whose CI is enabled must drain its CI before enrollment or CI
+reconfiguration. A host that runs only workers needs no drain: while its CI is disabled and no
+guest or registration is outstanding, `enroll`, `prepare` and `enable --ci` change only CI
+settings and leave its workers running. Run `update` first, so the release `enroll` installs is
+the one the controller runs. Worker settings such as the profile still need a drain.
 
 Every slot has a separate GitHub registration and pending-registration record.
 The service issues class, machine, and instance labels; a PR-only guest never

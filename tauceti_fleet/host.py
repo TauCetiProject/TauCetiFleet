@@ -108,6 +108,21 @@ def install_pressure_service():
     run(["systemctl", "--user", "try-restart", "tauceti-fleet-pressure.service"])
 
 
+# Host settings that only CI guests read. While CI is disabled and no guest or
+# registration is outstanding, changing them cannot affect running work.
+CI_SETTINGS = frozenset({"ci_allowed", "ci_broker_url", "runner_group_id", "ci_vcpus", "ci_memory_gib",
+                         "ci_disk_gib", "ci_max_jobs", "ci_kinds"})
+
+
+def ci_role_idle(config):
+    """CI is disabled and no CI guest or runner registration is outstanding.
+
+    Workers may be running. Enrolling, preparing the CI image and enabling CI on
+    such a host retire nothing, so they need no drain of the worker role.
+    """
+    return not config["ci_enabled"] and not vm.outstanding()
+
+
 def configure(payload):
     allowed = {
         "profile",
@@ -147,6 +162,10 @@ def configure(payload):
     capacity.staging_slots(dict(current, **updates))
     # Worker definition settings apply between rounds, like `workers`; the rest need a drain.
     live = {"max_open_prs", "author_model", "author_effort", "github_state_url"}
+    if ci_role_idle(current):
+        # No CI guest exists to retire, so CI enrollment and shape settings change
+        # live while workers run; worker settings still wait for a drain.
+        live |= CI_SETTINGS
     if current["ci_enabled"] or current["workers_enabled"] or vm.outstanding():
         if any(current.get(k) != v for k, v in updates.items() if k not in live):
             raise FleetError("Drain active roles before changing host profile or resource configuration")
@@ -194,7 +213,9 @@ def configure(payload):
 
 def prepare(config=None):
     config = config or host_config()
-    if config["ci_enabled"] or config["workers_enabled"] or vm.outstanding():
+    # Running workers keep their runtime; the staged Worker applies at their next
+    # start, as in a live update. Only a CI guest has to be gone.
+    if not ci_role_idle(config):
         raise FleetError("Drain this host and wait for its CI guest to exit before preparing runtimes")
     from .update import latest_worker_revision, stage_worker, symlink
     with locked(state_dir() / "worker-runtime-upgrade.lock"):
@@ -639,7 +660,9 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
             and capacity.staging_slots(config) > 0 and capacity.jobs(proposed) == capacity.jobs(config)
             and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
         )
-        if changed and not (growing or narrowing) and (config["ci_enabled"] or config["workers_enabled"] or vm.outstanding()):
+        # Running workers need no drain: write_slices refuses a CI budget that
+        # leaves them too little memory, and no CI guest exists to retire.
+        if changed and not (growing or narrowing) and not ci_role_idle(config):
             raise FleetError("Drain this host and wait for every CI slot to retire before changing its CI classes or capacity")
         config = proposed
     result = doctor(config)

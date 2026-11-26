@@ -155,6 +155,36 @@ class Enrollment(unittest.TestCase):
             with self.assertRaisesRegex(store.FleetError, "Drain"):
                 broker.enroll()
 
+    def test_a_host_running_workers_enrolls_for_ci_without_a_drain(self):
+        prior = store.update_host(profile="science", workers_enabled=True, max_workers=40, ci_allowed=False)
+        with patch.object(broker, "request", return_value=dict(machine_id=prior["machine_id"], runner_group_id=3)), \
+                patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+            broker.enroll(code="i" * 64)
+        config = store.host_config()
+        self.assertTrue(config["workers_enabled"])
+        self.assertFalse(config["ci_enabled"])
+        self.assertTrue(config["ci_allowed"])
+        self.assertEqual(config["ci_broker_url"], broker.DEFAULT_URL)
+        self.assertEqual((config["profile"], config["max_workers"]), ("science", 40))
+
+    def test_worker_settings_still_need_a_drain_while_workers_run(self):
+        store.update_host(workers_enabled=True, max_workers=40)
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(max_workers=20))
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(profile="other"))
+        host.configure(dict(ci_memory_gib=24, ci_vcpus=32))
+        self.assertEqual(store.host_config()["ci_memory_gib"], 24)
+
+    def test_ci_settings_need_a_drain_once_ci_runs(self):
+        store.update_host(workers_enabled=True, ci_enabled=True)
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(ci_memory_gib=24))
+        store.update_host(ci_enabled=False)
+        store.atomic(store.state_dir() / "vm.json", {"instance": "a" * 16})
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.configure(dict(ci_memory_gib=24))
+
     def test_draining_guests_and_pending_registrations_must_retire_before_enrollment(self):
         for filename in ("vm.json", "ci-registration.json"):
             with self.subTest(filename=filename):
