@@ -132,6 +132,18 @@ class ActivityTests(unittest.TestCase):
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (2, 2))
         self.assertNotIn("attribution_prs", row)
+        # An older host that counts no landed PRs cannot overlap the others.
+        idle = host_value([], [])
+        for row in idle["summary"]["costs"]["windows"].values():
+            del row["attribution_prs"]
+        row = activity.combine_status([first, second, idle])["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (2, 2))
+        # A lone counting host keeps its own count beside an idle updated host.
+        legacy = host_value([7], [8])
+        for row in legacy["summary"]["costs"]["windows"].values():
+            del row["attribution_prs"]
+        row = activity.combine_status([legacy, host_value([], [])])["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (1, 1))
         # An older host without identities leaves the distinct count unknown.
         del second["summary"]["costs"]["windows"]["24h"]["attribution_prs"]
         mixed = activity.combine_status([first, second])
