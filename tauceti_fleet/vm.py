@@ -211,6 +211,7 @@ def prepare_image(config=None):
         ]
         seed = cloud_seed(staging, commands, name="fleet-prepare-" + secrets.token_hex(6))
         unit = "tauceti-fleet-image-" + secrets.token_hex(4)
+        require_helper_memory()
         try:
             result = run(
                 scope_args(unit, qemu_args(config, staging, disk, seed, small=True), small=True),
@@ -368,6 +369,20 @@ def start_memory_available():
         return lean_pressure.memory(relative)[1]
     except (OSError, ValueError, KeyError):
         return None
+
+
+# Image preparation and smoke guests run in 3 GiB scopes inside the CI slice, which
+# shares its parent ceiling with running workers. Booting one with less than this
+# free there could make a worker the victim of the parent's OOM kill.
+HELPER_START_MEMORY_BYTES = 6 * 1024**3
+
+
+def require_helper_memory():
+    """Refuse a preparation or smoke guest that the shared ceiling cannot hold."""
+    available = start_memory_available()
+    if available is not None and available < HELPER_START_MEMORY_BYTES:
+        raise FleetError(f"Only {available / 1024**3:.1f} GiB is free under the shared CI and worker ceiling; "
+                         f"a preparation guest needs {HELPER_START_MEMORY_BYTES // 1024**3} GiB. Retry when running work frees memory")
 
 
 def start_memory_ok(config=None):
@@ -732,6 +747,7 @@ print('FLEET_SANDBOX_OK')
         commands += [f"echo FLEET_SMOKE_{number}_OK; sync; poweroff"]
         seed = cloud_seed(directory, commands, name="fleet-smoke-" + secrets.token_hex(6))
         unit = "tauceti-fleet-smoke-" + secrets.token_hex(4)
+        require_helper_memory()
         try:
             result = run(
                 scope_args(unit, qemu_args(config, directory, disk, seed, small=True), small=True),

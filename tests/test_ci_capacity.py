@@ -210,6 +210,41 @@ class Capacity(unittest.TestCase):
         self.assertEqual([c.args[1]["slot"] for c in retire.call_args_list], [1])
         self.assertEqual([c.args[0]["ci_kinds"] for c in start.call_args_list], [["queue-control"]])
 
+    def test_ci_is_prepared_and_enabled_live_on_a_host_running_workers(self):
+        store.update_host(workers_enabled=True, ci_broker_url=broker.DEFAULT_URL, runner_group_id=3)
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        with patch("tauceti_fleet.update.latest_worker_revision", return_value="b" * 40), \
+                patch("tauceti_fleet.update.stage_worker", return_value=self.root / "venv"), \
+                patch("tauceti_fleet.update.symlink"), patch.object(vm, "prepare_image", return_value={"sha256": "a" * 64}), \
+                patch.object(host.native_runner, "prepare_for_ci", return_value=None), patch.object(vm, "smoke", return_value={}):
+            self.assertEqual(host.prepare()["worker_revision"], "b" * 40)
+        store.update_host(ci_max_jobs=1, ci_protected_slots={"0": dict(kind="docs", runner_group_id=9)})
+        policy = dict(kinds=["staging", "docs"], groups={"docs": 9})
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready", workers="ready"))), \
+                patch.object(github, "capacity_policy", return_value=policy), patch.object(host, "write_slices"), \
+                patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), \
+                patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service"):
+            result = host.enable(ci="staging", maximum=1)
+        self.assertTrue(result["ci_enabled"])
+        self.assertTrue(result["workers_enabled"])
+        self.assertEqual([c.args[0]["ci_slot"] for c in start.call_args_list], [0])
+        self.assertEqual(capacity.for_slot(store.host_config(), 0)["ci_kinds"], ["docs"])
+
+    def test_preparation_guests_wait_for_room_under_the_shared_ceiling(self):
+        with patch.object(vm, "start_memory_available", return_value=4 * 1024**3):
+            with self.assertRaisesRegex(store.FleetError, "Retry"):
+                vm.require_helper_memory()
+        for available in (None, 8 * 1024**3):
+            with patch.object(vm, "start_memory_available", return_value=available):
+                vm.require_helper_memory()
+
+    def test_changing_ci_classes_still_needs_a_drain_once_ci_runs(self):
+        store.update_host(workers_enabled=True, ci_enabled=True, ci_kinds=["staging"], ci_max_jobs=2)
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.enable(ci="pr")
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.prepare()
+
     def test_live_enable_keeps_the_existing_controller_running(self):
         with patch.object(host, "units", return_value=self.root), patch.object(host, "run") as run:
             host.install_service(restart=False)
