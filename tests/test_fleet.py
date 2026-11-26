@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tauceti_fleet import activity, capabilities, host, pool_activity, remote, report, store, vm
+from tauceti_fleet import cli
 from tauceti_fleet.cli import main
 
 
@@ -749,6 +750,32 @@ class Isolated(unittest.TestCase):
         summaries = combine.call_args.args[0]
         self.assertEqual([v["summary"]["source_id"] for v in summaries], ["one", "two"])
         self.assertIn("_fleet", json.loads(output.getvalue()))
+
+    def test_fleet_totals_skip_hosts_that_run_no_workers(self):
+        entries = {name: dict(machine_id=name + "-id", target=name) for name in ("a", "b", "ci", "down")}
+        values = dict(
+            a=dict(workers_enabled=True, activity=dict(available=True, summary=dict(source_id="a"))),
+            b=dict(workers_enabled=True, activity=dict(available=True, summary=dict(source_id="b"))),
+            ci=dict(workers_enabled=False, activity=dict(available=False), status=dict(workers=[])),
+            down=dict(workers_enabled=False, activity=dict(available=False), status=dict(workers=[dict(id="w")])),
+        )
+
+        def prepared(target, payload, **kwargs):
+            return dict(values[target], machine_id=target + "-id")
+
+        with (
+            patch.object(remote, "inventory", return_value=entries),
+            patch.object(remote, "call", side_effect=prepared),
+            patch.object(activity, "combine_status", return_value=dict(available=False)) as combine,
+            patch("sys.stdout", io.StringIO()),
+        ):
+            main(["status", "--json"])
+        # The CI host is left out; a worker host without a summary stays a gap.
+        self.assertEqual(
+            [v.get("summary", {}).get("source_id") for v in combine.call_args.args[0]], ["a", "b", None]
+        )
+        self.assertFalse(cli.reports_activity(values["ci"]))
+        self.assertTrue(cli.reports_activity(dict(error="unreachable")))
 
     def test_named_hosts_are_fetched_in_parallel_and_shown_side_by_side(self):
         entries = {name: dict(machine_id=name + "-id", target=name, aliases=[name * 2]) for name in ("a", "b", "c")}

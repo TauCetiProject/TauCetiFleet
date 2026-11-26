@@ -291,6 +291,17 @@ def print_hosts(results):
                 print(f"{name}: {error}")
 
 
+def reports_activity(value):
+    """Whether a host belongs in the fleet activity totals.
+
+    A host with workers disabled and none listed (a CI or queue host) has no
+    activity to prepare; its missing summary must not blank the fleet totals.
+    """
+    if (value.get("activity") or {}).get("available"):
+        return True
+    return value.get("workers_enabled", True) or bool((value.get("status") or {}).get("workers"))
+
+
 def main(argv=None, *, _status_results=None, _standalone=False):
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] == ["monitoring"]:
@@ -535,7 +546,9 @@ def main(argv=None, *, _status_results=None, _standalone=False):
             for name, value in results.items():
                 distinct.setdefault(value.get("machine_id", selected[name]["machine_id"]), value)
             if len(distinct) > 1:
-                fleet = activity.combine_status([v.get("activity", {}) for v in distinct.values()])
+                fleet = activity.combine_status(
+                    [v.get("activity", {}) for v in distinct.values() if reports_activity(v)]
+                )
         if args.command == "status":
             from . import ci_overview
 

@@ -27,7 +27,7 @@ class ActivityTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def test_attributed_output_pools_local_credit_and_keeps_status_read_only(self):
-        def host_value(cost, credit):
+        def host_value(cost, credit, number):
             return dict(
                 available=True,
                 summary=dict(
@@ -53,6 +53,7 @@ class ActivityTests(unittest.TestCase):
                                 attributed_loc=str(credit),
                                 attribution_known_prs=1,
                                 attribution_missing_prs=0,
+                                attribution_prs=dict(known={"org/a": [number]}, missing={}),
                             )
                             for w in ("24h", "7d", "total")
                         },
@@ -60,7 +61,7 @@ class ActivityTests(unittest.TestCase):
                 ),
             )
 
-        first, second = host_value(17, 8000), host_value(20, 2000)
+        first, second = host_value(17, 8000, 1), host_value(20, 2000, 2)
         with (
             patch("sqlite3.connect", side_effect=AssertionError("SQL in status")),
             patch("subprocess.run", side_effect=AssertionError("process in status")),
@@ -77,7 +78,12 @@ class ActivityTests(unittest.TestCase):
         self.assertIn("~$0.0037", output.getvalue())
         self.assertIn("2/2", output.getvalue())
         for row in second["summary"]["costs"]["windows"].values():
-            row.update(attributed_loc=None, attribution_known_prs=0, attribution_missing_prs=1)
+            row.update(
+                attributed_loc=None,
+                attribution_known_prs=0,
+                attribution_missing_prs=1,
+                attribution_prs=dict(known={}, missing={"org/a": [2]}),
+            )
         with contextlib.redirect_stdout(io.StringIO()) as partial_output:
             partial = activity.combine_status([first, second])
             activity.display(partial)
@@ -97,6 +103,44 @@ class ActivityTests(unittest.TestCase):
         del second["summary"]["costs"]["windows"]["24h"]["attribution_version"]
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertIsNone(row["attributed_loc"])
+
+    def test_fleet_attribution_counts_each_landed_pr_once(self):
+        def host_value(known, missing):
+            prs = dict(known={"org/a": known}, missing={"org/a": missing} if missing else {})
+            windows = {
+                w: dict(
+                    estimated_usd="1",
+                    landed_prs=len(known),
+                    attribution_version=1,
+                    attributed_loc="10",
+                    attribution_known_prs=len(known),
+                    attribution_missing_prs=len(missing),
+                    attribution_prs=prs,
+                )
+                for w in ("24h", "7d", "total")
+            }
+            return dict(available=True, summary=dict(
+                prepared_at=100, history_since=1, rounds={w: {} for w in activity.WINDOWS},
+                pr_windows={w: dict(authored=1, landed=1) for w in activity.WINDOWS},
+                running=0, open_prs=0, unknown_prs=0, unknown_landings=0,
+                costs=dict(accounting_version=3, windows=windows),
+            ))
+
+        # PR 2 was authored on one host and reviewed from the other; PR 3 is
+        # complete on one host but missing on the other, so it lacks data.
+        first, second = host_value([1, 2, 3], []), host_value([2], [3, 4])
+        row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (2, 2))
+        self.assertNotIn("attribution_prs", row)
+        # An older host without identities leaves the distinct count unknown.
+        del second["summary"]["costs"]["windows"]["24h"]["attribution_prs"]
+        mixed = activity.combine_status([first, second])
+        row = mixed["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (None, None))
+        self.assertEqual(row["attributed_loc"], "20")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            activity.display(mixed)
+        self.assertRegex(output.getvalue(), r"\nLanded PRs with attribution data +— +2/4 +2/4\n")
 
     def test_backfill_never_displays_full_spend_over_partial_history(self):
         row = dict(
