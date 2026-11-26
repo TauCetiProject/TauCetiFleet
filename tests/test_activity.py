@@ -98,6 +98,38 @@ class ActivityTests(unittest.TestCase):
         row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
         self.assertIsNone(row["attributed_loc"])
 
+    def test_fleet_attribution_counts_each_landed_pr_once(self):
+        def host_value(known, missing):
+            prs = dict(known={"org/a": known}, missing={"org/a": missing} if missing else {})
+            windows = {
+                w: dict(
+                    estimated_usd="1",
+                    landed_prs=len(known),
+                    attribution_version=1,
+                    attributed_loc="10",
+                    attribution_known_prs=len(known),
+                    attribution_missing_prs=len(missing),
+                    attribution_prs=prs,
+                )
+                for w in ("24h", "7d", "total")
+            }
+            return dict(available=True, summary=dict(
+                prepared_at=100, history_since=1, rounds={w: {} for w in activity.WINDOWS},
+                pr_windows={w: dict(authored=1, landed=1) for w in activity.WINDOWS},
+                running=0, open_prs=0, unknown_prs=0, unknown_landings=0,
+                costs=dict(accounting_version=3, windows=windows),
+            ))
+
+        # PR 2 was authored on one host and reviewed from the other; PR 3 is
+        # complete on one host but missing on the other, so it lacks data.
+        first, second = host_value([1, 2, 3], []), host_value([2], [3, 4])
+        row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (2, 2))
+        self.assertNotIn("attribution_prs", row)
+        del second["summary"]["costs"]["windows"]["24h"]["attribution_prs"]
+        row = activity.combine_status([first, second])["summary"]["costs"]["windows"]["24h"]
+        self.assertEqual((row["attribution_known_prs"], row["attribution_missing_prs"]), (4, 2))
+
     def test_backfill_never_displays_full_spend_over_partial_history(self):
         row = dict(
             estimated_usd="35091.30",
