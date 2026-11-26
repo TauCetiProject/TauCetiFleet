@@ -637,15 +637,24 @@ def combine(values):
             row["attribution_backfilling"] = any(attribution_backfilling(r) for r in rows)
             for field in ("attribution_known_prs", "attribution_missing_prs"):
                 row[field] = sum(r[field] for r in rows) if compatible else None
-            if compatible and len(rows) > 1 and any(r.get("attribution_prs") is None for r in rows):
+            # A host that counts no landed PRs cannot overlap another, whether
+            # or not its collector names PRs.
+            named = [
+                r
+                for r in rows
+                if r.get("attribution_prs") is not None
+                or r.get("attribution_known_prs")
+                or r.get("attribution_missing_prs")
+            ]
+            if compatible and len(named) > 1 and any(r.get("attribution_prs") is None for r in named):
                 # Host counts overlap; without every host's PR identities their
                 # sum is not a count of distinct landed PRs.
                 row["attribution_known_prs"] = row["attribution_missing_prs"] = None
-            elif compatible and len(rows) > 1:
+            elif compatible and len(named) > 1:
                 # Hosts each count every landed PR they touched; count each PR
                 # once, with data only if every host that touched it has data.
                 touched, missing = set(), set()
-                for r in rows:
+                for r in named:
                     for state, repos in r["attribution_prs"].items():
                         for repo, numbers in repos.items():
                             keys = {(repo, number) for number in numbers}
