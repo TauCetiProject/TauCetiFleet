@@ -642,7 +642,7 @@ def combine(values):
             named = [
                 r
                 for r in rows
-                if r.get("attribution_prs") is not None
+                if any(numbers for repos in (r.get("attribution_prs") or {}).values() for numbers in repos.values())
                 or r.get("attribution_known_prs")
                 or r.get("attribution_missing_prs")
             ]
