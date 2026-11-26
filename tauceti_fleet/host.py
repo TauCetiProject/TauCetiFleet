@@ -194,10 +194,12 @@ def configure(payload):
         value = update_host(ci_enabled=False)
     if value["workers_enabled"]:
         worker_config(value)
-    # Inactive installation never adopts or starts the existing worker fleet.
+    # Inactive installation never adopts or starts the existing worker fleet. An
+    # active host keeps its controller: a restart would pause admissions, and the
+    # controller rereads host.json each loop. Releases change through `update`.
     service_error = None
     try:
-        install_service()
+        install_service(restart=not (value["workers_enabled"] or value["ci_enabled"]))
     except FleetError as exc:
         service_error = str(exc)
     return dict(

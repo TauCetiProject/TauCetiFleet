@@ -158,8 +158,11 @@ class Enrollment(unittest.TestCase):
     def test_a_host_running_workers_enrolls_for_ci_without_a_drain(self):
         prior = store.update_host(profile="science", workers_enabled=True, max_workers=40, ci_allowed=False)
         with patch.object(broker, "request", return_value=dict(machine_id=prior["machine_id"], runner_group_id=3)), \
-                patch.object(host, "install_service"), patch.object(host, "doctor", return_value={}):
+                patch.object(host, "install_service") as install, patch.object(host, "doctor", return_value={}), \
+                patch.object(host, "worker_config"):
             broker.enroll(code="i" * 64)
+        # A restart would publish empty admissions until the new controller starts.
+        self.assertEqual(install.call_args.kwargs, dict(restart=False))
         config = store.host_config()
         self.assertTrue(config["workers_enabled"])
         self.assertFalse(config["ci_enabled"])

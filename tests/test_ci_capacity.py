@@ -230,6 +230,14 @@ class Capacity(unittest.TestCase):
         self.assertEqual([c.args[0]["ci_slot"] for c in start.call_args_list], [0])
         self.assertEqual(capacity.for_slot(store.host_config(), 0)["ci_kinds"], ["docs"])
 
+    def test_preparation_guests_wait_for_room_under_the_shared_ceiling(self):
+        with patch.object(vm, "start_memory_available", return_value=4 * 1024**3):
+            with self.assertRaisesRegex(store.FleetError, "Retry"):
+                vm.require_helper_memory()
+        for available in (None, 8 * 1024**3):
+            with patch.object(vm, "start_memory_available", return_value=available):
+                vm.require_helper_memory()
+
     def test_changing_ci_classes_still_needs_a_drain_once_ci_runs(self):
         store.update_host(workers_enabled=True, ci_enabled=True, ci_kinds=["staging"], ci_max_jobs=2)
         with self.assertRaisesRegex(store.FleetError, "Drain"):
