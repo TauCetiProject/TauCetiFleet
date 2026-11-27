@@ -1202,11 +1202,16 @@ RAMP_INTERVAL = 30
 
 
 class Scaler:
-    def __init__(self):
+    def __init__(self, previous=None):
         self.target = 0
         self.decision = {}
-        self.ramping = False
         self.next_increase_at = None
+        # A restart or live handover resumes a memory recovery the previous controller left.
+        # Its last decision is the only record; a paused one with a memory reason, or a ramp.
+        decision = (previous or {}).get("worker_admission") or {}
+        self.ramping = decision.get("state") == "ramping" or (
+            decision.get("state") == "paused" and bool((previous or {}).get("memory_pressure"))
+        )
 
     def _result(self, state, reason, next_increase_at=None, next_worker_limit=None):
         self.decision = dict(
@@ -1228,7 +1233,11 @@ class Scaler:
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
             return self._result("paused", reason)
-        if self.ramping and maximum:
+        if self.ramping and not maximum:
+            # Another policy closed admission; keep the pending memory recovery.
+            self.target = 0
+            return self._result("paused", pause_reason or "configured worker ceiling is zero")
+        if self.ramping:
             increment = max(1, -(-maximum // RAMP_STEPS))
             if self.target == 0 or now >= self.next_increase_at:
                 self.target = min(maximum, self.target + increment)
@@ -1458,7 +1467,7 @@ def daemon():
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGHUP, reload_release)
-        scaler = Scaler()
+        scaler = Scaler(read(state_dir() / "status.json", {}))
         previous = cpu_sample()
         slots = {}
         last_github = 0

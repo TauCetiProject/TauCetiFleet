@@ -674,6 +674,21 @@ class Isolated(unittest.TestCase):
         self.assertEqual(scaler.step(now=240, **{**args, "maximum": 8})[0], 8)
         self.assertEqual(scaler.decision["state"], "at_ceiling")
 
+    def test_memory_recovery_survives_a_zero_ceiling_and_a_controller_restart(self):
+        args = dict(enabled=True, available=30, reserve=10, idle=0, maximum=60, ci_busy=True)
+        scaler = host.Scaler()
+        scaler.step(now=0, **dict(args, enabled=False, pause_reason="host memory headroom low", memory_pause=True))
+        self.assertEqual(scaler.step(now=1, **{**args, "maximum": 0})[0], 0)
+        self.assertEqual(scaler.step(now=2, **args)[0], 10)
+        for previous in (
+            dict(worker_admission=dict(state="ramping"), memory_pressure=[]),
+            dict(worker_admission=dict(state="paused"), memory_pressure=["host memory headroom low"]),
+        ):
+            self.assertEqual(host.Scaler(previous).step(now=3, **args)[0], 10)
+        for previous in (None, {}, dict(worker_admission=dict(state="paused"), memory_pressure=[]),
+                         dict(error="controller error")):
+            self.assertEqual(host.Scaler(previous).step(now=3, **args)[0], 60)
+
     def test_drain_changes_admission_not_desired_worker_configuration(self):
         store.host_config()
         store.update_host(ci_enabled=True, workers_enabled=True)
