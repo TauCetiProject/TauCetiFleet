@@ -598,7 +598,9 @@ working memory reaches 90% of its hard RAM limit. After a memory pause, working
 memory must fall below 85% and host available memory must exceed the reserve by
 max(2 GiB, 5% of host RAM) before resuming, preventing repeated start/pause cycles. Missing
 memory evidence fails closed. Existing paid sessions finish. When safe memory
-returns, the entire configured allowance is restored immediately. External admission leases and manual pauses
+returns, the configured allowance comes back in six steps 30 seconds apart, so the
+surveys of newly admitted rounds cannot push headroom back below the reserve at once;
+after other pauses it is restored immediately. External admission leases and manual pauses
 retain their existing semantics. JSON status includes the decision under
 `worker_admission`.
 

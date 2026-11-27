@@ -634,22 +634,45 @@ class Isolated(unittest.TestCase):
             with self.assertRaises(store.FleetError):
                 host.workers_swap_bytes(dict(workers_swap_gib=value))
 
-    def test_low_memory_or_disable_blocks_new_work_and_recovers_immediately(self):
+    def test_low_memory_or_disable_blocks_new_work_and_recovers(self):
         scaler = host.Scaler()
         args = dict(enabled=True, available=20, reserve=10, idle=0, maximum=12, ci_busy=True)
         self.assertEqual(scaler.step(now=100, **args)[0], 12)
         self.assertEqual(scaler.step(now=101, **{**args, "available": 1})[0], 0)
         self.assertEqual(scaler.decision["state"], "paused")
         self.assertIn("host memory", scaler.decision["reason"])
-        self.assertEqual(scaler.step(now=102, **args)[0], 12)
+        self.assertEqual(scaler.step(now=102, **args)[0], 2)
+        self.assertEqual(scaler.decision["state"], "ramping")
+        for step in range(1, 6):
+            limit = scaler.step(now=102 + step * host.RAMP_INTERVAL, **args)[0]
+        self.assertEqual(limit, 12)
         reason = "worker working set near hard memory limit"
-        self.assertEqual(scaler.step(now=103, **{**args, "enabled": False, "pause_reason": reason})[0], 0)
+        self.assertEqual(scaler.step(now=300, **{**args, "enabled": False, "pause_reason": reason})[0], 0)
         self.assertEqual(scaler.decision["reason"], reason)
-        self.assertEqual(scaler.step(now=104, **args)[0], 12)
+        # Other pauses (disable, drain, schedule, lease) restore every worker at once.
+        self.assertEqual(scaler.step(now=301, **args)[0], 12)
         self.assertEqual(scaler.step(now=105, **{**args, "maximum": 0})[0], 0)
         self.assertIn("ceiling is zero", scaler.decision["reason"])
         scaler.step(now=106, **{**args, "maximum": 0, "pause_reason": "worker admission lease expired"})
         self.assertEqual(scaler.decision["reason"], "worker admission lease expired")
+
+    def test_memory_pause_restores_admission_in_steps(self):
+        scaler = host.Scaler()
+        args = dict(enabled=True, available=30, reserve=10, idle=0, maximum=60, ci_busy=True)
+        self.assertEqual(scaler.step(now=0, **args)[0], 60)
+        pause = dict(args, enabled=False, pause_reason="host memory headroom low", memory_pause=True)
+        self.assertEqual(scaler.step(now=1, **pause)[0], 0)
+        limits = [scaler.step(now=t, **args)[0] for t in (2, 10, 32, 33, 62, 92, 122, 152, 182)]
+        self.assertEqual(limits, [10, 10, 20, 20, 30, 40, 50, 60, 60])
+        self.assertEqual(scaler.decision["state"], "at_ceiling")
+        # A pause during the ramp starts it again from the first step.
+        scaler.step(now=200, **pause)
+        self.assertEqual(scaler.step(now=201, **args)[0], 10)
+        self.assertEqual(scaler.decision["next_worker_limit"], 20)
+        self.assertEqual(scaler.decision["next_increase_at"], 201 + host.RAMP_INTERVAL)
+        # A lower ceiling during the ramp caps it.
+        self.assertEqual(scaler.step(now=240, **{**args, "maximum": 8})[0], 8)
+        self.assertEqual(scaler.decision["state"], "at_ceiling")
 
     def test_drain_changes_admission_not_desired_worker_configuration(self):
         store.host_config()
