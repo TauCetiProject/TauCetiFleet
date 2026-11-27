@@ -124,7 +124,14 @@ def worker_memory():
 
 def memory_pressure(memory, caps, *, recovering=False, reserve=None):
     reasons = []
-    if caps["memory_available"] < (reserve if reserve is not None else max(4 * GIB, int(caps["memory_total"] * 0.1))):
+    floor = reserve if reserve is not None else max(4 * GIB, int(caps["memory_total"] * 0.1))
+    if recovering:
+        # Resuming admits every worker at once, and their surveys alone use
+        # gigabytes. Without a margin, availability hovering at the floor
+        # flaps admission: rounds start, survey, then stop before inference
+        # (tauchonki, 27 Nov 2026: about 100 such rounds per half hour).
+        floor += max(2 * GIB, int(caps["memory_total"] * 0.05))
+    if caps["memory_available"] < floor:
         reasons.append("host memory headroom low")
     if (memory.get("pinned", memory["working_set"]) + memory.get("swap", 0)) >= memory["maximum"] * (0.85 if recovering else 0.90):
         reasons.append("worker working set near hard memory limit")
