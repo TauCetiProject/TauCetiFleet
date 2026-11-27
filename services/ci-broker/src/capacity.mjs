@@ -8,11 +8,13 @@ export function capacity(host) {
 // Build classes share the TauCetiFleet group. Each special class has its own
 // selected-repository group; the broker, never the host, chooses the group.
 // `infra` runs our own infrastructure repositories' CI (TauCetiInfra); `docs`
-// runs TauCeti's API documentation build (TauCetiDocs).
+// runs TauCeti's API documentation build (TauCetiDocs); `nightly` runs TauCeti's
+// clean from-source verification (TauCetiNightly).
 export const INFRA_GROUP=8;
 export const DOCS_GROUP=9;
-export const GROUPS={pr:3,staging:3,'queue-control':6,'pr-status':7,infra:INFRA_GROUP,docs:DOCS_GROUP};
-export const SPECIAL_GROUPS={'queue-control':6,'pr-status':7,infra:INFRA_GROUP,docs:DOCS_GROUP};
+export const NIGHTLY_GROUP=10;
+export const GROUPS={pr:3,staging:3,'queue-control':6,'pr-status':7,infra:INFRA_GROUP,docs:DOCS_GROUP,nightly:NIGHTLY_GROUP};
+export const SPECIAL_GROUPS={'queue-control':6,'pr-status':7,infra:INFRA_GROUP,docs:DOCS_GROUP,nightly:NIGHTLY_GROUP};
 /** Classes an operator may authorize for a host. */
 export function hostKinds(kinds) {
   return Array.isArray(kinds) && kinds.length>=1 && new Set(kinds).size===kinds.length &&

@@ -325,7 +325,11 @@ class DocsGuestLaunch(unittest.TestCase):
     setUp = WarmStagingDisk.setUp
 
     def launch(self, index, instance):
+        self.created = getattr(self, "created", [])
+
         def run(args, **kwargs):
+            if list(args[:2]) == ["qemu-img", "create"]:
+                self.created.append([str(a) for a in args])
             return SimpleNamespace(returncode=0, stdout="")
 
         with (patch.object(vm, "CI_START_GAP_SECONDS", 0),
@@ -350,3 +354,20 @@ class DocsGuestLaunch(unittest.TestCase):
         _, launch = self.launch(0, "e" * 16)
         self.assertIn("ManagedOOMPreference=avoid", launch)
         self.assertNotIn("OOMScoreAdjust=1000", launch)
+
+    def test_nightly_guest_is_a_fixed_vm_with_its_own_disk(self):
+        self.config = store.update_host(ci_max_jobs=3, ci_disk_gib=100,
+                                        ci_protected_slots={"2": dict(kind="nightly", runner_group_id=10)})
+        value, launch = self.launch(2, "f" * 16)
+        self.assertEqual((value["ci_kinds"], value["vcpus"], value["memory_gib"]), (["nightly"], 48, 64))
+        self.assertNotIn("runtime", value)
+        # Workers, not the nightly, are the preferred OOM victims, as for PR guests.
+        self.assertIn("ManagedOOMPreference=avoid", launch)
+        self.assertNotIn("OOMScoreAdjust=1000", launch)
+        self.assertIn("CPUWeight=100", launch)
+        self.assertEqual(launch[launch.index("-m") + 1], str(64 * 1024))
+        self.assertEqual(launch[launch.index("-smp") + 1], "48")
+        self.assertEqual(self.created[-1][-1], "320G")
+        # A general guest keeps the host's disk size.
+        self.launch(0, "e" * 16)
+        self.assertEqual(self.created[-1][-1], "100G")

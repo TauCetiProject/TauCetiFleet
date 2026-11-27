@@ -472,7 +472,7 @@ def _cancel_registration(config):
 
 def _start(config):
     from . import native_runner
-    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_shape
+    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_disk_gib, guest_shape
 
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
@@ -544,7 +544,7 @@ def _start(config):
                     "-b",
                     root / "prepared.qcow2",
                     disk,
-                    str(config["ci_disk_gib"]) + "G",
+                    str(guest_disk_gib(config)) + "G",
                 ]
             )
             # Actions runs .sh hooks with bash, regardless of their shebang.

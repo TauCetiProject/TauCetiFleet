@@ -28,6 +28,8 @@ export const CHECKS={
   [INFRA_GROUP]:{name:'TauCetiInfra',workflows:false,repositories:INFRA_REPOSITORIES},
   // TauCeti's API docs build: its caller stub and the shared harness job it calls, both at main.
   9:expect('TauCetiDocs',[...main(TAUCETI,['api-docs.yml']),...main(HARNESS,['api-docs.yml'])],[],'TauCetiProject/TauCeti'),
+  // TauCeti's nightly verification: its scheduled caller and the shared harness job it calls, both at main.
+  10:expect('TauCetiNightly',[...main(TAUCETI,['nightly-verify-schedule.yml']),...main(HARNESS,['nightly-verify.yml'])],[],'TauCetiProject/TauCeti'),
 };
 const encoder=new TextEncoder();
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
