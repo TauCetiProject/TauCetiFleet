@@ -59,6 +59,14 @@ class MemoryTests(unittest.TestCase):
         memory["pinned"] = 39 * GIB
         self.assertEqual(memory_pressure(memory, caps, recovering=True), [])
 
+    def test_host_headroom_resumes_only_with_a_margin_above_the_reserve(self):
+        memory = self.measured()
+        caps = dict(memory_available=21 * GIB, memory_total=125 * GIB)
+        self.assertEqual(memory_pressure(memory, caps, reserve=20 * GIB), [])
+        self.assertEqual(memory_pressure(memory, caps, recovering=True, reserve=20 * GIB), ["host memory headroom low"])
+        caps["memory_available"] = 27 * GIB
+        self.assertEqual(memory_pressure(memory, caps, recovering=True, reserve=20 * GIB), [])
+
     def test_swapped_memory_is_counted_in_working_set(self):
         original = self.measured()
         stats = dict(

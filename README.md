@@ -594,8 +594,9 @@ reservation, deducted from its resident RAM limit; swapped bytes also count in
 the estimated working set. This bounds zram use outside resident accounting.
 
 New work pauses when host available memory falls below the OS reserve or worker
-working memory reaches 90% of its hard RAM limit. After a memory pause it must
-fall below 85% before resuming, preventing repeated start/pause cycles. Missing
+working memory reaches 90% of its hard RAM limit. After a memory pause, working
+memory must fall below 85% and host available memory must exceed the reserve by
+max(2 GiB, 5% of host RAM) before resuming, preventing repeated start/pause cycles. Missing
 memory evidence fails closed. Existing paid sessions finish. When safe memory
 returns, the entire configured allowance is restored immediately. External admission leases and manual pauses
 retain their existing semantics. JSON status includes the decision under
