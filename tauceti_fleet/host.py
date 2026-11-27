@@ -649,10 +649,12 @@ def enable(*, ci=None, workers=False, maximum=None, vcpus=None, memory_gib=None,
         # The controller reads the slot count every iteration and admits added
         # slots independently. Existing guests need neither retirement nor a
         # controller restart when their shape and labels remain unchanged.
+        # Each guest creates its own disk when it starts, so a new disk size
+        # reaches every slot as its current one-job guest retires.
         growing = (
             capacity.jobs(proposed) >= capacity.jobs(config)
             and capacity.kinds(proposed) == capacity.kinds(config)
-            and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib", "ci_disk_gib"))
+            and all(proposed.get(k) == config.get(k) for k in ("ci_vcpus", "ci_memory_gib"))
         )
         # Dropping PR from a host with a staging reservation is live too: the
         # reserved and protected guests keep their shape and labels, and the

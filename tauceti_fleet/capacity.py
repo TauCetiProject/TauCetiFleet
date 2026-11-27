@@ -39,6 +39,12 @@ DOCS_SHAPE = dict(vcpus=32, memory_gib=24)
 # overlay that allocates on write, independent of the host's ci_disk_gib.
 NIGHTLY_SHAPE = dict(vcpus=48, memory_gib=64)
 NIGHTLY_DISK_GIB = 320
+# The guest disk new hosts get for PR and staging jobs, and the least doctor accepts
+# without a warning. A PR build without the host's shared tree restores every
+# TauCeti and Mathlib artifact into its guest. By 26 Nov 2026 that no longer fit
+# some 100 GiB guests (the old default), and it grows 1 to 2 GiB a day. QCOW2
+# allocates on write, so a larger virtual size reserves nothing on the host.
+PR_DISK_GIB = 200
 MAX_JOBS = 4096
 
 

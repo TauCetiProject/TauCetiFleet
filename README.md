@@ -322,7 +322,13 @@ faults retain that cooldown. New guests enable virtio free-page reporting.
 
 These are starting points for otherwise available machines, not measured
 optima. Keep the existing OS headroom and check actual RAM and disk availability
-with `doctor`. The default virtual disk limit is 100 GiB per slot. QCOW2 overlays
+with `doctor`. The default virtual disk limit is 200 GiB per slot. A PR build
+without the host's shared tree restores every TauCeti and Mathlib artifact into its
+guest, and in November 2026 that outgrew 100 GiB guests (the earlier default), whose
+builds then fail with "No space left on device". Doctor warns when PR guests get less
+than 200 GiB. Hosts enrolled with the old default can raise it live, keeping their
+current `--ci` class: `tauceti-fleet enable local --ci pr --ci-disk-gib 200`. Running
+guests keep their disks; each slot's next guest gets the new size. QCOW2 overlays
 allocate on write, so doctor requires up to 4 GiB of startup space per slot on
 the guest overlay filesystem, rather than the sum of virtual disk limits. Each launch
 also checks that headroom before registering a runner. Monitor actual overlay
