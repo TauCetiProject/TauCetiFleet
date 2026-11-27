@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub,PolicyError} from '../src/github.mjs';
-import {DOCS_GROUP,INFRA_GROUP,PRIORITY_CLASS,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
+import {DOCS_GROUP,INFRA_GROUP,NIGHTLY_GROUP,PRIORITY_CLASS,hostKinds,runnerKinds,groupFor,hostGroups,labels} from '../src/capacity.mjs';
 import {INFRA_REPOSITORIES} from '../src/github.mjs';
 import {RegistrationRecovery,RECOVERY_DELAY} from '../src/recovery.mjs';
 
@@ -10,7 +10,8 @@ const queue=[workflow('TauCeti','pick-runner.yml'),workflow('TauCeti','pr-build.
 const harness=[workflow('TauCetiTools','pr-build.yml'),workflow('TauCetiTools','publish-lake-cache.yml')];
 const status=[workflow('TauCeti','pr-status.yml'),workflow('TauCeti','pr-labels.yml')];
 const docs=[workflow('TauCeti','api-docs.yml'),workflow('TauCetiTools','api-docs.yml')];
-const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus',[INFRA_GROUP]:'TauCetiInfra',[DOCS_GROUP]:'TauCetiDocs'};
+const nightly=[workflow('TauCeti','nightly-verify-schedule.yml'),workflow('TauCetiTools','nightly-verify.yml')];
+const names={6:'TauCetiQueueControl',7:'TauCetiPRStatus',[INFRA_GROUP]:'TauCetiInfra',[DOCS_GROUP]:'TauCetiDocs',[NIGHTLY_GROUP]:'TauCetiNightly'};
 function client(group,{workflows,visibility='selected',restricted=true,repositories=['TauCetiProject/TauCeti'],name=names[group]},calls=[]) {
   const github=new GitHub({});
   github.request=async path=>{
@@ -70,6 +71,21 @@ test('docs requires exactly the API docs caller and its harness job at main, on 
     {workflows:docs,repositories:['TauCetiProject/TauCeti','TauCetiProject/TauCetiTools']},
     {workflows:docs,repositories:['TauCetiProject/TauCetiTools']},{workflows:docs,repositories:[]}])
     await assert.rejects(client(DOCS_GROUP,settings).policy({group:DOCS_GROUP,fresh:true}),PolicyError);
+});
+test('nightly requires exactly the nightly caller and its harness job at main, on TauCeti only',async()=>{
+  assert.equal(NIGHTLY_GROUP,10);
+  assert.equal(groupFor(['nightly']),NIGHTLY_GROUP);
+  assert.ok(runnerKinds(['nightly']));
+  assert.ok(hostKinds(['staging','docs','nightly']));
+  for (const kinds of [['pr','nightly'],['docs','nightly'],['staging','nightly']]) assert.ok(!runnerKinds(kinds));
+  assert.deepEqual(labels('a'.repeat(32),'fleet-x-'+'b'.repeat(16),['nightly'],'Tauchonki').at(-1),'tauceti-fleet-nightly');
+  assert.deepEqual(await client(NIGHTLY_GROUP,{workflows:nightly}).policy({group:NIGHTLY_GROUP,fresh:true}),{runner_group_id:NIGHTLY_GROUP});
+  for (const settings of [{workflows:nightly.slice(1)},{workflows:nightly.slice(0,1)},{workflows:[...nightly,docs[0]]},
+    {workflows:[...nightly,workflow('TauCetiTools','pr-build.yml')]},
+    {workflows:nightly.map(w=>w.replace('refs/heads/main','refs/heads/other'))},
+    {workflows:nightly,visibility:'all'},{workflows:nightly,restricted:false},{workflows:nightly,name:'TauCetiDocs'},
+    {workflows:nightly,repositories:['TauCetiProject/TauCeti','TauCetiProject/TauCetiTools']},{workflows:nightly,repositories:[]}])
+    await assert.rejects(client(NIGHTLY_GROUP,settings).policy({group:NIGHTLY_GROUP,fresh:true}),PolicyError);
 });
 test('infra admits any workflow of exactly the four infrastructure repositories',async()=>{
   const infra=INFRA_REPOSITORIES;

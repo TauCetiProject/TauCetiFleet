@@ -256,6 +256,50 @@ class DocsCI(unittest.TestCase):
                 capacity.broker_slot_group(2, dict(kind="docs", runner_group_id=9), policy)
 
 
+class NightlyCI(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        env = patch.dict(os.environ, {"TAUCETI_FLEET_STATE": temporary.name})
+        env.start()
+        self.addCleanup(env.stop)
+        # A workers host whose only CI slot is the nightly one.
+        self.config = dict(ci_enabled=True, ci_max_jobs=1, ci_kinds=["staging"], runner_group_id=3,
+                           ci_memory_gib=32, ci_vcpus=16, ci_disk_gib=64,
+                           ci_protected_slots={"0": dict(kind="nightly", runner_group_id=10)})
+
+    def test_nightly_slot_is_a_fixed_size_vm_that_builds_cannot_borrow(self):
+        nightly = capacity.for_slot(self.config, 0)
+        nightly["unit"] = "nightly-guest"
+        self.assertEqual(capacity.kinds(nightly), ["nightly"])
+        self.assertEqual(nightly["ci_slot_runner_group_id"], 10)
+        self.assertEqual(capacity.guest_shape(nightly, dict(cpus=96, memory_total=125 * 1024**3)),
+                         dict(vcpus=48, memory_gib=64))
+        self.assertEqual(capacity.guest_disk_gib(nightly), capacity.NIGHTLY_DISK_GIB)
+        self.assertEqual(capacity.guest_disk_gib(self.config), 64)
+        self.assertFalse(native_runner.selected(nightly))
+        labels = github.runner_labels(dict(nightly, machine_id="a" * 32), "fleet-" + "b" * 16)
+        self.assertIn("tauceti-fleet-nightly", labels)
+        for label in ("tauceti-fleet", "tauceti-fleet-pr", "tauceti-fleet-staging", "tauceti-fleet-docs"):
+            self.assertNotIn(label, labels)
+        self.assertEqual(ci_pool.recovery_slots(self.config, [], [], dict(queued=[["tauceti-fleet-pr"]]),
+                         [dict(instance="a" * 16, ci_kinds=["nightly"], labels=["tauceti-fleet-nightly"])]), {})
+        with patch.object(ci_priority, "run"), patch.object(github, "ci_read") as metadata:
+            ci_priority.classify(self.config, nightly, 100)
+        metadata.assert_not_called()
+        self.assertEqual(nightly["ci_job_kind"], "nightly")
+        self.assertEqual(nightly["cpu_weight"], 100)
+
+    def test_nightly_runners_register_only_through_the_broker(self):
+        with self.assertRaises(store.FleetError):
+            github.protected_policy(dict(ci_kinds=["nightly"], ci_slot_runner_group_id=10), {})
+        self.assertEqual(capacity.broker_slot_group(0, dict(kind="nightly", runner_group_id=10),
+                                                    dict(kinds=["staging", "nightly"], groups={"nightly": 10})), 10)
+        with self.assertRaises(store.FleetError):
+            capacity.broker_slot_group(0, dict(kind="nightly", runner_group_id=10),
+                                       dict(kinds=["staging"], groups={"nightly": 10}))
+
+
 class PRStatusCI(unittest.TestCase):
     def test_status_slots_cannot_be_borrowed_by_builds_or_queue_finalizers(self):
         config = dict(ci_enabled=True, ci_max_jobs=4, ci_staging_slots=1,

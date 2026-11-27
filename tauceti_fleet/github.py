@@ -94,7 +94,7 @@ def runner_policy(config):
         token_file=config.get("ci_token_file") or config.get("github_token_file"),
     )
     if kinds := config.get("ci_kinds"):
-        if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"], ["docs"]):
+        if kinds in (["roadmap"], ["control"], ["queue-control"], ["pr-status"], ["docs"], ["nightly"]):
             return protected_policy(config, data)
     required = "TauCetiProject/TauCeti/.github/workflows/pr-build.yml@refs/heads/main"
     allowed = {required, "TauCetiProject/TauCeti/.github/workflows/nightly-verify.yml@refs/heads/main",
@@ -123,7 +123,7 @@ def trusted_entries(entries, workflows):
 def protected_policy(config, data):
     """Isolate disposable protected VMs from TauCeti without per-pin policy edits."""
     kind = config["ci_kinds"][0]
-    if kind in ("infra", "docs"):
+    if kind in ("infra", "docs", "nightly"):
         raise FleetError(kind.capitalize() + " runners register only through the CI broker")
     expected = {"roadmap": "TauCetiRoadmap", "control": "TauCetiControl", "queue-control": "TauCetiQueueControl", "pr-status": "TauCetiPRStatus"}[kind]
     if data.get("name") != expected or data.get("visibility") != "selected":

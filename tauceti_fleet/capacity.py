@@ -8,8 +8,9 @@ KINDS = {"pr": ["pr"], "staging": ["staging"], "both": ["pr", "staging"]}
 # Classes of protected slots, each in its own runner group. `infra` runs our own
 # infrastructure repositories' CI on native-disk slots, above PR builds' CPU
 # weight and below staging's: someone is usually waiting on an infra job.
-# `docs` runs TauCeti's API documentation build in a VM of its own (DOCS_SHAPE).
-PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra", "docs")
+# `docs` runs TauCeti's API documentation build in a VM of its own (DOCS_SHAPE),
+# and `nightly` TauCeti's clean from-source verification (NIGHTLY_SHAPE).
+PROTECTED_KINDS = ("control", "roadmap", "queue-control", "pr-status", "infra", "docs", "nightly")
 # CPU weight of infra jobs; PR builds have 100 and staging 10000.
 INFRA_CPU_WEIGHT = 1000
 # The docs guest's fixed shape. A docs build re-analyses every changed TauCeti
@@ -25,6 +26,19 @@ INFRA_CPU_WEIGHT = 1000
 # not cover. A fixed shape also keeps it from inheriting the overcommitted size of
 # general guests.
 DOCS_SHAPE = dict(vcpus=32, memory_gib=24)
+# The nightly guest's fixed shape. TauCetiTools' nightly-verify.yml rebuilds every
+# TauCeti module from source and packs the outputs into a workspace-local Lake
+# cache. In November 2026 that took about 2 hours on 88 uncontended CPUs, and it
+# failed three ways on shared PR runners: out of disk on 100 GiB guests at 98%
+# (the build needed about 120 GiB on 27 Nov, growing 1 to 2 GiB a day), at a
+# 54 GiB memory cap with 96 CPUs exposed, and starved of CPU on a busy host.
+# 48 vCPUs with 64 GiB give each Lean process about 1.3 GiB; the guest's Lean
+# pressure gate holds back a start only when one worst-case file would not fit, so
+# the per-process budget, not the gate, is the protection. The build should take
+# about 4 hours. The disk (NIGHTLY_DISK_GIB) is a qcow2
+# overlay that allocates on write, independent of the host's ci_disk_gib.
+NIGHTLY_SHAPE = dict(vcpus=48, memory_gib=64)
+NIGHTLY_DISK_GIB = 320
 MAX_JOBS = 4096
 
 
@@ -38,6 +52,8 @@ def guest_shape(config, caps=None):
         return dict(vcpus=16, memory_gib=32)
     if config.get("ci_kinds") == ["docs"]:
         return dict(DOCS_SHAPE)
+    if config.get("ci_kinds") == ["nightly"]:
+        return dict(NIGHTLY_SHAPE)
     if caps is None:
         from .capabilities import resources
 
@@ -95,9 +111,14 @@ def memory_budget_gib(config, caps=None):
     return value
 
 
+def guest_disk_gib(config):
+    """Virtual size of a guest's disk: the host's ci_disk_gib, or the nightly slot's own size."""
+    return NIGHTLY_DISK_GIB if config.get("ci_kinds") == ["nightly"] else config["ci_disk_gib"]
+
+
 def disk_startup_gib(config):
     """QCOW2 disks allocate on write; virtual size is not reserved space."""
-    return min(4, config["ci_disk_gib"])
+    return min(4, guest_disk_gib(config))
 
 
 def disk_root():

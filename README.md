@@ -243,6 +243,22 @@ doc-gen4 runs its own executable, not `lean`, so the Lean pressure gate
 does not admit its processes; the guest's CPU weight is the PR builds' 100, below staging and
 infra. The slot stays warm and PR recovery cannot borrow it.
 
+TauCeti's nightly verification can reserve `ci_protected_slots` with `kind = "nightly"` in the
+`TauCetiNightly` runner group (group 10), on a broker-enrolled host whose enrollment allows
+`nightly`. The group must select only `TauCetiProject/TauCeti` and exactly TauCeti's
+`nightly-verify-schedule.yml` and TauCetiTools' `nightly-verify.yml`, both at `refs/heads/main`.
+Its runners carry `tauceti-fleet-nightly`, which only nightly slots offer, so the clean
+from-source build lands only on a host the operator chose for it. The guest is a VM of fixed
+shape, 48 vCPUs and 64 GiB, with its own 320 GiB disk rather than the host's `ci_disk_gib`: the
+build needed about 120 GiB of disk in November 2026 and grows by 1 to 2 GiB a day, and on shared
+PR runners it ran out of 100 GiB guest disks, hit a 54 GiB memory cap with 96 CPUs exposed, and
+was starved of CPU on a busy host. The qcow2 disk allocates on write, and the job runs once a
+day, so between runs the slot holds only an idle warm guest. Like PR guests, the nightly QEMU
+keeps `ManagedOOMPreference=avoid`, so systemd-oomd prefers other units under pressure (it does
+not change the kernel's choice at the CI slice's own ceiling), and it
+runs at the PR builds' CPU weight within the CI slice, which outranks the worker slice. Fleet
+has no on-demand protected slots: the guest stays warm, and PR recovery cannot borrow it.
+
 PR-status reconciliation can reserve `ci_protected_slots` with `kind = "pr-status"`
 in a separate `TauCetiPRStatus` runner group. These disposable guests have two CPUs
 and 4 GiB RAM, stay warm independently of the build backlog, and cannot be borrowed

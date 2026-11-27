@@ -472,7 +472,7 @@ def _cancel_registration(config):
 
 def _start(config):
     from . import native_runner
-    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_shape
+    from .capacity import INFRA_CPU_WEIGHT, disk_root, disk_startup_gib, guest_disk_gib, guest_shape
 
     root = data_dir() / "images"
     if not (root / "prepared.json").exists():
@@ -544,7 +544,7 @@ def _start(config):
                     "-b",
                     root / "prepared.qcow2",
                     disk,
-                    str(config["ci_disk_gib"]) + "G",
+                    str(guest_disk_gib(config)) + "G",
                 ]
             )
             # Actions runs .sh hooks with bash, regardless of their shebang.
@@ -585,7 +585,7 @@ def _start(config):
             phase="starting",
             pressure_protocol=2,
             lean_statistics_protocol=1,
-            **(runtime_fields if native else guest_shape(config)),
+            **(runtime_fields if native else dict(guest_shape(config), disk_gib=guest_disk_gib(config))),
         )
         # Record the prospective unit before launch: a controller/process crash
         # can then recover either the existing guest or the unused registration.
