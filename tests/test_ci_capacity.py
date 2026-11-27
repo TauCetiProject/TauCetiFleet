@@ -187,6 +187,47 @@ class Capacity(unittest.TestCase):
         self.assertEqual(start.call_args.args[0]["ci_slot"], 1)
         self.assertEqual(start.call_args.args[0]["ci_memory_gib"], 32)
 
+    def test_live_guest_disk_resize_keeps_the_busy_guest_and_sizes_the_next_one(self):
+        config = capacity.settings(store.host_config(), ci="pr", maximum=2, vcpus=16, memory_gib=32, disk_gib=100)
+        store.update_host(**dict(config, ci_enabled=True))
+        store.atomic(store.data_dir() / "images/prepared.json", {"sha256": "a" * 64})
+        busy = dict(slot=0, unit="vm-0", directory=str(self.root / "guest"), runner_id=100,
+                    started_at=0, phase="ready", busy=True, run_id=42)
+        store.atomic(vm.slot_file(config, "vm.json"), busy)
+        with patch.object(host, "doctor", return_value=dict(readiness=dict(ci="ready"))), patch.object(github, "capacity_policy", return_value=dict(kinds=["pr"])), patch.object(host, "write_slices"), patch.object(host, "resources", return_value={}), patch.object(host, "worker_config"), patch.object(vm, "start", return_value={}) as start, patch.object(host, "install_service") as install, patch.object(vm, "retire") as retire, patch.object(host.native_runner, "prepare_for_ci", return_value=None):
+            result = host.enable(ci="pr", disk_gib=capacity.PR_DISK_GIB)
+            start.assert_not_called()
+            retire.assert_not_called()
+            install.assert_called_once_with(restart=False)
+        self.assertTrue(result["ci_enabled"])
+        self.assertEqual(store.host_config()["ci_disk_gib"], capacity.PR_DISK_GIB)
+        self.assertEqual(capacity.jobs(store.host_config()), 2)
+        self.assertEqual(store.read(vm.slot_file(config, "vm.json")), busy)
+        self.assertEqual(capacity.guest_disk_gib(capacity.for_slot(store.host_config(), 1)), capacity.PR_DISK_GIB)
+        # A different guest RAM shape still needs the drain.
+        with self.assertRaisesRegex(store.FleetError, "Drain"):
+            host.enable(ci="pr", memory_gib=64)
+
+    def test_new_hosts_get_pr_sized_guest_disks_and_doctor_flags_smaller_ones(self):
+        self.assertEqual(store.host_config()["ci_disk_gib"], capacity.PR_DISK_GIB)
+        gib = 1024**3
+
+        def checks(config):
+            with (
+                patch.object(capabilities, "resources", return_value=dict(cpus=88, memory_total=1024 * gib, memory_available=1024 * gib)),
+                patch.object(capabilities, "run", return_value=subprocess.CompletedProcess([], 0, stdout="0")),
+                patch.object(capabilities, "executable", return_value=None),
+                patch.object(capabilities.os, "open", side_effect=PermissionError),
+                patch("tauceti_fleet.native_runner.selected", return_value=False),
+            ):
+                return {c["name"]: c for c in capabilities.doctor(config, probe=False)["checks"]}
+
+        small = checks(capacity.settings(store.host_config(), ci="both", disk_gib=100))["guest-disk"]
+        self.assertEqual(small["status"], "warning")
+        self.assertIn("--ci both --ci-disk-gib 200", small["remedy"])
+        self.assertNotIn("guest-disk", checks(capacity.settings(store.host_config(), ci="pr")))
+        self.assertNotIn("guest-disk", checks(capacity.settings(store.host_config(), ci="staging", disk_gib=64)))
+
     def test_dropping_pr_from_a_reserved_host_is_live_and_retires_pr_runners_as_they_finish(self):
         config = capacity.settings(store.host_config(), ci="both", maximum=4, vcpus=16, memory_gib=32)
         store.update_host(**dict(config, ci_enabled=True, ci_staging_slots=1,

@@ -94,7 +94,7 @@ def host_config():
                 max_workers=8,
                 ci_vcpus=32,
                 ci_memory_gib=64,
-                ci_disk_gib=100,
+                ci_disk_gib=200,  # capacity.PR_DISK_GIB
                 readiness_ttl=300,
             )
             atomic(path, value)

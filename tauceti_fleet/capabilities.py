@@ -406,6 +406,15 @@ def doctor(config=None, *, probe=True):
         "Free space on the instance filesystem; monitor actual allocated disk during builds",
         roles=("ci",),
     )
+    if not native_default and "pr" in capacity.kinds(config) and config["ci_disk_gib"] < capacity.PR_DISK_GIB:
+        add(
+            "guest-disk",
+            "warning",
+            f"PR guests get {config['ci_disk_gib']} GiB disks; PR builds outgrew 100 GiB in November 2026 and fail with 'No space left on device'",
+            f"Run tauceti-fleet enable local --ci {'both' if 'staging' in capacity.kinds(config) else 'pr'} --ci-disk-gib {capacity.PR_DISK_GIB}; "
+            "no drain is needed: each slot's next guest gets the larger disk",
+            roles=("ci",),
+        )
     worker = executable("tauceti")
     for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
         path = executable(name)
