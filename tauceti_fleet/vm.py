@@ -585,7 +585,7 @@ def _start(config):
             phase="starting",
             pressure_protocol=2,
             lean_statistics_protocol=1,
-            **(runtime_fields if native else guest_shape(config)),
+            **(runtime_fields if native else dict(guest_shape(config), disk_gib=guest_disk_gib(config))),
         )
         # Record the prospective unit before launch: a controller/process crash
         # can then recover either the existing guest or the unused registration.

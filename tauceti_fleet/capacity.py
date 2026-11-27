@@ -32,9 +32,10 @@ DOCS_SHAPE = dict(vcpus=32, memory_gib=24)
 # failed three ways on shared PR runners: out of disk on 100 GiB guests at 98%
 # (the build needed about 120 GiB on 27 Nov, growing 1 to 2 GiB a day), at a
 # 54 GiB memory cap with 96 CPUs exposed, and starved of CPU on a busy host.
-# 48 vCPUs with 64 GiB give each Lean process about 1.3 GiB, with the guest's
-# Lean pressure gate holding back starts when two worst-case files would not fit;
-# the build then takes about 4 hours. The disk (NIGHTLY_DISK_GIB) is a qcow2
+# 48 vCPUs with 64 GiB give each Lean process about 1.3 GiB; the guest's Lean
+# pressure gate holds back a start only when one worst-case file would not fit, so
+# the per-process budget, not the gate, is the protection. The build should take
+# about 4 hours. The disk (NIGHTLY_DISK_GIB) is a qcow2
 # overlay that allocates on write, independent of the host's ci_disk_gib.
 NIGHTLY_SHAPE = dict(vcpus=48, memory_gib=64)
 NIGHTLY_DISK_GIB = 320

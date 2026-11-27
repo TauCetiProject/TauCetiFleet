@@ -254,7 +254,8 @@ build needed about 120 GiB of disk in November 2026 and grows by 1 to 2 GiB a da
 PR runners it ran out of 100 GiB guest disks, hit a 54 GiB memory cap with 96 CPUs exposed, and
 was starved of CPU on a busy host. The qcow2 disk allocates on write, and the job runs once a
 day, so between runs the slot holds only an idle warm guest. Like PR guests, the nightly QEMU
-keeps `ManagedOOMPreference=avoid`, so worker rounds remain the preferred OOM victims, and it
+keeps `ManagedOOMPreference=avoid`, so systemd-oomd prefers other units under pressure (it does
+not change the kernel's choice at the CI slice's own ceiling), and it
 runs at the PR builds' CPU weight within the CI slice, which outranks the worker slice. Fleet
 has no on-demand protected slots: the guest stays warm, and PR recovery cannot borrow it.
 

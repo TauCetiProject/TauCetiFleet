@@ -300,7 +300,7 @@ def doctor(config=None, *, probe=True):
         f"Effective allocation: {caps['cpus']:g} CPUs, {caps['memory_total'] / GIB:.1f} GiB RAM",
         "Effective ancestor cgroup limits must be readable",
     )
-    from . import native_runner
+    from . import capacity, native_runner
     from .capacity import disk_root, disk_startup_gib, guest_shape, jobs, kinds, memory_budget_gib
 
     count = jobs(config)
@@ -384,7 +384,10 @@ def doctor(config=None, *, probe=True):
                 "Verify unprivileged user namespaces, this account's subordinate UID/GID mappings, and vm.max_map_count >= 1048576; then retry enable --ci pr",
                 roles=("ci",))
     free = shutil.disk_usage(disk_root()).free
-    startup = count * disk_startup_gib(config) * GIB
+    # Resolve each slot, so a protected slot's own disk size (the nightly one's) counts.
+    slots = [capacity.for_slot(config, index) for index in range(count)]
+    startup = sum(disk_startup_gib(slot) for slot in slots) * GIB
+    virtual = sum(capacity.guest_disk_gib(slot) for slot in slots)
     if native_default:
         startup = max(startup, native_runner.DISK_START_GIB * GIB)
     add(
@@ -392,7 +395,7 @@ def doctor(config=None, *, probe=True):
         "ok" if free >= startup else "blocked",
         (f"{free / GIB:.1f} GiB free on the instance filesystem; {startup / GIB:g} GiB startup headroom. Disk-native starts require {native_runner.DISK_START_GIB} GiB free; allocated disk is monitored, not reserved or hard-quota limited"
          if native_default else
-         f"{free / GIB:.1f} GiB free on the guest overlay filesystem; {startup / GIB:g} GiB startup headroom for {count} jobs. QCOW2 disks grow on write; their {count * config['ci_disk_gib']} GiB virtual limit is not a reservation"),
+         f"{free / GIB:.1f} GiB free on the guest overlay filesystem; {startup / GIB:g} GiB startup headroom for {count} jobs. QCOW2 disks grow on write; their {virtual} GiB virtual limit is not a reservation"),
         "Free space on the instance filesystem; monitor actual allocated disk during builds",
         roles=("ci",),
     )

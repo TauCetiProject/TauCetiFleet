@@ -368,6 +368,7 @@ class DocsGuestLaunch(unittest.TestCase):
         self.assertEqual(launch[launch.index("-m") + 1], str(64 * 1024))
         self.assertEqual(launch[launch.index("-smp") + 1], "48")
         self.assertEqual(self.created[-1][-1], "320G")
+        self.assertEqual(value["disk_gib"], 320)
         # A general guest keeps the host's disk size.
         self.launch(0, "e" * 16)
         self.assertEqual(self.created[-1][-1], "100G")
