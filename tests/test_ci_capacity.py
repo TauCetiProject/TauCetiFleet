@@ -227,6 +227,11 @@ class Capacity(unittest.TestCase):
         self.assertIn("--ci both --ci-disk-gib 200", small["remedy"])
         self.assertNotIn("guest-disk", checks(capacity.settings(store.host_config(), ci="pr")))
         self.assertNotIn("guest-disk", checks(capacity.settings(store.host_config(), ci="staging", disk_gib=64)))
+        reserved = dict(capacity.settings(store.host_config(), ci="both", maximum=2, disk_gib=100), ci_staging_slots=2)
+        self.assertNotIn("guest-disk", checks(reserved))
+        protected = dict(capacity.settings(store.host_config(), ci="both", maximum=1, disk_gib=100),
+                         ci_protected_slots={"0": dict(kind="docs", runner_group_id=9)})
+        self.assertNotIn("guest-disk", checks(protected))
 
     def test_dropping_pr_from_a_reserved_host_is_live_and_retires_pr_runners_as_they_finish(self):
         config = capacity.settings(store.host_config(), ci="both", maximum=4, vcpus=16, memory_gib=32)
