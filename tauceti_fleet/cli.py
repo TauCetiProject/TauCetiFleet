@@ -747,6 +747,11 @@ def main(argv=None, *, _status_results=None, _standalone=False):
                         print()
                         worker_view.display(status)
                     print()
+                    if value.get("subscription_usage"):
+                        from . import subscription_usage
+
+                        subscription_usage.display(value["subscription_usage"])
+                        print()
                     activity.display(value.get("activity", {}), storage=False,
                                      after_budget=show_bors if fleet is None else None)
                 else:
