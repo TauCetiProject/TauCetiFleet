@@ -263,6 +263,15 @@ class WorkerView(unittest.TestCase):
             "10m ago fleet-ab-2 replied on TauCetiProject/TauCeti#41",
             "30s ago fleet-ab-2 finished review on #12"])
 
+    def test_a_halted_row_names_its_forge_and_reason(self):
+        halted = dict(state="halted", phase=None, target=None, agent="claude", provider=None, pr=None,
+                      round_started_at=None, log_line="halted")
+        status = dict(workers=[dict(halted, id="w1", halt_reason="forgejo:invalid-credentials"),
+                               dict(halted, id="w2", halt_reason="account-halt")], worker_events=[])
+        rows = [re.split(r"\s{2,}", line.strip()) for line in self.render(["status", "--workers"], status).splitlines()]
+        self.assertIn(["w1", "halted (Forgejo invalid-credentials)", "—", "—", "claude", "—", "halted"], rows)
+        self.assertIn(["w2", "halted (GitHub account-halt)", "—", "—", "claude", "—", "halted"], rows)
+
     def test_host_without_rows_says_so_and_a_quiet_journal_is_stated(self):
         old = dict(workers=[dict(id="w1", state="running", detail="authoring")], active_worker_limit=1)
         text = self.render(["status", "--workers"], old)
