@@ -1193,29 +1193,64 @@ def collect_ci_results(config):
     atomic(path, remaining)
 
 
+# After a memory pause, admission returns in RAMP_STEPS increments RAMP_INTERVAL seconds apart.
+# Restoring every worker at once started dozens of rounds whose surveys alone took the
+# headroom back below the reserve; they then stopped before inference and admission
+# paused again (tauchonki, 27 Nov 2026: 60 workers cycling every two to three minutes).
+RAMP_STEPS = 6
+RAMP_INTERVAL = 30
+
+
 class Scaler:
-    def __init__(self):
+    def __init__(self, previous=None):
         self.target = 0
         self.decision = {}
+        self.next_increase_at = None
+        # A restart or live handover resumes a memory recovery the previous controller left.
+        # Its last decision is the only record; a paused one with a memory reason, or a ramp.
+        decision = (previous or {}).get("worker_admission") or {}
+        self.ramping = decision.get("state") == "ramping" or (
+            decision.get("state") == "paused" and bool((previous or {}).get("memory_pressure"))
+        )
 
-    def _result(self, state, reason):
+    def _result(self, state, reason, next_increase_at=None, next_worker_limit=None):
         self.decision = dict(
             state=state,
             reason=reason,
             policy="opportunistic",
             cpu_idle_required=0,
-            next_increase_at=None,
-            next_worker_limit=None,
+            next_increase_at=next_increase_at,
+            next_worker_limit=next_worker_limit,
         )
         return self.target, reason
 
-    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None):
+    def step(self, *, now, enabled, ci_busy, available, reserve, idle, maximum, pause_reason=None, memory_pause=False):
         if not enabled or available < reserve:
             self.target = 0
+            if memory_pause or (enabled and available < reserve):
+                self.ramping = True
             reason = pause_reason or (
                 "workers disabled or host draining" if not enabled else "host memory headroom below reserve"
             )
             return self._result("paused", reason)
+        if self.ramping and not maximum:
+            # Another policy closed admission; keep the pending memory recovery.
+            self.target = 0
+            return self._result("paused", pause_reason or "configured worker ceiling is zero")
+        if self.ramping:
+            increment = max(1, -(-maximum // RAMP_STEPS))
+            if self.target == 0 or now >= self.next_increase_at:
+                self.target = min(maximum, self.target + increment)
+                self.next_increase_at = now + RAMP_INTERVAL
+            self.target = min(self.target, maximum)
+            if self.target < maximum:
+                return self._result(
+                    "ramping",
+                    f"resuming after a memory pause: {self.target} of {maximum} workers allowed",
+                    self.next_increase_at,
+                    min(maximum, self.target + increment),
+                )
+        self.ramping = False
         # CPU scheduling gives CI first claim on contested resources. Idle CPU
         # and reclaim waits must not cap mostly network-bound inference sessions.
         self.target = maximum
@@ -1432,7 +1467,7 @@ def daemon():
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGHUP, reload_release)
-        scaler = Scaler()
+        scaler = Scaler(read(state_dir() / "status.json", {}))
         previous = cpu_sample()
         slots = {}
         last_github = 0
@@ -1567,6 +1602,7 @@ def daemon():
                     idle=idle,
                     maximum=maximum,
                     pause_reason=pause_reason,
+                    memory_pause=bool(pressure),
                 )
                 roadmap_focus = focus.policy(config, ids[:target])
                 published = dict(
