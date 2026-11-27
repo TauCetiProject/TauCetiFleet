@@ -418,13 +418,25 @@ def doctor(config=None, *, probe=True):
             roles=("ci",),
         )
     worker = executable("tauceti")
-    for name in ("gh", "git", "uvx", "jq", "lake", "claude"):
+    agent = config.get("agent") or "claude"
+    tools = ["gh", "git", "uvx", "jq", "lake"] + [name for name in ("claude", "codex") if agent in (name, "auto")]
+    if config.get("sandbox") == "bubble":
+        tools += ["bubble", "incus"]
+    for name in tools:
         path = executable(name)
         add(
             "worker-tool-" + name,
             "ok" if path else "blocked",
             path or "not installed",
             "Install this tool in the account's PATH before enabling workers; lake is supplied by elan and claude by Claude Code",
+            roles=("workers",),
+        )
+    if config.get("sandbox") == "bubble":
+        add(
+            "worker-sandbox-bubble",
+            "warning",
+            "Bubble containers run under the Incus daemon, outside tauceti-fleet-workers.slice: its memory ceiling and CPU weight do not apply to them and worker memory does not count them; host headroom at admission is the only bound",
+            "Set resource limits on the Incus profile or project the containers use, or size max_workers for the host's free memory",
             roles=("workers",),
         )
     protocol = worker_protocol()
@@ -451,6 +463,24 @@ def doctor(config=None, *, probe=True):
             "Worker supports live roadmap focus" if supported else "Installed worker ignores the configured roadmap focus",
             "Install a Worker release with roadmap_focus protocol support using a live update", roles=("workers",),
         )
+    if config.get("forges") is not None or config.get("new_pr_forge") is not None:
+        forges = [forge for forge in ("github", "forgejo") if forge in (config.get("forges") or ["github"])]
+        supported = compatible and protocol.get("source_selection") == 1
+        add(
+            "worker-forges", "ok" if supported else "blocked",
+            "Worker sources: " + ", ".join(forges) + "; new PRs: " + (config.get("new_pr_forge") or "github") if supported
+            else "Installed worker does not accept the profile's forges",
+            "Drain and run prepare to install a Worker release with source_selection protocol support", roles=("workers",),
+        )
+        if "forgejo" in forges:
+            token = Path((config.get("worker_env") or {}).get("TAUCETI_FORGEJO_TOKEN_FILE")
+                         or Path.home() / ".config/tauceti-forgejo/worker-token")
+            private = token.is_file() and token.stat().st_size > 0 and token.stat().st_mode & 0o077 == 0
+            add(
+                "forgejo-token", "ok" if private else "blocked",
+                "private Forgejo credential file present" if private else "Forgejo credential missing or readable by other users",
+                "Provision a private Forgejo worker credential at the path the workers read, with chmod 600", roles=("workers",),
+            )
     if config.get("roadmap_targets"):
         from .targets import status as target_list
 
@@ -521,7 +551,9 @@ def doctor(config=None, *, probe=True):
                 "Enroll this host with tauceti-fleet enroll local, or configure runner_group_id and a CI registration credential",
                 roles=("ci",),
             )
-    credential_names = ["anthropic_api_key_file", "github_token_file"]
+    credential_names = ["github_token_file"]
+    if config.get("claude_billing") != "subscription":
+        credential_names.insert(0, "anthropic_api_key_file")
     if config.get("ci_broker_url"):
         credential_names.append("ci_broker_token_file")
     for name in credential_names:
